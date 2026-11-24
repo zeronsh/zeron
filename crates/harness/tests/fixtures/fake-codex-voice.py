@@ -12,7 +12,9 @@ for line in sys.stdin:
         continue
     result = {}
     if method == 'config/read':
-        result = {'config': {}}
+        # The user's config as a test lays it out (`config-read.json`), else none.
+        seeded = pathlib.Path('config-read.json')
+        result = json.loads(seeded.read_text()) if seeded.exists() else {'config': {}}
     elif method in ('thread/start', 'thread/resume'):
         result = {'thread': {'id': 'idle-thread', 'turns': []}}
     elif method == 'turn/start':

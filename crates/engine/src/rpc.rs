@@ -2730,6 +2730,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_NATIVE_SUBAGENTS
             | methods::GET_CODE_MODE
             | methods::SET_CODE_MODE
+            | methods::GET_ZERON_MCP_ONLY
+            | methods::SET_ZERON_MCP_ONLY
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -3710,6 +3712,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
             methods::GET_CODE_MODE => RpcReply::value(&self.registry.code_mode_settings()),
+            methods::GET_ZERON_MCP_ONLY => RpcReply::value(&self.registry.zeron_mcp_only_settings()),
+            methods::SET_ZERON_MCP_ONLY => {
+                let p: SetHarnessEnabledParams = parse_params(params)?;
+                self.registry
+                    .set_zeron_mcp_only(p.harness, p.enabled)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.zeron_mcp_only_settings())
+            }
             methods::SET_CODE_MODE => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 self.registry

@@ -1673,7 +1673,13 @@
       },
       "couldnt_switch": "无法切换账户",
       "cloud": "云端",
-      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。"
+      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。",
+      "zeron_mcp_only": {
+        "label": "仅使用 Zeron 的 MCP 服务器",
+        "description": "隐藏 {name} 自带的 MCP 服务器和连接器，让它只使用「设置 → MCP」中的服务器，避免重复和多余的 token。",
+        "unavailable": "{name} 无法隐藏自带的 MCP 服务器，会与 Zeron 的一起使用。",
+        "terms": "mcp 服务器 连接器 内置 重复 token chatgpt 应用 claude.ai 自带 隐藏"
+      }
     },
     "devices": {
       "title": "设备",
@@ -2530,6 +2536,29 @@
         "body": "为此 {name} 账号命名，方便你和智能体区分。",
         "save": "保存",
         "unnamed_hint": "留空时，你的智能体会用编号区分它。"
+      },
+      "requests": {
+        "title": "等待你处理",
+        "description": "智能体请求更改你的 MCP 服务器。在你允许之前不会有任何更改。",
+        "terms": "请求 智能体 允许 拒绝 等待",
+        "add": "添加 {name}",
+        "remove": "移除 {name}",
+        "enable": "开启 {name}",
+        "disable": "关闭 {name}",
+        "from_chat": "{agent} 在“{chat}”中请求",
+        "an_agent": "一个智能体",
+        "from_agent": "一个智能体请求",
+        "because": "{who}：“{reason}”",
+        "runs": "在此电脑上运行 {command}",
+        "decline": "拒绝",
+        "allow": "允许",
+        "done": "已完成：{name}",
+        "couldnt": "无法完成：{name}",
+        "notice_body": "在你允许之前不会有任何更改。",
+        "notice_add": "一个智能体请求添加 {name}",
+        "notice_remove": "一个智能体请求移除 {name}",
+        "notice_enable": "一个智能体请求开启 {name}",
+        "notice_disable": "一个智能体请求关闭 {name}"
       }
     }
   },

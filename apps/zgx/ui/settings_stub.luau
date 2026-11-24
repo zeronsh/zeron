@@ -125,6 +125,7 @@ local engine: { [string]: any } = {
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
 	GetCodeMode = { supported = { "codex", "muse" }, enabled = {} },
+	GetZeronMcpOnly = { supported = { "claude-code", "codex", "pi" }, on = {} },
 	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
@@ -299,6 +300,16 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = w
 			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
+			elseif m == "SetZeronMcpOnly" then
+				local cur = engine[get]
+				local on = table.clone(cur.on)
+				local idx = table.find(on, arg.params.harness)
+				if arg.params.enabled and not idx then
+					table.insert(on, arg.params.harness)
+				elseif not arg.params.enabled and idx then
+					table.remove(on, idx)
+				end
+				engine[get] = { supported = cur.supported, on = on }
 			elseif m == "SetCodeMode" then
 				local cur = engine[get]
 				local enabled = table.clone(cur.enabled)

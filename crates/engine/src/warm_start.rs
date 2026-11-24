@@ -114,6 +114,9 @@ pub(super) struct Parked {
     /// Whether it launched with Code Mode enabled (the setting may change
     /// before its run: `code_mode_changed`).
     pub(super) code_mode: bool,
+    /// Whether it launched with only Zeron's MCP servers (the setting, or
+    /// whether any is set up, may change before its run).
+    pub(super) zeron_mcp_only: bool,
     /// The projectless folder its launch made, removed if it ends unused
     /// and still empty.
     made_folder: Option<std::path::PathBuf>,
@@ -150,6 +153,7 @@ fn same_ask(a: &RunRequest, b: &RunRequest) -> bool {
         && a.access == b.access
         && a.plan == b.plan
         && a.code_mode == b.code_mode
+        && a.zeron_mcp_only == b.zeron_mcp_only
         && a.auto_approve == b.auto_approve
 }
 
@@ -197,6 +201,7 @@ impl SessionsEngine {
         }
         request.harness = Some(harness_id);
         request.code_mode = self.inner.registry.code_mode(harness_id);
+        request.zeron_mcp_only = self.inner.zeron_mcp_only(harness_id);
         request.prompt.clear();
         request.attachments.clear();
         request.mcp = None;
@@ -365,6 +370,7 @@ impl SessionsEngine {
                 return Ok(None);
             }
             let code_mode = request.code_mode;
+            let zeron_mcp_only = request.zeron_mcp_only;
             harness
                 .prewarm(key, request)
                 .await
@@ -377,6 +383,7 @@ impl SessionsEngine {
                 binary,
                 side_chats_only,
                 code_mode,
+                zeron_mcp_only,
                 made_folder: made_folder.clone(),
             }))
         };

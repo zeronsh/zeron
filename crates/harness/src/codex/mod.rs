@@ -825,17 +825,20 @@ impl Harness for CodexHarness {
             && run_access(live) == run_access(next)
             && live.plan == next.plan
             && live.code_mode == next.code_mode
+            && live.zeron_mcp_only == next.zeron_mcp_only
     }
     /// `turn/start` carries model, effort, service tier, approval policy,
     /// sandbox and collaboration mode, and each sticks for later turns — so
     /// a change applies from the next turn without a new app-server.
     /// Clearing a model, effort or tier back to the default cannot be
     /// expressed that way (an omitted parameter keeps the previous value).
-    /// Code Mode is a `thread/start`/`thread/resume` config override, so
-    /// switching it starts a fresh thread.
+    /// Code Mode and "Only Zeron's MCP servers" are `thread/start` /
+    /// `thread/resume` config overrides, so switching either starts a fresh
+    /// thread.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.code_mode == next.code_mode
+            && live.zeron_mcp_only == next.zeron_mcp_only
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -1621,6 +1624,16 @@ async fn run_session(session: Session) {
                 .expect("thread/start config overrides are an object")
                 .extend(codex_extra_mcp_overrides(&request.extra_mcp));
         }
+        if !title_only && request.zeron_mcp_only {
+            // Only Zeron's MCP servers: ChatGPT's apps (its `codex_apps`
+            // server) off for this thread; the user's own configured servers
+            // are switched off by name once the config is read (below).
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object")
+                .insert("features.apps".into(), false.into());
+        }
         if !title_only && request.code_mode {
             p.entry("config")
                 .or_insert_with(|| json!({}))
@@ -1771,18 +1784,31 @@ async fn run_session(session: Session) {
         }
 
         let mut start_params = start_params.clone();
-        if title_only {
+        if title_only || request.zeron_mcp_only {
             // Disable each configured MCP server explicitly: an empty table
             // would merge with user configuration and leave servers enabled.
+            // As the run's folder sees it, so a project's own
+            // `.codex/config.toml` servers count too. Never one Zeron put
+            // there itself (its own server, plugins', the managed ones).
             let config = client
-                .request("config/read", json!({"includeLayers": false}))
+                .request(
+                    "config/read",
+                    json!({"includeLayers": false, "cwd": request.cwd}),
+                )
                 .await?;
+            let zerons: HashSet<&str> = request
+                .mcp
+                .iter()
+                .chain(&request.extra_mcp)
+                .map(|server| server.name.as_str())
+                .collect();
             if let Some(servers) = config["config"]["mcp_servers"].as_object() {
                 let overrides = start_params
-                    .get_mut("config")
-                    .and_then(Value::as_object_mut)
-                    .unwrap();
-                for name in servers.keys() {
+                    .entry("config")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("thread/start config overrides are an object");
+                for name in servers.keys().filter(|name| !zerons.contains(name.as_str())) {
                     overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
                 }
             }
@@ -3328,6 +3354,7 @@ mod tests {
             access,
             plan,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -3429,6 +3456,10 @@ mod tests {
         code_mode.code_mode = true;
         assert!(!harness.same_runtime(&live, &code_mode));
         assert!(!harness.reconfigures_in_place(&live, &code_mode));
+        let mut zeron_only = run_request(AccessMode::FullAccess, false);
+        zeron_only.zeron_mcp_only = true;
+        assert!(!harness.same_runtime(&live, &zeron_only));
+        assert!(!harness.reconfigures_in_place(&live, &zeron_only));
         assert_eq!(harness.access_modes(), &AccessMode::WITH_AUTO);
         assert!(harness.supports_plan());
     }

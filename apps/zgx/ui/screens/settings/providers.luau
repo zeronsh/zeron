@@ -45,6 +45,12 @@ search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.te
 		terms = ui.t("settings.providers.code_mode.terms"),
 	},
 	{
+		key = "zeron_mcp_only",
+		title = ui.t("settings.providers.zeron_mcp_only.label"),
+		section = ui.t("settings.providers.agent_settings"),
+		terms = ui.t("settings.providers.zeron_mcp_only.terms"),
+	},
+	{
 		key = "update_policy",
 		title = ui.t("settings.providers.update_policy.label"),
 		section = ui.t("settings.providers.agent_settings"),
@@ -225,6 +231,31 @@ local function load_code_modes()
 	end)
 end
 
+-- Which agents run with only Zeron's MCP servers (their own, and their
+-- account's connectors, hidden for the run): those that can, and those
+-- that do now (the person's choice, else on once Zeron has a server).
+local zeron_only = ui.state("settings_zeron_mcp_only", nil :: { supported: { string }, on: { string } }?)
+local zeron_only_device: string? = nil
+
+local function load_zeron_only()
+	local requested = shown_device()
+	if requested ~= zeron_only_device then
+		zeron_only:set(nil)
+	end
+	host.call("settings.engine", { method = "GetZeronMcpOnly", params = engine_params({}) }):after(function(v: any)
+		if shown_device() ~= requested then
+			return
+		end
+		zeron_only_device = requested
+		zeron_only:set({ supported = v.supported or {}, on = v.on or {} })
+	end, function()
+		if shown_device() == requested then
+			zeron_only_device = nil
+			zeron_only:set(nil)
+		end
+	end)
+end
+
 -- The Codex account whose banked resets are being chosen from (by its
 -- id), and the reset chosen. The account is read from the list as it
 -- stands, so its resets are the device's; it's spent there (account/agents).
@@ -396,6 +427,7 @@ local function card(row: State<agents.Agent>): Node
 		on_settings = function()
 			load_subagents()
 			load_code_modes()
+			load_zeron_only()
 			open_settings:set(id)
 		end,
 		on_add = function()
@@ -668,6 +700,19 @@ local function settings_dialog(): Node
 		local a, s = agent(), subagents:get()
 		return a ~= nil and s ~= nil and table.find(s.switchable, a.id) ~= nil
 	end
+	-- Only Zeron's MCP servers: as the engine says it runs now.
+	local mcp_only = ui.state("settings_agent_mcp_only", false)
+	ui.effect(function()
+		local a = agent()
+		local z = zeron_only:get()
+		if a then
+			mcp_only:set(z ~= nil and table.find(z.on, a.id) ~= nil)
+		end
+	end)
+	local function supports_mcp_only(): boolean
+		local a, z = agent(), zeron_only:get()
+		return a ~= nil and z ~= nil and table.find(z.supported, a.id) ~= nil
+	end
 	local function supports_code_mode(): boolean
 		local a, c = agent(), code_modes:get()
 		return a ~= nil and c ~= nil and table.find(c.supported, a.id) ~= nil
@@ -804,6 +849,44 @@ local function settings_dialog(): Node
 					end,
 				},
 			}),
+			-- (Every agent shows it: one that can't hide its own says so.)
+			ui.div {
+				w_full = true,
+				opacity = function()
+					return if supports_mcp_only() then 1 else "$zeron.disabled"
+				end,
+				disabled = function()
+					return not supports_mcp_only()
+				end,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.zeron_mcp_only.label"),
+					description = function(): string
+						local a = agent()
+						local name = if a then a.name else ""
+						return if supports_mcp_only()
+							then ui.t("settings.providers.zeron_mcp_only.description", { name = name }):get()
+							else ui.t("settings.providers.zeron_mcp_only.unavailable", { name = name }):get()
+					end,
+					control = ds.Switch {
+						value = mcp_only,
+						label = ui.t("settings.providers.zeron_mcp_only.label"),
+						on_change = function(on: boolean)
+							local a = agent()
+							if not a then
+								return
+							end
+							host.call("settings.engine", { method = "SetZeronMcpOnly", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+								if v and v.supported then
+									zeron_only:set({ supported = v.supported, on = v.on or {} })
+								end
+							end, function()
+								mcp_only:set(not on)
+								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+							end)
+						end,
+					},
+				},
+			},
 			ds.Settings.Row {
 				label = ui.t("settings.providers.skills_dollar.label"),
 				description = ui.t("settings.providers.skills_dollar.description"),

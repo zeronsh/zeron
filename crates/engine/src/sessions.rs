@@ -216,6 +216,10 @@ struct RunHandle {
     /// session whose setting has since flipped is replaced before its next
     /// turn.
     code_mode: bool,
+    /// Launched with only Zeron's MCP servers (Settings → Providers): its
+    /// MCP servers are fixed at launch, so a parked session whose setting
+    /// has since flipped is replaced before its next turn.
+    zeron_mcp_only: bool,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -1292,6 +1296,7 @@ impl SessionsEngine {
         // `drive_run`; normalize here so parked-session routing and mid-turn
         // guards go through `code_mode_changed`.
         request.code_mode = false;
+        request.zeron_mcp_only = false;
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -1306,6 +1311,7 @@ impl SessionsEngine {
                 h.runtime_config.harness.clone(),
                 h.side_chats_only,
                 h.code_mode,
+                h.zeron_mcp_only,
             )
         });
         if let Some((
@@ -1321,6 +1327,7 @@ impl SessionsEngine {
             live_harness,
             side_chats_only,
             code_mode,
+            zeron_mcp_only,
         )) = routed
         {
             if idle {
@@ -1343,6 +1350,7 @@ impl SessionsEngine {
                     .await
                 || self.native_subagents_changed(chat_id, harness_id, side_chats_only)
                 || self.code_mode_changed(chat_id, harness_id, code_mode)
+                || self.zeron_mcp_only_changed(chat_id, harness_id, zeron_mcp_only)
             {
                 None
             } else {
@@ -1501,6 +1509,7 @@ impl SessionsEngine {
         };
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
         let code_mode = self.inner.registry.code_mode(harness_id);
+        let zeron_mcp_only = self.inner.zeron_mcp_only(harness_id);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1664,6 +1673,7 @@ impl SessionsEngine {
                 binary,
                 side_chats_only,
                 code_mode,
+                zeron_mcp_only,
             },
         );
         drop(runs);
@@ -1726,6 +1736,7 @@ impl SessionsEngine {
             turn,
             side_chats_only,
             code_mode,
+            zeron_mcp_only,
             title,
         ));
         Ok(run_id)
@@ -1828,6 +1839,26 @@ impl SessionsEngine {
         }
         tracing::info!(chat = %chat_id, harness = ?harness_id,
             "code mode switched; replacing the parked session");
+        true
+    }
+
+    /// Whether a session parked between turns launched with "Only Zeron's
+    /// MCP servers" otherwise than a run would launch now (Settings →
+    /// Providers). Same guards as [`Self::code_mode_changed`].
+    fn zeron_mcp_only_changed(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        started: bool,
+    ) -> bool {
+        if started == self.inner.zeron_mcp_only(harness_id)
+            || self.turn_in_flight(chat_id)
+            || self.holds_background_work(chat_id)
+        {
+            return false;
+        }
+        tracing::info!(chat = %chat_id, harness = ?harness_id,
+            "MCP servers switched; replacing the parked session");
         true
     }
 
@@ -2587,6 +2618,7 @@ impl SessionsEngine {
                     access: Default::default(),
                     plan: false,
                     code_mode: false,
+                    zeron_mcp_only: false,
                     attachments: Vec::new(),
                     resume: None,
                     worktree: None,
@@ -3210,6 +3242,12 @@ impl Inner {
     /// instead. Never for a chat that has a parent: delegation is one level
     /// deep, so a side chat can't create chats and keeps its provider's own.
     /// Nor while its parent is unknown here (its run outran its row).
+    /// Whether a run of `harness_id` gets only Zeron's MCP servers, its own
+    /// hidden: the person's choice in Settings → Providers (off until then).
+    pub(super) fn zeron_mcp_only(&self, harness_id: HarnessId) -> bool {
+        self.registry.zeron_mcp_only(harness_id)
+    }
+
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {
@@ -4752,6 +4790,7 @@ async fn drive_run(
     turn: TurnControl,
     side_chats_only: bool,
     code_mode: bool,
+    zeron_mcp_only: bool,
     mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
     let device_id = inner.device_id.clone();
@@ -4797,6 +4836,8 @@ async fn drive_run(
             Some("native subagents switched")
         } else if taken.parked.code_mode != code_mode {
             Some("code mode switched")
+        } else if taken.parked.zeron_mcp_only != zeron_mcp_only {
+            Some("MCP servers switched")
         } else {
             None
         }
@@ -4824,6 +4865,7 @@ async fn drive_run(
     inner.refresh_mcp_servers_for_run().await;
     request.extra_mcp = inner.extra_mcp_servers(_mcp_grant.as_ref());
     request.code_mode = code_mode;
+    request.zeron_mcp_only = zeron_mcp_only;
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
     let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
@@ -7361,6 +7403,7 @@ mod tests {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             resume: None,
             attachments: Vec::new(),
             worktree: None,

@@ -131,6 +131,101 @@ pub struct McpServersSnapshot {
     /// client ID the person brings) must allow: unlike a dynamically
     /// registered client's, its port never changes.
     pub client_redirect_uri: String,
+    /// What agents asked to change, waiting for the person (and, for a
+    /// while, how each was answered: the asking agent reads that).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<McpRequestView>,
+}
+
+/// A change to the MCP servers an agent asks for (Zeron MCP's
+/// `request_mcp_change`). It carries no secret: a server that signs in does
+/// so in the person's browser once they allow it, and one that takes a key
+/// is the person's to add in Settings → MCP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum McpChange {
+    /// A server: a preset (`preset`), a remote one (`url`), or a command run
+    /// on this device (`command`, `args`). `account_label` names the
+    /// account, for a service connected more than once.
+    #[serde(rename_all = "camelCase")]
+    Add {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_kind: Option<McpAuthKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+    /// Remove a server (its id or agent name), its sign-in with it.
+    #[serde(rename_all = "camelCase")]
+    Remove { server: String },
+    /// Turn a server (its id or agent name) on or off for every agent.
+    #[serde(rename_all = "camelCase")]
+    SetEnabled { server: String, enabled: bool },
+}
+
+/// Params for `RequestMcpChange`: the change, why (said to the person), and
+/// the chat asking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMcpChangeParams {
+    #[serde(flatten)]
+    pub change: McpChange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum McpRequestStatus {
+    /// Waiting for the person.
+    #[default]
+    Pending,
+    /// Allowed and done (`server_id` the server it made or changed).
+    Approved,
+    Declined,
+    /// Allowed, but it couldn't be done (`error`).
+    Failed,
+}
+
+/// A change an agent asked for, as the person and the agent see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRequestView {
+    pub id: String,
+    #[serde(flatten)]
+    pub change: McpChange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// What the change is to, in words ("Linear · Work", a server's name).
+    pub title: String,
+    pub status: McpRequestStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
+/// Params for `GetMcpRequest` / the person's `ResolveMcpRequest`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpRequestParams {
+    pub id: String,
+    /// `ResolveMcpRequest` only: allow (true) or decline.
+    pub approve: bool,
 }
 
 /// The error `StartMcpAuth` answers with when the server's OAuth can't

@@ -1673,7 +1673,13 @@
       },
       "couldnt_switch": "Couldn't switch accounts",
       "cloud": "Cloud",
-      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use.",
+      "zeron_mcp_only": {
+        "label": "Only Zeron's MCP servers",
+        "description": "Hide {name}'s own MCP servers and connectors, so it uses the ones in Settings → MCP without duplicates or extra tokens.",
+        "unavailable": "{name} can't hide its own MCP servers, so it keeps them beside Zeron's.",
+        "terms": "mcp servers connectors built-in duplicates tokens chatgpt apps claude.ai own hide"
+      }
     },
     "devices": {
       "title": "Devices",
@@ -2530,6 +2536,29 @@
         "body": "Name this {name} account so you and your agents can tell it apart.",
         "save": "Save",
         "unnamed_hint": "Left empty, your agents tell it apart by a number."
+      },
+      "requests": {
+        "title": "Waiting for you",
+        "description": "Agents asked to change your MCP servers. Nothing changes until you allow it.",
+        "terms": "requests agent asked approve allow decline waiting",
+        "add": "Add {name}",
+        "remove": "Remove {name}",
+        "enable": "Turn on {name}",
+        "disable": "Turn off {name}",
+        "from_chat": "{agent} asked in “{chat}”",
+        "an_agent": "An agent",
+        "from_agent": "An agent asked",
+        "because": "{who}: “{reason}”",
+        "runs": "Runs {command} on this computer",
+        "decline": "Decline",
+        "allow": "Allow",
+        "done": "{name} done",
+        "couldnt": "Couldn't do {name}",
+        "notice_body": "Nothing changes until you allow it.",
+        "notice_add": "An agent asks to add {name}",
+        "notice_remove": "An agent asks to remove {name}",
+        "notice_enable": "An agent asks to turn on {name}",
+        "notice_disable": "An agent asks to turn off {name}"
       }
     }
   },

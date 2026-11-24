@@ -703,6 +703,18 @@ impl ClaudeHarness {
                 mcp_config_args(request.mcp.as_ref(), &request.extra_mcp, private_mcp_config);
             cmd.args(&config.args);
             mcp_config_dir = config.dir;
+            // Only Zeron's MCP servers: the CLI loads those from
+            // `--mcp-config` alone, its user's and project's servers, its
+            // plugins' and claude.ai's connectors left out (its skills and
+            // slash commands stay: live-checked on 2.1.325). An admin's
+            // managed MCP config refuses the flag, so then only the
+            // connectors go, which the environment switch also covers.
+            if request.zeron_mcp_only {
+                if !managed_mcp_config() {
+                    cmd.arg("--strict-mcp-config");
+                }
+                cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+            }
             // When to say it waits on background work (the Zeron tool
             // `wait_on_background`), where that tool is offered. Its own
             // description and the server's instructions say so too, but
@@ -996,6 +1008,10 @@ impl Harness for ClaudeHarness {
     /// Launched without `--strict-mcp-config`, the CLI also starts the
     /// servers of the user's own MCP scopes ([`mcp_config`]).
     fn configured_mcp_servers(&self, request: &RunRequest) -> Vec<crate::process::KnownServer> {
+        // With only Zeron's servers, the user's configured ones never start.
+        if request.zeron_mcp_only {
+            return Vec::new();
+        }
         let cwd = if request.cwd.is_empty() {
             std::env::current_dir().unwrap_or_default()
         } else {
@@ -1309,6 +1325,7 @@ fn launches_alike(warm: &RunRequest, request: &RunRequest) -> bool {
             == request.mcp.as_ref().is_some_and(McpServer::waits_on_background)
         && warm.mcp.as_ref().is_some_and(|m| m.side_chats_only())
             == request.mcp.as_ref().is_some_and(|m| m.side_chats_only())
+        && warm.zeron_mcp_only == request.zeron_mcp_only
 }
 
 /// End a warm start no message reached: never mid login refresh (stdin
@@ -2683,6 +2700,7 @@ mod tests {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -2705,6 +2723,52 @@ mod tests {
         }
     }
 
+    /// "Only Zeron's MCP servers": the CLI is told to load `--mcp-config`'s
+    /// servers alone and claude.ai's connectors stay off; otherwise neither,
+    /// and a warm process launched the other way isn't taken.
+    #[test]
+    fn zeron_mcp_only_launches_strict_without_connectors() {
+        let request = |only: bool| RunRequest {
+            mcp: None,
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access: Default::default(),
+            plan: false,
+            code_mode: false,
+            zeron_mcp_only: only,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        };
+        for only in [false, true] {
+            let mut cmd =
+                ClaudeHarness::build_command(std::path::Path::new("claude"), &request(only), false);
+            let std = cmd.as_std_mut();
+            let strict = std.get_args().any(|arg| arg == "--strict-mcp-config");
+            let connectors = std
+                .get_envs()
+                .find(|(key, _)| *key == "ENABLE_CLAUDEAI_MCP_SERVERS")
+                .and_then(|(_, value)| value.map(|v| v.to_os_string()));
+            assert_eq!(strict, only && !managed_mcp_config(), "only {only}");
+            assert_eq!(
+                connectors.as_deref(),
+                only.then_some(std::ffi::OsStr::new("false")),
+                "only {only}"
+            );
+        }
+        assert!(launches_alike(&request(true), &request(true)));
+        assert!(!launches_alike(&request(false), &request(true)));
+        assert!(ClaudeHarness::new().configured_mcp_servers(&request(true)).is_empty());
+    }
+
     #[test]
     fn runs_ask_the_cli_to_forward_subagent_text() {
         let request = RunRequest {
@@ -2720,6 +2784,7 @@ mod tests {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -2751,6 +2816,7 @@ mod tests {
                 access: Default::default(),
                 plan: false,
                 code_mode: false,
+                zeron_mcp_only: false,
                 attachments: Vec::new(),
                 worktree: None,
                 resume: None,
@@ -2807,6 +2873,7 @@ mod access_tests {
             access,
             plan,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -3201,6 +3268,7 @@ mod mcp_injection_tests {
             access: AccessMode::FullAccess,
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

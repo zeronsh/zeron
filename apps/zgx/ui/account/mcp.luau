@@ -55,12 +55,36 @@ export type Server = {
 	updatedAt: number,
 }
 
+-- A change an agent asked for (engine mcp_servers/requests.rs): waiting for
+-- the person, who alone answers it here (`resolve_request`).
+export type Request = {
+	id: string,
+	action: "add" | "remove" | "setEnabled",
+	preset: string?,
+	name: string?,
+	url: string?,
+	authKind: AuthKind?,
+	command: string?,
+	args: { string }?,
+	accountLabel: string?,
+	server: string?,
+	enabled: boolean?,
+	reason: string?,
+	chatId: string?,
+	title: string,
+	status: "pending" | "approved" | "declined" | "failed",
+	serverId: string?,
+	error: string?,
+	createdAt: number,
+}
+
 export type Snapshot = {
 	loaded: boolean,
 	storage: Storage,
 	vaultAvailable: boolean,
 	presets: { Preset },
 	servers: { Server },
+	requests: { Request }?,
 }
 
 export type AuthFlow = {
@@ -130,6 +154,12 @@ end
 
 function M.cancel_auth(id: string, flow_id: string?): any
 	return ui.call("mcp.cancel_auth", { id = id, flowId = flow_id })
+end
+
+-- The person's answer to an agent's request: allow (done as the page does
+-- it) or decline.
+function M.resolve_request(id: string, approve: boolean): any
+	return ui.call("mcp.resolve_request", { id = id, approve = approve })
 end
 
 function M.disconnect_auth(id: string): any

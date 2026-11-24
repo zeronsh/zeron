@@ -113,6 +113,9 @@ struct HarnessPrefsFile {
     native_subagents_off: Vec<HarnessId>,
     /// Harnesses the user turned Code Mode on for.
     code_mode_on: Vec<HarnessId>,
+    /// Harnesses the user turned "Only Zeron's MCP servers" on for (off
+    /// until they do).
+    zeron_mcp_only_on: Vec<HarnessId>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -137,6 +140,19 @@ pub struct NativeSubagentSettings {
     pub switchable: Vec<HarnessId>,
     /// The ones turned off: their runs delegate through side chats only.
     pub off: Vec<HarnessId>,
+}
+
+/// Per-device "Only Zeron's MCP servers" preferences (Settings →
+/// Providers): an agent's own MCP servers and connectors hidden for its
+/// runs, so they don't double the servers connected in Zeron. Off until the
+/// person turns it on, per agent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ZeronMcpOnlySettings {
+    /// Registered harnesses that can hide their own MCP servers per run.
+    pub supported: Vec<HarnessId>,
+    /// The ones turned on.
+    pub on: Vec<HarnessId>,
 }
 
 /// Per-device Code Mode preferences (Settings → Providers).
@@ -790,6 +806,49 @@ impl HarnessRegistry {
         Ok(())
     }
 
+    /// Whether runs of `id` get only Zeron's MCP servers on this device:
+    /// off by default, on only by the person's choice for a harness that
+    /// can hide its own.
+    pub fn zeron_mcp_only(&self, id: HarnessId) -> bool {
+        zeron_harness::supports_zeron_mcp_only(id) && self.prefs().zeron_mcp_only_on.contains(&id)
+    }
+
+    pub fn zeron_mcp_only_settings(&self) -> ZeronMcpOnlySettings {
+        let supported: Vec<HarnessId> = self
+            .order()
+            .iter()
+            .copied()
+            .filter(|id| zeron_harness::supports_zeron_mcp_only(*id))
+            .collect();
+        let on = self
+            .prefs()
+            .zeron_mcp_only_on
+            .iter()
+            .copied()
+            .filter(|id| zeron_harness::supports_zeron_mcp_only(*id))
+            .collect();
+        ZeronMcpOnlySettings { supported, on }
+    }
+
+    /// Turn `id`'s "Only Zeron's MCP servers" on or off and persist. Each
+    /// chat picks the change up as Code Mode's does: at its next turn, once
+    /// its background work is done.
+    pub fn set_zeron_mcp_only(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !zeron_harness::supports_zeron_mcp_only(id) {
+            return Err(format!("{id:?} can't hide its own MCP servers"));
+        }
+        {
+            let mut prefs = self.prefs();
+            match (on, prefs.zeron_mcp_only_on.contains(&id)) {
+                (true, false) => prefs.zeron_mcp_only_on.push(id),
+                (false, true) => prefs.zeron_mcp_only_on.retain(|h| *h != id),
+                _ => return Ok(()),
+            }
+        }
+        self.persist_prefs();
+        Ok(())
+    }
+
     pub fn register(&self, harness: Arc<dyn Harness>) {
         let id = harness.id();
         if self.slots().insert(id, Slot::Ready(harness)).is_none() {
@@ -862,6 +921,7 @@ impl HarnessRegistry {
             prefs.disabled.retain(|h| *h != id);
             prefs.native_subagents_off.retain(|h| *h != id);
             prefs.code_mode_on.retain(|h| *h != id);
+            prefs.zeron_mcp_only_on.retain(|h| *h != id);
             before
                 != prefs.disabled.len()
                     + prefs.native_subagents_off.len()
@@ -1812,6 +1872,43 @@ mod tests {
         // Only a driver that can launch without them ever runs without them.
         *reloaded.prefs() = serde_json::from_str(r#"{"nativeSubagentsOff":["opencode"]}"#).unwrap();
         assert!(reloaded.native_subagents(HarnessId::Opencode));
+    }
+
+    #[test]
+    fn zeron_mcp_only_is_off_until_turned_on_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Opencode, true);
+
+        // Off for every agent until the person turns it on.
+        assert!(!registry.zeron_mcp_only(HarnessId::Codex));
+        let settings = registry.zeron_mcp_only_settings();
+        assert_eq!(settings.supported, vec![HarnessId::ClaudeCode, HarnessId::Codex]);
+        assert!(settings.on.is_empty());
+
+        // An agent that can't hide its own is refused.
+        assert!(registry.set_zeron_mcp_only(HarnessId::Opencode, true).is_err());
+
+        registry.set_zeron_mcp_only(HarnessId::Codex, true).unwrap();
+        registry.set_zeron_mcp_only(HarnessId::Codex, true).unwrap();
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        test_slot(&reloaded, HarnessId::ClaudeCode, true);
+        test_slot(&reloaded, HarnessId::Codex, true);
+        assert!(reloaded.zeron_mcp_only(HarnessId::Codex));
+        assert!(!reloaded.zeron_mcp_only(HarnessId::ClaudeCode));
+        assert_eq!(reloaded.zeron_mcp_only_settings().on, vec![HarnessId::Codex]);
+
+        reloaded.set_zeron_mcp_only(HarnessId::Codex, false).unwrap();
+        assert!(!reloaded.zeron_mcp_only(HarnessId::Codex));
+
+        // Only a harness that can ever runs with it.
+        *reloaded.prefs() = serde_json::from_str(r#"{"zeronMcpOnlyOn":["opencode"]}"#).unwrap();
+        assert!(!reloaded.zeron_mcp_only(HarnessId::Opencode));
+        assert!(reloaded.zeron_mcp_only_settings().on.is_empty());
     }
 
     #[test]

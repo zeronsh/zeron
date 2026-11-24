@@ -105,6 +105,7 @@ fn request(prompt: &str) -> RunRequest {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -2489,6 +2490,73 @@ async fn code_mode_thread_starts_with_feature_flag() {
                 None,
                 "{start}"
             );
+        }
+    }
+}
+
+/// "Only Zeron's MCP servers": the thread starts with ChatGPT's apps off
+/// and each of the user's configured servers (as the run's folder sees
+/// them) switched off by name, never a server Zeron itself passes (even one
+/// named alike). Off, none of that is sent.
+#[tokio::test]
+async fn zeron_mcp_only_hides_apps_and_configured_servers() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config-read.json"),
+            r#"{"config": {"mcp_servers": {"github": {"url": "https://x"}, "linear": {"command": "npx"}}}}"#,
+        )
+        .unwrap();
+        let mut req = request("only zeron's");
+        req.cwd = dir.path().display().to_string();
+        req.zeron_mcp_only = only;
+        // Zeron's own managed Linear, named as the user's is.
+        req.extra_mcp = vec![zeron_proto::McpServer {
+            name: "linear".into(),
+            command: "zeron".into(),
+            ..Default::default()
+        }];
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let frames: Vec<serde_json::Value> = wire
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let start = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = &start["params"]["config"];
+        if only {
+            assert_eq!(config["features.apps"], false, "{start}");
+            assert_eq!(config["mcp_servers.github.enabled"], false, "{start}");
+            assert!(config.get("mcp_servers.linear.enabled").is_none(), "{start}");
+            // Read as the run's folder sees it.
+            let read = frames
+                .iter()
+                .find(|frame| frame["method"] == "config/read")
+                .expect("the config is read");
+            assert_eq!(read["params"]["cwd"], dir.path().display().to_string());
+        } else {
+            assert!(config.get("features.apps").is_none(), "{start}");
+            assert!(config.get("mcp_servers.github.enabled").is_none(), "{start}");
         }
     }
 }

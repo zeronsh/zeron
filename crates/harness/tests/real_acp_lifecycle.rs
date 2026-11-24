@@ -33,6 +33,7 @@ async fn live_run(cancel: bool) {
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         access: Default::default(), plan: false,
  code_mode: false,
+ zeron_mcp_only: false,
         attachments: Vec::new(), worktree: None, resume: None,
         env: Default::default(),
         extra_mcp: Vec::new(),
