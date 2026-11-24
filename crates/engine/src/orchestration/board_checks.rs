@@ -339,6 +339,27 @@ impl EngineRpc {
     /// `carry_on: false` only takes the pause off (an older app's drag to a
     /// waiting column): its held messages still go, nothing else is sent.
     pub(crate) async fn resume_item(&self, id: &str, carry_on: bool, now: DateTime<Utc>) -> Result<Value, RpcError> {
+        self.resume_card(id, carry_on, false, now).await
+    }
+
+    /// The person reopens closed card `id` and starts it again (dropped on
+    /// Running): open, then resumed as a paused card is, in one move said
+    /// as both ("You reopened and started it").
+    pub(crate) async fn reopen_start(&self, id: &str, now: DateTime<Utc>) -> Result<Value, RpcError> {
+        if !self.with_card(id, now, |row, item| {
+            row.closed = None;
+            // (Its thread's old word doesn't close it again.)
+            row.word = None;
+            row.stall = None;
+            item.approved_at = None;
+        }) {
+            return Err(RpcError::Failed(format!("No board item {id}")));
+        }
+        self.orchestration().board().reopened(id);
+        self.resume_card(id, true, true, now).await
+    }
+
+    async fn resume_card(&self, id: &str, carry_on: bool, reopened: bool, now: DateTime<Utc>) -> Result<Value, RpcError> {
         let orch = self.orchestration();
         let card = orch.item(id).filter(|c| !c.removed).ok_or_else(|| RpcError::Failed(format!("No board item {id}")))?;
         let live: Vec<String> = card
@@ -351,7 +372,8 @@ impl EngineRpc {
             item.paused_at = None;
             row.held = false;
         });
-        orch.comms().say(CommKind::Message, YOU, card.orchestrator_id.as_deref().unwrap_or(YOU), &format!("Resumed: {}", one_line(&card.title, 80)));
+        let said = if reopened { "Reopened and started" } else { "Resumed" };
+        orch.comms().say(CommKind::Message, YOU, card.orchestrator_id.as_deref().unwrap_or(YOU), &format!("{said}: {}", one_line(&card.title, 80)));
         tracing::info!(card = %id, title = %card.title, carry_on, threads = ?card.threads, "board: the person resumed a paused card");
         // Its threads' held messages go now, wherever it was taken (a held
         // queue under a card no longer paused would wait for nothing).
@@ -380,7 +402,11 @@ impl EngineRpc {
             if released.contains(t) {
                 self.work_sent(t, now);
             } else {
-                let text = format!("[Resumed] The person resumed \"{}\": carry on where you stopped.", one_line(&card.title, 80));
+                let text = if reopened {
+                    format!("[Reopened] The person reopened \"{}\" and started it again: carry on with it.", one_line(&card.title, 80))
+                } else {
+                    format!("[Resumed] The person resumed \"{}\": carry on where you stopped.", one_line(&card.title, 80))
+                };
                 super::ops::deliver(self, t, &text, None, super::ops::When::Next, Some(zeron_doc::Injected::resumed(&card.id)))?;
             }
         }
