@@ -192,3 +192,30 @@ test("needs float: a toast in its corner stands over it, the float where it was"
 	local _, fy2, _, _ = box(app, FLOAT)
 	expect(fy2).to_be(fy)
 end)
+
+test("needs float: Capture's history opened on a narrow page stops short of it, on Map, Chat and Notes", function()
+	-- (A 1440 window's page beside the sidebar.)
+	local app = open(1170)
+	local capped = 0
+	for _, t in { "map", "chat", "notes" } do
+		tab(app, t)
+		expect(app:has(FLOAT)).to_be(true)
+		app:click("#control-history-open")
+		app:frames(30)
+		expect(app:has("#control-history")).to_be(true)
+		local hx, hy, hw, hh = box(app, "#control-history")
+		local nx, ny, nw, nh = box(app, FLOAT)
+		local apart = hx + hw <= nx or nx + nw <= hx or hy + hh <= ny or ny + nh <= hy
+		expect(`{t} apart {apart}`).to_be(`{t} apart true`)
+		capped = hw
+		app:click("#control-history-open")
+		app:frames(30)
+	end
+	-- (On the Board, no Needs you floating: the panel wider again.)
+	tab(app, "board")
+	app:click("#control-history-open")
+	app:frames(30)
+	local _, _, bw = box(app, "#control-history")
+	expect(bw > capped).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
