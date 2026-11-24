@@ -63,7 +63,7 @@ const weigh = s && action === "verify" ? toWeigh(s) : null;
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
   <div class="wrap acct">
     <nav class="crumbs" aria-label="Where this is">
-      <a href="/admin/plugins">Queue</a><Icon name="chev" /><a href={submission}>{unbidi(name)} {version}</a><Icon name="chev" /><span aria-current="page">{ask.confirm}</span>
+      <a href="/admin/plugins">Review</a><Icon name="chev" /><a href={submission}>{unbidi(name)} {version}</a><Icon name="chev" /><span aria-current="page">{ask.confirm}</span>
     </nav>
     <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={submission}>
       {

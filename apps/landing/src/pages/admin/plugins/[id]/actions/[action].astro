@@ -49,7 +49,7 @@ const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
   <div class="wrap acct">
   <nav class="crumbs" aria-label="Where this is">
-    <a href="/admin/plugins">Queue</a><Icon name="chev" /><a href={back}>{unbidi(name)}</a><Icon name="chev" /><span aria-current="page">{ask.confirm}</span>
+    <a href="/admin/plugins">Review</a><Icon name="chev" /><a href={back}>{unbidi(name)}</a><Icon name="chev" /><span aria-current="page">{ask.confirm}</span>
   </nav>
   <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back}>
     {
