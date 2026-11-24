@@ -292,6 +292,30 @@ ui.command { id = "orch.many_asks", title = "Many asks", run = function()
 	now.asks = asks
 	orchestration.now:set(now)
 end }
+-- Two of Orchestrators' cards whose PR waits for review, both carrying the
+-- engine's one ask for its open PRs (`prs-orc-orch`, naming no card), as
+-- the engine's rows have them: one row of its own in Needs you.
+ui.command { id = "orch.shared_pr_ask", title = "Two review cards sharing the PR ask", run = function()
+	local t = os.time()
+	local n: any = table.clone(orchestration.now:peek())
+	local items = table.clone(n.items or {})
+	local cards = table.clone(n.cards or {})
+	local asks = table.clone(n.asks or {})
+	local links = {}
+	for i, pr in { 1570, 1571 } do
+		local id = `it-review-{i}`
+		local url = `https://github.com/zeronsh/zeron/pull/{pr}`
+		table.insert(links, { kind = "pr", label = `PR #{pr}`, target = url })
+		table.insert(items, { id = id, orchestrator_id = "orc-orch", title = `Review card {i}`, state = "review", priority = "normal", threads = {}, links = { { kind = "pr", label = `PR #{pr}`, target = url } }, order = 50 + i, created = t - 7200, updated = t - 3600 * i })
+		table.insert(cards, { id = id, place = "needs_you", status = "review", old_state = "review", since = t - 3600 * i, status_since = t - 3600 * i, asks = { "prs-orc-orch" }, finish = { line = "pr", pr = url }, chip = { kind = "pr", label = `PR #{pr}`, target = url }, events = {} })
+	end
+	table.insert(asks, {
+		id = "prs-orc-orch", from_chat = "orc-orch", orchestrator_id = "orc-orch", kind = "approval", origin = "review",
+		question = "12 PRs to review", options = {}, urgent = false, state = "open", created = t - 7000, links = links,
+	})
+	n.items, n.cards, n.asks = items, cards, asks
+	orchestration.now:set(n)
+end }
 ui.command { id = "orch.control", title = "Control room", run = function()
 	route.control()
 end }

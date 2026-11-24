@@ -11,6 +11,8 @@
 --   act.pause(entry), act.resume(entry), act.start(entry), act.remove(entry),
 --   act.archive_done() (every closed card archived: Done's and Earlier's),
 --   act.closed_count(),
+--   act.board_menu() -> { ContextMenu.Entry }? (the board's own: its "…"
+--   and a secondary click around its cards)
 --   act.request_changes(entry, text), act.snooze(ask, until_ms?),
 --   act.answer(ask, choice), act.expand(ask), act.open_thread(entry, chat?)
 --   act.menu(entry) -> { ContextMenu.Entry }
@@ -43,6 +45,7 @@ export type Actions = {
 	remove: (e: Ctx.Entry) -> (),
 	archive_done: () -> boolean,
 	closed_count: () -> number,
+	board_menu: () -> { any }?,
 	request_changes: (e: Ctx.Entry, text: string) -> (),
 	snooze: (ask: any, until_ms: number?) -> (),
 	answer: (ask: any, choice: any) -> any,
@@ -229,6 +232,13 @@ function M.closed_of(board: any): ({ Archived }, { [string]: boolean })
 		end
 	end
 	return out, busy
+end
+
+-- The last board built's own menu opened at a point in the window, as a
+-- secondary click there would (for pictures, which have no secondary
+-- click): false where none opened.
+M.open_board_menu = function(_x: number, _y: number): boolean
+	return false
 end
 
 -- Done's Archive all: the head's glyph button (Done's column, Done's list
@@ -437,6 +447,31 @@ function M.make(ctx: Ctx.Ctx): Actions
 		end
 		local cards, busy = M.closed_of(ctx.board())
 		return (M.archive(cards, { on_remove = f, on_undo_remove = props.on_undo_remove, busy = busy }))
+	end
+	-- The board's own menu: Archive all done (where the host deletes cards),
+	-- then the host's (`board_menu`: the Map's Unpin all and Mark all done
+	-- as read, which the Control room and an orchestrator's page give).
+	-- Nil with nothing in it.
+	function act.board_menu(): { any }?
+		local out: { any } = {}
+		if props.on_remove then
+			local n = act.closed_count()
+			table.insert(out, {
+				label = locale.s("orch.board.archive_done"),
+				icon = "archive-minimalistic",
+				disabled = n == 0,
+				on_select = function()
+					act.archive_done()
+				end,
+			})
+		end
+		local extra = props.board_menu :: (() -> { any }?)?
+		if extra ~= nil then
+			for _, e in extra() or {} do
+				table.insert(out, e)
+			end
+		end
+		return if #out > 0 then out else nil
 	end
 	function act.snooze(ask: any, until_ms: number?)
 		local f = props.on_snooze

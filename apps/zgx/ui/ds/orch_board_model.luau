@@ -451,10 +451,12 @@ local function build(now: any, filter: string?, at: number, prev: Board?): Board
 	end
 	table.sort(b.done, closed_last)
 	table.sort(b.earlier, closed_last)
-	b.counts.needs_you = #b.needs_you
+	-- (A shared ask is one more thing that needs the person: one row, one
+	-- in every figure of Needs you's.)
+	b.counts.needs_you = #b.needs_you + #b.shared
 	b.counts.running = #b.running
 	b.counts.done = #b.done
-	b.counts.all = #b.needs_you + #b.running + #b.done
+	b.counts.all = b.counts.needs_you + #b.running + #b.done
 	return b
 end
 

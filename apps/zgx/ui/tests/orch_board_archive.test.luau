@@ -294,3 +294,84 @@ test("board actions: archive all done on an orchestrator's page (its Tasks list)
 	expect(string.find(c, "removeItem", 1, true) ~= nil).to_be(true)
 	expect(string.find(c, "it-fx-theirs", 1, true)).to_be_nil()
 end)
+
+-- The board's own menu: its "…" in its head, and a secondary click around
+-- its cards (a column's head, the list around its rows), on the Control
+-- room's board and an orchestrator's page: Archive all done, Unpin all and
+-- Mark all done as read (the Map's own). A card's secondary click is its
+-- own menu still.
+local function control_board(): any
+	local app = mount("control_needs_cards_fixture.luau")
+	app:resize(1600, 1000)
+	app:frames(30)
+	app:command("fx.board")
+	app:frames(30)
+	return app
+end
+local THREE = { "Archive all done", "Unpin all" }
+local function has_three(app: any): boolean
+	for _, l in THREE do
+		if not app:has(`role:menuitem "{l}"`) then
+			return false
+		end
+	end
+	return app:has('role:menuitem ~"done as read"')
+end
+
+test("board actions: the board's … menu has Archive all done, Unpin all and Mark all done as read", function()
+	local app = control_board()
+	expect(app:has("#orch-board-more")).to_be(true)
+	app:click("#orch-board-more")
+	app:frames(10)
+	expect(has_three(app)).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	-- Unpin all lets go of the Map's kept pins, the Map not built.
+	app:set_state("ds/orch_force.luau::control_map_force_pins", { ["th-ui-orch"] = true })
+	app:click("#orch-board-more")
+	app:frames(10)
+	app:click('role:menuitem "Unpin all"')
+	app:frames(10)
+	expect(next(app:state("ds/orch_force.luau::control_map_force_pins") or {})).to_be_nil()
+	expect(app:error()).to_be_nil()
+end)
+
+test("board actions: a secondary click around the cards opens the board's menu; on a card, the card's own", function()
+	local app = control_board()
+	app:right_click("#orch-col-running >> .orch-column-head")
+	app:frames(10)
+	expect(has_three(app)).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	local card = string.match(app:tree("#orch-col-running", 3), "#(orch%-card%-[%w%-]+)")
+	expect(card ~= nil).to_be(true)
+	app:right_click(`#{card}`)
+	app:frames(10)
+	expect(app:has('role:menu "Card actions" >> role:menuitem "Unpin all"')).to_be(false)
+	expect(app:has('role:menu "Card actions" >> role:menuitem "Delete from the board"')).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	-- In the list too.
+	app:click("#orch-board-view-list")
+	app:frames(40)
+	app:right_click("#orch-list-running >> .orch-fold-head")
+	app:frames(10)
+	-- (A section's head folds on a click; its secondary click is the
+	-- board's.)
+	expect(has_three(app)).to_be(true)
+end)
+
+test("board actions: an orchestrator's page list has the board's menu too", function()
+	local app = mount("orchestrator_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(30)
+	expect(app:has("#orch-tasks >> #orch-list-more")).to_be(true)
+	app:click("#orch-tasks >> #orch-list-more")
+	app:frames(10)
+	expect(has_three(app)).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	app:right_click("#orch-tasks >> #orch-list-needs_you >> .orch-fold-head")
+	app:frames(10)
+	expect(has_three(app)).to_be(true)
+end)

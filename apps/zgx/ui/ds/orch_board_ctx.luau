@@ -111,6 +111,10 @@ export type Props = {
 	on_remove: ((id: string, wait_ms: number) -> any)?,
 	on_undo_remove: ((id: string) -> ())?,
 	on_seen: ((id: string) -> any)?,
+	-- The host's entries for the board's own menu (its "…", and a
+	-- secondary click around its cards), after Archive all done: the Map's
+	-- Unpin all and Mark all done as read.
+	board_menu: (() -> { any })?,
 	-- A new task for an orchestrator (nil: whoever takes it), as a dump.
 	on_new_task: ((text: string, orchestrator_id: string?) -> any)?,
 	[string]: any,

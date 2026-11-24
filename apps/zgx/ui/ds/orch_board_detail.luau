@@ -308,6 +308,58 @@ M.Detail = ui.component(function(props: Props): Node
 					weight = "$font.weight.medium",
 					color = "$text.primary",
 				},
+				-- A shared ask (the engine's one for an orchestrator's open
+				-- PRs, on every review card): what it covers, its pull
+				-- requests, as context. (Never on a card's face: its row and
+				-- its card say only their own.)
+				ui.each(ui.computed(function(): { any }
+					local a = ask:get()
+					if not a or not a.links or a.item_id ~= nil then
+						return {}
+					end
+					local x = e()
+					if not (x and x.own == nil) then
+						return {}
+					end
+					local out = {}
+					for _, l in a.links do
+						if l.kind == "pr" then
+							table.insert(out, l)
+						end
+					end
+					return out
+				end), function(l: any): Node
+					return ui.button {
+						class = "orch-detail-ask-link",
+						label = l.label,
+						h = 22,
+						px = "$space.2",
+						gap = "$zeron.space.tight",
+						items = "center",
+						shrink = 0,
+						rounded = "$radius.full",
+						bg = "$zeron.secondary.bg",
+						hover = { bg = "$zeron.secondary.hover" },
+						active = { bg = "$zeron.secondary.active" },
+						on_click = function()
+							local open = ctx.props.on_link
+							if open then
+								open(l)
+							end
+						end,
+						ui.div { shrink = 0, color = "$text.tertiary", Icon { name = "pull-request", size = 12 } },
+						ui.text { l.label, literal = true, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.primary" },
+					}
+				end, {
+					key = function(l: any): string
+						return l.target or l.label
+					end,
+					class = "orch-detail-ask-links",
+					direction = "row",
+					flex_wrap = true,
+					gap = ui.raw(6, "between chips"),
+					w_full = true,
+				}),
 				Choices {
 					ask = function(): any
 						return ask:get()

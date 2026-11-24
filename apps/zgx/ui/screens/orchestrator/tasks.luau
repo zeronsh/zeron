@@ -98,6 +98,11 @@ function M.board_props(props: Props): { [string]: any }
 		on_request_changes = orchestration.request_changes,
 		on_remove = orchestration.remove_later,
 		on_undo_remove = orchestration.undo_remove,
+		-- (The Map's Unpin all and Mark all done as read, as the Control
+		-- room's board has them.)
+		board_menu = function(): { any }
+			return require("@app/screens/control/page").board_menu_extra()
+		end,
 		on_seen = orchestration.seen_item,
 	}
 end

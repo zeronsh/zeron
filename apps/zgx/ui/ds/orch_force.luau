@@ -90,7 +90,11 @@ M.drag_by = function(_id: string, _dx: number, _dy: number) end
 M.drag_end = function(_id: string) end
 M.recentre = function() end
 M.unpin_children = function(_id: string) end
-M.unpin_all = function() end
+-- (No Map built: its kept pins let go of, as the Map would on its next
+-- build. A Map built does it in place, its nodes settling.)
+M.unpin_all = function()
+	M.pins_of():set({} :: any)
+end
 M.done_unread_ids = function(): { string }
 	return {}
 end
@@ -1639,6 +1643,8 @@ M.View = ui.component(function(props: {
 		unpin(function(_i: number): boolean
 			return true
 		end)
+		-- (And what's kept of nodes not on it now.)
+		M.pins_of():set({} :: any)
 	end
 
 	-- Fit: the Brain back in the centre (where it was dragged, if it was),

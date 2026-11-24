@@ -430,6 +430,144 @@ local Row = ui.component(function(props: RowProps): Node
 	}
 end)
 
+-- Needs you's shared asks (ds/orch_board_model's `shared`), each once, at
+-- its head (the list's section, the board's column): what stands on many
+-- cards said apart from them. Its head line opens it whole; its buttons, if
+-- it has any, under it. (Each counts one in Needs you's figures.)
+function M.SharedRows(ctx: Ctx.Ctx, act: Actions.Actions): Node
+	local shared_key = ui.computed(function(): string
+		local ids: { string } = {}
+		for _, a in ctx.board().shared do
+			table.insert(ids, a.id)
+		end
+		return table.concat(ids, "\n")
+	end)
+	local shared_ids = ui.computed(function(): { string }
+		local k = shared_key:get()
+		return if k == "" then {} else string.split(k, "\n")
+	end)
+	local function shared_of(ask_id: string): any?
+		for _, a in ctx.board().shared do
+			if a.id == ask_id then
+				return a
+			end
+		end
+		return nil
+	end
+	local function shared_row(ask_id: string): Node
+		local ask = ui.computed(function(): any?
+			return shared_of(ask_id)
+		end)
+		local function a(): any?
+			return ask:get()
+		end
+		local can_expand = act.can("expand_ask")
+		local line = ui.button {
+			class = "orch-list-shared-line",
+			label = function(): string
+				local x = a()
+				return if x then Card.plain(x.question or "") else ""
+			end,
+			w_full = true,
+			h = LINE_H,
+			px = "$space.2",
+			py = 0,
+			gap = "$space.2",
+			items = "center",
+			rounded = Card.RADIUS,
+			bg = "#00000000",
+			hover = {},
+			active = { bg = "$pressed" },
+			on_click = function()
+				local x = ask:peek()
+				if x and can_expand then
+					act.expand(x)
+				end
+			end,
+			Card.Glyph {
+				status = function(): string
+					local x = a()
+					return if x and x.origin == "review" then "review" else "asked"
+				end,
+				size = 13,
+			},
+			if ctx.owners
+				then ui.div {
+					class = "orch-list-owner",
+					role = "img",
+					shrink = 0,
+					hue.Dot {
+						hue = function(): number?
+							local x = a()
+							local o = x and ctx.owner(x.orchestrator_id)
+							return o and o.hue
+						end,
+						size = 7,
+					},
+				}
+				else nil,
+			ui.text {
+				function(): string
+					local x = a()
+					return if x then Card.plain(x.question or "") else ""
+				end,
+				class = "orch-list-title",
+				grow = 1,
+				basis = 0,
+				min_w = 64,
+				truncate = true,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+			},
+			if can_expand then expand_button(a, act.expand) else nil,
+		}
+		return surface {
+			class = "orch-list-shared",
+			id = `orch-list-ask-{ask_id}`,
+			line,
+			ui.show(function(): boolean
+				return has_choices(a())
+			end, function(): Node
+				return ui.column {
+					w_full = true,
+					min_w = 0,
+					pl = ui.raw(INDENT, "under the title, past the glyph"),
+					pr = "$space.2",
+					pb = "$space.2",
+					Choices {
+						ask = function(): any
+							return a()
+						end,
+						on_answer = function(x: any, choice: any): any
+							return act.answer(x, choice)
+						end,
+						size = "xs",
+						class = "orch-list-choices",
+					},
+				}
+			end),
+		}
+	end
+	local function shared_rows(): Node
+		return ui.show(function(): boolean
+			return shared_key:get() ~= ""
+		end, function(): Node
+			return ui.each(shared_ids, shared_row, {
+				key = function(ask_id: string): string
+					return ask_id
+				end,
+				class = "orch-list-shared-rows",
+				direction = "column",
+				gap = ROW_GAP,
+				w_full = true,
+				-- (Apart from the cards under it by a row's gap.)
+				pb = ROW_GAP,
+			})
+		end)
+	end
+	return shared_rows()
+end
+
 export type SectionsProps = {
 	ctx: Ctx.Ctx,
 	act: Actions.Actions,
@@ -613,140 +751,6 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 		}
 	end
 
-	-- Needs you's shared asks (ds/orch_board_model's `shared`), each once, at
-	-- its head: what stands on many cards said apart from them. Its head line
-	-- opens it whole; its buttons, if it has any, under it.
-	local shared_key = ui.computed(function(): string
-		local ids: { string } = {}
-		for _, a in ctx.board().shared do
-			table.insert(ids, a.id)
-		end
-		return table.concat(ids, "\n")
-	end)
-	local shared_ids = ui.computed(function(): { string }
-		local k = shared_key:get()
-		return if k == "" then {} else string.split(k, "\n")
-	end)
-	local function shared_of(ask_id: string): any?
-		for _, a in ctx.board().shared do
-			if a.id == ask_id then
-				return a
-			end
-		end
-		return nil
-	end
-	local function shared_row(ask_id: string): Node
-		local ask = ui.computed(function(): any?
-			return shared_of(ask_id)
-		end)
-		local function a(): any?
-			return ask:get()
-		end
-		local can_expand = act.can("expand_ask")
-		local line = ui.button {
-			class = "orch-list-shared-line",
-			label = function(): string
-				local x = a()
-				return if x then Card.plain(x.question or "") else ""
-			end,
-			w_full = true,
-			h = LINE_H,
-			px = "$space.2",
-			py = 0,
-			gap = "$space.2",
-			items = "center",
-			rounded = Card.RADIUS,
-			bg = "#00000000",
-			hover = {},
-			active = { bg = "$pressed" },
-			on_click = function()
-				local x = ask:peek()
-				if x and can_expand then
-					act.expand(x)
-				end
-			end,
-			Card.Glyph {
-				status = function(): string
-					local x = a()
-					return if x and x.origin == "review" then "review" else "asked"
-				end,
-				size = 13,
-			},
-			if ctx.owners
-				then ui.div {
-					class = "orch-list-owner",
-					role = "img",
-					shrink = 0,
-					hue.Dot {
-						hue = function(): number?
-							local x = a()
-							local o = x and ctx.owner(x.orchestrator_id)
-							return o and o.hue
-						end,
-						size = 7,
-					},
-				}
-				else nil,
-			ui.text {
-				function(): string
-					local x = a()
-					return if x then Card.plain(x.question or "") else ""
-				end,
-				class = "orch-list-title",
-				grow = 1,
-				basis = 0,
-				min_w = 64,
-				truncate = true,
-				text_size = "$font.size.sm",
-				color = "$text.primary",
-			},
-			if can_expand then expand_button(a, act.expand) else nil,
-		}
-		return surface {
-			class = "orch-list-shared",
-			id = `orch-list-ask-{ask_id}`,
-			line,
-			ui.show(function(): boolean
-				return has_choices(a())
-			end, function(): Node
-				return ui.column {
-					w_full = true,
-					min_w = 0,
-					pl = ui.raw(INDENT, "under the title, past the glyph"),
-					pr = "$space.2",
-					pb = "$space.2",
-					Choices {
-						ask = function(): any
-							return a()
-						end,
-						on_answer = function(x: any, choice: any): any
-							return act.answer(x, choice)
-						end,
-						size = "xs",
-						class = "orch-list-choices",
-					},
-				}
-			end),
-		}
-	end
-	local function shared_rows(): Node
-		return ui.show(function(): boolean
-			return shared_key:get() ~= ""
-		end, function(): Node
-			return ui.each(shared_ids, shared_row, {
-				key = function(ask_id: string): string
-					return ask_id
-				end,
-				class = "orch-list-shared-rows",
-				direction = "column",
-				gap = ROW_GAP,
-				w_full = true,
-				-- (Apart from the cards under it by a row's gap.)
-				pb = ROW_GAP,
-			})
-		end)
-	end
-
 	-- What folds under a section (Snoozed, Earlier): its own quiet head.
 	local function under(place: string): Node
 		return ui.show(function(): boolean
@@ -792,8 +796,9 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 			Fold {
 				id = `orch-list-{place}`,
 				title = locale.t(`orch.board.place.{place}`),
+				-- (Needs you's: its shared asks' rows too.)
 				count = function(): number
-					return count(place)
+					return count(place) + (if place == "needs_you" then #ctx.board().shared else 0)
 				end,
 				icon = Card.Glyph {
 					status = function(): string
@@ -816,7 +821,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 						return is_open(place)
 					end, function(): Node
 						if place == "needs_you" then
-							return ui.column { w_full = true, min_w = 0, shared_rows(), rows(place) }
+							return ui.column { w_full = true, min_w = 0, M.SharedRows(ctx, act), rows(place) }
 						end
 						return rows(place)
 					end),
@@ -860,12 +865,53 @@ export type Props = Ctx.Props
 M.List = ui.component(function(props: Props): Node
 	local ctx = Ctx.make(props)
 	local act = Actions.make(ctx)
+	-- Its own menu (ds/orch_board_actions `board_menu`): a "…" over the
+	-- sections at its end, and a secondary click around its rows.
+	local more_open = ui.use_state(false)
+	local more: Node? = nil
+	if act.board_menu() ~= nil then
+		more = ui.row {
+			class = "orch-list-head",
+			w_full = true,
+			justify = "end",
+			ContextMenu {
+				open = more_open,
+				label = locale.t("orch.board.menu"),
+				shrink = 0,
+				items = function(): { any }?
+					return act.board_menu()
+				end,
+				IconButton {
+					id = "orch-list-more",
+					icon = "more-horizontal",
+					label = locale.t("orch.board.menu"),
+					size = "sm",
+					tone = "quiet",
+					lit = function(): boolean
+						return more_open:get()
+					end,
+					on_click = function()
+						more_open:set(true)
+					end,
+				},
+			},
+		}
+	end
 	return ui.column {
 		id = props.id or "orch-board-list",
 		class = "orch-board-list",
 		w_full = true,
 		min_w = 0,
-		M.Sections { ctx = ctx, act = act, tab = props.tab, fold = props.fold },
+		more,
+		ContextMenu {
+			label = locale.t("orch.board.menu"),
+			w_full = true,
+			min_w = 0,
+			items = function(): { any }?
+				return act.board_menu()
+			end,
+			M.Sections { ctx = ctx, act = act, tab = props.tab, fold = props.fold },
+		},
 		ctx.motion.host(),
 	}
 end)

@@ -167,3 +167,36 @@ test("orch board list: the board's cards don't say the shared ask either", funct
 	-- A card's own question still is its summary.
 	expect(string.find(app:tree("#orch-card-it-1474", 10), "Nothing is moving on", 1, true) ~= nil).to_be(true)
 end)
+
+test("orch board list: a review card's detail keeps the shared PR ask as context, with its pull requests", function()
+	local app = list()
+	app:click("#orch-row-it-review-1")
+	app:frames(30)
+	expect(app:has("#orch-board-detail")).to_be(true)
+	-- Its question and its pull requests, in the detail's box.
+	expect(app:text("#orch-detail-question")).to_be("12 PRs to review")
+	expect(app:count("#orch-detail-needs >> .orch-detail-ask-link")).to_be(REVIEWS)
+	expect(app:has('#orch-detail-needs >> role:button "PR #1570"')).to_be(true)
+	app:click('#orch-detail-needs >> role:button "PR #1503"')
+	app:frames(5)
+	expect(string.find(app:state("calls") :: string, "link:PR #1503", 1, true) ~= nil).to_be(true)
+	-- Never on the card's face: its row stays its head line alone.
+	expect(string.find(app:tree("#orch-item-it-review-1", 8), "12 PRs to review", 1, true)).to_be_nil()
+	-- A card whose ask is its own shows no such list.
+	app:click("#orch-row-it-1474")
+	app:frames(30)
+	expect(app:has("#orch-detail-needs >> .orch-detail-ask-link")).to_be(false)
+end)
+
+test("orch board list: the shared ask counts one in Needs you's section, its tab and its column", function()
+	local app = list()
+	-- Eleven cards and the shared ask.
+	local head = app:tree('#orch-list-needs_you >> role:button "Needs you"', 2)
+	expect(head).to_contain('"12"')
+	expect(app:tree('#orch-board-tabs >> role:tab "Needs you"', 2)).to_contain('"12"')
+	app:set_state("board_view", "board")
+	app:frames(30)
+	expect(app:text("#orch-col-needs_you >> .orch-column-count")).to_be("12")
+	-- Said once in the column too, at its head.
+	expect(app:count("#orch-col-needs_you >> .orch-list-shared")).to_be(1)
+end)
