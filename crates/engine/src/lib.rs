@@ -1420,6 +1420,7 @@ impl Engine {
     pub async fn run(self) -> anyhow::Result<()> {
         let mut config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
+        sessions::expect_ipc_port(true);
 
         std::fs::create_dir_all(&config.data_dir)?;
         update_trial::boot(&config.data_dir)?;
