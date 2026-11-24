@@ -4342,7 +4342,15 @@
       "not_now": "Not now",
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
-      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}.",
+      "update_title": "Update {name}?",
+      "new_owner": "Its publisher changed: it's now @{username}'s.",
+      "store_record": "It's exactly what the store has",
+      "store_record_detail": "Published with a deploy token, so it isn't signed.",
+      "from_store": "From the store",
+      "from_store_detail": "Published by @{username}.",
+      "from_file": "From a file, not from the store",
+      "from_link": "From a link, not from the store"
     },
     "store": {
       "search": "Search templates",

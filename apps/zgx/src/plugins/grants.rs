@@ -521,7 +521,7 @@ mod tests {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
-                for word in ["DecidePlugin", "SignPlugin", "ReviewPlugin", "ReviewTemplate", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide", "\"store.decide\""] {
+                for word in ["DecidePlugin", "SignPlugin", "ReviewPlugin", "ReviewTemplate", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide", "InstallVerifiedTemplate", "templates.install_verified", "\"store.decide\""] {
                     if text.contains(word) {
                         found.push(format!("{word} in {}", path.display()));
                     }

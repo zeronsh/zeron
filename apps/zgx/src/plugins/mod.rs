@@ -55,6 +55,7 @@ pub mod looks;
 pub mod template_consent;
 pub mod act_consent;
 pub mod blocks;
+pub mod store_rows;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
@@ -265,6 +266,10 @@ pub struct Bridge {
     fallbacks: RefCell<HashMap<String, usize>>,
     /// The templates page's data (screens/templates).
     templates_page: Shared,
+    /// What the engine last said of the templates (`ListTemplates`), and
+    /// whether it's being asked.
+    templates_said: RefCell<Json>,
+    asking_templates: Cell<bool>,
     /// Plugins that failed, kept out until they change.
     failed_plugins: RefCell<recovery::Failures>,
     ui: zgx::widgets::WeakUi,
@@ -631,6 +636,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         failed_files: RefCell::default(),
         broken: RefCell::default(),
         fallbacks: RefCell::default(),
+        templates_said: RefCell::default(),
+        asking_templates: Cell::new(false),
         templates_page: host.shared("templates", Value::record([("state", Value::from("loading"))])),
         failed_plugins: RefCell::default(),
         ui: cx.ui.downgrade(),
@@ -1950,6 +1957,7 @@ impl Bridge {
         let Some(root) = self.templates_dir() else { return };
         let active = self.overlay.borrow().template.clone();
         let mut list = Vec::new();
+        let mut from_store = false;
         let mut status = serde_json::Map::new();
         let installed = live::installed(&root);
         // Each template's own theme (its theme.luau, as data), for the Themes
@@ -2016,12 +2024,22 @@ impl Bridge {
             // Someone's, from a package: who signed it, where it came from
             // (never a local path), and a newer version found there.
             if let Some(imported) = &t.imported {
+                let said = self.templates_said.borrow();
+                let row = store_rows::row(&said, &t.id, imported);
                 let mut imported = imported.clone();
-                if let Some(source) = imported.get_mut("source").and_then(Json::as_object_mut) {
-                    source.retain(|k, _| matches!(k.as_str(), "kind" | "url" | "ref"));
-                }
-                if let Some(found) = template_update(&root, &t.id, imported["hash"].as_str().unwrap_or("")) {
+                let of_store = imported["source"]["kind"] == "store";
+                from_store |= of_store;
+                imported["source"] = store_rows::source(&imported["source"], row);
+                // (A store template checks only the store: the engine's word.)
+                let found = match of_store {
+                    true => row.map(|row| row["update"].clone()).filter(Json::is_object),
+                    false => template_update(&root, &t.id, imported["hash"].as_str().unwrap_or("")),
+                };
+                if let Some(found) = found {
                     fields.push(("update", json_value(&found)));
+                }
+                if of_store && row.is_some_and(|row| row["edited"] == true) {
+                    fields.push(("edited", Value::Bool(true)));
                 }
                 fields.push(("imported", json_value(&imported)));
             }
@@ -2034,6 +2052,8 @@ impl Bridge {
         for p in &mut pending {
             let name = p["pending"].as_str().unwrap_or("").to_string();
             p["here"] = json!(self.told.borrow().contains(&format!("template:{name}")));
+            store_rows::waiting(&self.templates_said.borrow(), p);
+            from_store |= p["from"]["kind"] == "store";
         }
         templates::write_if_changed(&root.join(live::STATUS), &Json::Object(status));
         self.templates_page.set(Value::record([
@@ -2043,6 +2063,31 @@ impl Bridge {
             ("list", vlist(list)),
             ("pending", vlist(pending.iter().map(json_value).collect())),
         ]));
+        if from_store {
+            self.ask_templates();
+        }
+    }
+
+    /// What the engine says of the templates from the store, asked again; the
+    /// page brought up to date if it's anything new.
+    fn ask_templates(&self) {
+        if cfg!(test) || self.asking_templates.replace(true) {
+            return;
+        }
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            let said = template_call("ListTemplates", json!({})).await;
+            let Some(b) = me.upgrade() else { return };
+            // (Not answered: what it last said stays; asked at the next look.
+            // The page it makes isn't asked about again: once a look.)
+            if let Ok(said) = said
+                && *b.templates_said.borrow() != said
+            {
+                *b.templates_said.borrow_mut() = said;
+                b.publish_templates();
+            }
+            b.asking_templates.set(false);
+        });
     }
 
     /// Settings → Plugins brought up to date, once what asked has settled:

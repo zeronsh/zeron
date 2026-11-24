@@ -4342,7 +4342,15 @@
       "not_now": "暂不",
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
-      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。",
+      "update_title": "更新{name}？",
+      "new_owner": "它的发布者已变更：现在属于 @{username}。",
+      "store_record": "它与商店中的完全一致",
+      "store_record_detail": "由部署令牌发布，因此没有签名。",
+      "from_store": "来自商店",
+      "from_store_detail": "由 @{username} 发布。",
+      "from_file": "来自文件，而非商店",
+      "from_link": "来自链接，而非商店"
     },
     "store": {
       "search": "搜索模板",

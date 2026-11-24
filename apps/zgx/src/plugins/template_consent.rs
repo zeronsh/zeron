@@ -238,6 +238,7 @@ fn host(
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
 
+    install_verified(&host, bridge, &pending, &shared, &generation, &last);
     // Your answer: the package as shown (its hash), installed or not. The
     // window closes once the engine has it, and the main window looks again.
     let (weak, window, out) = (Rc::downgrade(bridge), cx.window.clone(), shared);
@@ -337,6 +338,45 @@ fn host(
         });
     });
     host
+}
+
+/// The verified version of waiting package `pending`, taken instead of it (the
+/// one the engine's own item names): it waits in its place, its sheet shown.
+fn install_verified(host: &ScriptHost, bridge: &Rc<Bridge>, pending: &Rc<RefCell<String>>, out: &Shared, generation: &Rc<Cell<u64>>, last: &Last) {
+    let (weak, out, pending, generation, last) = (Rc::downgrade(bridge), out.clone(), pending.clone(), generation.clone(), last.clone());
+    host.action("templates.install_verified", move |_| {
+        // (What's shown, as it's shown: never what a script names.)
+        let Some(item) = last.borrow().clone().filter(|item| item["store"]["verified_alternative"].is_object()) else { return };
+        let (Some(name), Some(hash)) = (item["pending"].as_str(), item["hash"].as_str()) else { return };
+        if !SEEN.with(|s| super::consent::may_allow(&s.borrow(), &key("", name, hash), Instant::now())) {
+            return;
+        }
+        let params = json!({ "pending": name, "hash": hash });
+        generation.set(generation.get() + 1);
+        out.set(record(Some(&item), true, None));
+        let (weak, out, pending, generation, last) = (weak.clone(), out.clone(), pending.clone(), generation.clone(), last.clone());
+        engine::get().spawn(async move {
+            let result = crate::auth::after_setup(|| {
+                let asked = params.clone();
+                async move { engine::get().call("InstallVerifiedTemplate", asked).await }
+            })
+            .await;
+            if let Some(b) = weak.upgrade() {
+                b.look();
+            }
+            let error = match result {
+                Ok(reply) => {
+                    if let Some(next) = reply["pending"].as_str() {
+                        *pending.borrow_mut() = next.to_string();
+                    }
+                    None
+                }
+                Err(error) => Some(said(&error)),
+            };
+            let name = pending.borrow().clone();
+            fetch(out, last, name, generation, error);
+        });
+    });
 }
 
 fn said(error: &str) -> String {

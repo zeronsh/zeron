@@ -37,6 +37,21 @@ local PACKAGES: { [string]: any } = {
 		hash = "mystery-hash-1",
 		author = { kind = "unknown", reason = "Checking who made it…" },
 	},
+	-- From the store: verified and signed; unverified, by a deploy token (no
+	-- key), an update over what was changed here; and one from a link.
+	store = {
+		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+	},
+	token = {
+		pending = "midnight-2", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-2",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false, verified_alternative = { version = "1.2.0" } },
+		update_of = "midnight", replaces_edits = true, new_owner = true, also_installed = { { id = "midnight", from = "file" } },
+	},
+	link = {
+		pending = "linked-1", id = "linked", name = "Linked", version = "1.0.0", key = "AbCdEfGhIjKlMnOpQrStUv", files = 3, ignored = {}, hash = "link-hash",
+		from = { kind = "link", url = "https://example.com/x" }, author = { kind = "verified", username = "grace" },
+	},
 	-- A template in preview, to keep (an agent made it on this device).
 	sleek = {
 		keep = "sleek",
@@ -62,6 +77,9 @@ local function show(id: string?)
 end
 
 ui.actions {
+	["templates.install_verified"] = function()
+		note("install_verified")
+	end,
 	["templates.decide"] = function(arg: any)
 		if arg.keep then
 			note(`keep:{arg.keep}:{tostring(arg.allow)}:{arg.hash}`)
@@ -74,6 +92,12 @@ ui.actions {
 
 ui.command { id = "ledger", title = "Show Ledger", run = function() show("ledger") end }
 ui.command { id = "mystery", title = "Show Mystery", run = function() show("mystery") end }
+for _, id in { "store", "token", "link" } do
+	ui.command { id = id, title = id, run = function() show(id) end }
+end
+for _, name in { "en", "zh-Hans" } do
+	ui.command { id = `locale_{name}`, title = name, run = function() ui.locale:set(name) end }
+end
 ui.command { id = "sleek", title = "Keep Sleek", run = function() show("sleek") end }
 ui.command {
 	id = "found",
