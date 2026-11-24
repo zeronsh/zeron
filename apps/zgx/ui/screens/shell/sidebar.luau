@@ -295,9 +295,8 @@ local NO_PROJECT = "none"
 local asks = ui.shared("chat.asks", {} :: { [string]: string })
 local ASKED: { [string]: string } = { approval = "approval", question = "input" }
 -- A chat whose subagent asks to be allowed something: that's the person's to
--- give, and the subagent's own chat isn't listed, so its parent says so. (A
--- question a waiting parent answers itself isn't; one whose parent has
--- finished is.)
+-- give, and the subagent's own chat isn't listed, so its parent says so. So
+-- does one at rest for a question (at work, it answers what it can itself).
 local function asked_under(c: sessions.Chat, asked: { [string]: string }): string?
 	if next(asked) == nil then
 		return nil
@@ -308,7 +307,7 @@ local function asked_under(c: sessions.Chat, asked: { [string]: string }): strin
 		if child.child_kind == "subagent" and ask then
 			if ask == "approval" then
 				return "approval"
-			elseif c.status == nil or c.status == "done" then
+			elseif c.status == nil or c.status == "done" or c.status == "waiting" then
 				found = "input"
 			end
 		end

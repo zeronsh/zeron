@@ -61,7 +61,7 @@ pub use session::{
     QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
     SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch, TranscriptLoad,
 };
-pub use subagents::{SubagentInfo, SubagentSink, SubagentState, SubagentWatch};
+pub use subagents::{SubagentInfo, SubagentOrigin, SubagentSink, SubagentState, SubagentWatch};
 pub use terminal::{TerminalInfo, TerminalLink, TerminalReplies, TerminalSink, TerminalUpdate};
 pub use workspace::{
     DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
