@@ -242,6 +242,40 @@ describe("a package's pictures can't run", () => {
   });
 });
 
+describe("the bar is drawn once: nothing in it changes after the page loads", () => {
+  test("signed in as an author or staff, or signed out, on public and private pages alike", async () => {
+    const pages = ["/plugins", "/plugins/all", "/plugins/focus-timer", "/plugins/publishing", "/account", "/account/tokens"];
+    for (const as of [undefined, "user_ada", "user_grace"] as const) {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      try {
+        if (as) await page.goto(new URL(`/auth/web/callback?as=${as}&return_to=/plugins/publishing`, site.url).href);
+        // Every change to the bar and its menus, from before the page is parsed until it has settled.
+        await page.addInitScript(() => {
+          const seen: string[] = [];
+          (window as unknown as { barChanges: string[] }).barChanges = seen;
+          new MutationObserver((records) => {
+            for (const r of records) {
+              const el = r.target instanceof Element ? r.target : r.target.parentElement;
+              if (el?.closest("header.top, #me-menu, #nav-menu") && document.readyState !== "loading") seen.push(`${r.type} ${el.tagName.toLowerCase()}.${el.className} ${r.attributeName ?? ""}`);
+            }
+          }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+        });
+        for (const path of pages) {
+          await page.goto(new URL(path, site.url).href, { waitUntil: "networkidle" });
+          await page.waitForTimeout(300);
+          const changes = await page.evaluate(() => (window as unknown as { barChanges: string[] }).barChanges);
+          expect(changes, `${path} as ${as ?? "no one"}`).toEqual([]);
+          const named = await page.locator("header.top button.me").isVisible();
+          expect(named, `${path} as ${as ?? "no one"}: the name in the bar`).toBe(as !== undefined);
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 120_000);
+});
+
 describe("a deploy token, shown once", () => {
   test("made from the dialog: shown on the page that made it, copied from there, and gone from the page and its history once it's left", async () => {
     const { page, context } = await open("/account/tokens", { as: "user_ada" });
@@ -330,7 +364,7 @@ describe("who you are, in the bar of a public page", () => {
       await expect.poll(() => me.isVisible()).toBe(true);
       expect(await me.locator("[data-handle]").textContent()).toBe("@ada");
       expect(await page.locator(".top [data-signin]").isVisible()).toBe(false);
-      expect(await page.locator(".top .nav a[data-staff]").isVisible()).toBe(false);
+      expect(await page.locator('.top .nav a[href="/admin/plugins"]').isVisible()).toBe(false);
       await me.click();
       const signOut = page.locator("#me-menu form[data-signout]");
       await expect.poll(() => signOut.isVisible()).toBe(true);
@@ -340,7 +374,7 @@ describe("who you are, in the bar of a public page", () => {
     }
     const staff = await open("/plugins", { as: "user_grace" });
     try {
-      await expect.poll(() => staff.page.locator(".top .nav a[data-staff]").isVisible()).toBe(true);
+      await expect.poll(() => staff.page.locator('.top .nav a[href="/admin/plugins"]').isVisible()).toBe(true);
     } finally {
       await staff.context.close();
     }
