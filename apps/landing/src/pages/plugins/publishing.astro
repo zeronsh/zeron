@@ -8,8 +8,11 @@
 // (lib/store/admin.ts). The same for everyone, kept by shared caches as the
 // store's other public pages are. (Rendered by the Worker, not built: a
 // built page would share the landing pages' styles, which stay as they are.)
-import Glyph from "../../components/ui/Glyph.astro";
-import App from "../../layouts/App.astro";
+import Icon from "../../components/look/Icon.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/account.css";
+import "../../styles/look/plugin.css";
+import { lsb } from "../../lib/store/bearing.ts";
 import { DECLINE_REASONS } from "../../lib/store/admin.ts";
 import { publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
@@ -26,8 +29,9 @@ const PARTS = [
 ] as const;
 ---
 
-<App title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and how Zeron verifies it." canonical="/plugins/publishing" current="guide" measure="prose">
-  <h1 slot="title" class="t-title">Publishing guide</h1>
+<Store title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and how Zeron verifies it." canonical="/plugins/publishing" current="publish">
+  <div class="wrap acct guide-page">
+  <h1 class={lsb("Publishing guide")}>Publishing guide</h1>
 
   <article class="guide prose">
     <p class="guide-lead">Anyone can share a Zeron plugin as a file or a link. The store is for the ones you want people to find: a version that passes the store's automatic checks is listed and installable the moment you send it, and Zeron verifies it once a reviewer has read it. Zeron says which versions are verified wherever it offers one.</p>
@@ -133,6 +137,7 @@ zeron plugin token revoke <id>`}</code></pre>
     token: \${{ secrets.ZERON_DEPLOY_TOKEN }}`}</code></pre>
     <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your token. Without a token (a pull request from a fork gets no secrets) it only checks.</p>
 
-    <p class="guide-next"><a class="btn secondary sm" href="/account"><Glyph name="folder-with-files" size={14} />Your plugins</a></p>
+    <p class="guide-next"><a class="btn sec" href="/account">Your plugins<Icon name="chev" /></a></p>
   </article>
-</App>
+  </div>
+</Store>

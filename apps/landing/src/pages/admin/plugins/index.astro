@@ -25,6 +25,7 @@ import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
 import { permission } from "../../../lib/store/permissions.ts";
 import { RISKY_ASKS } from "../../../lib/store/review.ts";
 import { adminSession } from "../../../lib/store/session.ts";
+import { queueHref, staffTabs } from "../../../lib/store/staff.ts";
 import type { QueueItem, QueueState } from "../../../lib/store/types.ts";
 
 export const prerender = false;
@@ -54,13 +55,8 @@ if (!result.ok && result.error === "bad_cursor") return Astro.redirect(waiting ?
 const items = result.ok ? result.data.items : [];
 const pager = result.ok ? pagerOf("/admin/plugins", keep, place, result.data, items.length) : null;
 const waitingTotal = waiting ? (result.ok ? result.data.total : null) : waitingList?.ok ? waitingList.data.total : null;
-const listHref = (s: QueueState) => (s === "undecided" ? "/admin/plugins" : `/admin/plugins?state=${s}`);
-const tabs = [
-  ...(["undecided", "verified", "declined", "taken_down"] as const).map((s) => ({ label: LISTS[s].label, href: listHref(s), n: s === "undecided" ? waitingTotal : null, current: s === status })),
-  { label: "Reports", href: "/admin/reports", n: openReports.ok ? openReports.data.total : null },
-  { label: "Reserved ids", href: "/admin/reservations" },
-  { label: "Log", href: "/admin/audit" },
-];
+const listHref = queueHref;
+const tabs = staffTabs(status, { waiting: waitingTotal, reports: openReports.ok ? openReports.data.total : null });
 const now = Date.now();
 
 /** An ask by its name alone, in the app's words (permissions.ts): what a row can say without the version's manifest. */

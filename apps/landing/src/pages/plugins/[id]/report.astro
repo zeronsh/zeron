@@ -3,10 +3,12 @@
 // report has someone behind it; the plugin's page itself stays the same
 // for everyone (and cached), so the thanks are said here.
 import { reportReasonWords, store } from "../../../lib/store/words.ts";
-import PluginTile from "../../../components/store/PluginTile.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import Toast from "../../../components/kit/Toast.astro";
-import App from "../../../layouts/App.astro";
+import Flash from "../../../components/look/Flash.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Tile from "../../../components/look/Tile.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import { lsb } from "../../../lib/store/bearing.ts";
 import { unbidi } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
@@ -56,52 +58,51 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
 };
 ---
 
-<App title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current={null} session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Report</span>
-  </nav>
-  {
-    sent ? (
-      <div class="dialog confirm-card report-card" role="status">
-        <div class="head">
-          <span class="tile s40 done-tile"><Glyph name="check-circle" size={20} /></span>
-          <h1 class="t-heading">Thanks for telling us</h1>
+<Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current="browse" session={session}>
+  <div class="wrap acct">
+    <nav class="crumbs" aria-label="Where this is">
+      <a href="/plugins/all">All plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
+    </nav>
+    <Flash flash={sent ? null : flash} />
+    {
+      sent ? (
+        <section class="card askcard report" role="status">
+          <h1 class={lsb("Thanks for telling us")}>Thanks for telling us</h1>
           <p>Your report reached the people who review plugins. If it needs to go, it goes from the store and from people's devices.</p>
-        </div>
-        <div class="answers"><a class="btn secondary" href={pluginUrl(id)}>Back to {unbidi(plugin?.name ?? "the plugin")}</a></div>
-      </div>
-    ) : (
-      <form method="post" action={here} class="dialog confirm-card report-card">
-        <input type="hidden" name="csrf" value={session.csrf} />
-        <div class="head report-who">
-          {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
-          <div>
-            <h1 class="t-heading">{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
-            {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
+          <div class="answers"><a class="btn sec" href={pluginUrl(id)}>Back to {unbidi(plugin?.name ?? "the plugin")}</a></div>
+        </section>
+      ) : (
+        <form method="post" action={here} class="card askcard report">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="report-who">
+            {plugin && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="s" />}
+            <div>
+              <h1 class={lsb(store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) }))}>{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
+              {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
+            </div>
           </div>
-        </div>
-        <div class="body">
-          <fieldset class="choices">
-            <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
-            {REPORT_REASONS.map((r) => (
-              <label class="choice">
-                <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
-                <span class="choice-words"><span class="choice-title">{reportReasonWords(r)}</span><span class="choice-about">{ABOUT[r]}</span></span>
-              </label>
-            ))}
-          </fieldset>
-          <div>
-            <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
-            <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
-            <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
+          <div class="body">
+            <fieldset class="choices">
+              <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
+              {REPORT_REASONS.map((r) => (
+                <label class="opt">
+                  <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
+                  <span><b>{reportReasonWords(r)}</b><small>{ABOUT[r]}</small></span>
+                </label>
+              ))}
+            </fieldset>
+            <div>
+              <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
+              <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
+              <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
+            </div>
           </div>
-        </div>
-        <div class="answers">
-          <a class="btn secondary" href={pluginUrl(id)}>Cancel</a>
-          <button class="btn danger" type="submit">{store("plugins.store.report.send")}</button>
-        </div>
-      </form>
-    )
-  }
-  <Toast toast={sent ? null : flash} />
-</App>
+          <div class="answers">
+            <a class="btn sec" href={pluginUrl(id)}>Cancel</a>
+            <button class="btn danger" type="submit">{store("plugins.store.report.send")}</button>
+          </div>
+        </form>
+      )
+    }
+  </div>
+</Store>

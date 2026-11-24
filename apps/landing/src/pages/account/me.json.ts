@@ -1,4 +1,4 @@
-// Who is signed in, for the list's foot on a public page (scripts/app.ts):
+// Who is signed in, for the bar on a public page (scripts/store.ts):
 // a public page is the same for everyone, so it asks after it has loaded.
 // Always 200 (signed out is an answer, not an error), never kept by anyone.
 // With the session's token, so the foot's Sign out can post (same-origin

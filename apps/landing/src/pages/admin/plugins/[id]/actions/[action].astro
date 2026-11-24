@@ -2,10 +2,12 @@
 // Suspend, restore, feature or move a plugin to another account. A post
 // does it; a visit is the same question as a page, with what is being
 // decided above it.
-import Confirm from "../../../../../components/kit/Confirm.astro";
-import Deciding from "../../../../../components/kit/Deciding.astro";
-import Glyph from "../../../../../components/ui/Glyph.astro";
-import App from "../../../../../layouts/App.astro";
+import AskCard from "../../../../../components/look/AskCard.astro";
+import Deciding from "../../../../../components/look/Deciding.astro";
+import Icon from "../../../../../components/look/Icon.astro";
+import Store from "../../../../../layouts/Store.astro";
+import "../../../../../styles/look/account.css";
+import "../../../../../styles/look/staff.css";
 import { isPluginAction, PLUGIN_FLASH, pluginAsk, pluginRequest } from "../../../../../lib/store/admin.ts";
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
@@ -44,11 +46,12 @@ const ask = pluginAsk(action, name);
 const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
 ---
 
-<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="queue" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} /><a href={back}>{unbidi(name)}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{ask.confirm}</span>
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
+  <div class="wrap acct">
+  <nav class="crumbs" aria-label="Where this is">
+    <a href="/admin/plugins">Review</a><Icon name="chev" /><a href={back}>{unbidi(name)}</a><Icon name="chev" /><span aria-current="page">{ask.confirm}</span>
   </nav>
-  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} size={action === "suspend" || action === "transfer" ? "md" : "sm"}>
+  <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back}>
     {
       (a || wasCut(Astro.url)) && (
         <div class="body">
@@ -63,7 +66,7 @@ const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
               fromElsewhere={fromElsewhere(Astro.request)}
             />
           )}
-          {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
+          {wasCut(Astro.url) && <p class="flash info cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
         </div>
       )
     }
@@ -83,10 +86,11 @@ const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
         <div class="body">
           <div>
             <label class="field-label" for="transfer-to">New owner's username</label>
-            <div class="field"><input id="transfer-to" name="to_username" required maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
+            <div class="field"><input class="input" id="transfer-to" name="to_username" required maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
           </div>
         </div>
       )
     }
-  </Confirm>
-</App>
+  </AskCard>
+  </div>
+</Store>

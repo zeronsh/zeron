@@ -107,6 +107,8 @@
 .prose .task-list-item { display: flex; gap: 10px; align-items: baseline; }
 .prose .task-list-item input { flex: none; width: 15px; height: 15px; margin: 0; transform: translateY(2px); accent-color: var(--verified); }
 .prose code { font: 500 0.85em/1 var(--mono); padding: 2px 4px; border-radius: 5px; background: var(--sunken); color: var(--text); }
+/* (A chip that starts a list's line hangs by its padding, its word on the column.) */
+.prose li > code:first-child, .prose li > strong:first-child > code:first-child { margin-left: -4px; }
 .prose pre { margin-inline: -18px; padding: 16px 18px; border-radius: 14px; background: var(--sunken); font: 450 13.5px/22px var(--mono); overflow-x: auto; overflow-wrap: normal; white-space: pre; }
 .prose pre code { padding: 0; background: none; font: inherit; color: var(--text); }
 .prose pre:focus-visible { outline-offset: 2px; }
