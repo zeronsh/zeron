@@ -56,6 +56,33 @@ describe("every run of text that begins a line puts its ink on its column", () =
     }, 120_000);
 });
 
+describe("every icon is drawn at an icon's size", () => {
+  // (An icon whose size went with its rule draws as the browser's default, a black square over the page.)
+  for (const p of ALIGN_PAGES)
+    test(p.name, async () => {
+      for (const [what, params] of p.fake ?? []) await site.fake(what, params);
+      try {
+        for (const width of [1440, 390]) {
+          const page = await open(p, width, "dark");
+          try {
+            const big = await page.evaluate(() =>
+              [...document.querySelectorAll('svg:has(> use[href^="#i-"])')]
+                .filter((el) => (el as unknown as HTMLElement).checkVisibility?.() ?? true)
+                .map((el) => [el.getBoundingClientRect(), el.parentElement] as const)
+                .filter(([r]) => r.width > 32 || r.height > 32)
+                .map(([r, parent]) => `${parent?.tagName.toLowerCase()}.${parent?.className}: ${Math.round(r.width)}x${Math.round(r.height)}`),
+            );
+            expect(big, `${p.name} at ${width}`).toEqual([]);
+          } finally {
+            await page.context().close();
+          }
+        }
+      } finally {
+        for (const [what, params] of RESET) if (p.fake?.some(([w]) => w === what)) await site.fake(what, params);
+      }
+    }, 60_000);
+});
+
 describe("the columns the rule names", () => {
   test("a plugin's Get ends on the page's right edge, the rail's; its button its own width, level with the tile's middle", async () => {
     for (const path of ["/plugins/focus-timer", "/plugins/first-light", "/plugins/worst-case-listing-at-every-limit-xyz12", "/plugins/focus-timer/versions/1.2.0"])
