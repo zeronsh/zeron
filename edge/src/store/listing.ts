@@ -13,7 +13,7 @@
 import { cleanImage } from "../image-check";
 import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./json";
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
-import { MAX_BYTES, MAX_FILES, TEMPLATE_MANIFEST_FILE, insideTemplate, protectedPath, validTemplateId } from "./package";
+import { MAX_BYTES, MAX_FILES, TEMPLATE_MANIFEST_FILE, TEMPLATE_SCREENSHOTS, insideTemplate, protectedPath, strayScreenshot, validTemplateId } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
 import { asWritten, firstUnseen, keywordClaim, markClaim, problemWord } from "./mark";
 import type { Kind } from "./kind";
@@ -52,12 +52,18 @@ export const MAX_NOTES_BYTES = LIMITS.max_notes_bytes;
 /** A template's preview, its card's cover: at most this many bytes. */
 export const MAX_PREVIEW_BYTES = LIMITS.max_preview_bytes;
 export const PREVIEW_FILE = "preview.png";
-/** Where a template's screenshots are, in it. */
-const TEMPLATE_SCREENSHOTS = "screenshots";
 /** What a device writes beside a template's files (no file may fold to it). */
 const TEMPLATE_IMPORTED_FILE = ".imported.json";
 /** Members a template's manifest may not have in the store. */
 const TEMPLATE_REFUSED_MEMBERS: readonly string[] = STORE_DATA.template_refused_members;
+/** Every member it may have, or is refused for by name: any other but its
+ * signature is refused too. */
+const TEMPLATE_KNOWN_MEMBERS: ReadonlySet<string> = new Set([
+  "signature",
+  ...STORE_DATA.template_manifest_fields.required,
+  ...STORE_DATA.template_manifest_fields.allowed,
+  ...TEMPLATE_REFUSED_MEMBERS
+]);
 /** A README holding this sentence is the one Zeron wrote, unchanged. */
 const TEMPLATE_README_STUB: string = STORE_DATA.template_readme_stub;
 
@@ -83,7 +89,8 @@ export interface Problem {
   readonly path: string | null;
   readonly words: string;
   /** A bad name, description or keywords: why, and (where there is one)
-   * the word at fault, cleaned (`problemWord`). */
+   * the word at fault, cleaned (`problemWord`); the member a template's
+   * manifest may not have. */
   readonly cause?: ListingCause;
   readonly word?: string;
 }
@@ -520,6 +527,17 @@ export const checkListing = (
 /** A PNG's first bytes. */
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
+/** Whether a PNG has an animation control chunk (`acTL`), read chunk by chunk
+ * while a whole chunk header remains (listing.rs `animated_png`): a cover is
+ * a still. */
+const isAnimatedPng = (bytes: Uint8Array): boolean => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = PNG_SIGNATURE.length; at + 8 <= bytes.length; at += 12 + view.getUint32(at)) {
+    if (view.getUint32(at + 4) === 0x6163544c) return true;
+  }
+  return false;
+};
+
 /** listing.rs `check_template`: what stands in the way of publishing a
  * template with `manifest` (its own, as the package carries it, which the
  * signature isn't part of here) and `files` (every file the package
@@ -535,6 +553,10 @@ export const checkTemplate = (
   const warnings: Problem[] = [];
   for (const member of TEMPLATE_REFUSED_MEMBERS) {
     if (raw.has(member)) problems.push(problem("bad_listing", member, `A template has no "${member}": it asks for nothing, and runs as Zeron itself`));
+  }
+  for (const member of [...raw.keys()].filter((key) => !TEMPLATE_KNOWN_MEMBERS.has(key)).sort(byCodePoint)) {
+    const word = problemWord(member);
+    problems.push({ ...problem("bad_listing", "manifest", `"${word ?? ""}" isn't something a template's manifest says in the store: leave it out`), ...(word === undefined ? {} : { word }) });
   }
   const text = (key: string): string | undefined => {
     const value = raw.get(key);
@@ -556,8 +578,8 @@ export const checkTemplate = (
   checkDescription(text("description") ?? "", "template", problems);
   const preview = files.get(PREVIEW_FILE);
   if (!preview) problems.push(problem("missing_listing", "preview", "It needs a preview.png: its card's cover in the store"));
-  else if (preview.length > MAX_PREVIEW_BYTES || !PNG_SIGNATURE.every((b, i) => preview[i] === b)) {
-    problems.push(problem("bad_listing", "preview", `Its preview.png must be a PNG picture, at most ${MAX_PREVIEW_BYTES / (1024 * 1024)} MB`, PREVIEW_FILE));
+  else if (preview.length > MAX_PREVIEW_BYTES || !PNG_SIGNATURE.every((b, i) => preview[i] === b) || isAnimatedPng(preview)) {
+    problems.push(problem("bad_listing", "preview", `Its preview.png must be a still PNG picture, at most ${MAX_PREVIEW_BYTES / (1024 * 1024)} MB`, PREVIEW_FILE));
   }
   checkKeywords(raw, "template", problems);
   checkLinks(raw, problems);
@@ -569,6 +591,8 @@ export const checkTemplate = (
     if (!insideTemplate(rel)) problems.push(problem("bad_package", "files", `It has a file Zeron won't write: "${rel}"`, rel));
     else if (protectedPath(rel)) {
       problems.push(problem("protected_file", "files", `"${rel}" is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out`, rel));
+    } else if (strayScreenshot(rel)) {
+      problems.push(problem("bad_listing", "files", `"${rel}" isn't a PNG or JPEG: ${TEMPLATE_SCREENSHOTS}/ holds its pictures alone`, rel));
     }
   }
   checkClashes(files, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE], problems);
@@ -577,26 +601,13 @@ export const checkTemplate = (
   return { problems, warnings };
 };
 
-/** Whether a PNG has an animation control chunk (`acTL`): an APNG. Read
- * chunk by chunk, never past the bytes it has. */
-const isAnimatedPng = (bytes: Uint8Array): boolean => {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  for (let at = 8; at + 12 <= bytes.length; ) {
-    if (bytes[at + 4] === 0x61 && bytes[at + 5] === 0x63 && bytes[at + 6] === 0x54 && bytes[at + 7] === 0x4c) return true;
-    const end = at + 12 + view.getUint32(at);
-    if (end <= at) return false;
-    at = end;
-  }
-  return false;
-};
-
 /** A template's preview, past the device's check: a picture the store will
- * serve (image-check's), so its card's cover is never a 404, and a still one
- * (an APNG is refused, not flattened). Undefined when it is. */
+ * serve (image-check's), so its card's cover is never a 404. Undefined when
+ * it is. */
 export const previewProblem = (files: ReadonlyMap<string, Uint8Array>): Problem | undefined => {
   const preview = files.get(PREVIEW_FILE);
-  if (preview && pictureType(preview) === "image/png" && !isAnimatedPng(preview)) return undefined;
-  return problem("bad_listing", "preview", "Its preview.png isn't a still PNG picture the store can show", PREVIEW_FILE);
+  if (preview && pictureType(preview) === "image/png") return undefined;
+  return problem("bad_listing", "preview", "Its preview.png isn't a PNG picture the store can show", PREVIEW_FILE);
 };
 
 /** What the store keeps of a listing that passed `checkListing`. */

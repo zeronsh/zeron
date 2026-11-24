@@ -110,7 +110,8 @@ export interface VerifiedTemplate extends VerifiedContents {
   readonly id: string;
   readonly version: string;
   /** Files it carries that a device leaves out when it installs: what no
-   * template may replace, and a manifest of its own. */
+   * template may replace, a manifest of its own, and anything but pictures
+   * under `screenshots/`. */
   readonly ignored: readonly string[];
 }
 
@@ -138,6 +139,21 @@ const PROTECTED: readonly string[] = STORE_DATA.template_protected.map(fold);
 export const protectedPath = (rel: string): boolean => {
   const path = fold(rel);
   return PROTECTED.some((p) => path === p || path.startsWith(`${p}/`));
+};
+
+/** A template's own pictures' folder, and the types of them. */
+export const TEMPLATE_SCREENSHOTS = "screenshots";
+const SCREENSHOT_TYPES: readonly string[] = LIMITS.screenshot_types;
+/** Whether `rel` is under `screenshots/` (as a disk folding names has it) and
+ * isn't a PNG or JPEG there by its name: refused in the store, left out by a
+ * device, never composed (listing.rs `template_stray_screenshot`). */
+export const strayScreenshot = (rel: string): boolean => {
+  if (rel.startsWith(`${TEMPLATE_SCREENSHOTS}/`)) {
+    const dot = rel.lastIndexOf(".");
+    if (dot >= 0 && SCREENSHOT_TYPES.includes(rel.slice(dot + 1).replace(/[A-Z]/g, (c) => c.toLowerCase()))) return false;
+  }
+  const path = fold(rel);
+  return path === TEMPLATE_SCREENSHOTS || path.startsWith(`${TEMPLATE_SCREENSHOTS}/`);
 };
 
 const encoder = new TextEncoder();
@@ -493,7 +509,7 @@ export const verifyTemplate = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYT
   };
   const id = text("id");
   if (!validTemplateId(id) || id === ZERON_ID) refuse("bad_id", JSON.stringify(id.slice(0, 80)));
-  const ignored = [...contents.files.keys()].filter((rel) => protectedPath(rel) || rel === TEMPLATE_MANIFEST_FILE);
+  const ignored = [...contents.files.keys()].filter((rel) => protectedPath(rel) || rel === TEMPLATE_MANIFEST_FILE || strayScreenshot(rel));
   const left = new Set(ignored);
   const kept = [...contents.files.keys()].filter((rel) => !left.has(rel));
   const collision = firstCollision(kept, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE]);

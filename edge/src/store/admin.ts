@@ -426,9 +426,9 @@ const decline = async (db: D1Database, adminId: string, id: string, v: VersionRo
  * write (after its audit row, so only when the change landed). */
 const takedownEvent = (db: D1Database, kind: "take_down" | "restore", id: string, version: string, reason: string, at: number): D1PreparedStatement =>
   db
-    // (The item's kind and the version's content hash with it: a released
-    // id's row is gone by the time an old event is read, and a device refuses
-    // a file or link import of the same package.)
+    // (The item's kind and the version's content hash with it: a device
+    // reads which of its lists it's about, and refuses a file or link import
+    // of the same package.)
     .prepare(
       `INSERT INTO takedown_events (kind, item_kind, plugin_id, version, hash, reason, at)
        SELECT ?1, (SELECT kind FROM plugins WHERE id = ?2), ?2, ?3, (SELECT content_hash FROM versions WHERE plugin_id = ?2 AND version = ?3), ?4, ?5 WHERE changes() > 0`

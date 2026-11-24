@@ -8,6 +8,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { crc32 } from "../../src/image-check";
 import { handlePublish } from "../../src/store/publish";
+import { UNUSED_ID_DAYS, releaseRows, releaseUnusedIds } from "../../src/store/release";
 import { MAX_UPDATE_ITEMS } from "../../src/store/updates";
 import { PNG, adminCall, author, call, deployToken, listed, listedTemplate, makePackage, makeTemplate, newSigner, publish, publishTemplate, publishedTemplate, randomLetters, tokenPublish, tokenPublishTemplate, uniqueId } from "./store-helpers";
 
@@ -241,6 +242,14 @@ describe("templates: what's refused", () => {
     for (const member of ["builtin_theme", "builtin_template", "permissions", "icon", "categories", "engines"]) {
       expect(await problems({ manifest: { [member]: member === "engines" ? { zeron: ">=1.0.0" } : true } }), member).toEqual([400, "bad_listing", member, null]);
     }
+    // Nothing but pictures under screenshots/, however its folder is spelt.
+    for (const stray of ["screenshots/x.luau", "Screenshots/x.luau"]) {
+      expect(await problems({ files: { [stray]: "return {}" } }), stray).toEqual([400, "bad_listing", "files", stray]);
+    }
+    // An allow list: no other member.
+    for (const member of ["author", "x-future"]) {
+      expect(await problems({ manifest: { [member]: "Zeron" } }), member).toEqual([400, "bad_listing", "manifest", null]);
+    }
     expect(await problems({ files: { "preview.png": undefined } })).toEqual([400, "missing_listing", "preview", null]);
     // A preview that isn't a picture the store serves: past the device's
     // check (a PNG's first bytes), refused on image-check's.
@@ -302,8 +311,11 @@ describe("templates: deploy tokens", () => {
     expect(await error(await tokenPublishTemplate(token, fresh, await pkg(fresh, "1.0.0")))).toEqual([403, "token_not_allowed"]);
     // Under the other prefix: its owner's, so told which kind it is.
     expect(await error(await tokenPublishTemplate(token, plug, await pkg(plug, "2.0.0")))).toEqual([409, "wrong_kind"]);
+    expect(await error(await tokenPublish(token, temp, await makePackage({ id: temp, version: "2.0.0", signer: null })))).toEqual([409, "wrong_kind"]);
     // Not in the token's scope: that answers first, whatever its prefix.
     const { token: narrow } = await deployToken(a.userId, { plugins: [plug] });
+    const { token: narrowest } = await deployToken(a.userId, { plugins: [temp] });
+    expect(await error(await tokenPublishTemplate(narrowest, plug, await pkg(plug, "2.0.0")))).toEqual([403, "token_not_allowed"]);
     expect(await error(await tokenPublish(narrow, temp, await makePackage({ id: temp, version: "2.0.0", signer: null })))).toEqual([403, "token_not_allowed"]);
     // It reads nothing.
     for (const path of ["/templates", `/templates/${temp}`, "/me/templates", "/me/plugins"]) {
@@ -387,6 +399,12 @@ describe("templates: updates", () => {
     expect((await adminCall("POST", `/store/v1/admin/templates/${temp}/versions/1.2.0/take-down`, { reason: "It sends your files away." })).status).toBe(200);
     expect((await ask({ zeron: "0.5.0", plugins: [], templates: [bad] })).blocked).toEqual([{ id: temp, version: "1.2.0", reason: "It sends your files away.", item_kind: "template" }]);
     expect((await ask({ zeron: "0.5.0", plugins: [bad] })).blocked).toEqual([]);
+    // A taken-down version's record stays, so its id can't be released, not
+    // even by an admin, nor claimed as the other kind: the block stands.
+    expect(await releaseRows(env.STORE_DB, temp, Infinity, "user_admin", false)).toBeUndefined();
+    await releaseUnusedIds(env as never, Date.now() + 10 * UNUSED_ID_DAYS * 86_400_000);
+    expect(await error(await publish(a.userId, temp, await makePackage({ id: temp, version: "2.0.0", signer: a.signer })))).toEqual([409, "wrong_kind"]);
+    expect((await ask({ zeron: "0.5.0", plugins: [], templates: [bad] })).blocked).toEqual([expect.objectContaining({ id: temp, item_kind: "template" })]);
     // One limit over both lists; a list that isn't one.
     const many = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}x`, version: "1.0.0", hash: "0".repeat(64) }));
     expect((await call(undefined, "POST", "/store/v1/updates", { zeron: "0.5.0", plugins: many(MAX_UPDATE_ITEMS, "p"), templates: [] })).status).toBe(200);
