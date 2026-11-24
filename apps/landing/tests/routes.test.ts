@@ -1254,6 +1254,36 @@ describe("forms", () => {
     expect(author.body).toContain("Say what &lt;b&gt;it&lt;/b&gt; does.");
   });
 
+  test("the line under Install says one thing for one version: the plugin's page and the version's own draw it alike", async () => {
+    const line = (body: string) => body.slice(body.indexOf('<p class="ver">'), body.indexOf("</p>", body.indexOf('<p class="ver">')) + 4);
+    const plugin = line((await html("/plugins/focus-timer")).body);
+    expect(plugin).toContain('<b class="mono">1.2.0</b>');
+    expect(line((await html("/plugins/focus-timer/versions/1.2.0")).body)).toBe(plugin);
+    // (When it was published: the verified date is the rail's.)
+    expect(plugin).toMatch(/<time datetime="[^"]+"><span class="sr-only">Published <\/span>[^<]+<\/time><\/p>$/);
+  });
+
+  test("a version's stepper: the versions either side of it, the older at the left, the newer at the right; one at an end, one side", async () => {
+    const step = async (version: string) => {
+      const body = (await html(`/plugins/focus-timer/versions/${version}`)).body;
+      const nav = body.slice(body.indexOf('<nav class="stepper"'), body.indexOf("</nav>", body.indexOf('<nav class="stepper"')));
+      return {
+        older: /<a class="step older" href="\/plugins\/focus-timer\/versions\/([^"]+)" rel="prev">/.exec(nav)?.[1] ?? null,
+        newer: /<a class="step newer" href="\/plugins\/focus-timer\/versions\/([^"]+)" rel="next">/.exec(nav)?.[1] ?? null,
+        all: nav.includes('<a class="all" href="/plugins/focus-timer/versions">All versions</a>'),
+      };
+    };
+    expect(await step("1.2.0")).toEqual({ older: "1.1.0", newer: "1.3.0-beta.1", all: true });
+    expect(await step("1.1.0")).toEqual({ older: "1.0.0", newer: "1.2.0", all: true });
+    // (The first and the newest: one side only.)
+    expect(await step("1.0.0")).toEqual({ older: null, newer: "1.1.0", all: true });
+    expect(await step("1.3.0-beta.1")).toEqual({ older: "1.2.0", newer: null, all: true });
+    // The old lone link back is gone; a version without notes says so.
+    const body = (await html("/plugins/focus-timer/versions/1.2.0")).body;
+    expect(body).not.toContain("Every version of");
+    expect(body).toMatch(/<header class="head vhead">[\s\S]*?<b class="vnum mono">1\.2\.0<\/b> <span class="state ok">/);
+  });
+
   test("a report needs a known reason, reaches the reviewers, and thanks you", async () => {
     const kai = await site.signIn("user_kai");
     const page = await html("/plugins/theme-sync/report", kai);
@@ -1261,7 +1291,13 @@ describe("forms", () => {
     const csrf = tokenOf(page.body);
     expect((await post("/plugins/theme-sync/report", kai, { csrf, reason: "bogus", text: "x" })).headers.get("set-cookie")).toMatch(/bad_input/);
     const sent = await post("/plugins/theme-sync/report", kai, { csrf, reason: "broken", text: "It <script>breaks</script> the sidebar." });
-    expect((await html("/plugins/theme-sync/report", `${kai}; ${flashOf(sent)}`)).body).toContain("Thanks for telling us");
+    const thanks = (await html("/plugins/theme-sync/report", `${kai}; ${flashOf(sent)}`)).body;
+    expect(thanks).toContain("<h1>Thanks — the reviewers will read it.</h1>");
+    expect(thanks).toMatch(/<a class="back-link" href="\/plugins\/theme-sync"><svg[^>]*>[\s\S]*?<\/svg>Back to /);
+    // (The form: each reason a card to choose, its radio in it; Send report the store's primary button, not the danger's.)
+    expect(page.body.match(/<label class="rcard"><span class="rc-words"><b>[^<]+<\/b><small>[^<]+<\/small><\/span><input type="radio" name="reason" value="[a-z]+" required>/g)).toHaveLength(5);
+    expect(page.body).toContain('<button class="btn pri" type="submit">Send report</button>');
+    expect(page.body).not.toContain("btn danger");
     const reports = await html("/admin/reports", await site.signIn("user_grace"));
     expect(reports.body).toContain("It &lt;script&gt;breaks&lt;/script&gt; the sidebar.");
   });

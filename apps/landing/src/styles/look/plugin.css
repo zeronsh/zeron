@@ -20,13 +20,13 @@
 .head .who { display: inline-flex; align-items: center; gap: var(--s8); border-radius: 4px; transition: color 0.12s var(--ease); }
 .head a.who:hover { color: var(--text); }
 .head .av { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2); font-size: 9px; line-height: 1; font-weight: 600; }
-/* (One version's head: its number beside its name, as staff read it.) */
-/* (Its words centred on its tile, as the button is: the row as tall as the tile.) */
-.head.one { --tile: 56px; }
-.head.one .txt { display: flex; flex-direction: column; justify-content: center; min-height: var(--tile); }
-.head.one h1 { font-size: 32px; line-height: 38px; letter-spacing: -0.03em; flex-wrap: wrap; gap: 0 var(--s12); }
-.head.one .vnum { font: 550 26px/38px var(--mono); letter-spacing: -0.03em; color: var(--text-2); }
-.head.one .by { margin-top: var(--s4); }
+/* (A version's head, the plugin page's and Review's: the name, then the version a mono pill and where it stands, in
+   the line's flow right after it, never at the head's far end.) */
+.head.vhead h1 { display: block; }
+.head.vhead h1 .name { overflow-wrap: anywhere; }
+.head.vhead h1 :is(.vnum, .state) { display: inline-flex; vertical-align: 0.3em; margin-left: var(--s8); }
+.head.vhead h1 .vnum { align-items: center; height: 24px; padding: 0 var(--s8); border-radius: 12px; font: 550 13px/1 var(--mono); letter-spacing: -0.01em; color: var(--text-2); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); }
+.head.vhead h1 .state { letter-spacing: 0.005em; }
 
 /* ---- getting it ---- */
 /* (At the head's right: the button its own width, level with the tile's middle; the lines under it end on its
@@ -111,10 +111,21 @@
 .tabs a[aria-current]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--text); }
 .tabs a:focus-visible { outline-offset: -2px; }
 .sec-title { font-size: 19px; line-height: 26px; }
-.back { margin-top: var(--s48); }
-.back .more { max-width: 100%; align-items: flex-start; }
-.back .more svg { margin-top: var(--s4); }
-.back .more .name { min-width: 0; }
+
+/* ---- One version: its notes, then the versions either side of it ---- */
+.vbody { min-width: 0; max-width: 720px; }
+/* (Older at the left, newer at the right, each a small link of two lines; All versions between them. Each hangs
+   by its padding, its words on the column.) */
+.stepper { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--s16); margin: var(--sections) calc(-1 * var(--s12)) 0; padding-top: var(--s24); box-shadow: inset 0 1px 0 var(--line); }
+.stepper .step { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; padding: var(--s8) var(--s12); border-radius: 10px; transition: background-color 0.12s var(--ease); }
+.stepper a.step:hover { background: var(--surface); }
+.stepper .newer { align-items: flex-end; text-align: right; }
+.stepper .dir { display: inline-flex; align-items: center; gap: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); }
+.stepper .dir svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.stepper .older .dir svg { rotate: 180deg; }
+.stepper .step b { max-width: 100%; font: 550 14px/20px var(--mono); letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; }
+.stepper .all { justify-self: center; padding: var(--s8) var(--s12); border-radius: 8px; font-size: 14px; line-height: 20px; font-weight: 500; color: var(--text-2); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.stepper .all:hover { color: var(--text); background: var(--surface); }
 
 /* ---- a README, or a version's notes, set to be read: every form the renderer draws ---- */
 .prose { padding-top: var(--s32); font-size: 16px; line-height: 27px; color: color-mix(in srgb, var(--text) 86%, var(--bg)); max-width: 720px; overflow-wrap: anywhere; }
@@ -183,6 +194,7 @@
 .facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s8) var(--s16); font-size: 14px; line-height: 20px; }
 .facts dt { color: var(--text-3); } .facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .facts .okline { display: inline-flex; align-items: center; gap: var(--s8); color: var(--verified); font-weight: 500; }
+.facts .waitline { color: var(--warn); font-weight: 500; }
 .tags { display: flex; flex-wrap: wrap; gap: var(--s8); margin-left: calc(-1 * var(--s8)); padding: 0; list-style: none; }
 .tags li { min-width: 0; max-width: 100%; }
 .tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -267,11 +279,6 @@
   .head .by { grid-column: 1 / -1; font-size: 13px; margin-top: var(--s8); }
   .head > .get { grid-column: 1 / -1; max-width: none; margin-top: var(--s24); }
   /* (One version's head: its tile beside its title; the byline, and where it stands, the width under them.) */
-  .head.one { grid-template-columns: 56px minmax(0, 1fr); align-items: start; }
-  .head.one .by { grid-column: 1 / -1; margin-top: var(--s12); }
-  .head.one > .state { grid-column: 1 / -1; justify-self: start; margin-top: var(--s12); margin-left: calc(-1 * var(--pad)); }
-  .head.one h1 { font-size: 26px; line-height: 32px; }
-  .head.one .vnum { font-size: 21px; line-height: 32px; }
   /* (The row as wide as the screen, a picture and the next one's edge in view; a finger scrolls it.) */
   .shots-row { grid-auto-columns: 84%; gap: var(--s12); margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
   .shots.one .shots-row { grid-auto-columns: 100%; }

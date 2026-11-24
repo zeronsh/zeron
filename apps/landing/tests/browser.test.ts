@@ -431,6 +431,50 @@ describe("Review: nothing a reviewer reads is cut or hidden past an edge", () =>
   }, 120_000);
 });
 
+describe("reporting a plugin", () => {
+  test("by keyboard alone: a reason chosen (the chosen card ringed), words typed, sent, thanked", async () => {
+    const { page, context } = await open("/plugins/theme-sync/report", { as: "user_kai" });
+    try {
+      // (Tab to the reasons: the first radio; an arrow chooses the next.)
+      for (let i = 0; i < 40 && !(await page.evaluate(() => (document.activeElement as HTMLInputElement | null)?.name === "reason")); i++) await page.keyboard.press("Tab");
+      await page.keyboard.press("ArrowDown");
+      const chosen = await page.evaluate(() => {
+        const input = document.activeElement as HTMLInputElement;
+        return { value: input.value, checked: input.checked, ring: getComputedStyle(input.closest(".rcard")!).boxShadow };
+      });
+      expect(chosen.checked).toBe(true);
+      expect(chosen.ring).toMatch(/1\.5px/);
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => document.activeElement?.id)).toBe("report-text");
+      await page.keyboard.type("Typed by keyboard alone.");
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Send report");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.locator("h1").textContent()).toBe("Thanks — the reviewers will read it.");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("with no script: a card's click chooses its reason, and the form sends", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, javaScriptEnabled: false });
+    try {
+      const page = await context.newPage();
+      await page.goto(new URL("/auth/web/callback?as=user_kai&return_to=/plugins", site.url).href);
+      await page.goto(new URL("/plugins/theme-sync/report", site.url).href, { waitUntil: "networkidle" });
+      await page.locator(".rcard", { hasText: "It doesn't work" }).click();
+      expect(await page.locator('input[name="reason"][value="broken"]').isChecked()).toBe(true);
+      await page.locator("#report-text").fill("Sent with no script.");
+      await page.getByRole("button", { name: "Send report" }).click();
+      await page.waitForLoadState("networkidle");
+      expect(await page.locator("h1").textContent()).toBe("Thanks — the reviewers will read it.");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 describe("a plugin's tile, in every hue", () => {
   test("its glyph reads on its fill: at least 3:1, dark and light", async () => {
     for (const scheme of ["dark", "light"] as const) {
