@@ -35,10 +35,10 @@ const AUDIT_RETAIN_MS = 400 * 24 * 60 * 60_000;
 export const grantMessage = (userId: string, deviceId: string, subject: string, ts: number): string =>
   `zeron-vault-grant\n${userId}\n${deviceId}\n${subject}\n${ts}`;
 
-/** A grant request as the device fence checks it: one provider, or a batch
- * whose `subject` is what was signed. */
+/** A grant request as the device fence checks it: one provider, a batch, or
+ * a connection subject (`conn:{id}` / `conns:{ids}`). */
 export interface SignedGrant {
-  readonly provider: VaultProviderId;
+  readonly provider?: VaultProviderId;
   readonly subject?: string;
   readonly deviceId: string;
   readonly ts: number;
@@ -61,7 +61,15 @@ export type AuditEvent =
   | "refresh_failed"
   | "github_connect"
   | "github_installation_token"
-  | "github_revoke";
+  | "github_revoke"
+  | "conn_put"
+  | "conn_update"
+  | "conn_delete"
+  | "conn_disconnect"
+  | "conn_grant"
+  | "conn_grant_denied"
+  | "conn_refresh"
+  | "conn_refresh_failed";
 
 export interface AuditEntry {
   readonly event: AuditEvent;
@@ -312,6 +320,8 @@ export class VaultDevices extends DurableObject<Env> {
     } catch {
       return refuse(fail("bad_signature", "signature is not base64url"));
     }
+    const subject = request.subject ?? request.provider;
+    if (!subject) return refuse(fail("bad_request", "missing grant subject"));
     let valid = false;
     try {
       const key = await this.verifyKey(device.public_key);
@@ -319,7 +329,7 @@ export class VaultDevices extends DurableObject<Env> {
         { name: "Ed25519" },
         key,
         signature,
-        utf8(grantMessage(userId, request.deviceId, request.subject ?? request.provider, request.ts))
+        utf8(grantMessage(userId, request.deviceId, subject, request.ts))
       );
     } catch {
       valid = false;

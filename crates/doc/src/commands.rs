@@ -361,6 +361,7 @@ mod tests {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

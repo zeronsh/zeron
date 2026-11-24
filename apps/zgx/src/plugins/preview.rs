@@ -120,6 +120,14 @@ pub const BLOCKED: &[&str] = &[
     // (What a Cloud chat reaches: the person's own choice.)
     "cloud.set_reach",
     "cloud.set_session_reach",
+    // Managed MCP servers and their OAuth/credential flows.
+    "mcp.upsert",
+    "mcp.set_enabled",
+    "mcp.delete",
+    "mcp.start_auth",
+    "mcp.cancel_auth",
+    "mcp.disconnect_auth",
+    "mcp.resolve_request",
 ];
 
 pub fn blocked(action: &str) -> bool {

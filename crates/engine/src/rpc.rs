@@ -944,6 +944,8 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Managed external MCP servers (absent in bare test assemblies).
+    mcp_servers: Option<std::sync::Arc<crate::mcp_servers::McpServers>>,
     engine_info: EngineInfo,
 }
 
@@ -1006,6 +1008,7 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            mcp_servers: None,
             engine_info,
         }
     }
@@ -1013,6 +1016,15 @@ impl EngineRpc {
     /// Attach the plugins service (the Plugin* methods).
     pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    /// Attach the managed external MCP servers service.
+    pub fn with_mcp_servers(
+        mut self,
+        mcp_servers: std::sync::Arc<crate::mcp_servers::McpServers>,
+    ) -> Self {
+        self.mcp_servers = Some(mcp_servers);
         self
     }
 
@@ -1258,10 +1270,82 @@ impl EngineRpc {
                 self.handle(method, local(&["chatId", "spaceId", "path"]))
                     .await,
             ),
+            // How the person runs each agent on Cloud: the account's, held by
+            // its registry for every Cloud machine (never one machine's, made
+            // for one chat), so answered here for Cloud and any of its
+            // machines. (A Cloud machine itself only reads them.)
+            methods::GET_NATIVE_SUBAGENTS
+            | methods::SET_NATIVE_SUBAGENTS
+            | methods::GET_CODE_MODE
+            | methods::SET_CODE_MODE
+            | methods::GET_ZERON_MCP_ONLY
+            | methods::SET_ZERON_MCP_ONLY
+                if !crate::runner::is_cloud_platform() =>
+            {
+                Some(self.cloud_agent_settings(method, local(&[])))
+            }
             _ if account => Some(Err(RpcError::Failed(
                 crate::cloud_client::ACCOUNT_DEVICE_HAS_NO_ENGINE.into(),
             ))),
             _ => None,
+        }
+    }
+
+    /// Settings → Providers' agent settings for Cloud, read and made on the
+    /// account's registry rows (`cloudAgents`): the same answers this
+    /// device's own give, over the agents Cloud runs.
+    fn cloud_agent_settings(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use crate::registry::{CLOUD_HARNESS_IDS, CodeModeSettings, NativeSubagentSettings, ZeronMcpOnlySettings};
+        use zeron_doc::CloudAgentChoice;
+        let ws = &self.workspace;
+        let can = |supports: fn(HarnessId) -> bool| -> Vec<HarnessId> {
+            CLOUD_HARNESS_IDS.iter().copied().filter(|id| supports(*id)).collect()
+        };
+        let chosen = |of: &[HarnessId], choice: CloudAgentChoice, on: bool| -> Vec<HarnessId> {
+            of.iter().copied().filter(|id| ws.cloud_agent_choices(*id).get(choice) == Some(on)).collect()
+        };
+        let choice = match method {
+            methods::GET_NATIVE_SUBAGENTS | methods::SET_NATIVE_SUBAGENTS => CloudAgentChoice::NativeSubagents,
+            methods::GET_CODE_MODE | methods::SET_CODE_MODE => CloudAgentChoice::CodeMode,
+            _ => CloudAgentChoice::ZeronMcpOnly,
+        };
+        let supports: fn(HarnessId) -> bool = match choice {
+            CloudAgentChoice::NativeSubagents => zeron_harness::switches_native_subagents,
+            CloudAgentChoice::CodeMode => zeron_harness::supports_code_mode,
+            CloudAgentChoice::ZeronMcpOnly => zeron_harness::supports_zeron_mcp_only,
+        };
+        let agents = can(supports);
+        if matches!(method, methods::SET_NATIVE_SUBAGENTS | methods::SET_CODE_MODE | methods::SET_ZERON_MCP_ONLY) {
+            // This device's own app or CLI alone: the room takes these rows
+            // from no Cloud machine, so one mustn't have them written by
+            // asking a computer it can reach.
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: how agents run on Cloud is changed in Zeron's own window"
+                )));
+            }
+            let p: SetHarnessEnabledParams = parse_params(params)?;
+            if !agents.contains(&p.harness) {
+                return Err(RpcError::Failed(format!(
+                    "{} can't change that on Cloud",
+                    zeron_proto::providers::provider_name(p.harness)
+                )));
+            }
+            ws.set_cloud_agent_choice(p.harness, choice, p.enabled);
+        }
+        match choice {
+            CloudAgentChoice::NativeSubagents => RpcReply::value(&NativeSubagentSettings {
+                off: chosen(&agents, choice, false),
+                switchable: agents,
+            }),
+            CloudAgentChoice::CodeMode => RpcReply::value(&CodeModeSettings {
+                enabled: chosen(&agents, choice, true),
+                supported: agents,
+            }),
+            CloudAgentChoice::ZeronMcpOnly => RpcReply::value(&ZeronMcpOnlySettings {
+                on: chosen(&agents, choice, true),
+                supported: agents,
+            }),
         }
     }
 
@@ -2727,6 +2811,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_NATIVE_SUBAGENTS
             | methods::GET_CODE_MODE
             | methods::SET_CODE_MODE
+            | methods::GET_ZERON_MCP_ONLY
+            | methods::SET_ZERON_MCP_ONLY
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2865,6 +2951,11 @@ fn forwardable(method: &str) -> bool {
             | methods::UPDATE_PLUGIN
             | methods::INSTALL_VERIFIED_PLUGIN
             | methods::PLUGIN_STATUS
+            // Managed MCP servers: read-only views/refresh are forwardable;
+            // mutations and OAuth flows stay local-only (`zeron_rpc::local_only`).
+            | methods::LIST_MCP_SERVERS
+            | methods::WATCH_MCP_SERVERS
+            | methods::REFRESH_MCP_SERVERS
     )
 }
 
@@ -2886,6 +2977,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_PLUGINS
+            | methods::WATCH_MCP_SERVERS
     )
 }
 
@@ -3651,6 +3743,12 @@ impl RpcService for EngineRpc {
             };
             return Box::pin(async move { plugins.dispatch(method, params).await }).await;
         }
+        if crate::mcp_servers::handles(method) {
+            let Some(mcp_servers) = self.mcp_servers.clone() else {
+                return Err(RpcError::Failed("MCP servers aren't available here".into()));
+            };
+            return Box::pin(async move { mcp_servers.handle_rpc(method, params).await }).await;
+        }
         if crate::acp_registry::handles(method) {
             return Box::pin(crate::acp_registry::dispatch(
                 &self.registry,
@@ -3740,6 +3838,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
             methods::GET_CODE_MODE => RpcReply::value(&self.registry.code_mode_settings()),
+            methods::GET_ZERON_MCP_ONLY => RpcReply::value(&self.registry.zeron_mcp_only_settings()),
+            methods::SET_ZERON_MCP_ONLY => {
+                let p: SetHarnessEnabledParams = parse_params(params)?;
+                self.registry
+                    .set_zeron_mcp_only(p.harness, p.enabled)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.zeron_mcp_only_settings())
+            }
             methods::SET_CODE_MODE => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 self.registry

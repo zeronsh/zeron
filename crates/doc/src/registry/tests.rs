@@ -3225,3 +3225,51 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }
+
+#[test]
+fn cloud_agent_choices_are_kept_per_field_and_written_only_when_changed() {
+    let mut doc = RegistryDoc::new("desktop");
+    assert_eq!(doc.cloud_agent_choices("codex"), CloudAgentChoices::default());
+    doc.set_cloud_agent_choice("codex", CloudAgentChoice::ZeronMcpOnly, true);
+    doc.set_cloud_agent_choice("codex", CloudAgentChoice::CodeMode, false);
+    let choices = doc.cloud_agent_choices("codex");
+    assert_eq!(choices.zeron_mcp_only, Some(true));
+    assert_eq!(choices.code_mode, Some(false));
+    assert_eq!(choices.native_subagents, None, "never chosen: no choice");
+    // The same choice again writes nothing.
+    let pending = doc.pending_ops_len();
+    doc.set_cloud_agent_choice("codex", CloudAgentChoice::ZeronMcpOnly, true);
+    assert_eq!(doc.pending_ops_len(), pending);
+    // Each is an upsert on the agent's row: a first one makes it.
+    let ops: Vec<RowOp> = doc.take_pushable().into_iter().flat_map(|b| b.ops).collect();
+    assert!(ops.iter().all(|op| op.kind == KIND_CLOUD_AGENTS && op.id == "codex" && op.op == OpKind::Upsert));
+    assert_eq!(doc.all_cloud_agent_choices().len(), 1);
+}
+
+#[test]
+fn a_cloud_agent_choice_made_elsewhere_keeps_the_others() {
+    let mut doc = RegistryDoc::new("cloud-1");
+    // Made on the laptop: Claude Code with only Zeron's servers.
+    let row = applied(None, &RowOp {
+        kind: KIND_CLOUD_AGENTS.into(),
+        id: "claude-code".into(),
+        op: OpKind::Upsert,
+        set: Some(fields([("zeronMcpOnly", json!(true)), ("codeMode", json!(true))])),
+        hlc: hlc_by(10, "laptop"),
+        clocks: None,
+    });
+    assert!(doc.apply_rows(1, vec![row.clone()]));
+    // Then, on the phone, Code Mode turned off alone.
+    let row = applied(Some(&row), &RowOp {
+        kind: KIND_CLOUD_AGENTS.into(),
+        id: "claude-code".into(),
+        op: OpKind::Upsert,
+        set: Some(fields([("codeMode", json!(false))])),
+        hlc: hlc_by(20, "phone"),
+        clocks: None,
+    });
+    assert!(doc.apply_rows(2, vec![row]));
+    let choices = doc.cloud_agent_choices("claude-code");
+    assert_eq!(choices.zeron_mcp_only, Some(true));
+    assert_eq!(choices.code_mode, Some(false));
+}

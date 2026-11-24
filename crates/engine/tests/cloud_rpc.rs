@@ -889,6 +889,97 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     core.shutdown().await;
 }
 
+/// Settings → Providers' agent settings for Cloud are the account's, kept
+/// in its registry for every Cloud machine: read and made here for Cloud and
+/// for any of its machines, never by dialing one (made for one chat).
+#[tokio::test]
+async fn cloud_agent_settings_are_the_accounts_and_answered_here() {
+    use zeron_rpc::RpcService;
+    let (edge_url, seen) = scripted_edge(cloud_edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+
+    // Nothing chosen yet: off for each agent Cloud runs that can hide its own.
+    let got: serde_json::Value = client
+        .call_as(methods::GET_ZERON_MCP_ONLY, serde_json::json!({ "targetDeviceId": "cloud" }))
+        .await
+        .unwrap();
+    assert_eq!(got["on"], serde_json::json!([]), "{got}");
+    let supported: Vec<&str> = got["supported"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(supported.contains(&"codex") && supported.contains(&"claude-code"), "{got}");
+
+    // Made for Cloud, read back from a machine of Cloud's: the same rows.
+    let set: serde_json::Value = client
+        .call_as(
+            methods::SET_ZERON_MCP_ONLY,
+            serde_json::json!({ "targetDeviceId": "cloud", "harness": "codex", "enabled": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set["on"], serde_json::json!(["codex"]));
+    let _: serde_json::Value = client
+        .call_as(
+            methods::SET_NATIVE_SUBAGENTS,
+            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "claude-code", "enabled": false }),
+        )
+        .await
+        .unwrap();
+    let native: serde_json::Value = client
+        .call_as(methods::GET_NATIVE_SUBAGENTS, serde_json::json!({ "targetDeviceId": "cloud" }))
+        .await
+        .unwrap();
+    assert_eq!(native["off"], serde_json::json!(["claude-code"]), "{native}");
+    let choices = core.workspace.cloud_agent_choices(HarnessId::Codex);
+    assert_eq!(choices.zeron_mcp_only, Some(true));
+    // This computer's own settings are its own.
+    let here: serde_json::Value = client.call_as(methods::GET_ZERON_MCP_ONLY, serde_json::json!({})).await.unwrap();
+    assert_eq!(here["on"], serde_json::json!([]), "{here}");
+
+    // An agent that can't is refused, and nothing changes.
+    let refused = client
+        .call_as::<serde_json::Value>(
+            methods::SET_CODE_MODE,
+            serde_json::json!({ "targetDeviceId": "cloud", "harness": "claude-code", "enabled": true }),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("can't change that on Cloud"), "{refused}");
+
+    // Nor from another device (a Cloud machine may reach this one, and the
+    // room takes these rows from no Cloud machine) or an agent; reading may.
+    for caller in [
+        zeron_rpc::Caller::Peer { device: None },
+        zeron_rpc::Caller::Agent { chat: None },
+    ] {
+        let service = core.rpc_service();
+        let (set, got) = zeron_rpc::with_caller(caller.clone(), async move {
+            let set = service
+                .handle(
+                    methods::SET_ZERON_MCP_ONLY,
+                    serde_json::json!({ "targetDeviceId": "cloud", "harness": "codex", "enabled": false }),
+                )
+                .await;
+            let got = service
+                .handle(methods::GET_ZERON_MCP_ONLY, serde_json::json!({ "targetDeviceId": "cloud" }))
+                .await;
+            (set.err().map(|e| e.to_string()), got.is_ok())
+        })
+        .await;
+        assert!(set.is_some_and(|e| e.contains("Zeron's own window")), "{caller:?}");
+        assert!(got, "{caller:?}");
+    }
+    assert_eq!(core.workspace.cloud_agent_choices(HarnessId::Codex).zeron_mcp_only, Some(true));
+    assert!(seen.lock().unwrap().iter().all(|(r, _)| !r.contains("/device/")), "no machine dialed");
+    core.shutdown().await;
+}
+
 /// Deleting a Cloud chat deletes its machine; deleting any other chat
 /// touches no Cloud session.
 #[tokio::test]
@@ -1206,6 +1297,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

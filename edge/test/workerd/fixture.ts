@@ -126,6 +126,84 @@ export class VaultStub extends WorkerEntrypoint {
   accountUsage(caller: Caller, provider: string, slot: string) {
     return this.answer("accountUsage", [caller, provider, slot], { body: { five_hour: { utilization: 10 } }, fetchedAt: 1 });
   }
+  listConnections(caller: Caller, kind?: string) {
+    return this.answer("listConnections", [caller, kind], { disabled: false, connections: [] });
+  }
+  putConnection(caller: Caller, id: string, req: Record<string, unknown>) {
+    const kind = id.startsWith("plugin:") ? "plugin" : "mcp";
+    return this.answer("putConnection", [caller, id, req], {
+      id,
+      kind,
+      name: String(req.name ?? id),
+      url: String(req.url ?? "https://example.com/mcp"),
+      transport: req.transport === "sse" ? "sse" : "http",
+      enabled: req.enabled !== false,
+      authKind: req.authKind ?? "none",
+      status: req.authKind === "none" || req.material ? "connected" : "needs_auth",
+      headerKeys: [],
+      scopes: Array.isArray(req.scopes) ? req.scopes : [],
+      authorizedDevices: Array.isArray(req.authorizedDevices) ? req.authorizedDevices : ["*"],
+      updatedAt: 1
+    });
+  }
+  updateConnection(caller: Caller, id: string, patch: Record<string, unknown>) {
+    const kind = id.startsWith("plugin:") ? "plugin" : "mcp";
+    return this.answer("updateConnection", [caller, id, patch], {
+      id,
+      kind,
+      name: String(patch.name ?? id),
+      url: String(patch.url ?? "https://example.com/mcp"),
+      transport: patch.transport === "sse" ? "sse" : "http",
+      enabled: patch.enabled !== false,
+      authKind: "none",
+      status: "connected",
+      headerKeys: [],
+      scopes: [],
+      authorizedDevices: Array.isArray(patch.authorizedDevices) ? patch.authorizedDevices : ["*"],
+      updatedAt: 2
+    });
+  }
+  deleteConnection(caller: Caller, id: string) {
+    return this.answer("deleteConnection", [caller, id], { deleted: true });
+  }
+  disconnectConnectionAuth(caller: Caller, id: string) {
+    const kind = id.startsWith("plugin:") ? "plugin" : "mcp";
+    return this.answer("disconnectConnectionAuth", [caller, id], {
+      id,
+      kind,
+      name: id,
+      url: "https://example.com/mcp",
+      transport: "http",
+      enabled: true,
+      authKind: "oauth",
+      status: "needs_auth",
+      headerKeys: [],
+      scopes: [],
+      authorizedDevices: ["*"],
+      updatedAt: 3
+    });
+  }
+  grantConnection(caller: Caller, req: { id: string }) {
+    return this.answer("grantConnection", [caller, req], {
+      id: req.id,
+      url: "https://example.com/mcp",
+      transport: "http",
+      headers: { Authorization: "Bearer conn-tok" },
+      generation: 1
+    });
+  }
+  grantConnections(caller: Caller, req: { ids: string[] }) {
+    return this.answer("grantConnections", [caller, req], {
+      grants: req.ids.map((id) => ({
+        id,
+        url: "https://example.com/mcp",
+        transport: "http",
+        headers: { Authorization: "Bearer conn-tok" },
+        generation: 1
+      })),
+      missing: []
+    });
+  }
   calls() { return vaultCalls; }
 }
 
