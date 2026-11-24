@@ -6,7 +6,7 @@
 
 local function open(show: string?): any
 	local app = mount("store_consent_fixture.luau")
-	app:resize(460, 540)
+	app:resize(460, 580)
 	if show then
 		app:command(show)
 	end
@@ -187,7 +187,7 @@ test("every fact is whole, and the answer stays in view", function()
 			expect(facts.y + facts.h <= said.y + said.h + 0.5).to_be(true)
 			local allow = box(app, "#store-consent-allow")
 			expect(view.y + view.h <= allow.y).to_be(true)
-			expect(allow.y + allow.h <= 540).to_be(true)
+			expect(allow.y + allow.h <= 580).to_be(true)
 			-- (And nothing in it wider than it: wrapped, not cut.)
 			for line in app:tree("#store-consent-facts"):gmatch("[^\n]+") do
 				local x, w = line:match('text "[^"]*" (%-?[%d.]+),%-?[%d.]+ ([%d.]+)x')

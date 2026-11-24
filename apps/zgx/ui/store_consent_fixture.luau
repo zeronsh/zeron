@@ -100,6 +100,6 @@ shown:set({ busy = false, item = ACTS.publish } :: any)
 
 return ui.column {
 	w = 460,
-	h = 540,
+	h = 580,
 	consent.View(),
 }

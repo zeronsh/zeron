@@ -37,7 +37,7 @@ use super::consent::{ARMED, plain};
 use super::{Bridge, json_value};
 
 /// The window, in points: the consent windows'.
-const SIZE: (f64, f64) = (460., 540.);
+const SIZE: (f64, f64) = (460., 580.);
 
 pub type Answer = Pin<Box<dyn Future<Output = Result<Json, String>>>>;
 /// What it does once you say so.
