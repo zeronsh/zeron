@@ -81,6 +81,9 @@ fn stage(plugin: &Path) -> PathBuf {
         let mut config: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&luaurc).expect("ui/.luaurc")).expect("ui/.luaurc is JSON");
         config["aliases"][id.as_str()] = serde_json::Value::from(plugin.join("app").to_string_lossy().into_owned());
+        // A link to ui/'s own (`copy_tree`): written through, it would be
+        // ui/'s that changed. The stage's is a file of its own.
+        std::fs::remove_file(&luaurc).expect("the stage's .luaurc");
         std::fs::write(&luaurc, serde_json::to_vec_pretty(&config).unwrap()).expect("the stage's .luaurc");
     }
     for entry in std::fs::read_dir(plugin.join("tests")).into_iter().flatten().flatten() {
@@ -161,6 +164,12 @@ fn a_plugin_s_fixture_mounts_with_its_overrides_loaded() {
     use zgx_script::testing::TestApp;
     let path = path("orchestrators_proof_fixture.luau");
     assert!(!path.starts_with(app().join("ui")), "{}: the plugin's, staged", path.display());
+    // The stage's .luaurc names the plugin's app/; ui/'s, linked into the
+    // stage with the rest, doesn't.
+    let ours = std::fs::read_to_string(path.with_file_name(".luaurc")).expect("the stage's .luaurc");
+    assert!(ours.contains("\"orchestrators\""), "{ours}");
+    let ui = std::fs::read_to_string(app().join("ui/.luaurc")).expect("ui/.luaurc");
+    assert!(!ui.contains("\"orchestrators\""), "ui/.luaurc written through the stage's link: {ui}");
     let mut app = TestApp::new(|runtime| host(runtime, "orchestrators_proof_fixture.luau"));
     app.frames(2);
     assert_eq!(app.error(), None, "the fixture failed");
