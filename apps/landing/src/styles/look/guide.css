@@ -1,7 +1,7 @@
 /* The Publishing guide (pages/plugins/publishing.astro): the article in the store's text column, the "On this
    page" rail at the container's right, steps whose numbers hang in the gutter, code blocks with a head, tables.
-   Spacing by the scale's steps only (store.css :root). The bar is 60 px tall: what sticks or is scrolled to
-   clears it by a group's step. */
+   Spacing by the scale's steps only (store.css :root). What sticks or is scrolled to sits a group's step from the
+   window's top (the bar scrolls away). */
 .guide-page { padding-top: var(--s48); padding-bottom: var(--sections); }
 .guide-grid { display: grid; grid-template-columns: minmax(0, 720px) minmax(0, 1fr) 232px; align-items: start; }
 .guide { grid-column: 1; min-width: 0; font-size: 16px; line-height: 28px; color: var(--text); }
@@ -15,7 +15,7 @@
    scrolled to, and offers its own address in the gutter, on hover or focus. */
 .guide h2 { position: relative; margin-top: var(--sections); margin-bottom: var(--head); font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -0.02em; }
 .guide h3 { position: relative; margin-top: var(--s32); margin-bottom: var(--s12); font-size: 18px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; }
-.guide :is(h2, h3)[id] { scroll-margin-top: calc(60px + var(--s32)); }
+.guide :is(h2, h3)[id] { scroll-margin-top: var(--s32); }
 .anchor { position: absolute; left: calc(-1 * var(--s24)); top: 0; width: var(--s16); color: var(--text-3); font-weight: 500; text-align: center; opacity: 0; border-radius: 4px; transition: opacity 0.12s var(--ease), color 0.12s var(--ease); }
 .guide :is(h2, h3):hover .anchor, .anchor:focus-visible { opacity: 1; }
 .anchor:hover { color: var(--text); }
@@ -80,9 +80,9 @@
 .nc-t svg { width: 16px; height: 16px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .nc-l { font-size: 14px; line-height: 22px; color: var(--text-2); }
 
-/* On this page: the rail, sticky under the bar; a line down its left, the current part's stretch of it and its
+/* On this page: the rail, sticky a step from the window's top; a line down its left, the current part's stretch of it and its
    words in the text's colour. */
-.toc { grid-column: 3; position: sticky; top: calc(60px + var(--s32)); }
+.toc { grid-column: 3; position: sticky; top: var(--s32); }
 .toc-h { margin-bottom: var(--label); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
 .toc ol { margin: 0; padding: 0; list-style: none; }
 .toc > ol { box-shadow: inset 1px 0 0 var(--line); }

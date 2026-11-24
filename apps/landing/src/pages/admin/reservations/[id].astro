@@ -32,7 +32,7 @@ privatePage(Astro);
 ---
 
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
-  <div class="wrap acct">
+  <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is"><a href={back}>Reserved ids</a><Icon name="chev" /><span aria-current="page">{id}</span></nav>
     <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
   </div>

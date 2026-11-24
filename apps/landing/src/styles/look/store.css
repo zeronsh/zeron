@@ -131,7 +131,9 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none !important; }
 .skip:focus-visible { top: 10px; }
 
 /* ---- top bar ---- */
-.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: saturate(1.4) blur(16px); backdrop-filter: saturate(1.4) blur(16px); box-shadow: 0 1px 0 var(--line); }
+/* (The bar is the page's top and scrolls away with it, on every page and every screen: nothing sticks over what you
+   read. What sticks beside it, a rail, the decision, sticks a group's step from the window's top.) */
+.top { position: relative; z-index: 10; background: var(--bg); box-shadow: 0 1px 0 var(--line); }
 .top .wrap { display: flex; align-items: center; height: 60px; gap: var(--s32); }
 .brand { display: flex; align-items: center; gap: var(--s12); font-weight: 600; font-size: 15px; letter-spacing: -0.01em; border-radius: 6px; }
 /* (Its own size, on whole pixels: components/look/ZeronMark.astro.) */
@@ -330,7 +332,7 @@ a.card:focus-visible { outline-offset: 3px; }
 :is(.question, .askcard) .body { display: grid; gap: var(--s16); margin-top: var(--s16); }
 :is(.question, .askcard, .rpt-form) .field-label { display: block; padding: 0; margin-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
 :is(.question, .askcard, .rpt-form) .field { position: relative; }
-:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input) { --pad: var(--s12); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); padding: var(--s8) var(--s12); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input) { --pad: var(--s16); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); padding: var(--s8) var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
 :is(.question, .askcard, .rpt-form) .field select { appearance: none; padding-right: var(--s32); height: 40px; }
 :is(.question, .askcard, .rpt-form) .field textarea { resize: vertical; min-height: 96px; }
 :is(.question, .askcard, .rpt-form) .field :is(select, textarea, input):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

@@ -1,7 +1,9 @@
 ---
 // A question asked before something that can't be taken back, as a page
-// (it works with no script): its title, what it does, Cancel back, and
-// the button that does it, in the danger's colour when it's one.
+// (it works with no script), set as the report page is: one quiet column
+// (the page's .wrap.rpt), no box round it; its title, what it does, its
+// fields, then Cancel back and the button that does it at the right, in the
+// danger's colour when it's one.
 import type { Ask } from "../../lib/store/actions.ts";
 import { unbidi } from "../../lib/store/format.ts";
 import { lsb } from "../../lib/store/bearing.ts";
@@ -15,7 +17,7 @@ interface Props {
 const { ask, action, csrf, back } = Astro.props;
 ---
 
-<form method="post" action={action} class="card askcard">
+<form method="post" action={action} class="askcard">
   <input type="hidden" name="csrf" value={csrf} />
   <h1 class={lsb(ask.title)}>{unbidi(ask.title)}</h1>
   {ask.words.map((w) => <p>{w}</p>)}

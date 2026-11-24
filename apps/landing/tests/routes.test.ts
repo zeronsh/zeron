@@ -35,7 +35,7 @@ const flashOf = (response: Response) => response.headers.getSetCookie().find((c)
 
 /** A version's state on its author's page, as its row's badge says it. */
 /** A version's row on one of your plugins' pages. */
-const rowOf = (body: string, version: string) => body.split('<li class="vr').find((r) => r.includes(`<b class="mono">${version}</b>`)) ?? "";
+const rowOf = (body: string, version: string) => body.slice(body.indexOf('<div class="tbl vers">')).split('<li class="trow').find((r) => r.includes(`<b class="mono">${version}</b>`)) ?? "";
 /** Where a version stands in its row: its status pill, or Listed when it has none (amendment 45). */
 const stateOf = (body: string, version: string) => (rowOf(body, version) ? (/<span class="state [a-z]+" data-kind="status">([^<]+)<\/span>/.exec(rowOf(body, version))?.[1] ?? "Listed") : undefined);
 /** A version's second badge in its row: whether a reviewer verified it (amendment 45), when it's listed or yanked. */
@@ -869,8 +869,13 @@ describe("forms", () => {
     // Said once: taken down already says it was turned off on the devices that had it.
     expect(body.match(/turned off on the devices that had it/g)).toHaveLength(1);
     // Whether it's verified always first, beside the version; where it stands after it; one kind of button for each action.
-    for (const r of body.split('<li class="vr').slice(1)) if (r.includes('data-kind="status"') && r.includes('data-kind="verified"')) expect(r.indexOf('data-kind="verified"')).toBeLessThan(r.indexOf('data-kind="status"'));
-    expect([...body.matchAll(/<a class="([^"]+)" href="\/account\/plugins\/[^"]+\/(?:yank|unyank)"/g)].map((m) => m[1])).toEqual(["btn sec sm", "btn sec sm", "btn sec sm"]);
+    for (const r of body.split('<li class="trow').slice(1)) if (r.includes('data-kind="status"') && r.includes('data-kind="verified"')) expect(r.indexOf('data-kind="verified"')).toBeLessThan(r.indexOf('data-kind="status"'));
+    // (Each action the same quiet button, at the row's end.)
+    expect([...body.matchAll(/<a class="([^"]+)" href="\/account\/plugins\/[^"]+\/(?:yank|unyank)"/g)].map((m) => m[1])).toEqual(["btn ghost sm", "btn ghost sm", "btn ghost sm"]);
+    // (The plugin page's head: its tile, name, id and where it stands; See it in the store at the right. No "What it means" column.)
+    expect(body).toMatch(/<header class="ohead"><span class="tile xl[^"]*"[\s\S]*?<p class="by"><span class="mono">worst-case-listing-at-every-limit-xyz12<\/span>/);
+    expect(body).toMatch(/<div class="head-act"><a class="btn sec" href="\/plugins\/worst-case-listing-at-every-limit-xyz12">See it in the store/);
+    expect(body).not.toContain("What it means");
     // Its tokens are the account's: a way to them.
     expect(body).toContain('<a href="/account/tokens">deploy tokens</a>');
   });
@@ -1005,7 +1010,9 @@ describe("forms", () => {
         const { readToken } = await import("../fake-edge/token.ts");
         expect(readToken(token!).ok).toBe(true);
         expect(made.body).toContain(`<code id="the-token" translate="no">${token}</code>`);
-        expect(made.body).toContain('<button type="button" data-copy-of="the-token" aria-label="Copy the token">');
+        // (In the guide's block of code: its name and copy button in the head, the token in its body, the warning under it.)
+        expect(made.body).toMatch(/<figure class="codeblock secret"><figcaption class="cb-head"><span class="cb-label">Deploy token<\/span><button type="button" class="cb-copy" data-copy-of="the-token" aria-label="Copy the token">/);
+        expect(made.body).toMatch(/<\/figure><p class="warnline">This is the only time Zeron shows it\./);
         expect(made.body).not.toMatch(/="[^"]*zdt_/);
         expect(made.body).not.toMatch(/<input[^>]*zdt_|<textarea/);
         // What it is: its name and short id (the token's first characters), what it publishes, when it ends; then done.

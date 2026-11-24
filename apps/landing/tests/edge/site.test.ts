@@ -419,7 +419,8 @@ describe("an author's pages", () => {
     const published = await ada.publishWithToken(token, "theme-sync", "0.2.0");
     expect(published.status, await published.clone().text()).toBe(201);
     const mine = await web.get("/account/plugins/theme-sync");
-    expect(mine.body).toMatch(/0\.2\.0[\s\S]*<small><svg[^>]*>[\s\S]*?<\/svg>GitHub Actions<\/small>/);
+    // (Its owner's page says it came by token, the token's name on hover and to a screen reader.)
+    expect(mine.body).toMatch(/<b class="mono">0\.2\.0<\/b>[\s\S]*?<span class="via" title="Sent by the deploy token “GitHub Actions”">[\s\S]*?via token<span class="sr-only">: GitHub Actions<\/span>/);
     expect((await web.get("/account/tokens")).body).toMatch(/<span class="c-used" title="[^"]+ \u00b7 theme sync"><span><span class="ph">Last used [^<]+ \u00b7 theme sync<\/span><span class="wd">[^<]+ \u00b7 theme sync<\/span><\/span>/);
 
     // Revoked from the site, it publishes nothing.

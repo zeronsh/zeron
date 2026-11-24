@@ -38,7 +38,7 @@ const ask = found ? revokeAsk(found.name) : null;
 ---
 
 <Store title={`${ask?.title ?? "Revoke a token"} · Zeron`} description="Revoke a deploy token." noindex current="publish" session={session}>
-  <div class="wrap acct">
+  <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
     {
       who.state === "down" ? (

@@ -69,7 +69,7 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
 ---
 
 <Store title={`${title} · Zeron`} description="Make a deploy token." noindex current="publish" session={session}>
-  <div class="wrap acct">
+  <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
     {
       who.state === "down" ? (
@@ -77,13 +77,17 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
       ) : !session ? (
         <SignInPlease what="your deploy tokens" />
       ) : made ? (
-        <section class="card askcard reveal" aria-labelledby="made-title" data-secret>
+        <section class="askcard reveal" aria-labelledby="made-title" data-secret>
           <h1 id="made-title" class={lsb(title)}>{title}</h1>
-          <p>{store("plugins.store.key.secret_body")}</p>
-          <div class="secret">
-            <code id="the-token" translate="no">{made.token}</code>
-            <button type="button" data-copy-of="the-token" aria-label="Copy the token"><Icon name="copy" /></button>
-          </div>
+          {/* (The token in the guide's block of code, its copy button in the block's head; the warning under it.) */}
+          <figure class="codeblock secret">
+            <figcaption class="cb-head">
+              <span class="cb-label">Deploy token</span>
+              <button type="button" class="cb-copy" data-copy-of="the-token" aria-label="Copy the token"><Icon name="copy" /></button>
+            </figcaption>
+            <pre tabindex="0"><code id="the-token" translate="no">{made.token}</code></pre>
+          </figure>
+          <p class="warnline">{store("plugins.store.key.secret_body")}</p>
           <dl class="made">
             <div><dt>{store("plugins.store.key.name")}</dt><dd><Words text={made.name} /> <span class="id">{made.short}</span></dd></div>
             <div><dt>{store("plugins.store.key.scope.label")}</dt><dd><Words text={scopeWords(made)} /></dd></div>
@@ -94,7 +98,7 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
           </div>
         </section>
       ) : (
-        <section class="card askcard newtoken" aria-labelledby="new-title">
+        <section class="askcard newtoken" aria-labelledby="new-title">
           <h1 id="new-title" class={lsb(title)}>{title}</h1>
           <TokenForm id="page-token" csrf={session.csrf} fields={fields} plugins={[...yours.values()]} fresh={session.fresh_sign_in === true} again={again} refusal={refusal} back={back} />
         </section>
