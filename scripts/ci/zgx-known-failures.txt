@@ -22,3 +22,8 @@ rust: split_tests::a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_
 # the loop awake. Waits on the same zgx fix.
 rust: route_motion_tests::composer_skinny_to_multiline_glides_text_and_caret_smoothly
 rust: route_motion_tests::composer_writing_new_lines_never_clips_caret_at_bottom_or_text_at_top
+
+# Fails on main: main's own zgx-linux run fails it the same way (release
+# 0.3.17, e7601a6d2, transcript_scroll_tests.rs:258), and so does main at
+# 296461969 run locally. Off this list once main's fix comes in.
+rust: transcript_scroll_tests::a_synced_chat_scrolled_up_from_its_end_passes_through_every_message
