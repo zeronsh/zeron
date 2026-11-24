@@ -3237,17 +3237,17 @@ impl Inner {
             .is_some_and(|handle| handle.continues_with_sent_message())
     }
 
-    /// Whether a run of `chat_id` launches without its provider's own
-    /// subagents (Settings → Providers), delegating through side chats
-    /// instead. Never for a chat that has a parent: delegation is one level
-    /// deep, so a side chat can't create chats and keeps its provider's own.
-    /// Nor while its parent is unknown here (its run outran its row).
     /// Whether a run of `harness_id` gets only Zeron's MCP servers, its own
     /// hidden: the person's choice in Settings → Providers (off until then).
     pub(super) fn zeron_mcp_only(&self, harness_id: HarnessId) -> bool {
         self.registry.zeron_mcp_only(harness_id)
     }
 
+    /// Whether a run of `chat_id` launches without its provider's own
+    /// subagents (Settings → Providers), delegating through side chats
+    /// instead. Never for a chat that has a parent: delegation is one level
+    /// deep, so a side chat can't create chats and keeps its provider's own.
+    /// Nor while its parent is unknown here (its run outran its row).
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {

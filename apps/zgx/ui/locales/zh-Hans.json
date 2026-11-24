@@ -1577,6 +1577,7 @@
         "off_note": "不检查新版本。"
       },
       "dialog_body": "位于 {device}。更改立即生效。",
+      "dialog_body_cloud": "适用于所有云端对话，无论由哪台机器运行。更改立即生效。",
       "done": "完成",
       "updates": "更新",
       "description": "设备上的编码智能体及其登录账户。",

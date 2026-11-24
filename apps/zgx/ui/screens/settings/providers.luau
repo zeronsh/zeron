@@ -197,9 +197,11 @@ local shown_settings = ui.state("settings_agent_shown", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
+-- An agent setting's call, for the device shown: Cloud's are the
+-- account's, which this device's engine keeps for every Cloud machine.
 local function engine_params(params: { [string]: any }): { [string]: any }
 	local target = now().target
-	if target and target ~= CLOUD then
+	if target then
 		params.targetDeviceId = target
 	end
 	return params
@@ -235,8 +237,8 @@ local function load_code_modes()
 end
 
 -- Which agents run with only Zeron's MCP servers (their own, and their
--- account's connectors, hidden for the run): those that can, and those
--- that do now (the person's choice, else on once Zeron has a server).
+-- account's connectors, hidden for the run): those that can, and those the
+-- person turned it on for.
 local zeron_only = ui.state("settings_zeron_mcp_only", nil :: { supported: { string }, on: { string } }?)
 local zeron_only_device: string? = nil
 
@@ -426,7 +428,8 @@ local function card(row: State<agents.Agent>): Node
 			end
 			return nil
 		end,
-		settings = not cloud_card,
+		-- (On Cloud too: how each agent runs there, for every Cloud machine.)
+		settings = true,
 		on_settings = function()
 			load_subagents()
 			load_code_modes()
@@ -794,7 +797,9 @@ local function settings_dialog(): Node
 		open = open,
 		title = ui.t("settings.providers.agent_settings"),
 		body = (function(): string
-			return ui.t("settings.providers.dialog_body", { device = device_name() }):get()
+			return if on_cloud()
+				then ui.t("settings.providers.dialog_body_cloud"):get()
+				else ui.t("settings.providers.dialog_body", { device = device_name() }):get()
 		end) :: any,
 		size = "md",
 		cancel = false,
@@ -901,8 +906,9 @@ local function settings_dialog(): Node
 				description = ui.t("settings.providers.skills_separate.description"),
 				control = ds.Switch { value = separate, label = ui.t("settings.providers.skills_separate.label"), on_change = completion("separate") },
 			},
+			-- (Not on Cloud, whose agents Zeron keeps current.)
 			ui.show(function()
-				return not own()
+				return not own() and not on_cloud()
 			end, ds.Settings.Row {
 				label = ui.t("settings.providers.updates"),
 				description = function()

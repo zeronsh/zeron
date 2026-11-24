@@ -292,6 +292,10 @@ local answers: { [string]: (arg: any) -> any } = {
 				return r
 			end
 			local get = "Get" .. string.sub(m, 4)
+			-- (An agent's settings, with the device they're for: "" for this one.)
+			if m == "SetZeronMcpOnly" or m == "SetCodeMode" or m == "SetNativeSubagents" then
+				log(`settings.engine:{m}:{arg.params.harness}:{arg.params.targetDeviceId or ""}`)
+			end
 			if m == "SetCommitCredit" then
 				engine[get] = { enabled = arg.params.enabled, cloud = false }
 			elseif m == "SetWorktreeSettings" then

@@ -45,6 +45,8 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod cloud_agents;
+pub use cloud_agents::{CloudAgentChoice, CloudAgentChoices, KIND_CLOUD_AGENTS};
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;

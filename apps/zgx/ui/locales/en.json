@@ -1577,6 +1577,7 @@
         "off_note": "New versions aren't looked for."
       },
       "dialog_body": "On {device}. Changes apply as you make them.",
+      "dialog_body_cloud": "For every Cloud chat, on whichever machine runs it. Changes apply as you make them.",
       "done": "Done",
       "updates": "Updates",
       "description": "The coding agents on a device, and the accounts they sign in with.",

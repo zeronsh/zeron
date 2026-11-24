@@ -327,6 +327,12 @@ impl EngineCore {
             },
         )?;
         doc_host.set_workspace(workspace.clone());
+        // A Cloud machine is made for one chat: it runs each agent as the
+        // person chose for Cloud, which the account's registry holds.
+        if runner::is_cloud_platform() {
+            let workspace = workspace.clone();
+            registry.follow_cloud_choices(move |harness| workspace.cloud_agent_choices(harness));
+        }
         doc_host.set_sessions(sessions.clone());
         sessions.follow_chat_deletions(workspace.watch_chats());
         let plugins = plugins::Plugins::new(data_dir, &device_id);
