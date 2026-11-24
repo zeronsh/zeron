@@ -723,10 +723,29 @@ async fn reports_compatibility_for_another_zeron_and_deploy_tokens_for_owned_plu
     // scope that isn't one is refused.
     let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "all": true } })).await.unwrap();
     assert_eq!(refused["error"], "not_published", "{refused}");
+    // A template is something to publish too: owning only one, a token for
+    // all of both kinds or for its id gets as far as the sign-in.
+    store.state.lock().unwrap().templates.insert("midnight".into(), ("bob".into(), vec!["1.0.0".into()]));
+    for scope in [json!({ "all": true, "all_kinds": ["plugin", "template"] }), json!({ "plugins": ["midnight"] })] {
+        let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": scope })).await.unwrap();
+        assert_eq!(refused["error"], "step_up_required", "{scope}: {refused}");
+    }
+    // A store that has no templates route has none of theirs.
+    store.state.lock().unwrap().without_templates = true;
+    let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "all": true } })).await.unwrap();
+    assert_eq!(refused["error"], "not_published", "{refused}");
+    store.state.lock().unwrap().without_templates = false;
     store.add("bob", &package_of(&key, "notes", "1.0.0", &[], "return 1", json!({})), "verified", "");
     let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "plugins": ["focus", "board"] } })).await.unwrap();
     assert_eq!((refused["error"].as_str(), refused["ids"].clone()), (Some("not_owner"), json!(["board", "focus"])), "{refused}");
-    for scope in [json!({}), json!({ "all": true, "plugins": ["focus"] }), json!({ "plugins": [] })] {
+    for scope in [
+        json!({}),
+        json!({ "all": true, "plugins": ["focus"] }),
+        json!({ "plugins": [] }),
+        json!({ "plugins": ["notes"], "all_kinds": ["plugin"] }),
+        json!({ "all": true, "all_kinds": ["template"] }),
+        json!({ "all": true, "all_kinds": [] }),
+    ] {
         let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": scope })).await.unwrap();
         assert_eq!(refused["error"], "invalid_scope", "{scope}: {refused}");
     }
@@ -823,7 +842,7 @@ async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_
 
     // A deploy token publishes 1.1.0 (unsigned); the laptop 1.2.0; this
     // device 1.3.0.
-    let ci = store.add_deploy_token("ann", "CI", Scope::All);
+    let ci = store.add_deploy_token("ann", "CI", Scope::All { templates: false });
     let by_token = StoreClient::new(&store.url)
         .publish("focus", unsigned_package_of("focus", "1.1.0", &["ui.add"], "return 2"), &zeron_engine::plugins::store::client::Caller::DeployToken(Arc::new(DeployToken::parse(&ci).unwrap())))
         .await;

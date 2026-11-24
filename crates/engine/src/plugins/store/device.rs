@@ -168,7 +168,7 @@ struct VersionActionParams {
 #[derive(Deserialize)]
 struct CreateTokenParams {
     name: String,
-    /// `{all: true}` or `{plugins: [id…]}` (amendment 44).
+    /// `{all: true, all_kinds?}` or `{plugins: [id…]}`.
     scope: ScopeParams,
     /// Epoch ms.
     #[serde(default)]
@@ -179,15 +179,20 @@ struct CreateTokenParams {
 struct ScopeParams {
     #[serde(default)]
     all: bool,
+    /// Beside `all` alone: `["plugin"]` (none: that) or `["plugin",
+    /// "template"]`.
+    #[serde(default)]
+    all_kinds: Option<Vec<String>>,
+    /// Ids of either kind.
     #[serde(default)]
     plugins: Option<Vec<String>>,
 }
 
 impl ScopeParams {
     fn scope(&self) -> Result<Scope, String> {
-        match (self.all, &self.plugins) {
-            (true, None) => Ok(Scope::All),
-            (false, Some(ids)) => Scope::plugins(ids),
+        match (self.all, &self.all_kinds, &self.plugins) {
+            (true, kinds, None) => Scope::all(kinds.as_deref()),
+            (false, None, Some(ids)) => Scope::plugins(ids),
             _ => Err("A token's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
         }
     }
@@ -691,22 +696,30 @@ impl Plugins {
             Ok(store) => store,
             Err(error) => return not_ok(&error),
         };
-        // A token publishes plugins you have in the store already (a first
-        // version comes from a signed-in device): said here, by id, before
-        // the step-up.
+        // A token publishes what you have in the store already, a plugin or
+        // a template (a first version comes from a signed-in device): said
+        // here, by id, before the step-up.
         let mine = match client.my_plugins(&caller).await {
             Ok(mine) => mine,
             Err(error) => return not_ok(&error),
         };
-        let owned: Vec<&str> = mine["plugins"].as_array().into_iter().flatten().filter_map(|plugin| plugin["id"].as_str()).collect();
+        let mine_templates = match client.of(client::Kind::Template).my_plugins(&caller).await {
+            Ok(mine) => mine,
+            // (A store without templates has none of yours.)
+            Err(error) if install::reason_of(&error) == Some(client::reason::NOT_IN_STORE) => Value::Null,
+            Err(error) => return not_ok(&error),
+        };
+        let ids = |mine: &Value, key: &str| -> Vec<String> { mine[key].as_array().into_iter().flatten().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect() };
+        let mut owned = ids(&mine, "plugins");
+        owned.extend(ids(&mine_templates, "templates"));
         if owned.is_empty() {
             return not_ok(&failure(
                 "not_published",
-                "You have no plugin in the store yet: publish one from this device (`zeron plugin publish <id>`), then make a deploy token",
+                "You have no plugin or template in the store yet: publish one from this device, then make a deploy token",
             ));
         }
         if let Scope::Plugins(ids) = &scope {
-            let missing: Vec<&str> = ids.iter().map(String::as_str).filter(|id| !owned.contains(id)).collect();
+            let missing: Vec<&str> = ids.iter().filter(|id| !owned.contains(id)).map(String::as_str).collect();
             if !missing.is_empty() {
                 return not_owner(&missing);
             }
@@ -1470,12 +1483,12 @@ fn agent_unverified(id: &str, version: &str) -> RpcError {
     ))
 }
 
-/// `{ok: false, error: "not_owner", ids}`: a token's scope names plugins
-/// that aren't the account's in the store.
+/// `{ok: false, error: "not_owner", ids}`: a token's scope names ids that
+/// aren't the account's in the store.
 fn not_owner(ids: &[&str]) -> Value {
     let mut value = not_ok(&failure(
         "not_owner",
-        format!("{} isn't yours in the store: a token publishes plugins you already have there (a first version comes from a signed-in device)", ids.join(", ")),
+        format!("{} isn't yours in the store: a token publishes what you already have there (a first version comes from a signed-in device)", ids.join(", ")),
     ));
     value["ids"] = json!(ids);
     value

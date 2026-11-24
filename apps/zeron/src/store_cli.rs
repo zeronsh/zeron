@@ -547,7 +547,8 @@ pub fn is_store_command(command: &PluginCommand) -> bool {
 /// it), name, what it publishes, and whether it's revoked.
 fn token_line(token: &Value) -> String {
     let scope = if token["scope"]["all"] == true {
-        "all of your plugins".to_owned()
+        let templates = token["scope"]["all_kinds"].as_array().is_some_and(|kinds| kinds.iter().any(|k| k == "template"));
+        (if templates { "all of your plugins and templates" } else { "all of your plugins" }).to_owned()
     } else {
         token["scope"]["plugins"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
     };

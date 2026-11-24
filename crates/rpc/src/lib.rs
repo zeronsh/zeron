@@ -832,12 +832,14 @@ pub mod methods {
     /// last_used_at, expires_at, revoked_at}]}`: the account's deploy
     /// tokens, as the store lists them (never a secret).
     pub const LIST_DEPLOY_TOKENS: &str = "ListDeployTokens";
-    /// `{name, scope: {all: true} | {plugins: [id…]}, expires?}` →
+    /// `{name, scope: {all: true, all_kinds?} | {plugins: [id…]}, expires?}`
+    /// (`all_kinds`: `["plugin"]`, the default, or `["plugin", "template"]`;
+    /// the ids named are of either kind) →
     /// `{ok: true, token: {id, short, name, scope, expires_at,
     /// created_at}, secret}` (the secret, `zdt_…`, shown this once and kept
     /// nowhere), or `{ok: false, error, message}`: `step_up_required` (run
     /// [`STEP_UP`] `{for: "deploy_token"}`, then again: each token takes a
-    /// step-up of its own), `not_owner` with `ids` (plugins not yours in the
+    /// step-up of its own), `not_owner` with `ids` (those not yours in the
     /// store), `not_published`, `invalid_scope`, or the store's word. The
     /// scope is fixed: another scope is another token.
     pub const CREATE_DEPLOY_TOKEN: &str = "CreateDeployToken";

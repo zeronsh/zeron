@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use zeron_engine::plugins::install;
+use zeron_engine::plugins::store::client::Kind;
 use zeron_engine::plugins::store::deploy_token::{DeployToken, Scope};
 use zeron_engine::plugins::version::{Range, Version};
 
@@ -96,6 +97,8 @@ pub struct State {
     pub submitted: Vec<(String, Vec<u8>, String)>,
     /// Templates: each one's owner and versions, as published.
     pub templates: BTreeMap<String, (String, Vec<String>)>,
+    /// A store from before templates: their routes aren't there.
+    pub without_templates: bool,
     /// Templates submitted: `(id, package)`.
     pub submitted_templates: Vec<(String, Vec<u8>)>,
     /// Updates asks, as sent.
@@ -670,7 +673,7 @@ impl FakeStore {
                 // plugin's first version (that comes from a device).
                 if let Some((scope, _)) = &scope {
                     let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner && !p.versions.is_empty());
-                    if !owned || !scope.covers(id) {
+                    if !owned || !scope.covers(id, Kind::Plugin) {
                         return json_reply(403, json!({ "error": "token_not_allowed", "message": "This deploy token may not publish this plugin." }));
                     }
                 }
@@ -706,6 +709,15 @@ impl FakeStore {
                 state.submitted.push(((*id).to_owned(), body.to_vec(), via.to_owned()));
                 json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [], "superseded": superseded }))
             }
+            ("GET", ["store", "v1", "me", "templates"]) => {
+                let Some((owner, None)) = who else { return unauthorized() };
+                let state = self.state.lock().unwrap();
+                if state.without_templates {
+                    return not_found();
+                }
+                let templates: Vec<Value> = state.templates.iter().filter(|(_, (o, _))| *o == owner).map(|(id, _)| json!({ "id": id, "kind": "template" })).collect();
+                json_reply(200, json!({ "publisher_id": publisher_id(&owner), "templates": templates }))
+            }
             // Templates, under their own prefix: what a deploy token does.
             ("GET", ["store", "v1", "templates", id, "versions"]) => {
                 let state = self.state.lock().unwrap();
@@ -718,7 +730,7 @@ impl FakeStore {
                 let mut state = self.state.lock().unwrap();
                 let refused = |status: u16, word: &str, words: &str| json_reply(status, json!({ "error": word, "message": words }));
                 if let Some((scope, _)) = &scope
-                    && (!scope.covers(id) || state.templates.get(*id).is_none_or(|(o, versions)| *o != owner || versions.is_empty()))
+                    && (!scope.covers(id, Kind::Template) || state.templates.get(*id).is_none_or(|(o, versions)| *o != owner || versions.is_empty()))
                 {
                     return refused(403, "token_not_allowed", "This deploy token may not publish this template.");
                 }
@@ -742,7 +754,7 @@ impl FakeStore {
                 let plugins: Vec<Value> = state
                     .plugins
                     .iter()
-                    .filter(|(id, p)| p.owner == owner && scope.as_ref().is_none_or(|(s, _)| s.covers(id)))
+                    .filter(|(id, p)| p.owner == owner && scope.as_ref().is_none_or(|(s, _)| s.covers(id, Kind::Plugin)))
                     .map(|(id, p)| carded(&state, json!({
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| {
@@ -785,7 +797,11 @@ impl FakeStore {
                     return json_reply(403, json!({ "error": "step_up_required", "message": "Sign in again." }));
                 }
                 let scope = if request["scope"]["all"] == true {
-                    Scope::All
+                    let kinds: Option<Vec<String>> = serde_json::from_value(request["scope"]["all_kinds"].clone()).unwrap_or_default();
+                    match Scope::all(kinds.as_deref()) {
+                        Ok(scope) => scope,
+                        Err(e) => return json_reply(400, json!({ "error": "invalid_scope", "message": e })),
+                    }
                 } else {
                     let ids: Vec<String> = request["scope"]["plugins"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_owned)).collect();
                     match Scope::plugins(&ids) {
@@ -796,7 +812,7 @@ impl FakeStore {
                 {
                     let state = self.state.lock().unwrap();
                     if let Scope::Plugins(ids) = &scope {
-                        let missing: Vec<&String> = ids.iter().filter(|id| state.plugins.get(*id).is_none_or(|p| p.owner != owner)).collect();
+                        let missing: Vec<&String> = ids.iter().filter(|id| state.plugins.get(*id).is_none_or(|p| p.owner != owner) && state.templates.get(*id).is_none_or(|(o, _)| *o != owner)).collect();
                         if !missing.is_empty() {
                             return json_reply(403, json!({ "error": "not_owner", "ids": missing, "message": "Not yours." }));
                         }

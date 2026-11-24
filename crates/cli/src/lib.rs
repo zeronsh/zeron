@@ -197,7 +197,7 @@ pub enum PluginCommand {
     },
     /// Deploy tokens: what a CI job publishes plugins and templates with.
     /// Each is your account's, for those you name (an id is a plugin's or a
-    /// template's) or all of yours, fixed when it's made. Made,
+    /// template's) or all of your plugins, fixed when it's made. Made,
     /// listed and revoked through the running Zeron, with your session
     /// (never with a deploy token); a plugin's first version comes from your
     /// machine.
