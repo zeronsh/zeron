@@ -7248,6 +7248,7 @@ name = "zeron-plugin-guard"
 version = "0.3.18"
 dependencies = [
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
