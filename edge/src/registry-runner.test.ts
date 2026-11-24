@@ -63,6 +63,11 @@ describe("runner registry writes, in either reach", () => {
         expect(runnerOpRefusal(CLOUD, undefined, upsert("preferences", "sidebar", { x: 1 }), reach)).toMatch(/not writable/);
         expect(runnerOpRefusal(CLOUD, undefined, upsert("sidebarPins", "c1", { pinned: true }), reach)).toMatch(/not writable/);
         expect(runnerOpRefusal(CLOUD, undefined, upsert("somethingNew", "x", { deviceId: CLOUD }), reach)).toMatch(/not writable/);
+        // How the person runs an agent on Cloud is theirs, read by its machines alone.
+        expect(runnerOpRefusal(CLOUD, undefined, upsert("cloudAgents", "codex", { zeronMcpOnly: true }), reach)).toMatch(/not writable/);
+        expect(runnerOpRefusal(CLOUD, row("cloudAgents", "codex", { codeMode: true }), upsert("cloudAgents", "codex", { codeMode: false }), reach)).toMatch(/not writable/);
+        expect(runnerOpRefusal(CLOUD, row("cloudAgents", "codex", { codeMode: true }), del("cloudAgents", "codex"), reach)).toMatch(/not writable/);
+        expect(runnerCanSee(CLOUD, row("cloudAgents", "codex", { zeronMcpOnly: true }), reach)).toBe(true);
       });
 
       it("deletes a delegate with its session row, never re-homes it", () => {

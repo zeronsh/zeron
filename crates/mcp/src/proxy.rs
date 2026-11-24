@@ -29,6 +29,7 @@ struct Endpoint {
     port: u16,
     path: String,
     token: String,
+    session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Endpoint {
@@ -60,7 +61,13 @@ impl Endpoint {
             port: port.parse()?,
             path: path.to_owned(),
             token,
+            session_id: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Only Zeron's own `/mcp` endpoint serves 2026 `subscriptions/listen`.
+    fn should_listen_for_changes(&self) -> bool {
+        self.path == "/mcp"
     }
 
     /// POST `body`; the response's status, content type and body reader.
@@ -77,6 +84,19 @@ impl Endpoint {
             self.token,
             body.len()
         );
+        let has_session_override = extra
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"));
+        if !has_session_override {
+            let session = self
+                .session_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(session_id) = session {
+                head.push_str(&format!("Mcp-Session-Id: {session_id}\r\n"));
+            }
+        }
         for (name, value) in extra {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -84,13 +104,21 @@ impl Endpoint {
         stream.write_all(head.as_bytes())?;
         stream.write_all(body.as_bytes())?;
         stream.flush()?;
-        read_reply(stream)
+        let reply = read_reply(stream)?;
+        if let Some(ref sid) = reply.session_id {
+            *self
+                .session_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid.clone());
+        }
+        Ok(reply)
     }
 }
 
 struct Reply {
     status: u16,
     event_stream: bool,
+    session_id: Option<String>,
     body: Box<dyn BufRead + Send>,
 }
 
@@ -106,6 +134,7 @@ fn read_reply(stream: TcpStream) -> std::io::Result<Reply> {
     let mut length: Option<u64> = None;
     let mut chunked = false;
     let mut event_stream = false;
+    let mut session_id: Option<String> = None;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -122,7 +151,10 @@ fn read_reply(stream: TcpStream) -> std::io::Result<Reply> {
         match name.trim().to_ascii_lowercase().as_str() {
             "content-length" => length = value.parse().ok(),
             "transfer-encoding" => chunked = value.eq_ignore_ascii_case("chunked"),
-            "content-type" => event_stream = value.starts_with("text/event-stream"),
+            "content-type" => {
+                event_stream = value.to_ascii_lowercase().starts_with("text/event-stream")
+            }
+            "mcp-session-id" if !value.is_empty() => session_id = Some(value.to_owned()),
             _ => {}
         }
     }
@@ -133,7 +165,12 @@ fn read_reply(stream: TcpStream) -> std::io::Result<Reply> {
     } else {
         Box::new(reader)
     };
-    Ok(Reply { status, event_stream, body })
+    Ok(Reply {
+        status,
+        event_stream,
+        session_id,
+        body,
+    })
 }
 
 /// A `Transfer-Encoding: chunked` body, decoded.
@@ -335,7 +372,10 @@ pub fn run() -> anyhow::Result<()> {
                 std::thread::spawn(move || forward_request(&endpoint, &out, id, &body));
             }
             (None, Some(method)) => {
-                if method == "notifications/initialized" && !listening {
+                if method == "notifications/initialized"
+                    && !listening
+                    && endpoint.should_listen_for_changes()
+                {
                     listening = true;
                     let out = out.clone();
                     let listen = endpoint.clone();
@@ -360,6 +400,9 @@ mod tests {
     fn only_a_loopback_http_endpoint_is_taken() {
         let ok = Endpoint::parse("http://127.0.0.1:4321/mcp", "t".into()).unwrap();
         assert_eq!((ok.host.as_str(), ok.port, ok.path.as_str()), ("127.0.0.1", 4321, "/mcp"));
+        assert!(ok.should_listen_for_changes());
+        let external = Endpoint::parse("http://127.0.0.1:4321/mcp/server/linear", "t".into()).unwrap();
+        assert!(!external.should_listen_for_changes());
         assert!(Endpoint::parse("http://example.com:80/mcp", "t".into()).is_err());
         assert!(Endpoint::parse("https://127.0.0.1:1/mcp", "t".into()).is_err());
     }
@@ -379,12 +422,107 @@ mod tests {
         });
         let mut seen = Vec::new();
         messages(
-            Reply { status: 200, event_stream: true, body: Box::new(reader) },
+            Reply {
+                status: 200,
+                event_stream: true,
+                session_id: None,
+                body: Box::new(reader),
+            },
             |message| seen.push(message),
         )
         .unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0]["method"], "notifications/progress");
         assert_eq!(seen[1]["id"], 1);
+    }
+
+    #[test]
+    fn captures_and_forwards_mcp_session_id_across_posts() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen_sessions = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let recorded = seen_sessions.clone();
+        let server = std::thread::spawn(move || {
+            let reply_sessions = [Some("sess-1"), None, Some("sess-2"), None];
+            for reply_sid in reply_sessions {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut content_length = 0usize;
+                let mut incoming_sid = None;
+                // Request line
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    let header = line.trim_end();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = header.split_once(':') {
+                        let k = k.trim().to_ascii_lowercase();
+                        let v = v.trim();
+                        if k == "content-length" {
+                            content_length = v.parse().unwrap_or(0);
+                        } else if k == "mcp-session-id" {
+                            incoming_sid = Some(v.to_owned());
+                        }
+                    }
+                }
+                let mut body_buf = vec![0u8; content_length];
+                if content_length > 0 {
+                    reader.read_exact(&mut body_buf).unwrap();
+                }
+                recorded.lock().unwrap().push(incoming_sid);
+
+                let resp_body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                let mut resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                    resp_body.len()
+                );
+                if let Some(sid) = reply_sid {
+                    resp.push_str(&format!("Mcp-Session-Id: {sid}\r\n"));
+                }
+                resp.push_str("\r\n");
+                resp.push_str(resp_body);
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let endpoint = Endpoint::parse(
+            &format!("http://127.0.0.1:{port}/mcp/server/linear"),
+            "tok".into(),
+        )
+        .unwrap();
+        // Cloned endpoints share the tracked session id, as spawned threads do.
+        let cloned = endpoint.clone();
+
+        let r1 = endpoint.post(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &[]).unwrap();
+        assert_eq!(r1.status, 200);
+        assert_eq!(r1.session_id.as_deref(), Some("sess-1"));
+
+        let r2 = cloned.post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &[]).unwrap();
+        assert_eq!(r2.status, 200);
+
+        let r3 = endpoint.post(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &[]).unwrap();
+        assert_eq!(r3.status, 200);
+        assert_eq!(r3.session_id.as_deref(), Some("sess-2"));
+
+        let r4 = cloned.post(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call"}"#, &[]).unwrap();
+        assert_eq!(r4.status, 200);
+
+        server.join().unwrap();
+        assert_eq!(
+            *seen_sessions.lock().unwrap(),
+            vec![
+                None,
+                Some("sess-1".to_owned()),
+                Some("sess-1".to_owned()),
+                Some("sess-2".to_owned()),
+            ]
+        );
     }
 }

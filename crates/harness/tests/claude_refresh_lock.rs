@@ -89,6 +89,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

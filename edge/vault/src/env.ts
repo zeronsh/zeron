@@ -4,11 +4,13 @@
  * affected operation answer `unavailable`, never crash the isolate.
  */
 import type { VaultAccount } from "./account";
+import type { VaultConnections } from "./connections";
 import type { VaultDevices } from "./devices";
 
 export interface Env {
   readonly VAULT_DEVICES: DurableObjectNamespace<VaultDevices>;
   readonly VAULT_ACCOUNTS: DurableObjectNamespace<VaultAccount>;
+  readonly VAULT_CONNECTIONS: DurableObjectNamespace<VaultConnections>;
 
   /** Global kill switch: `"1"` refuses every call with 503. */
   readonly VAULT_DISABLED?: string;
@@ -26,6 +28,11 @@ export interface Env {
   readonly GITHUB_APP_PRIVATE_KEY?: string;
   /** The App's URL slug (`github.com/apps/{slug}`), for the install link. */
   readonly GITHUB_APP_SLUG?: string;
+
+  /** OAuth client credentials used to refresh unified Antigravity CLI uploads
+   * (which omit client_id/client_secret from their token file). */
+  readonly ANTIGRAVITY_OAUTH_CLIENT_ID?: string;
+  readonly ANTIGRAVITY_OAUTH_CLIENT_SECRET?: string;
 
   /** User whose codex + github credentials the daily cron force-refreshes. */
   readonly CANARY_USER_ID?: string;

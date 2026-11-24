@@ -58,6 +58,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
