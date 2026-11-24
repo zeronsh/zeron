@@ -966,6 +966,30 @@ mod tests {
         assert!(t.join(LIVE).join("screenshots.luau").is_file());
     }
 
+    /// A stray under `screenshots/` added to a kept template asks, and is
+    /// never laid down; a picture or a changelog added asks nothing.
+    #[test]
+    fn a_stray_added_to_a_kept_template_asks_and_is_never_laid_down() {
+        use super::super::preview::{approve_at, approved_at, digest, trusted_at};
+        let t = setup("stray");
+        let (dir, approvals) = (t.join("t"), t.join("approvals.json"));
+        let kept = digest(&dir);
+        approve_at(&approvals, "t", &kept).unwrap();
+        for rel in ["screenshots/a.png", "screenshots/b.JPEG", "CHANGELOG.md", "README.md", "preview.png"] {
+            write(&dir, rel, "x");
+            assert!(trusted_at(&t, "t", &approvals), "{rel}");
+        }
+        for rel in ["screenshots/x.luau", "screenshots/a.svg", "Screenshots/y.luau", "\u{17f}creenshots/z.luau"] {
+            write(&dir, rel, "return 1");
+            assert!(!trusted_at(&t, "t", &approvals), "{rel} asks");
+            assert!(approved_at(&approvals, "t", &kept), "{rel}: the record stays");
+            compose(&t, "t", &BTreeSet::new(), false).unwrap();
+            assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
+            std::fs::remove_file(dir.join(rel)).unwrap();
+            assert!(trusted_at(&t, "t", &approvals), "{rel} gone");
+        }
+    }
+
     /// A path Windows could open as another file by its short name is never
     /// laid down, on any system. A template kept with one runs without it and
     /// isn't asked about again; one byte of that file different asks, as ever.
