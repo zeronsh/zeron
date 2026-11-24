@@ -1,9 +1,10 @@
 -- Settings → Activity: the Activity sidebar, and how it behaves. The view
 -- itself (the sidebar's "…" turns it on too), whether working chats fold
 -- into Working, what Sleep does, and how long a chat may sit idle before
--- it's archived. Everything after the view's own switch applies only while
--- it's on, so it's dimmed and out of reach while it's off. All of it is
--- this device's (screens/shell/activity).
+-- it's archived. The list rows after the view's own switch apply only while
+-- it's on, so they're dimmed and out of reach while it's off; the archive
+-- row is the exception, applying in every sidebar view. All of it is this
+-- device's (screens/shell/activity).
 
 local ds = require("@ds")
 local search = require("@app/screens/settings/search")
@@ -87,7 +88,7 @@ function M.view(): Node
 		ds.Settings.Section {
 			title = ui.t("settings.activity.archive_section"),
 			ds.Settings.Group {
-				while_on("archive_after", {
+				row("archive_after", {
 					label = ui.t("settings.activity.archive_after.label"),
 					description = ui.t("settings.activity.archive_after.description"),
 					control = ds.Select {

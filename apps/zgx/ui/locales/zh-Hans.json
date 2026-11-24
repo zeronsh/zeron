@@ -494,7 +494,10 @@
         "projects_first": "项目优先",
         "empty_projects": "空项目",
         "activity": "动态",
-        "activity_settings": "动态设置…"
+        "activity_settings": "动态设置…",
+        "archive_after": "归档闲置会话",
+        "archive_never": "从不",
+        "archive_days": "{n, plural, other {# 天后}}"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
@@ -2349,7 +2352,7 @@
       "archive_section": "归档",
       "archive_after": {
         "label": "归档闲置会话",
-        "description": "在这段时间内没有新动态的会话会移入“已归档”。已置顶、进行中、休眠以及等待你处理的会话不受影响。",
+        "description": "在这段时间内没有新动态的会话会在所有侧边栏视图中移入“已归档”。已置顶、进行中、休眠以及等待你处理的会话不受影响。",
         "terms": "自动 归档 闲置 旧 清理",
         "never": "从不",
         "days": "{n, plural, other {# 天后}}"

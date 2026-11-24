@@ -12,7 +12,7 @@
 -- Cheap by design: nothing here runs on a session's change but what the
 -- sidebar reads (`shelf`, `rank`); its one timer ticks once a minute and
 -- does work only while a chat is asleep (its countdown) or auto-archive is
--- on (its sweep).
+-- on (its sweep, which runs in every sidebar view, not only this one).
 --
 --   activity.on                 the view (a persisted boolean)
 --   activity.working_shelf      chats under way fold into Working
@@ -204,8 +204,8 @@ local function sweep()
 		back:set(came_back)
 	end
 	-- (The first sweep after a launch only looks: what came back meanwhile
-	-- is unknown until the next. Turned off, it only looks too.)
-	if not was or not M.on:peek() or type(days) ~= "number" or days <= 0 then
+	-- is unknown until the next. Set to never, it only looks too.)
+	if not was or type(days) ~= "number" or days <= 0 then
 		return
 	end
 	local pinned: { [string]: boolean } = {}
@@ -235,8 +235,9 @@ end
 -- effect (an effect owns the timers it arms, and every run of one would
 -- cancel and restart it: a busy minute of session changes would starve it).
 -- Each tick does something only while something reads it: a sleeper's
--- countdown moves while one is asleep, and the sweep runs while
--- auto-archive is on. A reload numbers the beat anew; the old one stops.
+-- countdown moves while one is asleep (in the Activity view), and the sweep
+-- runs in every view (it does nothing while auto-archive is never). A
+-- reload numbers the beat anew; the old one stops.
 local beat_gen = ui.state("activity_beat_gen", 0)
 beat_gen:set(beat_gen:peek() + 1)
 local my_beat = beat_gen:peek()
@@ -252,8 +253,8 @@ local function beat()
 					break
 				end
 			end
-			sweep()
 		end
+		sweep()
 		beat()
 	end)
 end

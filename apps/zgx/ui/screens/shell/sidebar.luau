@@ -1606,6 +1606,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_activity_settings = function()
 			route.settings("activity")
 		end,
+		archive_after = activity.archive_after,
+		archive_choices = activity.ARCHIVE_AFTER,
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)
 		end,
