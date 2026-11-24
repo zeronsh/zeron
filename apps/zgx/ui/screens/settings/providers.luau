@@ -191,6 +191,9 @@ end
 
 -- Which agent's settings are open (none: "").
 local open_settings = ui.state("settings_agent_open", "")
+-- The agent its dialog shows: the one opened last, kept while the dialog
+-- leaves, so nothing in it changes (and is all drawn again) as it fades.
+local shown_settings = ui.state("settings_agent_shown", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
@@ -428,6 +431,7 @@ local function card(row: State<agents.Agent>): Node
 			load_subagents()
 			load_code_modes()
 			load_zeron_only()
+			shown_settings:set(id)
 			open_settings:set(id)
 		end,
 		on_add = function()
@@ -642,7 +646,7 @@ local dialog_open = ui.computed(function(): boolean
 	return open_settings:get() ~= ""
 end)
 local function agent(): agents.Agent?
-	local id = open_settings:get()
+	local id = shown_settings:get()
 	for _, a in now().list do
 		if a.id == id then
 			return a
