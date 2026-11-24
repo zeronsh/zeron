@@ -6,7 +6,8 @@
 //! and read by the app too, before it lays any template's code down (a launch
 //! with no engine among them). It fails closed: a file that's there and can't
 //! be read, or an entry of it, blocks every template that came from the store
-//! or from one that did.
+//! or from one that did. So does one that's gone: it's written before the
+//! first of those is installed.
 //!
 //! A template is known by what its record says (`.imported.json`: the store's
 //! id and the version), never by its folder's name, and by its lineage
@@ -14,8 +15,8 @@
 //! too). What it holds now doesn't matter: an edit lifts nothing.
 //!
 //! One that couldn't be written is held to while this engine runs, and said
-//! of its row; the app's own record beside what you allowed, kept once a row
-//! said so, covers a launch before it's written.
+//! of its row. The app reads the file (and its own copy of it): until it's
+//! written, this engine's refusals are all that's sure to hold it.
 //!
 //! An entry is kept while something here is it, and 30 days besides: so long
 //! a file or a link with that package (its content `hash`) isn't imported.
@@ -107,11 +108,33 @@ impl Block {
     }
 }
 
-/// Whether the file isn't there at all. Written at the first full check that
-/// is kept (`[]` when nothing is down), so from then on it being gone means
-/// it was taken away: the list starts over, never from the next event alone.
-pub fn missing(dir: &Path) -> bool {
+/// Whether the file isn't there at all. It's written before the first
+/// template from the store is installed (`begin`), so gone with one here it
+/// was lost: what it said isn't known, as when it can't be read (`read`).
+fn missing(dir: &Path) -> bool {
     std::fs::symlink_metadata(dir.join(FILE)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Whether the list is gone, and something here came from the store.
+fn lost(dir: &Path) -> bool {
+    missing(dir) && !all_identities(dir).is_empty()
+}
+
+/// Whether what's blocked isn't known, and a whole answer from the store
+/// would say: the feed starts over for one.
+pub fn wanted(dir: &Path) -> bool {
+    let found = installed(dir);
+    read(dir).is_err() && !found.is_empty() && found.iter().all(|(_, f)| f.is_ok())
+}
+
+/// Write the list, empty, before the first template from the store is
+/// installed.
+pub fn begin(dir: &Path) -> Result<(), String> {
+    let _held = changing();
+    if !missing(dir) || lost(dir) {
+        return Ok(());
+    }
+    write(dir, with_unwritten(dir, Vec::new()))
 }
 
 /// Take-downs that couldn't be written (a full disk, a folder made
@@ -132,8 +155,12 @@ fn with_unwritten(dir: &Path, mut blocks: Vec<Block>) -> Vec<Block> {
     blocks
 }
 
-/// What's blocked here; none when there's never been a take-down.
+/// What's blocked here; none when there's never been a take-down. A list
+/// that's gone can't be read, with something here from the store.
 pub fn read(dir: &Path) -> Result<Vec<Block>, Unreadable> {
+    if lost(dir) {
+        return Err(Unreadable);
+    }
     read_file(dir).map(|blocks| with_unwritten(dir, blocks))
 }
 
@@ -239,7 +266,7 @@ pub fn refuse_package(dir: &Path, content_hash: &str, identity: Option<&Identity
     // With nothing here for it to block, one that can't be read is started
     // again: else nothing would ever be imported.
     if read(dir).is_err() && installed(dir).is_empty() {
-        let _ = settle(dir, &[], Vec::new(), 0);
+        let _ = settle(dir, &[], Vec::new(), true, 0);
     }
     let blocks = read(dir).map_err(|_| super::install::failure(TAKEN_DOWN, "Zeron can't read which templates have been taken down from the store, so it isn't installing any"))?;
     let hit = blocks.iter().find(|b| b.hash.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(content_hash)) || identity.is_some_and(|i| b.is(i)));
@@ -316,6 +343,9 @@ fn hold_to(dir: &Path, blocks: Vec<Block>) {
 }
 
 fn apply_held(dir: &Path, changes: Vec<Change>, now: i64) -> Result<(), String> {
+    if lost(dir) {
+        return Err("The list of what's been taken down is gone".into());
+    }
     let before = read_file(dir).map_err(|_| "What's been taken down can't be read".to_string())?;
     let mut blocks = with_unwritten(dir, before.clone());
     for change in changes {
@@ -328,28 +358,54 @@ fn apply_held(dir: &Path, changes: Vec<Change>, now: i64) -> Result<(), String> 
         }
     }
     let kept = kept(dir, blocks, now);
-    if kept == before { Ok(()) } else { write(dir, kept) }
+    if kept == before {
+        // (The file says it all: nothing is left to hold to.)
+        unwritten().remove(dir);
+        return Ok(());
+    }
+    write(dir, kept)
 }
 
-/// What the full check said: `asked` (everything it was asked about and
-/// answered), of which `blocks` are down. Those asked about are exactly as it
-/// says; any other entry stays until it's past keeping. Whatever couldn't be
-/// read before is replaced. (Nothing of the feed's is applied between the
-/// question and this: `Plugins::template_checks`.)
-pub fn settle(dir: &Path, asked: &[Identity], blocks: Vec<Block>, now: i64) -> Result<(), String> {
+/// What a check said: `asked` (everything it asked about and was answered
+/// about), of which `blocks` are down. Only a whole answer (`whole`, and about
+/// everything here now) lifts anything, or makes a list that's gone or can't
+/// be read good again; any other adds what it says is down to a list that
+/// reads, and no more: what it can't add is held to while this engine runs.
+/// Nor is a list that's gone or can't be read made good while something here
+/// can't be read either: it may be anything the list said. Those a whole
+/// answer was asked about are exactly as it says; any other entry stays until
+/// it's past keeping. Whether the answer was whole. (Nothing of the feed's is
+/// applied between the question and this: `Plugins::template_checks`.)
+pub fn settle(dir: &Path, asked: &[Identity], blocks: Vec<Block>, whole: bool, now: i64) -> Result<bool, String> {
     let _held = changing();
     let before = read_file(dir);
-    let mut all: Vec<Block> = with_unwritten(dir, before.clone().unwrap_or_default());
+    let reads = before.is_ok() && !missing(dir);
+    let found = installed(dir);
+    let whole = whole && found.iter().filter_map(|(_, f)| f.as_ref().ok()).flatten().all(|i| asked.contains(i));
+    if !reads && (!whole || found.iter().any(|(_, f)| f.is_err())) {
+        hold_to(dir, blocks);
+        return Ok(whole);
+    }
+    let mut entries: Vec<Block> = with_unwritten(dir, before.clone().unwrap_or_default());
     // (One already known keeps when it was learned of, and its hash.)
-    let blocks = blocks.into_iter().map(|b| match all.iter().find(|k| k.id == b.id && same_version(&k.version, &b.version)) {
+    let blocks = blocks.into_iter().map(|b| match entries.iter().find(|k| k.id == b.id && same_version(&k.version, &b.version)) {
         Some(known) => Block { at: known.at, hash: b.hash.or_else(|| known.hash.clone()), ..b },
         None => b,
     });
     let blocks: Vec<Block> = blocks.collect();
-    all.retain(|b| !asked.iter().any(|i| b.is(i)));
-    all.extend(blocks.iter().cloned());
-    let kept = kept(dir, all, now);
-    if before == Ok(kept.clone()) && !missing(dir) { Ok(()) } else { write(dir, kept).inspect_err(|_| hold_to(dir, blocks)) }
+    if whole {
+        entries.retain(|b| !asked.iter().any(|i| b.is(i)));
+        entries.extend(blocks.iter().cloned());
+    } else {
+        let new = blocks.iter().filter(|b| !entries.iter().any(|k| k.id == b.id && same_version(&k.version, &b.version)));
+        entries.extend(new.cloned().collect::<Vec<_>>());
+    }
+    let kept = kept(dir, entries, now);
+    if reads && before == Ok(kept.clone()) {
+        unwritten().remove(dir);
+        return Ok(whole);
+    }
+    write(dir, kept).inspect_err(|_| hold_to(dir, blocks)).map(|()| whole)
 }
 
 /// `blocks` without those past keeping: 30 days old, and nothing here is one.
@@ -406,6 +462,7 @@ mod tests {
         let second = template(dir, "second", None);
         keep_lineage(&second, &identities(&copy).unwrap()).unwrap();
         let other = template(dir, "other", Some(record("midnight", "1.1.0")));
+        settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap();
         for t in [&store, &named_so, &from_file, &copy, &second, &other] {
             assert_eq!(blocked(dir, t), None, "never had a take-down");
         }
@@ -434,6 +491,10 @@ mod tests {
         std::fs::write(broken.join(".imported.json"), "nope").unwrap();
         let lineage = template(dir, "lineage", None);
         std::fs::write(lineage.join(LINEAGE), "{}").unwrap();
+        // Gone, with one from the store here: lost.
+        assert!(blocked(dir, &store).is_some() && blocked(dir, &broken).is_some() && blocked(dir, &mine).is_none());
+        assert!(refuse_package(dir, "00", None).is_err() && apply(dir, Vec::new(), NOW).is_err() && !wanted(dir));
+        write(dir, Vec::new()).unwrap();
         assert_eq!((blocked(dir, &store), blocked(dir, &broken), blocked(dir, &lineage)), (None, None, None), "no take-down ever");
         // One listed, of something else: only what can't be told is blocked.
         apply(dir, vec![Change::TakenDown(block("z", "1.0.0", NOW))], NOW).unwrap();
@@ -454,7 +515,12 @@ mod tests {
         std::fs::remove_dir(dir.join(FILE)).unwrap();
         // The full check's word replaces what couldn't be read.
         std::fs::write(dir.join(FILE), "nope").unwrap();
-        settle(dir, &all_identities(dir), Vec::new(), NOW).unwrap();
+        // (Not while something here may be anything it said.)
+        assert_eq!(settle(dir, &all_identities(dir), Vec::new(), true, NOW), Ok(true));
+        assert!(read(dir).is_err() && blocked(dir, &store).is_some() && blocked(dir, &broken).is_some());
+        std::fs::remove_dir_all(&broken).unwrap();
+        std::fs::remove_dir_all(&lineage).unwrap();
+        assert_eq!(settle(dir, &all_identities(dir), Vec::new(), true, NOW), Ok(true));
         assert_eq!((read(dir), blocked(dir, &store)), (Ok(Vec::new()), None));
     }
 
@@ -501,22 +567,171 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let t = template(dir, "aa", Some(record("aa", "1.0.0")));
+        settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap();
         let mode = |mode| std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
         mode(0o555);
         assert!(apply(dir, vec![Change::TakenDown(block("aa", "1.0.0", NOW))], NOW).is_err());
-        assert!(!dir.join(FILE).exists() && blocked(dir, &t).is_some());
+        assert!(read_file(dir) == Ok(Vec::new()) && blocked(dir, &t).is_some());
         mode(0o755);
         apply(dir, vec![Change::TakenDown(block("bb", "1.0.0", NOW))], NOW).unwrap();
         assert_eq!(read_file(dir).unwrap().len(), 2, "both are written");
         // So does the full check's.
         mode(0o555);
-        assert!(settle(dir, &[], vec![block("cc", "1.0.0", NOW)], NOW).is_err());
+        assert!(settle(dir, &all_identities(dir), vec![block("cc", "1.0.0", NOW)], true, NOW).is_err());
         assert!(read(dir).unwrap().iter().any(|b| b.id == "cc"));
+        assert!(settle(dir, &[], vec![block("dd", "1.0.0", NOW)], false, NOW).is_err());
+        assert!(read(dir).unwrap().iter().any(|b| b.id == "dd"));
         assert!(apply(dir, vec![Change::Restored("aa".into(), "1.0.0".into())], NOW).is_err());
         assert!(blocked(dir, &t).is_some());
         mode(0o755);
         apply(dir, vec![Change::Restored("aa".into(), "1.0.0".into())], NOW).unwrap();
         assert!(blocked(dir, &t).is_none());
+    }
+
+    /// Only a whole answer lifts anything, or makes a list that's gone or
+    /// can't be read good again; the feed doesn't either. Any other leaves it
+    /// byte for byte as it is, but for adding what it says is down to one
+    /// that reads.
+    #[test]
+    fn only_a_whole_answer_lifts_or_repairs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (a, b) = (template(dir, "aa", Some(record("aa", "1.0.0"))), template(dir, "bb", Some(record("bb", "1.0.0"))));
+        let all = all_identities(dir);
+        let only_b: Vec<Identity> = all.iter().filter(|i| i.id == "bb").cloned().collect();
+        settle(dir, &all, vec![block("aa", "1.0.0", NOW)], true, NOW).unwrap();
+        let whole = std::fs::read(dir.join(FILE)).unwrap();
+        let states: [(&str, Option<Vec<u8>>); 4] =
+            [("there", Some(whole.clone())), ("gone", None), ("unreadable", Some(b"nope".to_vec())), ("cut short", Some(whole[..whole.len() / 2].to_vec()))];
+        for (state, bytes) in states {
+            unwritten().remove(dir);
+            let put = || match &bytes {
+                Some(bytes) => std::fs::write(dir.join(FILE), bytes).unwrap(),
+                None => std::fs::remove_file(dir.join(FILE)).unwrap_or(()),
+            };
+            let same = || std::fs::read(dir.join(FILE)).ok() == bytes;
+            put();
+            // Offline; answered about one of two; and that everything asked
+            // about was, when more is here by now.
+            assert_eq!(settle(dir, &[], Vec::new(), false, NOW), Ok(false), "{state}");
+            assert_eq!(settle(dir, &only_b, Vec::new(), false, NOW), Ok(false), "{state}");
+            assert_eq!(settle(dir, &only_b, Vec::new(), true, NOW), Ok(false), "{state}");
+            assert!(same(), "{state}");
+            assert!(blocked(dir, &a).is_some(), "{state}: nothing lifted");
+            assert_eq!(blocked(dir, &b).is_some(), state != "there", "{state}: nor refused");
+            assert_eq!(wanted(dir), state != "there", "{state}");
+            assert_eq!(settle(dir, &only_b, vec![block("bb", "1.0.0", NOW)], false, NOW), Ok(false), "{state}");
+            assert!(blocked(dir, &b).is_some(), "{state}");
+            let ids: Vec<String> = read_file(dir).unwrap_or_default().into_iter().map(|b| b.id).collect();
+            match state {
+                "there" => assert_eq!(ids, ["aa", "bb"], "added, and nothing lifted"),
+                _ => assert!(same(), "{state}: held to"),
+            }
+            unwritten().remove(dir);
+            assert!(blocked(dir, &b).is_some(), "{state}: across a restart");
+            // (Said again: nothing to add.)
+            let written = std::fs::read(dir.join(FILE)).ok();
+            assert_eq!(settle(dir, &only_b, vec![block("bb", "1.0.0", NOW + 9)], false, NOW), Ok(false), "{state}");
+            assert_eq!(std::fs::read(dir.join(FILE)).ok(), written, "{state}");
+            if state != "there" {
+                assert!(apply(dir, vec![Change::TakenDown(block("cc", "1.0.0", NOW))], NOW).is_err(), "{state}");
+                assert!(same(), "{state}: not from an event");
+            }
+            assert_eq!(settle(dir, &all, vec![block("aa", "1.0.0", NOW)], true, NOW), Ok(true), "{state}");
+            assert!(read_file(dir).is_ok_and(|l| l.iter().any(|b| b.id == "aa")), "{state}");
+            assert!(blocked(dir, &a).is_some() && blocked(dir, &b).is_none(), "{state}");
+        }
+        // Written beside it and moved over it: what a write that was cut off
+        // left is nobody's list, and the one there is whole.
+        std::fs::write(dir.join(format!("{FILE}.tmp-1")), &whole[..10]).unwrap();
+        let before = std::fs::read(dir.join(FILE)).unwrap();
+        let beside = dir.join(format!("{FILE}.tmp-{}", std::process::id()));
+        std::fs::create_dir(&beside).unwrap();
+        assert!(settle(dir, &all, Vec::new(), true, NOW).is_err());
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), before);
+        assert!(blocked(dir, &a).is_some() && blocked(dir, &b).is_none() && all_identities(dir) == all);
+    }
+
+    /// What a partial answer couldn't add is held to: the template gone since,
+    /// its package is refused all the same. And an answer that wasn't whole
+    /// repairs nothing, though nothing it wasn't about is here any more.
+    #[test]
+    fn what_a_partial_answer_could_not_add_is_held_to() {
+        for lost in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let t = template(dir, "aa", Some(record("aa", "1.0.0")));
+            if !lost {
+                std::fs::write(dir.join(FILE), "nope").unwrap();
+            }
+            assert_eq!(settle(dir, &[], vec![block("aa", "1.0.0", NOW)], false, NOW), Ok(false));
+            std::fs::remove_dir_all(t).unwrap();
+            assert_eq!(settle(dir, &[], Vec::new(), false, NOW), Ok(false));
+            assert_eq!(std::fs::read(dir.join(FILE)).ok(), (!lost).then(|| b"nope".to_vec()));
+            assert!(refuse_package(dir, &"ab".repeat(32), None).is_err(), "gone: {lost}");
+            begin(dir).unwrap();
+            assert_eq!(read_file(dir).unwrap().len(), 1, "and written with the list, when one's begun");
+        }
+    }
+
+    /// With only what can't be asked about here, there's no whole answer to
+    /// wait for: the feed's take-downs are kept, and block it.
+    #[test]
+    fn a_list_with_nothing_to_ask_about_starts_by_the_feed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let broken = template(dir, "broken", None);
+        std::fs::write(broken.join(LINEAGE), "nope").unwrap();
+        assert!(missing(dir) && blocked(dir, &broken).is_none() && !wanted(dir));
+        apply(dir, vec![Change::TakenDown(block("z", "1.0.0", NOW))], NOW).unwrap();
+        assert!(blocked(dir, &broken).is_some());
+    }
+
+    /// The list is there before the first from the store is, and one that's
+    /// lost isn't begun again by the next.
+    #[test]
+    fn the_list_is_begun_before_the_first_from_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        template(dir, "mine", None);
+        std::fs::write(template(dir, "broken", None).join(LINEAGE), "nope").unwrap();
+        begin(dir).unwrap();
+        assert_eq!(read_file(dir), Ok(Vec::new()));
+        assert!(!missing(dir));
+        apply(dir, vec![Change::TakenDown(block("z", "1.0.0", NOW))], NOW).unwrap();
+        begin(dir).unwrap();
+        assert_eq!(read(dir).unwrap().len(), 1, "one that's there stays");
+        let t = template(dir, "aa", Some(record("aa", "1.0.0")));
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        begin(dir).unwrap();
+        assert!(missing(dir) && blocked(dir, &t).is_some());
+        std::fs::write(dir.join(FILE), "nope").unwrap();
+        begin(dir).unwrap();
+        assert!(read_file(dir).is_err());
+    }
+
+    /// What was held to unwritten is let go of with what lifts it, though the
+    /// file never had it and so has nothing to change.
+    #[cfg(unix)]
+    #[test]
+    fn what_was_held_to_goes_with_what_lifts_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for by_feed in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let t = template(dir, "aa", Some(record("aa", "1.0.0")));
+            settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap();
+            let mode = |mode| std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            mode(0o555);
+            assert!(apply(dir, vec![Change::TakenDown(block("aa", "1.0.0", NOW))], NOW).is_err());
+            mode(0o755);
+            assert!(blocked(dir, &t).is_some());
+            match by_feed {
+                true => apply(dir, vec![Change::Restored("aa".into(), "1.0.0".into())], NOW).unwrap(),
+                false => assert!(settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap()),
+            }
+            assert!(blocked(dir, &t).is_none(), "by the feed: {by_feed}");
+        }
     }
 
     /// An entry stays while something here is it, and 30 days besides.
@@ -526,6 +741,7 @@ mod tests {
         let dir = tmp.path();
         template(dir, "aa", Some(record("aa", "1.0.0")));
         let past = NOW - KEEP_SECS - 1;
+        settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap();
         apply(dir, vec![Change::TakenDown(block("aa", "1.0.0", past)), Change::TakenDown(block("gone", "1.0.0", past)), Change::TakenDown(block("fresh", "1.0.0", NOW))], NOW).unwrap();
         let ids = || read(dir).unwrap().into_iter().map(|b| b.id).collect::<Vec<_>>();
         assert_eq!(ids(), ["aa", "fresh"]);
@@ -533,11 +749,11 @@ mod tests {
         assert!(refuse_package(dir, "00", Some(&Identity { id: "fresh".into(), version: "1.0.0".into(), hash: "00".into() })).is_err());
         assert!(refuse_package(dir, "00", Some(&Identity { id: "fresh".into(), version: "1.0.1".into(), hash: "00".into() })).is_ok());
         // The full check lifts only what it was asked about.
-        settle(dir, &all_identities(dir), Vec::new(), NOW).unwrap();
+        settle(dir, &all_identities(dir), Vec::new(), true, NOW).unwrap();
         assert_eq!(ids(), ["fresh"]);
         // And keeps when one was learned of, and its hash.
         apply(dir, vec![Change::TakenDown(block("aa", "1.0.0", NOW - 5))], NOW).unwrap();
-        settle(dir, &all_identities(dir), vec![Block { hash: None, at: NOW, ..block("aa", "1.0.0", NOW) }], NOW).unwrap();
+        settle(dir, &all_identities(dir), vec![Block { hash: None, at: NOW, ..block("aa", "1.0.0", NOW) }], true, NOW).unwrap();
         let a = read(dir).unwrap().into_iter().find(|b| b.id == "aa").unwrap();
         assert_eq!((a.at, a.hash.is_some()), (NOW - 5, true));
         // Something unreadable here may be any of them: nothing is dropped.

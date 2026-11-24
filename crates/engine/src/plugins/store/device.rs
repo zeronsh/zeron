@@ -1028,17 +1028,17 @@ impl Plugins {
     pub async fn check_takedowns(&self) {
         self.rescan().await;
         let templates_dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
-        let has_templates = {
+        let (has_templates, lost) = {
             let dir = templates_dir.clone();
-            tokio::task::spawn_blocking(move || !template_blocks::installed(&dir).is_empty()).await.unwrap_or(true)
+            tokio::task::spawn_blocking(move || (!template_blocks::installed(&dir).is_empty(), template_blocks::wanted(&dir))).await.unwrap_or((true, true))
         };
         if self.store_candidates(None).is_empty() && !has_templates {
             return;
         }
         let Ok((client, caller)) = self.store_reader() else { return };
         let mut after = lock(&self.inner.state).takedowns_after;
-        // The list of templates' taken away since: it starts over, whole.
-        if has_templates && after.is_some() && template_blocks::missing(&templates_dir) {
+        // What's blocked of templates is lost: it starts over, whole.
+        if lost {
             after = None;
         }
         // (At most a few pages a check; the next one carries on.)
@@ -1190,7 +1190,7 @@ impl Plugins {
 
     /// Run `change` (to what's blocked of templates), then tell you of each
     /// template here it newly blocks.
-    async fn changing_blocks(&self, change: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<(), String> {
+    async fn changing_blocks<T: Send + 'static>(&self, change: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
         let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
         let (changed, newly) = tokio::task::spawn_blocking(move || {
             let blocked = || -> BTreeMap<String, template_blocks::Block> {
@@ -1358,12 +1358,12 @@ impl Plugins {
             }
         }
         if held.is_some() {
-            let all = settled.len() == templates.len();
+            let whole = settled.len() == templates.len();
             let dir = templates_dir.clone();
-            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, now_secs())).await {
-                Ok(()) => {
-                    check.templates_settled = all;
-                    if !all {
+            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await {
+                Ok(whole) => {
+                    check.templates_settled = whole;
+                    if !whole {
                         tracing::warn!(asked = templates.len(), "store: not every template here was answered about");
                     }
                 }

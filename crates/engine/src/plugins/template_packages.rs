@@ -417,6 +417,9 @@ fn free_id(dir: &Path, want: &str) -> Result<String, String> {
 /// free one beside it).
 fn install(dir: &Path, package: &Package, author: &Author, source: Option<&Source>) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make the templates folder: {e}"))?;
+    if source.is_some_and(|s| s.store().is_some()) {
+        super::template_blocks::begin(dir).map_err(|e| format!("Couldn't keep what's been taken down from the store: {e}"))?;
+    }
     let id = free_id(dir, &package.id())?;
     let tmp = write_folder(dir, &id, package, author, source)?;
     if let Err(error) = std::fs::rename(&tmp, dir.join(&id)) {
@@ -1120,8 +1123,11 @@ mod tests {
             assert!(!d.join("midnight").exists());
         }
         let (pending, shown) = wait(&source(record(&hash, "midnight")));
+        assert!(!d.join(super::super::template_blocks::FILE).exists());
         let done = decide(&d, &pending, true, &shown, nobody).unwrap();
         assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("ada")), "{done}");
+        // (What's been taken down is kept from before it: it isn't blocked.)
+        assert!(super::super::template_blocks::read(&d).is_ok_and(|b| b.is_empty()));
         let t = d.join("midnight");
         let kept = imported(&t).unwrap();
         assert!(kept["key"].is_null() && has_record(&t), "{kept}");
