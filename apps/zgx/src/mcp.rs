@@ -399,6 +399,28 @@ pub fn install(host: &ScriptHost) {
         }
     });
 
+    // The person's answer to what an agent asked (only this app can give
+    // it: the engine refuses it from an agent's token or another device).
+    let m = mcp.clone();
+    host.async_action("mcp.resolve_request", move |args| {
+        let m = m.clone();
+        let id = args.field("id").map(|v| text(&v)).unwrap_or_default();
+        let approve = matches!(args.field("approve"), Some(Value::Bool(true)));
+        async move {
+            crate::plugins::preview::refuse("mcp.resolve_request")?;
+            let reply = engine::get()
+                .call("ResolveMcpRequest", json!({ "id": id, "approve": approve }))
+                .await?;
+            // (The list as it now stands, the server it made with it.)
+            if let Ok(snapshot) = engine::get().call("ListMcpServers", json!({})).await
+                && snapshot.is_object()
+            {
+                m.take_snapshot(snapshot);
+            }
+            Ok(json_value(&reply))
+        }
+    });
+
     let m = mcp.clone();
     host.async_action("mcp.disconnect_auth", move |args| {
         let m = m.clone();
@@ -715,11 +737,20 @@ mod tests {
                 }
             ],
             "clientRedirectUri": "http://localhost:38417/callback",
+            "requests": [{
+                "id": "req-1",
+                "action": "add",
+                "preset": "context7",
+                "reason": "to read the React docs",
+                "title": "Context7",
+                "status": "pending",
+                "createdAt": 1700000003,
+            }],
         });
         let snapshot_for_host = snapshot.clone();
         let mut app = TestApp::new(move |runtime| {
             let host = crate::plugins::lend_design_system(ScriptHost::new(runtime, path.clone()), &path);
-            host.shared("zgx.window.size", zgx_script::window_size_value(1200., 800.));
+            host.shared("zgx.window.size", zgx_script::window_size_value(1200., 1200.));
             host.shared("mcp.servers", json_value(&snapshot_for_host));
             host.shared("mcp.auth", json_value(&json!({})));
             for name in [
@@ -730,13 +761,14 @@ mod tests {
                 "mcp.start_auth",
                 "mcp.cancel_auth",
                 "mcp.disconnect_auth",
+                "mcp.resolve_request",
             ] {
                 host.async_action(name, |_| async { Ok(Value::Nil) });
             }
             host
         });
         assert_eq!(app.error(), None);
-        app.ui.scene.borrow_mut().resize(1200., 800.);
+        app.ui.scene.borrow_mut().resize(1200., 1200.);
         app.frames(20);
         app.host.run_command("shell.settings");
         app.frames(20);
@@ -746,6 +778,14 @@ mod tests {
 
         let texts = app.texts();
         assert!(texts.iter().any(|t| t == "Your servers"), "missing servers section: {texts:?}");
+        // What an agent asked for, waiting for the person.
+        assert!(texts.iter().any(|t| t == "Waiting for you"), "missing requests: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Add Context7"), "missing request: {texts:?}");
+        assert!(
+            texts.iter().any(|t| t == "An agent asked: “to read the React docs”"),
+            "missing who and why: {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Allow") && texts.iter().any(|t| t == "Decline"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "Linear"), "missing configured server Linear: {texts:?}");
         // Two accounts of Linear, each with its name beside the service's.
         assert!(texts.iter().any(|t| t == "Work"), "missing account Work: {texts:?}");

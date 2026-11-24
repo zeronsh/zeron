@@ -16,6 +16,7 @@ pub mod gateway;
 pub mod local_store;
 pub mod oauth;
 pub mod presets;
+mod requests;
 pub mod vault_client;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -74,6 +75,9 @@ pub fn handles(method: &str) -> bool {
             | methods::CANCEL_MCP_AUTH
             | methods::DISCONNECT_MCP_AUTH
             | methods::REFRESH_MCP_SERVERS
+            | methods::REQUEST_MCP_CHANGE
+            | methods::GET_MCP_REQUEST
+            | methods::RESOLVE_MCP_REQUEST
     )
 }
 
@@ -137,6 +141,8 @@ pub struct McpServers {
     vault_listed_at: Mutex<Option<Instant>>,
     /// One listing at a time for runs starting together.
     run_refresh: tokio::sync::Mutex<()>,
+    /// Changes agents asked for, waiting for the person here (`requests`).
+    requests: Mutex<Vec<zeron_proto::McpRequestView>>,
 }
 
 impl McpServers {
@@ -201,6 +207,7 @@ impl McpServers {
             snapshot_tx,
             vault_listed_at: Mutex::new(None),
             run_refresh: tokio::sync::Mutex::new(()),
+            requests: Mutex::new(Vec::new()),
         });
 
         manager.publish_snapshot();
@@ -240,6 +247,7 @@ impl McpServers {
             snapshot_tx,
             vault_listed_at: Mutex::new(None),
             run_refresh: tokio::sync::Mutex::new(()),
+            requests: Mutex::new(Vec::new()),
         });
         manager.publish_snapshot();
         manager
@@ -452,6 +460,7 @@ impl McpServers {
             presets: self.presets.clone(),
             servers,
             client_redirect_uri: oauth::preregistered_redirect_uri(),
+            requests: lock(&self.requests).clone(),
         }
     }
 
@@ -712,6 +721,24 @@ impl McpServers {
                     .await
                     .map_err(RpcError::Failed)?;
                 to_unary(&snap)
+            }
+            methods::REQUEST_MCP_CHANGE => {
+                let req: zeron_proto::RequestMcpChangeParams = parse_params(params)?;
+                let view = self.request_change(req).await.map_err(RpcError::Failed)?;
+                to_unary(&view)
+            }
+            methods::GET_MCP_REQUEST => {
+                let req: zeron_proto::McpRequestParams = parse_params(params)?;
+                let view = self.get_request(&req.id).map_err(RpcError::Failed)?;
+                to_unary(&view)
+            }
+            methods::RESOLVE_MCP_REQUEST => {
+                let req: zeron_proto::McpRequestParams = parse_params(params)?;
+                let view = self
+                    .resolve_request(&req.id, req.approve)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                to_unary(&view)
             }
             methods::START_MCP_AUTH => {
                 let req: StartMcpAuthRequest = parse_params(params)?;

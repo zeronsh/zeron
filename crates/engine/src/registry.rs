@@ -113,6 +113,9 @@ struct HarnessPrefsFile {
     native_subagents_off: Vec<HarnessId>,
     /// Harnesses the user turned Code Mode on for.
     code_mode_on: Vec<HarnessId>,
+    /// Harnesses the user turned "Only Zeron's MCP servers" on for (off
+    /// until they do).
+    zeron_mcp_only_on: Vec<HarnessId>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -137,6 +140,19 @@ pub struct NativeSubagentSettings {
     pub switchable: Vec<HarnessId>,
     /// The ones turned off: their runs delegate through side chats only.
     pub off: Vec<HarnessId>,
+}
+
+/// Per-device "Only Zeron's MCP servers" preferences (Settings →
+/// Providers): an agent's own MCP servers and connectors hidden for its
+/// runs, so they don't double the servers connected in Zeron. Off until the
+/// person turns it on, per agent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ZeronMcpOnlySettings {
+    /// Registered harnesses that can hide their own MCP servers per run.
+    pub supported: Vec<HarnessId>,
+    /// The ones turned on.
+    pub on: Vec<HarnessId>,
 }
 
 /// Per-device Code Mode preferences (Settings → Providers).
@@ -251,7 +267,14 @@ pub struct HarnessRegistry {
     /// Told of every run's prepared environment (Cloud runner only): it
     /// keeps the account's model catalogs current on the edge.
     catalog_publisher: std::sync::OnceLock<Arc<dyn CatalogPublisher>>,
+    /// Where a Cloud machine reads how the person runs each agent (Cloud
+    /// runner only, [`Self::follow_cloud_choices`]): in place of this
+    /// device's prefs, which a machine made for one chat never has.
+    cloud_choices: std::sync::OnceLock<Box<CloudChoices>>,
 }
+
+/// An agent's choices on Cloud, as the account's registry holds them.
+type CloudChoices = dyn Fn(HarnessId) -> zeron_doc::CloudAgentChoices + Send + Sync;
 
 /// Hears each run's prepared environment (the Cloud runner's catalog
 /// publisher, [`crate::model_publish`]). Must return at once: it is on the
@@ -362,6 +385,7 @@ impl HarnessRegistry {
             account_environment: Mutex::new(None),
             commit_credit: std::sync::OnceLock::new(),
             catalog_publisher: std::sync::OnceLock::new(),
+            cloud_choices: std::sync::OnceLock::new(),
         }
     }
 
@@ -436,6 +460,21 @@ impl HarnessRegistry {
     /// Install the catalog publisher (Cloud runner only; once).
     pub fn set_catalog_publisher(&self, publisher: Arc<dyn CatalogPublisher>) {
         let _ = self.catalog_publisher.set(publisher);
+    }
+
+    /// Run each agent as the person chose for Cloud (`choices`, the account's
+    /// registry rows) rather than as this device's prefs say: a Cloud
+    /// machine's, set once as it starts. Its native subagents, Code Mode and
+    /// "Only Zeron's MCP servers" then follow those rows, and each chat picks
+    /// a change up at its next turn as it would one made here.
+    pub fn follow_cloud_choices(&self, choices: impl Fn(HarnessId) -> zeron_doc::CloudAgentChoices + Send + Sync + 'static) {
+        let _ = self.cloud_choices.set(Box::new(choices));
+    }
+
+    /// One of `id`'s choices where a Cloud machine follows the account's
+    /// (`None` elsewhere: this device's prefs decide).
+    fn cloud_choice(&self, id: HarnessId, choice: zeron_doc::CloudAgentChoice) -> Option<Option<bool>> {
+        self.cloud_choices.get().map(|choices| choices(id).get(choice))
     }
 
     /// [`RunEnvironment::credential`] (`None` without a provider).
@@ -573,6 +612,22 @@ impl HarnessRegistry {
 
     fn order(&self) -> MutexGuard<'_, Vec<HarnessId>> {
         self.order.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The registered harnesses, in order, with no lock kept (a setting read
+    /// per agent takes the prefs' lock, or a Cloud machine's registry's).
+    fn registered(&self) -> Vec<HarnessId> {
+        self.order().clone()
+    }
+
+    /// The agents a setting's list may name: on a Cloud machine every
+    /// registered one (the account chose for them), elsewhere those this
+    /// device's prefs list, in the order they were chosen.
+    fn chosen_or(&self, prefs: impl FnOnce(&HarnessPrefsFile) -> Vec<HarnessId>) -> Vec<HarnessId> {
+        match self.cloud_choices.get() {
+            Some(_) => self.registered(),
+            None => prefs(&self.prefs()),
+        }
     }
 
     fn prefs(&self) -> MutexGuard<'_, HarnessPrefsFile> {
@@ -714,8 +769,15 @@ impl HarnessRegistry {
     /// Whether runs of `id` keep the provider's own subagent tools. Off only
     /// by the user's choice, for a driver that can launch without them.
     pub fn native_subagents(&self, id: HarnessId) -> bool {
-        !(zeron_harness::switches_native_subagents(id)
-            && self.prefs().native_subagents_off.contains(&id))
+        !(zeron_harness::switches_native_subagents(id) && self.native_subagents_off(id))
+    }
+
+    /// The person turned `id`'s native subagents off (on Cloud, for Cloud).
+    fn native_subagents_off(&self, id: HarnessId) -> bool {
+        match self.cloud_choice(id, zeron_doc::CloudAgentChoice::NativeSubagents) {
+            Some(on) => on == Some(false),
+            None => self.prefs().native_subagents_off.contains(&id),
+        }
     }
 
     pub fn native_subagent_settings(&self) -> NativeSubagentSettings {
@@ -725,7 +787,10 @@ impl HarnessRegistry {
                 .into_iter()
                 .filter(|id| zeron_harness::switches_native_subagents(*id))
                 .collect(),
-            off: self.prefs().native_subagents_off.clone(),
+            off: match self.cloud_choices.get() {
+                Some(_) => self.registered().into_iter().filter(|id| self.native_subagents_off(*id)).collect(),
+                None => self.prefs().native_subagents_off.clone(),
+            },
         }
     }
 
@@ -751,7 +816,11 @@ impl HarnessRegistry {
     /// Whether runs of `id` enable Code Mode on this device. Off by default;
     /// on only by the user's choice for a harness that supports it.
     pub fn code_mode(&self, id: HarnessId) -> bool {
-        zeron_harness::supports_code_mode(id) && self.prefs().code_mode_on.contains(&id)
+        zeron_harness::supports_code_mode(id)
+            && match self.cloud_choice(id, zeron_doc::CloudAgentChoice::CodeMode) {
+                Some(on) => on == Some(true),
+                None => self.prefs().code_mode_on.contains(&id),
+            }
     }
 
     pub fn code_mode_settings(&self) -> CodeModeSettings {
@@ -762,11 +831,9 @@ impl HarnessRegistry {
                 .filter(|id| zeron_harness::supports_code_mode(*id))
                 .collect(),
             enabled: self
-                .prefs()
-                .code_mode_on
-                .iter()
-                .copied()
-                .filter(|id| zeron_harness::supports_code_mode(*id))
+                .chosen_or(|prefs| prefs.code_mode_on.clone())
+                .into_iter()
+                .filter(|id| self.code_mode(*id))
                 .collect(),
         }
     }
@@ -783,6 +850,51 @@ impl HarnessRegistry {
             match (on, prefs.code_mode_on.contains(&id)) {
                 (true, false) => prefs.code_mode_on.push(id),
                 (false, true) => prefs.code_mode_on.retain(|h| *h != id),
+                _ => return Ok(()),
+            }
+        }
+        self.persist_prefs();
+        Ok(())
+    }
+
+    /// Whether runs of `id` get only Zeron's MCP servers on this device:
+    /// off by default, on only by the person's choice for a harness that
+    /// can hide its own.
+    pub fn zeron_mcp_only(&self, id: HarnessId) -> bool {
+        zeron_harness::supports_zeron_mcp_only(id)
+            && match self.cloud_choice(id, zeron_doc::CloudAgentChoice::ZeronMcpOnly) {
+                Some(on) => on == Some(true),
+                None => self.prefs().zeron_mcp_only_on.contains(&id),
+            }
+    }
+
+    pub fn zeron_mcp_only_settings(&self) -> ZeronMcpOnlySettings {
+        let supported: Vec<HarnessId> = self
+            .order()
+            .iter()
+            .copied()
+            .filter(|id| zeron_harness::supports_zeron_mcp_only(*id))
+            .collect();
+        let on = self
+            .chosen_or(|prefs| prefs.zeron_mcp_only_on.clone())
+            .into_iter()
+            .filter(|id| self.zeron_mcp_only(*id))
+            .collect();
+        ZeronMcpOnlySettings { supported, on }
+    }
+
+    /// Turn `id`'s "Only Zeron's MCP servers" on or off and persist. Each
+    /// chat picks the change up as Code Mode's does: at its next turn, once
+    /// its background work is done.
+    pub fn set_zeron_mcp_only(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !zeron_harness::supports_zeron_mcp_only(id) {
+            return Err(format!("{id:?} can't hide its own MCP servers"));
+        }
+        {
+            let mut prefs = self.prefs();
+            match (on, prefs.zeron_mcp_only_on.contains(&id)) {
+                (true, false) => prefs.zeron_mcp_only_on.push(id),
+                (false, true) => prefs.zeron_mcp_only_on.retain(|h| *h != id),
                 _ => return Ok(()),
             }
         }
@@ -862,6 +974,7 @@ impl HarnessRegistry {
             prefs.disabled.retain(|h| *h != id);
             prefs.native_subagents_off.retain(|h| *h != id);
             prefs.code_mode_on.retain(|h| *h != id);
+            prefs.zeron_mcp_only_on.retain(|h| *h != id);
             before
                 != prefs.disabled.len()
                     + prefs.native_subagents_off.len()
@@ -1812,6 +1925,78 @@ mod tests {
         // Only a driver that can launch without them ever runs without them.
         *reloaded.prefs() = serde_json::from_str(r#"{"nativeSubagentsOff":["opencode"]}"#).unwrap();
         assert!(reloaded.native_subagents(HarnessId::Opencode));
+    }
+
+    #[test]
+    fn zeron_mcp_only_is_off_until_turned_on_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Opencode, true);
+
+        // Off for every agent until the person turns it on.
+        assert!(!registry.zeron_mcp_only(HarnessId::Codex));
+        let settings = registry.zeron_mcp_only_settings();
+        assert_eq!(settings.supported, vec![HarnessId::ClaudeCode, HarnessId::Codex]);
+        assert!(settings.on.is_empty());
+
+        // An agent that can't hide its own is refused.
+        assert!(registry.set_zeron_mcp_only(HarnessId::Opencode, true).is_err());
+
+        registry.set_zeron_mcp_only(HarnessId::Codex, true).unwrap();
+        registry.set_zeron_mcp_only(HarnessId::Codex, true).unwrap();
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        test_slot(&reloaded, HarnessId::ClaudeCode, true);
+        test_slot(&reloaded, HarnessId::Codex, true);
+        assert!(reloaded.zeron_mcp_only(HarnessId::Codex));
+        assert!(!reloaded.zeron_mcp_only(HarnessId::ClaudeCode));
+        assert_eq!(reloaded.zeron_mcp_only_settings().on, vec![HarnessId::Codex]);
+
+        reloaded.set_zeron_mcp_only(HarnessId::Codex, false).unwrap();
+        assert!(!reloaded.zeron_mcp_only(HarnessId::Codex));
+
+        // Only a harness that can ever runs with it.
+        *reloaded.prefs() = serde_json::from_str(r#"{"zeronMcpOnlyOn":["opencode"]}"#).unwrap();
+        assert!(!reloaded.zeron_mcp_only(HarnessId::Opencode));
+        assert!(reloaded.zeron_mcp_only_settings().on.is_empty());
+    }
+
+    #[test]
+    fn a_cloud_machine_runs_each_agent_as_chosen_for_cloud_not_as_its_prefs_say() {
+        use zeron_doc::CloudAgentChoices;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        // What the machine's own prefs say (never chosen on a Cloud machine,
+        // but they'd lose to the account's anyway).
+        registry.set_code_mode(HarnessId::Codex, true).unwrap();
+        registry.set_zeron_mcp_only(HarnessId::ClaudeCode, true).unwrap();
+        registry.follow_cloud_choices(|harness| match harness {
+            HarnessId::Codex => CloudAgentChoices {
+                zeron_mcp_only: Some(true),
+                code_mode: Some(false),
+                native_subagents: None,
+            },
+            HarnessId::ClaudeCode => CloudAgentChoices {
+                native_subagents: Some(false),
+                ..Default::default()
+            },
+            // Nothing chosen: as it runs anywhere.
+            _ => CloudAgentChoices::default(),
+        });
+        assert!(registry.zeron_mcp_only(HarnessId::Codex));
+        assert!(!registry.code_mode(HarnessId::Codex));
+        assert!(!registry.zeron_mcp_only(HarnessId::ClaudeCode));
+        assert!(!registry.native_subagents(HarnessId::ClaudeCode));
+        assert!(registry.native_subagents(HarnessId::Codex));
+        assert_eq!(registry.zeron_mcp_only_settings().on, vec![HarnessId::Codex]);
+        assert!(registry.code_mode_settings().enabled.is_empty());
+        assert_eq!(registry.native_subagent_settings().off, vec![HarnessId::ClaudeCode]);
     }
 
     #[test]

@@ -21,6 +21,7 @@ local toast = require("@ds/toast")
 local mcp = require("@account/mcp")
 local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
+local sessions = require("@account/sessions")
 local visits = require("@app/screens/settings/visits")
 
 local M = {}
@@ -29,6 +30,7 @@ M.ID = "mcp"
 M.TITLE = "MCP"
 
 search.index(M.ID, ui.t("settings.mcp.title"), ui.t("settings.mcp.terms"), {
+	{ key = "requests", title = ui.t("settings.mcp.requests.title"), terms = ui.t("settings.mcp.requests.terms") },
 	{ key = "servers", title = ui.t("settings.mcp.servers.title"), terms = ui.t("settings.mcp.servers.terms") },
 	{ key = "add", title = ui.t("settings.mcp.add.title"), terms = ui.t("settings.mcp.add.terms") },
 })
@@ -1888,6 +1890,131 @@ local ServiceCard = ui.component(function(props: { now: State<Service> }): Node
 	}
 end)
 
+-- ── What agents asked for ──────────────────────────────────────────────
+-- An agent can't change the servers: it asks (Zeron MCP's
+-- request_mcp_change), and the request waits here for you. Allowed, it's
+-- done as this page would do it, a sign-in opening as Connect's does.
+
+local function pending_requests(): { mcp.Request }
+	local out: { mcp.Request } = {}
+	for _, r in snapshot().requests or {} do
+		if r.status == "pending" then
+			table.insert(out, r)
+		end
+	end
+	return out
+end
+
+local function request_title(r: mcp.Request): string
+	if r.action == "remove" then
+		return ui.t("settings.mcp.requests.remove", { name = r.title }):get()
+	elseif r.action == "setEnabled" then
+		return ui.t(if r.enabled then "settings.mcp.requests.enable" else "settings.mcp.requests.disable", { name = r.title }):get()
+	end
+	return ui.t("settings.mcp.requests.add", { name = r.title }):get()
+end
+
+-- Who asked, and why, in their words.
+local function request_line(r: mcp.Request): string
+	local chat: any = nil
+	for _, c in sessions.now:get().chats or {} do
+		if c.id == r.chatId then
+			chat = c
+		end
+	end
+	local who = if chat
+		then ui.t("settings.mcp.requests.from_chat", { agent = chat.agent or ui.t("settings.mcp.requests.an_agent"):get(), chat = chat.title }):get()
+		else ui.t("settings.mcp.requests.from_agent"):get()
+	local reason = r.reason
+	return if reason and reason ~= "" then ui.t("settings.mcp.requests.because", { who = who, reason = reason }):get() else who
+end
+
+-- What exactly would run or be reached: shown whole before it's allowed.
+local function request_detail(r: mcp.Request): string?
+	if r.action ~= "add" then
+		return nil
+	end
+	if r.command then
+		return ui.t("settings.mcp.requests.runs", { command = `{r.command} {format_args(r.args)}` }):get()
+	elseif r.url then
+		return r.url
+	end
+	return nil
+end
+
+local function answer(r: mcp.Request, approve: boolean, busy: State<boolean>)
+	if busy:peek() then
+		return
+	end
+	busy:set(true)
+	mcp.resolve_request(r.id, approve):after(function(view: any)
+		busy:set(false)
+		if not approve then
+			return
+		end
+		if type(view) ~= "table" or view.status == "failed" then
+			toast.show {
+				title = ui.t("settings.mcp.requests.couldnt", { name = r.title }),
+				body = friendly(if type(view) == "table" then view.error else nil),
+				tone = "danger",
+			}
+			return
+		end
+		local s = server_by_id(view.serverId)
+		if s and s.authKind == "oauth" and s.status ~= "connected" and s.enabled then
+			sign_in(s.id, nil, #accounts_of(s) > 1)
+		else
+			toast.show { title = ui.t("settings.mcp.requests.done", { name = r.title }), tone = "success" }
+		end
+	end, function(err: any)
+		busy:set(false)
+		toast.show { title = ui.t("settings.mcp.requests.couldnt", { name = r.title }), body = friendly(message_of(err)), tone = "danger" }
+	end)
+end
+
+local RequestRow = ui.component(function(props: { now: State<mcp.Request> }): Node
+	local now = props.now
+	local busy = ui.use_state(false)
+	local first = now:peek()
+	local preset = preset_by_id(first.preset)
+	return ds.Settings.Row {
+		label = function(): string
+			return request_title(now:get())
+		end,
+		description = function(): string
+			return request_line(now:get())
+		end,
+		detail = function(): string?
+			return request_detail(now:get())
+		end,
+		lead = if preset
+			then Logo(preset.icon, preset.name, 32)
+			else ds.ProviderCard.disc(ds.Icon { name = if first.command then "terminal" else "bot", size = 16 }),
+		control = ui.row {
+			gap = "$space.2",
+			items = "center",
+			ds.Button {
+				ui.t("settings.mcp.requests.decline"),
+				tone = "ghost",
+				size = "sm",
+				disabled = busy,
+				on_click = function()
+					answer(now:peek(), false, busy)
+				end,
+			},
+			ds.Button {
+				ui.t("settings.mcp.requests.allow"),
+				tone = "primary",
+				size = "sm",
+				busy = busy,
+				on_click = function()
+					answer(now:peek(), true, busy)
+				end,
+			},
+		},
+	}
+end)
+
 -- The servers, a service's accounts together (the engine's order).
 local function services(): { Service }
 	local out: { Service } = {}
@@ -1946,6 +2073,24 @@ function M.view(): Node
 			open_add()
 		end
 	end)
+
+	local requests = ui.computed(pending_requests)
+	local waiting = search.anchor(
+		"requests",
+		ui.show(function(): boolean
+			return #requests:get() > 0
+		end, ds.Settings.Section {
+			title = ui.t("settings.mcp.requests.title"),
+			description = ui.t("settings.mcp.requests.description"),
+			ds.Settings.Each(requests, function(_r: mcp.Request, _i: number, row: State<mcp.Request>): Node
+				return RequestRow { now = row }
+			end, {
+				key = function(r: mcp.Request): string
+					return r.id
+				end,
+			}),
+		})
+	)
 
 	local yours = search.anchor(
 		"servers",
@@ -2012,6 +2157,7 @@ function M.view(): Node
 				then ui.t("settings.mcp.description_synced"):get()
 				else ui.t("settings.mcp.description_local"):get()
 		end,
+		waiting,
 		yours,
 		add,
 		connect_dialog(),

@@ -127,6 +127,7 @@ pub const BLOCKED: &[&str] = &[
     "mcp.start_auth",
     "mcp.cancel_auth",
     "mcp.disconnect_auth",
+    "mcp.resolve_request",
 ];
 
 pub fn blocked(action: &str) -> bool {

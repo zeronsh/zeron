@@ -112,8 +112,9 @@ export const runnerOpRefusal = (
 
 /**
  * Whether runner `device`, of a session reaching `reach`, may see `row`.
- * `devices`: every device, chat, project and session row (live or
- * tombstoned), and none of the user's own kinds. `isolated`: every device
+ * Both reaches: the person's Cloud agent choices (`cloudAgents`), which its
+ * runs follow. `devices`: every device, chat, project and session row (live
+ * or tombstoned), and none of the user's other kinds. `isolated`: every device
  * row, the hosted rows it owns, the projects of the chats it hosts
  * (`scope.spaces`), its delegates and their session rows (`scope.children`;
  * a session row's id is its chat's), and tombstones of hosted kinds (they
@@ -121,6 +122,9 @@ export const runnerOpRefusal = (
  */
 export const runnerCanSee = (device: string, row: Row, reach: RunnerReach, scope: RunnerScope = NO_SCOPE): boolean => {
   if (row.kind === "devices") return true;
+  // How the person runs each agent on Cloud: what a Cloud machine is for
+  // (read only; a runner never writes the user's kinds).
+  if (row.kind === "cloudAgents") return true;
   if (!HOSTED_KINDS.has(row.kind)) return false;
   if (reach === "devices" || row.deleted) return true;
   if (hostOf(row) === device) return true;

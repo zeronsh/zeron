@@ -1,7 +1,8 @@
 -- Settings → Providers offers Cloud as one more choice after the computers,
 -- while Cloud is on: its agents' accounts (the vault's, every Cloud machine
--- uses them), with no switch, no settings and nothing to install, each card
--- adding its sign-ins and API keys. Without Cloud, no such choice. On the shell in
+-- uses them), with no switch and nothing to install, each card adding its
+-- sign-ins and API keys, and settings that are Cloud's: how each agent runs
+-- on every Cloud machine. Without Cloud, no such choice. On the shell in
 -- ui/shell_fixture.luau, Cloud from ui/cloud_stub.luau.
 
 local PAGE = "#settings-page"
@@ -46,10 +47,22 @@ test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or 
 	expect(shows(app, PAGE, "Claude Code")).to_be(true)
 	expect(shows(app, PAGE, "Codex")).to_be(true)
 	expect(shows(app, PAGE, "ada@example.com")).to_be(true)
-	-- Nothing to switch, set or install: its accounts alone.
+	-- Nothing to switch or install: its accounts, and how each agent runs
+	-- there.
 	expect(app:has(`{PAGE} >> role:switch "Codex on"`)).to_be(false)
-	expect(app:has(`{PAGE} >> role:button "Codex settings"`)).to_be(false)
 	expect(shows(app, PAGE, "Add another agent")).to_be(false)
+	-- Its settings are Cloud's, for every Cloud machine: no updates to take
+	-- (Zeron keeps Cloud's agents current).
+	app:click(`{PAGE} >> role:button "Codex settings"`)
+	app:frames(30)
+	local dialog = 'role:dialog "Agent settings"'
+	expect(shows(app, dialog, "For every Cloud chat")).to_be(true)
+	expect(shows(app, dialog, "Updates")).to_be(false)
+	app:click(`{dialog} >> role:switch "Only Zeron's MCP servers"`)
+	app:frames(10)
+	expect(asked(app, "settings.engine:SetZeronMcpOnly:codex:cloud")).to_be(true)
+	app:click(`{dialog} >> role:button "Done"`)
+	app:frames(30)
 	-- Every agent signs in on Cloud as it does on a computer, Muse Code
 	-- included, and takes its API key on its own card: no keys section.
 	expect(shows(app, PAGE, "Add Muse Code account")).to_be(true)
