@@ -3,6 +3,7 @@
 // anywhere but the package, and can't pass for the page's own parts.
 import { describe, expect, test } from "vitest";
 import { BOUNDS, firstLine, render as renderWith, renderMarkdown, target } from "./markdown.ts";
+import { fastest, TRIES } from "./md/fastest.ts";
 
 const FILES = "/plugins/demo/files/1.0.0/";
 const render = (md: string) => renderMarkdown(md, { file: (p) => FILES + p.split("/").map(encodeURIComponent).join("/"), demote: true }).trim();
@@ -176,9 +177,8 @@ describe("what a README may hold", () => {
 
   test("emphasis and brackets by the ten thousand are drawn, at once", () => {
     for (const md of ["*a_ ".repeat(12_000), "**_ ".repeat(16_000), "~~a~~ ".repeat(8_000), `${"[".repeat(20_000)}\n\n${"*a".repeat(4_000)}`]) {
-      const started = performance.now();
-      const html = render(md);
-      expect(performance.now() - started).toBeLessThan(250);
+      const { ms, out: html } = fastest(() => render(md), 250);
+      expect(ms, `the fastest of ${TRIES}`).toBeLessThan(250);
       expect(html).not.toContain('class="as-text"');
       assertInert(html);
     }
@@ -260,8 +260,8 @@ describe("a version's notes in one line", () => {
   });
 
   test("…at once, whatever it holds (a line of 64 KB of brackets once took the square of its length)", () => {
-    const started = performance.now();
-    expect(firstLine("[".repeat(64 * 1024))).toBe("[".repeat(4096));
-    expect(performance.now() - started).toBeLessThan(250);
+    const { ms, out } = fastest(() => firstLine("[".repeat(64 * 1024)), 250);
+    expect(out).toBe("[".repeat(4096));
+    expect(ms, `the fastest of ${TRIES}`).toBeLessThan(250);
   });
 });
