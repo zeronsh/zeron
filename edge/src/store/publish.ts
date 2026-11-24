@@ -6,7 +6,8 @@
  * The same rules hold for both kinds, each with its own package and listing
  * rules (a template's: listing.ts `checkTemplate`, its preview a picture the
  * store serves). An id of the other kind under a prefix is 409 `wrong_kind`
- * to its owner and 404 to anyone else. The limits are counted across both.
+ * to its owner and 403 `id_taken` to anyone else. The limits are counted
+ * across both.
  *
  * A version that passes is listed and installable by everyone at once
  * (amendment 45); a reviewer's decision later only marks it verified.
@@ -37,7 +38,7 @@ import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, NO_CONSENT, consentItem } from "./consent";
 import { type PluginRow, VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
 import { purgeCatalog } from "./purge";
-import { fail, answer, notFound, rateLimited } from "./http";
+import { fail, answer, rateLimited } from "./http";
 import type { JsonObject } from "./json";
 import type { Kind } from "./kind";
 import { type Listing, type Problem, checkListing, checkTemplate, listingOf, listingOfTemplate, previewProblem } from "./listing";
@@ -167,10 +168,10 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   return res;
 };
 
-/** An id of the other kind: its owner is told which it is; to anyone else
- * there's no such item here. */
+/** An id of the other kind than this prefix's: its owner is told which it is,
+ * and to anyone else it's another account's, under either prefix. */
 const wrongKind = (row: PluginRow, publisher: Publisher, id: string): Response =>
-  row.owner_id === publisher.userId ? fail(409, "wrong_kind", `"${id}" is a ${row.kind}.`) : notFound();
+  row.owner_id === publisher.userId ? fail(409, "wrong_kind", `"${id}" is a ${row.kind}.`) : fail(403, "id_taken", `"${id}" belongs to another account.`);
 
 /** What a package is to be listed as: verified, its listing read, its
  * problems (the first problem's order is the engine's), and what it asks

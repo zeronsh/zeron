@@ -12,11 +12,12 @@ import type { Env } from "../../src/env";
 import { PLUGIN_KEY_PROOF_PREFIX } from "../../src/plugin-keys";
 import { deployTokenHash, tokenFromBody } from "../../src/store/identity/deploy-token";
 import { signingKeyAllowed, tokenInScope, type Publisher, type ScopedPlugin } from "../../src/store/principal";
-import { DEPLOY_TOKENS_PER_DAY, MAX_DEPLOY_TOKEN_PLUGINS, MAX_LIVE_DEPLOY_TOKENS, type UserDirectory } from "../../src/user-directory";
+import { DEPLOY_TOKENS_PER_DAY, MAX_DEPLOY_TOKEN_PLUGINS, MAX_LIVE_DEPLOY_TOKENS, UserDirectory, type DeployTokenScope } from "../../src/user-directory";
 import { SITE, directory, errorOf, newSigner, person, setOwner, siteChange, stepUp, webSignIn } from "./identity-helpers";
 import { author, makePackage, publish, tokenPublish, uniqueId } from "./store-helpers";
 
-type Scope = { all: true } | { plugins: string[] };
+type Kinds = ("plugin" | "template")[];
+type Scope = { all: true; all_kinds?: Kinds } | { plugins: string[] };
 interface Made {
   token: string;
   id: string;
@@ -110,7 +111,8 @@ describe("deploy tokens: making one", () => {
     ]);
     // An `all` token that never expires; each a new secret.
     const all = await made(userId, { all: true });
-    expect(all).toMatchObject({ scope: { all: true }, expires_at: null });
+    expect(all.scope).toEqual({ all: true, all_kinds: ["plugin"] });
+    expect(all.expires_at).toBeNull();
     expect(all.token).not.toBe(token.token);
     expect((await tokensOf(userId)).map((t) => t.id)).toEqual([token.id, all.id]);
     // Only the directory's hash, never the secret.
@@ -133,6 +135,8 @@ describe("deploy tokens: making one", () => {
       [{}, undefined],
       [{ all: false }, undefined],
       [{ all: true, plugins: [pluginId] }, undefined],
+      ...[[], ["template"], ["plugin", "plugin"], ["plugin", "widget"], "plugin", null].map((all_kinds): [unknown, undefined] => [{ all: true, all_kinds }, undefined]),
+      [{ plugins: [pluginId], all_kinds: ["plugin"] }, undefined],
       [[pluginId], undefined],
       [{ plugins: [] }, undefined],
       [{ plugins: Array.from({ length: MAX_DEPLOY_TOKEN_PLUGINS + 1 }, newPlugin) }, undefined],
@@ -434,12 +438,12 @@ describe("deploy tokens: who's calling", () => {
 });
 
 describe("deploy tokens: what a scope holds", () => {
-  const row = async (id: string) => (await env.STORE_DB!.prepare("SELECT id, owner_id, owner_since, created_at FROM plugins WHERE id = ?").bind(id).first<ScopedPlugin>())!;
+  const row = async (id: string) => (await env.STORE_DB!.prepare("SELECT id, kind, owner_id, owner_since, created_at FROM plugins WHERE id = ?").bind(id).first<ScopedPlugin>())!;
   const holder = async (token: Made, userId: string): Promise<Publisher> => ({
     userId,
     username: null,
     via: "deploy_token",
-    token: { id: token.id, short: token.short, name: token.name, scope: (await tokensOf(userId)).find((t) => t.id === token.id)!.scope as Scope, createdAt: token.created_at }
+    token: { id: token.id, short: token.short, name: token.name, scope: (await tokensOf(userId)).find((t) => t.id === token.id)!.scope as DeployTokenScope, createdAt: token.created_at }
   });
 
   it("a list holds the plugins named; `all` what the account owned when it was made or claims later, never a plugin moved in", async () => {
@@ -486,6 +490,23 @@ describe("deploy tokens: what a scope holds", () => {
     // The store's transfer drops it from the lists too, for the owner to see.
     expect(await directory().dropFromDeployTokens(former, pluginId)).toBe(1);
     expect((await tokensOf(former)).find((t) => t.id === list.id)!.scope).toEqual({ plugins: [kept] });
+  });
+});
+
+describe("deploy tokens: made before kinds were named", () => {
+  it("is for plugins alone, once its directory starts with the column", async () => {
+    const stub = env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("legacy-deploy-tokens"));
+    await runInDurableObject(stub, (_instance: UserDirectory, state) => {
+      const sql = state.storage.sql;
+      sql.exec("ALTER TABLE deploy_tokens DROP COLUMN scope_kinds");
+      sql.exec(
+        "INSERT INTO deploy_tokens (id, token_hash, short, user_id, name, scope_all, created_at) VALUES ('tok_old', 'h', 's', 'user_old', 'CI', 1, 1)"
+      );
+      const started = () => new UserDirectory(state, env as never).deployTokens("user_old").map((t) => t.scope);
+      expect(started()).toEqual([{ all: true, all_kinds: ["plugin"] }]);
+      // Again, with the column there.
+      expect(started()).toEqual([{ all: true, all_kinds: ["plugin"] }]);
+    });
   });
 });
 
@@ -575,6 +596,12 @@ describe("deploy tokens: the operator's routes", () => {
       expect((await operator("POST", "/admin/deploy-tokens/revoke", body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(((await (await operator("GET", "/admin/deploy-tokens")).json()) as { live: number }).live).toBeGreaterThanOrEqual(4);
+    // An `all` token of plugins isn't one a leaked template's could be.
+    const template = await owned();
+    await env.STORE_DB!.prepare("UPDATE plugins SET kind = 'template' WHERE id = ?").bind(template.pluginId).run();
+    await made(template.userId, { all: true });
+    await made(template.userId, { all: true, all_kinds: ["plugin", "template"] });
+    expect(await (await operator("POST", "/admin/deploy-tokens/revoke", { pluginId: template.pluginId })).json()).toEqual({ revoked: 1 });
     // An id no one owns has no tokens.
     expect(await (await operator("POST", "/admin/deploy-tokens/revoke", { pluginId: newPlugin() })).json()).toEqual({ revoked: 0 });
     // Its owner's tokens whose scope may hold it: the one listing it, and `all`.

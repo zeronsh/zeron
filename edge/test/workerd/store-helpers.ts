@@ -126,7 +126,7 @@ export const registerKey = async (userId: string, signer: Signer): Promise<void>
 /** A deploy token of `userId`'s, made as the app or the CLI makes one. */
 export const deployToken = async (
   userId: string,
-  scope: { all: true } | { plugins: string[] },
+  scope: { all: true; all_kinds?: ("plugin" | "template")[] } | { plugins: string[] },
   extra: Record<string, unknown> = {}
 ): Promise<{ token: string; id: string; short: string; name: string }> => {
   const res = await call(userId, "POST", "/store/v1/me/tokens", { name: "CI", scope, stepUp: await stepUp(userId), ...extra });

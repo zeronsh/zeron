@@ -424,13 +424,14 @@ describe("the take-down feed", () => {
     expect(await feed(head)).toEqual({ events: [], head });
     const id = uniqueId();
     await listed(a, id, "1.0.0");
+    const { hash } = await json<{ hash: string }>(await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0`));
     expect((await takeDown(id, "1.0.0")).status).toBe(200);
     expect((await restore(id, "1.0.0")).status).toBe(200);
     // (The answer a device up to date held was purged: it sees both at once.)
     const after = await feed(head);
     expect(after.events).toEqual([
-      { seq: head + 1, kind: "take_down", item_kind: "plugin", id, version: "1.0.0", reason: "It sends your files away." },
-      { seq: head + 2, kind: "restore", item_kind: "plugin", id, version: "1.0.0", reason: "A mistake." }
+      { seq: head + 1, kind: "take_down", item_kind: "plugin", id, version: "1.0.0", hash, reason: "It sends your files away." },
+      { seq: head + 2, kind: "restore", item_kind: "plugin", id, version: "1.0.0", hash, reason: "A mistake." }
     ]);
     expect(after.head).toBe(head + 2);
     expect(await feed(head + 1)).toMatchObject({ events: [{ seq: head + 2, kind: "restore" }] });

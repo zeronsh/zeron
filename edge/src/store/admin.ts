@@ -426,9 +426,13 @@ const decline = async (db: D1Database, adminId: string, id: string, v: VersionRo
  * write (after its audit row, so only when the change landed). */
 const takedownEvent = (db: D1Database, kind: "take_down" | "restore", id: string, version: string, reason: string, at: number): D1PreparedStatement =>
   db
-    // (The item's kind with it: a released id's row is gone by the time an
-    // old event is read.)
-    .prepare("INSERT INTO takedown_events (kind, item_kind, plugin_id, version, reason, at) SELECT ?1, (SELECT kind FROM plugins WHERE id = ?2), ?2, ?3, ?4, ?5 WHERE changes() > 0")
+    // (The item's kind and the version's content hash with it: a released
+    // id's row is gone by the time an old event is read, and a device refuses
+    // a file or link import of the same package.)
+    .prepare(
+      `INSERT INTO takedown_events (kind, item_kind, plugin_id, version, hash, reason, at)
+       SELECT ?1, (SELECT kind FROM plugins WHERE id = ?2), ?2, ?3, (SELECT content_hash FROM versions WHERE plugin_id = ?2 AND version = ?3), ?4, ?5 WHERE changes() > 0`
+    )
     .bind(kind, id, version, reason, at);
 
 const afterEvent = async (db: D1Database, id: string, version: string): Promise<Response> => {
@@ -693,8 +697,7 @@ const reportItems = async (env: Env, rows: readonly ReportRow[]) => {
   return rows.map((r) => ({
     id: r.id,
     // (Its kind says which prefix its staff page is under.)
-    kind: r.plugin_kind,
-    plugin: { id: r.plugin_id, name: r.plugin_name },
+    plugin: { id: r.plugin_id, name: r.plugin_name, kind: r.plugin_kind },
     version: r.version,
     reporter: names[r.reporter_id] ?? null,
     reason: r.reason,

@@ -94,6 +94,7 @@ import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { constantTimeEqual } from "./cloud/crypto";
 import { STORE_DATA } from "./store/data";
+import { KINDS, type Kind } from "./store/kind";
 import { foldUsername } from "./username";
 import { deleteUserBlobs } from "./user-images";
 
@@ -138,15 +139,25 @@ export const DEPLOY_TOKENS_PER_DAY = 10;
 /** The engine's (the data file's `deploy_token.max_scope_plugins`). */
 export const MAX_DEPLOY_TOKEN_PLUGINS: number = STORE_DATA.deploy_token.max_scope_plugins;
 
-/** What a deploy token may publish, fixed when it is made: every plugin of
- * its account (owned then, or first published by it later; never one
- * transferred in: the store decides that, by when its owner came to own
- * it), or the listed ids, sorted and unique. */
-export type DeployTokenScope = { readonly all: true } | { readonly plugins: readonly string[] };
+/** What a deploy token may publish, fixed when it is made: every item of its
+ * account of the kinds `all_kinds` names (owned then, or first published by
+ * it later; never one transferred in: the store decides that, by when its
+ * owner came to own it), or the listed ids, of either kind, sorted and
+ * unique. */
+export type DeployTokenScope = { readonly all: true; readonly all_kinds: readonly Kind[] } | { readonly plugins: readonly string[] };
 
-/** A store plugin as a token's scope is judged against it: who owns it, since
+/** The kinds of an `all` token as they're kept (`plugin,template`), read
+ * back: only kinds, in order; one made before kinds were named, a plugin's. */
+const readKinds = (text: unknown): readonly Kind[] => {
+  const found = new Set(typeof text === "string" ? text.split(",") : []);
+  const kinds = KINDS.filter((k) => found.has(k));
+  return kinds.length ? kinds : ["plugin"];
+};
+
+/** A store item as a token's scope is judged against it: who owns it, since
  * when, and when it was first claimed (the store's D1). */
 export interface PluginOwnership {
+  readonly kind: Kind;
   readonly owner: string;
   readonly ownerSince: number;
   readonly createdAt: number;
@@ -156,14 +167,15 @@ export interface PluginOwnership {
  * `userId`, holds `pluginId` (owned as `plugin` says): its account owns it
  * now, and either the token lists it and the account has held it since
  * before the token was made, or the token is for `all` and the account held it
- * then or claimed it itself and never moved it. So a plugin that leaves the
+ * then or claimed it itself and never moved it, and the token is for its
+ * kind. So a plugin that leaves the
  * account leaves every scope for good, by the data alone: coming back (a
  * transfer back, a release and a new claim) gives it a later `ownerSince`,
  * and one transferred in never joins. */
 export const scopeHoldsPlugin = (userId: string, scope: DeployTokenScope, keyCreatedAt: number, pluginId: string, plugin: PluginOwnership | null | undefined): boolean => {
   if (!plugin || plugin.owner !== userId) return false;
   if (!("all" in scope)) return scope.plugins.includes(pluginId) && plugin.ownerSince <= keyCreatedAt;
-  return plugin.ownerSince <= keyCreatedAt || plugin.ownerSince === plugin.createdAt;
+  return scope.all_kinds.includes(plugin.kind) && (plugin.ownerSince <= keyCreatedAt || plugin.ownerSince === plugin.createdAt);
 };
 
 /** Web sessions (web-session.ts). An account holding any role gets the
@@ -542,7 +554,11 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS deploy_tokens (
       id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, short TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
       scope_all INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER, revoked_at INTEGER,
-      last_used_at INTEGER, last_used_plugin TEXT)`);
+      last_used_at INTEGER, last_used_plugin TEXT, scope_kinds TEXT NOT NULL DEFAULT 'plugin')`);
+    // What an `all` token is for (`plugin` or `plugin,template`): one made
+    // before kinds were named is a plugin's.
+    const tokenColumns = [...this.ctx.storage.sql.exec("SELECT name FROM pragma_table_info('deploy_tokens')")].map((row) => row.name);
+    if (!tokenColumns.includes("scope_kinds")) this.ctx.storage.sql.exec("ALTER TABLE deploy_tokens ADD COLUMN scope_kinds TEXT NOT NULL DEFAULT 'plugin'");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS deploy_tokens_user ON deploy_tokens(user_id)");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS deploy_tokens_short ON deploy_tokens(short)");
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS deploy_token_plugins (
@@ -1384,8 +1400,8 @@ export class UserDirectory extends DurableObject<Env> {
   // ── deploy tokens (store/identity/deploy-tokens.ts) ─────────────────────
 
   /** Deploy token `id`'s scope. */
-  private tokenScope(id: string, scopeAll: unknown): DeployTokenScope {
-    if (scopeAll === 1) return { all: true };
+  private tokenScope(id: string, scopeAll: unknown, scopeKinds: unknown): DeployTokenScope {
+    if (scopeAll === 1) return { all: true, all_kinds: readKinds(scopeKinds) };
     const plugins = this.ctx.storage.sql
       .exec("SELECT plugin_id FROM deploy_token_plugins WHERE token_id = ? ORDER BY plugin_id", id)
       .toArray()
@@ -1398,7 +1414,7 @@ export class UserDirectory extends DurableObject<Env> {
       id: row.id as string,
       short: row.short as string,
       name: row.name as string,
-      scope: this.tokenScope(row.id as string, row.scope_all),
+      scope: this.tokenScope(row.id as string, row.scope_all, row.scope_kinds),
       createdAt: row.created_at as number,
       lastUsedAt: row.last_used_at as number | null,
       lastUsedPlugin: row.last_used_plugin as string | null,
@@ -1424,8 +1440,8 @@ export class UserDirectory extends DurableObject<Env> {
       if (count("revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", now) >= MAX_LIVE_DEPLOY_TOKENS) return "too_many_tokens";
       if (!this.useStepUp(userId, stepUpHash)) return "step_up_required";
       this.ctx.storage.sql.exec(
-        `INSERT INTO deploy_tokens (id, token_hash, short, user_id, name, scope_all, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO deploy_tokens (id, token_hash, short, user_id, name, scope_all, created_at, expires_at, scope_kinds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         token.id,
         token.hash,
         token.short,
@@ -1433,7 +1449,8 @@ export class UserDirectory extends DurableObject<Env> {
         token.name,
         "all" in token.scope ? 1 : 0,
         now,
-        token.expiresAt
+        token.expiresAt,
+        "all" in token.scope ? token.scope.all_kinds.join(",") : "plugin"
       );
       if (!("all" in token.scope)) {
         for (const pluginId of token.scope.plugins) this.ctx.storage.sql.exec("INSERT INTO deploy_token_plugins (token_id, plugin_id) VALUES (?, ?)", token.id, pluginId);
@@ -1447,7 +1464,7 @@ export class UserDirectory extends DurableObject<Env> {
   deployTokens(userId: string): DeployTokenRow[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT id, short, name, scope_all, created_at, last_used_at, last_used_plugin, expires_at, revoked_at FROM deploy_tokens
+        `SELECT id, short, name, scope_all, scope_kinds, created_at, last_used_at, last_used_plugin, expires_at, revoked_at FROM deploy_tokens
          WHERE user_id = ? ORDER BY created_at, id`,
         userId
       )
@@ -1479,14 +1496,16 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Revoke every live deploy token of `userId` whose scope may hold
-   * `pluginId` (an operator's, for a leaked token). Answers how many. */
-  revokeDeployTokensFor(userId: string, pluginId: string): number {
+   * `pluginId`, an item of `kind` (an operator's, for a leaked token).
+   * Answers how many. */
+  revokeDeployTokensFor(userId: string, pluginId: string, kind: Kind): number {
     return this.ctx.storage.sql
       .exec(
         `UPDATE deploy_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL
-           AND (scope_all = 1 OR id IN (SELECT token_id FROM deploy_token_plugins WHERE plugin_id = ?)) RETURNING id`,
+           AND ((scope_all = 1 AND (',' || scope_kinds || ',') LIKE '%,' || ? || ',%') OR id IN (SELECT token_id FROM deploy_token_plugins WHERE plugin_id = ?)) RETURNING id`,
         Date.now(),
         userId,
+        kind,
         pluginId
       )
       .toArray().length;
@@ -1526,7 +1545,7 @@ export class UserDirectory extends DurableObject<Env> {
   deployTokenHolder(short: string, hash: string): DeployTokenHolder | undefined {
     const now = Date.now();
     const rows = this.ctx.storage.sql
-      .exec("SELECT id, token_hash, user_id, short, name, scope_all, created_at, expires_at, revoked_at FROM deploy_tokens WHERE short = ?", short)
+      .exec("SELECT id, token_hash, user_id, short, name, scope_all, scope_kinds, created_at, expires_at, revoked_at FROM deploy_tokens WHERE short = ?", short)
       .toArray();
     let found: Record<string, unknown> | undefined;
     for (const row of rows) if (constantTimeEqual(row.token_hash as string, hash)) found = row;
@@ -1539,7 +1558,7 @@ export class UserDirectory extends DurableObject<Env> {
       id: found.id as string,
       short: found.short as string,
       name: found.name as string,
-      scope: this.tokenScope(found.id as string, found.scope_all),
+      scope: this.tokenScope(found.id as string, found.scope_all, found.scope_kinds),
       createdAt: found.created_at as number
     };
   }

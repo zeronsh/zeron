@@ -6,6 +6,7 @@
  */
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { crc32 } from "../../src/image-check";
 import { handlePublish } from "../../src/store/publish";
 import { MAX_UPDATE_ITEMS } from "../../src/store/updates";
 import { PNG, adminCall, author, call, deployToken, listed, listedTemplate, makePackage, makeTemplate, newSigner, publish, publishTemplate, publishedTemplate, randomLetters, tokenPublish, tokenPublishTemplate, uniqueId } from "./store-helpers";
@@ -17,6 +18,19 @@ const error = async (res: Response) => [res.status, (await json<{ error: string 
 /** A PNG's first bytes and some: what a device's preview check takes, and
  * image-check doesn't. */
 const FAKE_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+/** PNG with an animation control chunk after its header: an APNG, sound in
+ * every chunk. */
+const animated = (png: Uint8Array): Uint8Array => {
+  const chunk = new Uint8Array(20);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, 8);
+  chunk.set(new TextEncoder().encode("acTL"), 4);
+  view.setUint32(8, 1);
+  view.setUint32(16, crc32(chunk.subarray(4, 16)));
+  const header = 8 + 25;
+  return new Uint8Array([...png.subarray(0, header), ...chunk, ...png.subarray(header)]);
+};
 
 describe("templates: publishing and browsing one", () => {
   it("lists it at once, with a cover and no icon or permissions, and serves its package and preview", async () => {
@@ -31,7 +45,7 @@ describe("templates: publishing and browsing one", () => {
     const detail = await json(await get(`/templates/${id}`));
     expect(detail).toMatchObject({
       id, kind: "template", icon: null, cover: "preview.png", screenshots: ["screenshots/one.png"], engines: { zeron: ">=0.3.0" },
-      versions: [{ version: "1.0.0", kind: "template", key: a.signer.key, via: "device", notes: "- What changed in 1.0.0." }],
+      versions: [{ version: "1.0.0", kind: "template", engines: { zeron: ">=0.3.0" }, key: a.signer.key, via: "device", notes: "- What changed in 1.0.0." }],
       package: { url: `/store/v1/templates/${id}/versions/1.0.0/package`, key: a.signer.key }
     });
     expect(detail).not.toHaveProperty("permissions");
@@ -43,7 +57,7 @@ describe("templates: publishing and browsing one", () => {
     expect((await get(`/templates/${id}/files/1.0.0/app.luau`)).status).toBe(404);
     expect((await get(`/templates/${id}/files/1.0.0/app.luau`, a.userId)).status).toBe(200);
     expect(await json(await get(`/templates/${id}/versions`))).toMatchObject({ total: 1, versions: [{ version: "1.0.0" }] });
-    expect(await json(await get(`/templates/${id}/versions/1.0.0`))).toMatchObject({ version: "1.0.0", kind: "template" });
+    expect(await json(await get(`/templates/${id}/versions/1.0.0`))).toMatchObject({ version: "1.0.0", kind: "template", engines: { zeron: ">=0.3.0" } });
     // The owner's view is its own: the shape of /me/plugins.
     expect(await json(await get("/me/templates", a.userId))).toMatchObject({ publisher_id: expect.stringMatching(/^pub_/), templates: [{ id, kind: "template", versions: [{ version: "1.0.0" }] }] });
     // A newer version is the card's; a cached first page shows it (purged).
@@ -108,7 +122,7 @@ describe("templates: publishing and browsing one", () => {
 });
 
 describe("templates: one namespace", () => {
-  it("is 409 wrong_kind to the owner under the other prefix, 404 to anyone else, and never takes a plugin's id", async () => {
+  it("is 409 wrong_kind to the owner under the other prefix, 403 id_taken to anyone else, and never takes a plugin's id", async () => {
     const a = await author();
     const b = await author();
     const plug = uniqueId("p");
@@ -120,10 +134,10 @@ describe("templates: one namespace", () => {
     const own = await publishTemplate(a.userId, plug, await template(plug, a));
     expect([own.status, await own.json()]).toEqual([409, expect.objectContaining({ error: "wrong_kind", message: `"${plug}" is a plugin.` })]);
     expect(await error(await publish(a.userId, temp, await plugin(temp, a)))).toEqual([409, "wrong_kind"]);
-    // To anyone else: no such id, before a byte of the body is read.
+    // To anyone else: another account's, before a byte of the body is read.
     const other = await publishTemplate(b.userId, plug, new TextEncoder().encode("not a package"));
-    expect(await error(other)).toEqual([404, "not_found"]);
-    expect(await error(await publish(b.userId, temp, new TextEncoder().encode("not a package")))).toEqual([404, "not_found"]);
+    expect(await error(other)).toEqual([403, "id_taken"]);
+    expect(await error(await publish(b.userId, temp, new TextEncoder().encode("not a package")))).toEqual([403, "id_taken"]);
     // Under the id's own prefix: another account's, as always.
     expect(await error(await publishTemplate(b.userId, temp, await template(temp, b)))).toEqual([403, "id_taken"]);
     // Nothing of it landed.
@@ -181,9 +195,9 @@ describe("templates: one namespace", () => {
       expect(versions.results).toEqual([{ version: "1.0.0", kind: "plugin" }]);
       return error(res);
     };
-    // Its owner: told which kind it is now. Anyone else: no such template.
+    // Its owner: told which kind it is now. Anyone else: it's another account's.
     expect(await whileWriting(a)).toEqual([409, "wrong_kind"]);
-    expect(await whileWriting(b)).toEqual([404, "not_found"]);
+    expect(await whileWriting(b)).toEqual([403, "id_taken"]);
   });
 
   it("shares reserved ids, lookalikes, the weekly limit and the hourly one", async () => {
@@ -232,6 +246,8 @@ describe("templates: what's refused", () => {
     // check (a PNG's first bytes), refused on image-check's.
     expect(await problems({ files: { "preview.png": FAKE_PNG } })).toEqual([400, "bad_listing", "preview", "preview.png"]);
     expect(await problems({ files: { "preview.png": new TextEncoder().encode("not a picture") } })).toEqual([400, "bad_listing", "preview", "preview.png"]);
+    // A still one only: an animation is refused, not flattened.
+    expect(await problems({ files: { "preview.png": animated(PNG) } })).toEqual([400, "bad_listing", "preview", "preview.png"]);
     expect(await problems({ files: { "README.md": "# x\n\nThis README isn't part of the interface.\n" } })).toEqual([400, "missing_readme", null, "README.md"]);
     expect(await problems({ files: { "README.md": undefined } })).toEqual([400, "missing_readme", null, null]);
     expect(await problems({ manifest: { zeron_version: undefined } })).toEqual([400, "missing_listing", "zeron_version", null]);
@@ -286,16 +302,32 @@ describe("templates: deploy tokens", () => {
     expect(await error(await tokenPublishTemplate(token, fresh, await pkg(fresh, "1.0.0")))).toEqual([403, "token_not_allowed"]);
     // Under the other prefix: its owner's, so told which kind it is.
     expect(await error(await tokenPublishTemplate(token, plug, await pkg(plug, "2.0.0")))).toEqual([409, "wrong_kind"]);
+    // Not in the token's scope: that answers first, whatever its prefix.
+    const { token: narrow } = await deployToken(a.userId, { plugins: [plug] });
+    expect(await error(await tokenPublish(narrow, temp, await makePackage({ id: temp, version: "2.0.0", signer: null })))).toEqual([403, "token_not_allowed"]);
     // It reads nothing.
     for (const path of ["/templates", `/templates/${temp}`, "/me/templates", "/me/plugins"]) {
       expect(await error(await call(undefined, "GET", `/store/v1${path}`, undefined, { authorization: `Bearer ${token}` })), path).toEqual([401, "session_required"]);
     }
     expect(await error(await call(undefined, "POST", `/store/v1/templates/${temp}/versions/1.1.0/yank`, undefined, { authorization: `Bearer ${token}` }))).toEqual([401, "session_required"]);
-    // `all` holds both kinds, those claimed later included.
-    const { token: all } = await deployToken(a.userId, { all: true });
-    const later = uniqueId("t");
-    await publishedTemplate(a, later, "1.0.0");
-    expect((await tokenPublishTemplate(all, later, await pkg(later, "1.1.0"))).status).toBe(201);
+  });
+
+  it("holds an `all` token to the kinds it names, those claimed later included", async () => {
+    const a = await author();
+    const { token: plugins } = await deployToken(a.userId, { all: true });
+    const { token: both } = await deployToken(a.userId, { all: true, all_kinds: ["template", "plugin"] });
+    const plug = uniqueId("p");
+    const temp = uniqueId("t");
+    await listed(a, plug, "1.0.0");
+    await publishedTemplate(a, temp, "1.0.0");
+    const template = (version: string) => makeTemplate({ id: temp, version, signer: null });
+    const plugin = (version: string) => makePackage({ id: plug, version, signer: null });
+    expect((await tokenPublish(plugins, plug, await plugin("1.1.0"))).status).toBe(201);
+    expect(await error(await tokenPublishTemplate(plugins, temp, await template("1.1.0")))).toEqual([403, "token_not_allowed"]);
+    // Under the other prefix too, before it's told which kind it is.
+    expect(await error(await tokenPublish(plugins, temp, await makePackage({ id: temp, version: "1.1.0", signer: null })))).toEqual([403, "token_not_allowed"]);
+    expect((await tokenPublish(both, plug, await plugin("1.2.0"))).status).toBe(201);
+    expect((await tokenPublishTemplate(both, temp, await template("1.1.0"))).status).toBe(201);
   });
 });
 
@@ -319,8 +351,10 @@ describe("templates: what its author and anyone do", () => {
     const report = { reason: "broken", text: "It doesn't open." };
     expect((await call(b.userId, "POST", `/store/v1/plugins/${temp}/reports`, report)).status).toBe(404);
     expect((await call(b.userId, "POST", `/store/v1/templates/${temp}/reports`, report)).status).toBe(201);
-    const reports = await json<{ reports: { kind: string; plugin: { id: string } }[] }>(await adminCall("GET", "/store/v1/admin/reports"));
-    expect(reports.reports.find((r) => r.plugin.id === temp)).toMatchObject({ kind: "template" });
+    const reports = await json<{ reports: { plugin: { id: string; kind: string } }[] }>(await adminCall("GET", "/store/v1/admin/reports"));
+    const row = reports.reports.find((r) => r.plugin.id === temp)!;
+    expect(row.plugin).toEqual({ id: temp, name: expect.any(String), kind: "template" });
+    expect(row).not.toHaveProperty("kind");
   });
 });
 
@@ -378,7 +412,7 @@ describe("templates: staff", () => {
     expect((await queue("kind=plugin")).map((i) => i.plugin.id)).not.toContain(temp);
     expect((await adminCall("GET", "/store/v1/admin/queue?kind=widget")).status).toBe(400);
     const view = await json(await adminCall("GET", `/store/v1/admin/versions/${temp}/1.0.0`));
-    expect(view).toMatchObject({ kind: "template", plugin: { kind: "template", cover: "preview.png" }, version: { icon: null, kind: "template" }, permissions: null, permissions_diff: null });
+    expect(view).toMatchObject({ kind: "template", plugin: { kind: "template", cover: "preview.png" }, version: { icon: null, kind: "template", engines: { zeron: ">=0.3.0" } }, permissions: null, permissions_diff: null });
     // (The checks of a template: none of what it asks.)
     expect((view.checks as { id: string }[]).map((c) => c.id)).not.toContain("asks");
     expect((await json(await adminCall("GET", `/store/v1/admin/versions/${plug}/1.0.0`))).kind).toBe("plugin");
@@ -395,10 +429,12 @@ describe("templates: staff", () => {
     expect((await json<{ items: { id: string }[] }>(await get("/templates?featured=true", a.userId))).items.map((c) => c.id)).toContain(temp);
     expect((await json<{ items: { id: string }[] }>(await get("/plugins?featured=true", a.userId))).items.map((c) => c.id)).not.toContain(temp);
     // The feed and the log say which kind.
+    const hash = (view.version as { hash: string }).hash;
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
     const head = (await json<{ head: number }>(await get("/takedowns"))).head;
     expect((await adminCall("POST", `/store/v1/admin/templates/${temp}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
     const events = await json<{ events: Record<string, unknown>[] }>(await get(`/takedowns?after=${head}`));
-    expect(events.events).toEqual([expect.objectContaining({ kind: "take_down", item_kind: "template", id: temp, version: "1.0.0" })]);
+    expect(events.events).toEqual([expect.objectContaining({ kind: "take_down", item_kind: "template", id: temp, version: "1.0.0", hash })]);
     const audit = await json<{ entries: { item_kind: string | null; plugin_id: string | null; action: string }[] }>(await adminCall("GET", `/store/v1/admin/audit?plugin=${temp}`));
     expect(audit.entries.length).toBeGreaterThan(0);
     expect(audit.entries.every((e) => e.item_kind === "template")).toBe(true);

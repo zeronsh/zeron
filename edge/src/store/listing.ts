@@ -577,12 +577,26 @@ export const checkTemplate = (
   return { problems, warnings };
 };
 
+/** Whether a PNG has an animation control chunk (`acTL`): an APNG. Read
+ * chunk by chunk, never past the bytes it has. */
+const isAnimatedPng = (bytes: Uint8Array): boolean => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 8; at + 12 <= bytes.length; ) {
+    if (bytes[at + 4] === 0x61 && bytes[at + 5] === 0x63 && bytes[at + 6] === 0x54 && bytes[at + 7] === 0x4c) return true;
+    const end = at + 12 + view.getUint32(at);
+    if (end <= at) return false;
+    at = end;
+  }
+  return false;
+};
+
 /** A template's preview, past the device's check: a picture the store will
- * serve (image-check's), so its card's cover is never a 404. Undefined when
- * it is. */
+ * serve (image-check's), so its card's cover is never a 404, and a still one
+ * (an APNG is refused, not flattened). Undefined when it is. */
 export const previewProblem = (files: ReadonlyMap<string, Uint8Array>): Problem | undefined => {
   const preview = files.get(PREVIEW_FILE);
-  return preview && pictureType(preview) === "image/png" ? undefined : problem("bad_listing", "preview", "Its preview.png isn't a PNG picture the store can show", PREVIEW_FILE);
+  if (preview && pictureType(preview) === "image/png" && !isAnimatedPng(preview)) return undefined;
+  return problem("bad_listing", "preview", "Its preview.png isn't a still PNG picture the store can show", PREVIEW_FILE);
 };
 
 /** What the store keeps of a listing that passed `checkListing`. */

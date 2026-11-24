@@ -167,8 +167,8 @@ export const versionRow = (db: D1Database, id: string, version: string): Promise
  * or null when no one has claimed it. */
 export const pluginOwner = async (env: Pick<Env, "STORE_DB">, id: string): Promise<PluginOwnership | null> => {
   if (!env.STORE_DB) return null;
-  const row = await env.STORE_DB.prepare("SELECT owner_id, owner_since, created_at FROM plugins WHERE id = ?").bind(id).first<{ owner_id: string; owner_since: number; created_at: number }>();
-  return row ? { owner: row.owner_id, ownerSince: row.owner_since, createdAt: row.created_at } : null;
+  const row = await env.STORE_DB.prepare("SELECT kind, owner_id, owner_since, created_at FROM plugins WHERE id = ?").bind(id).first<{ kind: Kind; owner_id: string; owner_since: number; created_at: number }>();
+  return row ? { kind: row.kind, owner: row.owner_id, ownerSince: row.owner_since, createdAt: row.created_at } : null;
 };
 
 /**

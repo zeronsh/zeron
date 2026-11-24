@@ -27,6 +27,7 @@ import type { Env } from "../env";
 import { jsonError } from "../http";
 import { SESSION_COOKIE, sendsCookie } from "../web-cookies";
 import { type DeployTokenScope, scopeHoldsPlugin, userDirectoryStub } from "../user-directory";
+import type { Kind } from "./kind";
 import { bearerUser, cookieSession, forbidden, headerBearer, sessionRequired, unauthenticated } from "./identity/callers";
 import { deployTokenHash, looksLikeDeployToken, parseDeployToken } from "./identity/deploy-token";
 
@@ -63,9 +64,10 @@ export type Publisher = {
   token?: PublishingToken;
 };
 
-/** A plugin as a scope is judged against it (the store's row). */
+/** An item as a scope is judged against it (the store's row). */
 export interface ScopedPlugin {
   readonly id: string;
+  readonly kind: Kind;
   readonly owner_id: string;
   readonly owner_since: number;
   readonly created_at: number;
@@ -81,6 +83,7 @@ export const tokenInScope = (publisher: Publisher, plugin: ScopedPlugin): boolea
   publisher.via === "session" ||
   (publisher.token !== undefined &&
     scopeHoldsPlugin(publisher.userId, publisher.token.scope, publisher.token.createdAt, plugin.id, {
+      kind: plugin.kind,
       owner: plugin.owner_id,
       ownerSince: plugin.owner_since,
       createdAt: plugin.created_at

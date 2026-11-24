@@ -490,13 +490,13 @@ const takedowns = async (db: D1Database, after: number | undefined): Promise<Res
   if (after === undefined || after > head || oldest > after + 1) return answer({ events: [], head, reset: true }, 200, publicCache(LIST_TTL));
   const rows = (
     await db
-      .prepare("SELECT seq, kind, item_kind, plugin_id, version, reason FROM takedown_events WHERE seq > ? ORDER BY seq LIMIT ?")
+      .prepare("SELECT seq, kind, item_kind, plugin_id, version, hash, reason FROM takedown_events WHERE seq > ? ORDER BY seq LIMIT ?")
       .bind(after, TAKEDOWN_PAGE)
-      .all<{ seq: number; kind: string; item_kind: Kind; plugin_id: string; version: string; reason: string | null }>()
+      .all<{ seq: number; kind: string; item_kind: Kind; plugin_id: string; version: string; hash: string | null; reason: string | null }>()
   ).results;
   return answer(
     {
-      events: rows.map((r) => ({ seq: r.seq, kind: r.kind, item_kind: r.item_kind, id: r.plugin_id, version: r.version, ...(r.reason ? { reason: r.reason } : {}) })),
+      events: rows.map((r) => ({ seq: r.seq, kind: r.kind, item_kind: r.item_kind, id: r.plugin_id, version: r.version, ...(r.hash ? { hash: r.hash } : {}), ...(r.reason ? { reason: r.reason } : {}) })),
       head
     },
     200,
