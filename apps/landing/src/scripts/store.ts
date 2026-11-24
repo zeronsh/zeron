@@ -90,6 +90,39 @@ if (secret) {
   });
 }
 
+// ── On this page: the part you're reading ──────────────────────────────
+// The rail's link to the part whose heading last went above a line near the
+// window's top is the current one (aria-current: its words and its stretch of
+// the rail's line in the text's colour). Reached the page's end, the last
+// part is. Without this, the rail is plain links.
+const toc = document.querySelector<HTMLElement>("[data-toc]");
+if (toc && "IntersectionObserver" in window) {
+  const links = [...toc.querySelectorAll<HTMLAnchorElement>('a[href^="#"]')];
+  const heads = links.map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter((h): h is HTMLElement => h !== null);
+  let atEnd = false;
+  const mark = () => {
+    const line = Math.min(window.innerHeight * 0.3, 240);
+    let current = 0;
+    heads.forEach((h, i) => {
+      if (h.getBoundingClientRect().top <= line) current = i;
+    });
+    if (atEnd) current = heads.length - 1;
+    links.forEach((a, i) => (i === current ? a.setAttribute("aria-current", "true") : a.removeAttribute("aria-current")));
+  };
+  const crossing = new IntersectionObserver(mark, { rootMargin: "0px 0px -70% 0px", threshold: [0, 1] });
+  for (const h of heads) crossing.observe(h);
+  const end = document.querySelector(".guide > :last-child");
+  if (end)
+    new IntersectionObserver(
+      (entries) => {
+        atEnd = entries.some((e) => e.isIntersecting);
+        mark();
+      },
+      { threshold: 1 },
+    ).observe(end);
+  mark();
+}
+
 // ── A plugin's pictures ────────────────────────────────────────────────
 // The strip scrolls by itself (keyboard, touch, trackpad); the dots follow
 // it, and take you to a picture.

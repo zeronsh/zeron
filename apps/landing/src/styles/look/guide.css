@@ -1,0 +1,147 @@
+/* The Publishing guide (pages/plugins/publishing.astro): the article in the store's text column, the "On this
+   page" rail at the container's right, steps whose numbers hang in the gutter, code blocks with a head, tables.
+   Spacing by the scale's steps only (store.css :root). The bar is 60 px tall: what sticks or is scrolled to
+   clears it by a group's step. */
+.guide-page { padding-top: var(--s48); padding-bottom: var(--sections); }
+.guide-grid { display: grid; grid-template-columns: minmax(0, 720px) minmax(0, 1fr) 232px; align-items: start; }
+.guide { grid-column: 1; min-width: 0; font-size: 16px; line-height: 28px; color: var(--text); }
+
+/* The title block; the first section's heading keeps its own step above it, as every section's does. */
+.guide-head h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
+.guide-head .lead { margin-top: var(--head); max-width: 36em; }
+.guide-head + * { margin-top: var(--title); }
+
+/* Headings: a section's 64 above and 16 below; a part's 32 above and 12 below. Each clears the bar when it's
+   scrolled to, and offers its own address in the gutter, on hover or focus. */
+.guide h2 { position: relative; margin-top: var(--sections); margin-bottom: var(--head); font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -0.02em; }
+.guide h3 { position: relative; margin-top: var(--s32); margin-bottom: var(--s12); font-size: 18px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.guide :is(h2, h3)[id] { scroll-margin-top: calc(60px + var(--s32)); }
+.anchor { position: absolute; left: calc(-1 * var(--s24)); top: 0; width: var(--s16); color: var(--text-3); font-weight: 500; text-align: center; opacity: 0; border-radius: 4px; transition: opacity 0.12s var(--ease), color 0.12s var(--ease); }
+.guide :is(h2, h3):hover .anchor, .anchor:focus-visible { opacity: 1; }
+.anchor:hover { color: var(--text); }
+
+/* The body: paragraphs a step apart; a list's items closer; its marks hang in the gutter, its words on the column. */
+.guide p, .guide ul, .guide ol:not(.steps) { margin-top: var(--s16); }
+.guide :is(h2, h3) + :is(p, ul, ol, .table-wrap, .codeblock, .flow) { margin-top: 0; }
+.guide ul:not(.flow, .reasons), .guide .table-wrap ul { padding-left: 0; list-style: disc outside; }
+.guide li + li { margin-top: var(--s8); }
+.guide li::marker { color: var(--text-3); }
+.guide strong { font-weight: 600; }
+.guide del { color: var(--text-3); }
+.guide a:not(.anchor, .ncard) { color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; transition: box-shadow 0.12s var(--ease); }
+.guide a:not(.anchor, .ncard):hover { box-shadow: 0 1px 0 var(--text-3); }
+
+/* A literal name: a small chip, its fill faint, so a sentence reads through it. */
+.guide :not(pre) > code { font: 500 0.875em/1 var(--mono); padding: 0 var(--s4); border-radius: 4px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); overflow-wrap: anywhere; }
+
+/* A block of code (components/look/CodeBlock.astro): a head (what it is, Copy), then the code; one line round it
+   (a shadow, so it takes no room and the words sit on the column), its body a step off the page; it hangs outside
+   the text column by its padding. */
+.codeblock { --pad: var(--s16); margin: var(--s16) calc(-1 * var(--pad)) 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; background: var(--surface); }
+.cb-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); height: 40px; padding: 0 var(--s4) 0 var(--pad); border-bottom: 1px solid var(--line); }
+.cb-label { font: 500 13px/20px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-copy { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.cb-copy:hover { color: var(--text); background: var(--sunken); }
+.cb-copy.is-done { color: var(--verified); }
+.cb-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.codeblock pre { margin: 0; padding: var(--s16) var(--pad); overflow-x: auto; font: 450 13.5px/24px var(--mono); color: var(--text); white-space: pre; }
+.codeblock pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* Steps, as Tailwind numbers them: the number a small square in the gutter, the title on the text's edge. */
+.steps { margin: var(--groups) 0 0; padding: 0; list-style: none; counter-reset: none; }
+.step { position: relative; }
+.step + .step { margin-top: var(--groups); }
+.guide .steps + * { margin-top: var(--groups); }
+.step-n { position: absolute; left: calc(-1 * (28px + var(--s16))); top: 0; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; font: 600 12px/1 var(--mono); color: var(--text-2); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.guide .step-title { margin: 0; font-size: 16px; line-height: 28px; font-weight: 600; letter-spacing: -0.005em; }
+.guide .step-title + p { margin-top: var(--s4); }
+
+/* A table: one line round it, as a code block's; its words on the column (it hangs by its cells' padding). */
+.table-wrap { --pad: var(--s16); margin: var(--s16) calc(-1 * var(--pad)) 0; overflow-x: auto; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); }
+.gtable { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 24px; }
+.gtable :is(th, td) { padding: var(--s12) var(--pad); text-align: left; vertical-align: top; }
+.gtable tr + tr :is(th, td), .gtable tbody tr :is(th, td) { box-shadow: 0 -1px 0 var(--line); }
+.gtable thead th { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); box-shadow: none; }
+.gtable tbody th { width: 160px; font-weight: 500; white-space: nowrap; }
+.gtable.halves td { width: 50%; }
+.gtable ul { margin: 0; padding-left: var(--s16); }
+.gtable li + li { margin-top: var(--s4); }
+
+/* All of what counts: under its table, folded. */
+.fold { margin-top: var(--s16); font-size: 15px; line-height: 24px; color: var(--text-2); }
+.fold summary { display: inline-flex; align-items: center; gap: var(--s4); font-size: 14px; font-weight: 500; color: var(--text-2); list-style: none; cursor: pointer; border-radius: 4px; }
+.fold summary::-webkit-details-marker { display: none; }
+.fold summary:hover { color: var(--text); }
+.fold summary svg, .toc-inline summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.fold[open] summary svg, .toc-inline[open] summary svg { transform: rotate(-90deg); }
+.fold p { margin-top: var(--s8); }
+
+/* A version's way through the store, in the store's own pills. */
+.flow { display: flex; flex-direction: column; gap: var(--s8); margin: 0 0 0 calc(-1 * var(--s8)); padding: 0; list-style: none; }
+.flow li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s8); }
+.guide .flow li + li { margin-top: 0; }
+.flow > li > svg { width: 14px; height: 14px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow-why { font-size: 14px; line-height: 20px; color: var(--text-3); }
+.reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s8) var(--s32); padding-left: 0; list-style: disc outside; }
+.guide .reasons li + li { margin-top: 0; }
+
+/* Where to go next: two cards side by side, the store's card. */
+.next { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--items); margin: var(--sections) calc(-1 * var(--s24)) 0; }
+.ncard { display: flex; flex-direction: column; gap: var(--s4); padding: var(--s24); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1), 0 0 0 1px var(--line); transition: box-shadow 0.12s var(--ease); }
+.ncard:hover { box-shadow: var(--shadow-2), 0 0 0 1px var(--line-2); }
+.nc-t { display: flex; align-items: center; justify-content: space-between; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--text); }
+.nc-t svg { width: 16px; height: 16px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.nc-l { font-size: 14px; line-height: 22px; color: var(--text-2); }
+
+/* On this page: the rail, sticky under the bar; a line down its left, the current part's stretch of it and its
+   words in the text's colour. */
+.toc { grid-column: 3; position: sticky; top: calc(60px + var(--s32)); }
+.toc-h { margin-bottom: var(--label); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
+.toc ol { margin: 0; padding: 0; list-style: none; }
+.toc > ol { box-shadow: inset 1px 0 0 var(--line); }
+.toc ol ol { padding-left: var(--s12); }
+.toc a { display: block; padding-left: var(--s16); font-size: 14px; line-height: 32px; color: var(--text-3); box-shadow: inset 1px 0 0 transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 0.12s var(--ease), box-shadow 0.12s var(--ease); }
+.toc ol ol a { margin-left: calc(-1 * var(--s12)); padding-left: calc(var(--s16) + var(--s12)); }
+.toc a:hover { color: var(--text-2); }
+.toc a[aria-current] { color: var(--text); box-shadow: inset 1px 0 0 var(--text); }
+.toc a:focus-visible { outline-offset: -2px; }
+
+/* Narrower than the rail's room: the same links under the lead, folded; no box, no fill. */
+.toc-inline { display: none; }
+
+@media (max-width: 1099px) {
+  .guide-grid { grid-template-columns: minmax(0, 720px); }
+  .toc { display: none; }
+  .toc-inline { display: block; }
+  .toc-inline summary { display: inline-flex; align-items: center; gap: var(--s4); font-size: 14px; line-height: 20px; font-weight: 500; color: var(--text-2); list-style: none; cursor: pointer; border-radius: 4px; }
+  .toc-inline summary::-webkit-details-marker { display: none; }
+  .toc-inline > ol { margin-top: var(--s8); }
+  .toc-inline ol { padding: 0; list-style: none; }
+  .toc-inline ol ol { padding-left: var(--s16); }
+  .guide .toc-inline li + li, .guide .toc-inline li > ol { margin-top: 0; }
+  .toc-inline a { display: block; font-size: 15px; line-height: 32px; box-shadow: none; font-weight: 450; color: var(--text-2); }
+}
+@media (max-width: 720px) {
+  .guide-page { padding-top: var(--s32); padding-bottom: var(--s48); }
+  .guide-head h1 { font-size: 32px; line-height: 36px; }
+  .guide h2 { margin-top: var(--s48); }
+  /* (No gutter to hang in: a step's number starts its title's line; a heading's own address is its tap.) */
+  .step-n { position: static; float: left; margin-right: var(--s12); }
+  .anchor { display: none; }
+  /* (As wide as the column, as wide as the screen.) */
+  .codeblock, .table-wrap { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; box-shadow: inset 0 1px 0 var(--line), inset 0 -1px 0 var(--line); }
+  .codeblock { --pad: var(--gutter); }
+  .table-wrap { --pad: var(--gutter); }
+  /* (A table's rows stack: the field, then what it needs, under it. Its heads are still read out, not shown; a
+     column's own head starts its cell.) */
+  .gtable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .gtable tbody tr { display: block; padding: var(--s12) var(--pad); }
+  .gtable tbody tr + tr { box-shadow: 0 -1px 0 var(--line); }
+  .guide .gtable tbody tr :is(th, td) { display: block; width: auto; padding: 0; box-shadow: none; white-space: normal; }
+  .gtable tbody th + td { margin-top: var(--s4); }
+  .gtable td[data-head] + td[data-head] { margin-top: var(--s16); }
+  .gtable td[data-head]::before { content: attr(data-head) / ""; display: block; margin-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
+  .reasons { grid-template-columns: minmax(0, 1fr); }
+  .next { grid-template-columns: minmax(0, 1fr); margin-inline: calc(-1 * var(--gutter)); }
+  .ncard { padding: var(--s24) var(--gutter); border-radius: 0; }
+}
