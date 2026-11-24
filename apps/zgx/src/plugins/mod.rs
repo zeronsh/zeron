@@ -829,7 +829,7 @@ pub fn prepare_live() -> PathBuf {
         preview::enter_safe();
     }
     // One Zeron took down never starts (blocks.rs), told once there's a window.
-    if let Some((id, why)) = blocks::stop(&root, preview::approvals_path().as_deref()) {
+    if let Some((id, why)) = blocks::stop(&root, preview::approvals_path().as_deref(), None) {
         let name = template_name(&root, &id);
         held_back(&id, &why);
         STOPPED_AT_LAUNCH.with(|s| *s.borrow_mut() = Some((name, why)));
@@ -1828,9 +1828,9 @@ impl Bridge {
         // look on (the survey already says so), told by the host.
         let running = self.laid.borrow().id.clone();
         if running != live::BUILTIN && id == live::BUILTIN {
-            let at = root.to_path_buf();
-            let stopped = off_thread(move || blocks::stop(&at, preview::approvals_path().as_deref())).await.flatten();
-            if let Some((_, why)) = stopped.filter(|(stopped, _)| *stopped == running) {
+            let (at, of) = (root.to_path_buf(), running.clone());
+            let stopped = off_thread(move || blocks::stop(&at, preview::approvals_path().as_deref(), Some(&of))).await.flatten();
+            if let Some((_, why)) = stopped {
                 self.chose.set(true);
                 held_back(&running, &why);
                 host_bar::notice(host_bar::Notice::stopped(&template_name(root, &running), &why));
@@ -1968,6 +1968,10 @@ impl Bridge {
                 .filter_map(|rel| self.failed_files.borrow().why(&format!("{}:{rel}", t.id)).map(|why| (rel.clone(), why.to_string())))
                 .collect();
             let blocked = blocks::blocked(&root, &t.id);
+            // (Taken down, in use or not: what was allowed of it is forgotten.)
+            if let (Some(blocks::Why::TakenDown { .. }), Some(approvals)) = (&blocked, preview::approvals_path()) {
+                preview::forget_at(&approvals, &t.id);
+            }
             let (state, error) = if blocked.is_some() {
                 ("blocked", None)
             } else if let Some(why) = &broken {

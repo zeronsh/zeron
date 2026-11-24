@@ -211,12 +211,12 @@ pub fn refuse(templates: &Path, id: &str) -> Result<(), String> {
     }
 }
 
-/// What was chosen can't be used: `(id, its name, why)`, if it can't. One
-/// taken down is let go of for good (what you allowed of it forgotten, Zeron's
+/// What runs (`running`; at a launch, what's chosen) can't be used: its id and
+/// why, if it can't, whatever is chosen since. One taken down is let go of for good (what you allowed of it forgotten, Zeron's
 /// own chosen by safe mode's path), so a restore brings nothing back by
 /// itself; one that can't be checked stays chosen, and comes back once it is.
-pub fn stop(templates: &Path, approvals: Option<&Path>) -> Option<(String, Why)> {
-    let id = live::chosen(templates);
+pub fn stop(templates: &Path, approvals: Option<&Path>, running: Option<&str>) -> Option<(String, Why)> {
+    let id = running.map_or_else(|| live::chosen(templates), str::to_owned);
     let why = blocked(templates, &id)?;
     if let Why::TakenDown { .. } = why {
         eprintln!("zeron-zgx: templates: {id} was taken down: Zeron's own from here");
@@ -224,7 +224,8 @@ pub fn stop(templates: &Path, approvals: Option<&Path>) -> Option<(String, Why)>
             preview::forget_at(approvals, &id);
         }
         preview::enter_safe();
-        if let Err(error) = live::set_active(templates, live::BUILTIN) {
+        if live::chosen(templates) == id
+            && let Err(error) = live::set_active(templates, live::BUILTIN) {
             eprintln!("zeron-zgx: Zeron's template wasn't chosen: {error}");
         }
     }
@@ -410,22 +411,32 @@ mod tests {
         let digest = preview::digest(&r.templates.join("midnight"));
         preview::approve_at(&approvals, "midnight", &digest).unwrap();
         live::set_active(&r.templates, "midnight").unwrap();
-        assert_eq!((live::active(&r.templates), stop(&r.templates, Some(&approvals))), ("midnight".into(), None));
+        assert_eq!((live::active(&r.templates), stop(&r.templates, Some(&approvals), None)), ("midnight".into(), None));
         r.write(FILE, "{");
         assert_eq!(live::active(&r.templates), live::BUILTIN, "refused before anything is laid down");
-        assert_eq!(stop(&r.templates, Some(&approvals)), Some(("midnight".into(), Why::Unchecked)));
+        assert_eq!(stop(&r.templates, Some(&approvals), None), Some(("midnight".into(), Why::Unchecked)));
         assert!(preview::approved_at(&approvals, "midnight", &digest));
         r.blocks(json!([]));
         assert_eq!(live::active(&r.templates), "midnight", "back, by itself");
         r.midnight();
         assert_eq!(live::active(&r.templates), live::BUILTIN);
         assert_eq!(refuse(&r.templates, "midnight"), Err("template_taken_down".into()));
-        assert!(matches!(stop(&r.templates, Some(&approvals)), Some((id, Why::TakenDown { .. })) if id == "midnight"));
+        assert!(matches!(stop(&r.templates, Some(&approvals), None), Some((id, Why::TakenDown { .. })) if id == "midnight"));
         assert!(!preview::approved_at(&approvals, "midnight", &digest), "what was allowed is forgotten");
         assert_eq!(live::chosen(&r.templates), live::BUILTIN);
-        assert_eq!(stop(&r.templates, Some(&approvals)), None, "once");
+        assert_eq!(stop(&r.templates, Some(&approvals), None), None, "once");
         r.blocks(json!([]));
         preview::enter_safe_for_test(false);
         assert_eq!(live::active(&r.templates), live::BUILTIN, "a restore brings nothing back");
+        // Another switched it away first: what ran is what's told, and let go
+        // of; what's chosen since isn't touched.
+        preview::approve_at(&approvals, "midnight", &digest).unwrap();
+        r.template("mine");
+        live::set_active(&r.templates, "mine").unwrap();
+        r.midnight();
+        assert!(matches!(stop(&r.templates, Some(&approvals), Some("midnight")), Some((id, Why::TakenDown { .. })) if id == "midnight"));
+        assert!(!preview::approved_at(&approvals, "midnight", &digest));
+        assert_eq!(live::chosen(&r.templates), "mine");
+        assert_eq!(stop(&r.templates, Some(&approvals), Some("mine")), None);
     }
 }
