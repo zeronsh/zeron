@@ -215,20 +215,26 @@ pub enum PluginCommand {
 #[derive(Subcommand)]
 pub enum TokenCommand {
     /// Make a deploy token: it's shown this once (neither Zeron nor the
-    /// store keeps it). Name the plugins it publishes (`--plugins a,b`), or
-    /// `--all` of yours, those you first publish later included; that can't
-    /// change afterwards. Making one needs a fresh sign-in, which this asks
-    /// for.
+    /// store keeps it). Name what it publishes (`--plugins a,b`, plugins and
+    /// templates alike), or `--all` of your plugins, or `--all --templates`
+    /// for your plugins and templates, those you first publish later
+    /// included; that can't change afterwards. Making one needs a fresh
+    /// sign-in, which this asks for.
     Create {
         /// What it's for, like "GitHub Actions".
         #[arg(long)]
         name: String,
-        /// The plugins it publishes, by id (yours in the store already).
+        /// What it publishes, by id: plugins and templates (yours in the
+        /// store already).
         #[arg(long, value_delimiter = ',', value_name = "IDS", required_unless_present = "all", conflicts_with = "all")]
         plugins: Vec<String>,
         /// Every plugin of yours, those you first publish later included.
+        /// Templates too with `--templates`.
         #[arg(long)]
         all: bool,
+        /// With `--all`: every template of yours as well as every plugin.
+        #[arg(long, requires = "all")]
+        templates: bool,
         /// Stop it working after this many days.
         #[arg(long, value_name = "DAYS")]
         expires_in_days: Option<u32>,

@@ -171,7 +171,7 @@ pub(super) fn template_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 }
 
 /// Every installed template id, unsorted.
-fn installed(dir: &Path) -> Vec<String> {
+pub(super) fn installed(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -393,6 +393,15 @@ fn entry(
     if let Some(error) = error {
         out["error"] = json!(error);
     }
+    // Taken down from the store, or a copy of one that was.
+    if !builtin && let Some(block) = super::template_blocks::blocked(dir, folder) {
+        out["status"] = json!("blocked");
+        out["blocked"] = json!({ "id": block.id, "version": block.version, "reason": block.reason, "at": block.at });
+        // (A copy of it says whose it is, and that it's a copy.)
+        if super::template_blocks::by_lineage(folder, &block) {
+            out["blocked"]["via"] = json!("lineage");
+        }
+    }
     let preview = folder.join(PREVIEW);
     if is_regular_file(&preview) {
         out["preview"] = json!(preview.display().to_string());
@@ -515,6 +524,16 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
         )
     };
 
+    // What it's a copy of goes with it: a take-down of that is one of this
+    // too. (One whose own can't be read isn't copied.)
+    let lineage = match &from_dir {
+        Some(from) => {
+            super::template_blocks::refuse(dir, from, "copied")?;
+            super::template_blocks::identities(from).map_err(|_| "Zeron can't read where that template came from, so it can't be copied.")?
+        }
+        None => Vec::new(),
+    };
+
     let tmp = dir.join(format!(
         ".tmp-{id}-{}-{}",
         std::process::id(),
@@ -523,7 +542,7 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)
         .map_err(|e| format!("Couldn't make the template's folder: {e}"))?;
-    let made = fill(&tmp, &zeron, from_dir.as_deref(), id, name, guide).and_then(|()| {
+    let made = fill(&tmp, &zeron, from_dir.as_deref(), id, name, guide).and_then(|()| super::template_blocks::keep_lineage(&tmp, &lineage)).and_then(|()| {
         std::fs::rename(&tmp, &target)
             .map_err(|e| format!("Couldn't put the template in place: {e}"))
     });
@@ -555,6 +574,9 @@ pub fn use_template(dir: &Path, id: &str, by: Option<&Value>) -> Result<Value, S
         return Err(format!(
             "There's no template {id}. list_templates names them."
         ));
+    }
+    if id != ZERON {
+        super::template_blocks::refuse(dir, &dir.join(id), "used")?;
     }
     match by {
         Some(by) => write_atomic(

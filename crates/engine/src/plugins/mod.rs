@@ -34,6 +34,7 @@ pub mod signing;
 pub mod snapshot;
 pub mod status;
 pub mod store;
+pub mod template_blocks;
 pub mod template_packages;
 pub mod templates;
 pub mod themes;
@@ -2195,7 +2196,8 @@ impl Plugins {
                 if method == methods::DELETE_TEMPLATE
                     && !Self::by_person()
                     && let Some(folder) = p.id.as_deref().and_then(|id| templates::template_dir(&dir, id.trim()))
-                    && template_packages::source(&folder).is_some_and(|s| s.kind == install::STORE)
+                    && (template_packages::source(&folder).is_some_and(|s| s.kind == install::STORE)
+                        || template_packages::has_record(&folder) && template_packages::imported(&folder).is_none())
                 {
                     return Err(failed(install::failure(
                         install::reason::NEEDS_PERSON,

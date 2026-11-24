@@ -346,6 +346,9 @@ pub struct TakedownEvent {
     pub version: String,
     #[serde(default, deserialize_with = "nullable")]
     pub reason: String,
+    /// Its content hash, when the store knows it.
+    #[serde(default, deserialize_with = "nullable")]
+    pub hash: Option<String>,
 }
 
 /// A version taken down and blocked: devices turn it off.

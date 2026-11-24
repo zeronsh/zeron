@@ -394,6 +394,12 @@ async fn an_agent_cannot_delete_a_template_from_the_store() {
         assert!(refused.as_ref().is_err_and(|e| e.contains("needs_person")), "{refused:?}");
     }
     assert!(from_store.exists());
+    // A record that can't be read: not told apart, so the person's too.
+    let unreadable = install("broken", Some("store"));
+    std::fs::write(unreadable.join(".imported.json"), "nope").unwrap();
+    let refused = with_caller(Caller::Agent { chat: None }, call(&f.plugins, methods::DELETE_TEMPLATE, json!({ "id": "broken" }))).await;
+    assert!(refused.as_ref().is_err_and(|e| e.contains("needs_person")), "{refused:?}");
+    assert!(unreadable.exists());
     for (id, kind) in [("mine", None), ("shared", Some("file"))] {
         let folder = install(id, kind);
         with_caller(Caller::Agent { chat: None }, call(&f.plugins, methods::DELETE_TEMPLATE, json!({ "id": id }))).await.unwrap();

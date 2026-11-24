@@ -584,6 +584,86 @@ async fn take_downs_reach_the_device_by_the_feed_and_a_restore_asks_again() {
     assert_eq!(store.state.lock().unwrap().asks.len(), asks + 1);
 }
 
+/// A template taken down from the store: by the feed (with its contents'
+/// hash) and by the full check; it and its copies can't be used, copied or
+/// exported, nothing with its contents is imported, and a restore lifts it.
+/// The device's place in the feed moves past it only once it's kept.
+#[tokio::test]
+async fn a_template_taken_down_is_blocked_here_and_so_are_its_copies() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    std::fs::write(templates.join(".zeron/app.luau"), "return 1").unwrap();
+    // (Its folder's name is another's.)
+    let folder = templates.join("midnight-2");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("zeron-template.json"), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#).unwrap();
+    std::fs::write(folder.join("app.luau"), "return 2").unwrap();
+    let record = json!({ "key": null, "hash": "h", "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+        "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+    std::fs::write(folder.join(".imported.json"), record.to_string()).unwrap();
+    d.call(methods::CREATE_TEMPLATE, json!({ "id": "mine", "from": "midnight-2" })).await.unwrap();
+    d.call(methods::CREATE_TEMPLATE, json!({ "id": "again", "from": "mine" })).await.unwrap();
+    let row = |list: &Value, id: &str| list["templates"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+
+    // No place in the feed yet: the full check, which asks about it once.
+    d.plugins.check_takedowns().await;
+    let asks = store.state.lock().unwrap().asks.clone();
+    assert_eq!((asks.len(), &asks[0]["templates"]), (1, &json!([{ "id": "midnight", "version": "1.0.0", "hash": "cd".repeat(32) }])), "{asks:?}");
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "mine" })).await.is_ok());
+
+    let down = |seq: u64, kind: &str| {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((seq, kind.into(), "midnight".into(), "1.0.0".into(), "It read your chats.".into()));
+        state.template_events.insert(seq);
+    };
+    down(1, "take_down");
+    // It can't be kept: the place doesn't move, and it's asked for again.
+    let file = templates.join(".blocked.json");
+    std::fs::create_dir(&file).unwrap();
+    d.plugins.check_takedowns().await;
+    std::fs::remove_dir(&file).unwrap();
+    // (What couldn't be read starts over: the full check, then the feed on.)
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    d.plugins.check_takedowns().await;
+    let list = d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap();
+    for id in ["midnight-2", "mine", "again"] {
+        let row = row(&list, id);
+        assert_eq!((row["status"].as_str(), row["blocked"]["reason"].as_str()), (Some("blocked"), Some("From the full check.")), "{row}");
+        for (method, params) in [
+            (methods::USE_TEMPLATE, json!({ "id": id })),
+            (methods::CREATE_TEMPLATE, json!({ "id": "another", "from": id })),
+            (methods::EXPORT_TEMPLATE, json!({ "id": id })),
+        ] {
+            let refused = d.call(method, params).await.unwrap_err();
+            assert!(refused.contains("taken_down"), "{method} {id}: {refused}");
+        }
+    }
+    // A copy's row names what it's a copy of, and says it's a copy.
+    let rows: Vec<Value> = ["midnight-2", "mine", "again"].iter().map(|id| row(&list, id)["blocked"].clone()).collect();
+    for (blocked, via) in rows.iter().zip([Value::Null, json!("lineage"), json!("lineage")]) {
+        assert_eq!((blocked["id"].as_str(), blocked["version"].as_str(), blocked["via"].clone()), (Some("midnight"), Some("1.0.0"), via), "{blocked}");
+    }
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "zeron" })).await.is_ok(), "Zeron's own always");
+
+    // Restored, by the feed; then taken down again, by it.
+    store.state.lock().unwrap().templates_down.clear();
+    down(2, "restore");
+    d.plugins.check_takedowns().await;
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "again" })).await.is_ok());
+    down(3, "take_down");
+    d.plugins.check_takedowns().await;
+    let list = d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap();
+    assert_eq!(row(&list, "again")["blocked"]["reason"], "It read your chats.");
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!((kept["format"].as_str(), kept["blocks"][0]["hash"].clone()), (Some("zeron-template-blocks:v1"), json!("ab".repeat(32))), "{kept}");
+
+    let asked = |path: &str| store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == path).count();
+    assert!(asked("/store/v1/takedowns?after=2") >= 1);
+}
+
 /// A template's take-down is never a plugin's, whatever its id and version;
 /// the device's place in the feed moves past it all the same.
 #[tokio::test]
@@ -610,6 +690,54 @@ async fn a_template_s_take_down_never_touches_a_plugin() {
     assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
     let asked = store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns?after=1").count();
     assert_eq!(asked, 1, "its place moved past the template's event");
+}
+
+/// The feed starts over only when the full check answered about every
+/// template here: one it couldn't read leaves the place where it was.
+#[tokio::test]
+async fn a_reset_waits_for_the_templates_too() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("midnight")).unwrap();
+    std::fs::write(templates.join("midnight/zeron-template.json"), r#"{"id":"midnight","name":"Midnight"}"#).unwrap();
+    let record = json!({ "key": null, "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+        "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+    std::fs::write(templates.join("midnight/.imported.json"), record.to_string()).unwrap();
+    let starts = || store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns").count();
+    // The check's answer about it can't be read.
+    store.state.lock().unwrap().blocked_anyway.push(json!({ "id": "midnight", "item_kind": "template" }));
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 2, "it starts over each time");
+    // It can: the device takes its place.
+    store.state.lock().unwrap().blocked_anyway.clear();
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 3, "no more from the start");
+}
+
+/// A block this Zeron can't tell the kind of lifts nothing: the plugin it
+/// names keeps the block it has.
+#[tokio::test]
+async fn a_block_of_an_unknown_kind_lifts_no_other() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store.block("focus", "1.0.0", "Its own.");
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    // Restored in the feed (it's named by nothing), but the full check names
+    // it as a kind this Zeron doesn't know.
+    store.restore("focus", "1.0.0");
+    store.state.lock().unwrap().blocked_anyway.push(json!({ "id": "focus", "version": "1.0.0", "item_kind": "theme" }));
+    d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    let item = d.item("focus").await;
+    assert_eq!(item["blocked"]["reason"], "Its own.", "{item}");
 }
 
 #[tokio::test]

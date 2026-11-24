@@ -27,7 +27,7 @@ use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
 use crate::plugins::status::{Blocked, UpdatePreference};
 use crate::plugins::version::{self, Version};
-use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing};
+use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks};
 
 /// The most one store file fetched for showing may be.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -226,6 +226,14 @@ struct Candidate {
     verified: bool,
     /// Which update this device stages for it.
     prefer: UpdatePreference,
+}
+
+/// What a full check of the store found.
+struct StoreCheck {
+    updates: Vec<Value>,
+    errors: Vec<Value>,
+    /// Every template here was answered about, and what's blocked kept.
+    templates_settled: bool,
 }
 
 /// `{ok: false, error, message}` from a failure's `"<word>: <words>"`.
@@ -1019,7 +1027,12 @@ impl Plugins {
     /// count. Nothing about what's installed is sent.
     pub async fn check_takedowns(&self) {
         self.rescan().await;
-        if self.store_candidates(None).is_empty() {
+        let templates_dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let has_templates = {
+            let dir = templates_dir.clone();
+            tokio::task::spawn_blocking(move || !template_blocks::installed(&dir).is_empty()).await.unwrap_or(true)
+        };
+        if self.store_candidates(None).is_empty() && !has_templates {
             return;
         }
         let Ok((client, caller)) = self.store_reader() else { return };
@@ -1034,8 +1047,8 @@ impl Plugins {
                 }
             };
             if feed.reset || after.is_none_or(|a| a > feed.head) {
-                let (_, errors) = self.check_store_updates(None).await;
-                if errors.is_empty() {
+                let check = self.check_store(None).await;
+                if check.errors.is_empty() && check.templates_settled {
                     self.end_marks(&client, &caller).await;
                     let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
                 }
@@ -1043,6 +1056,31 @@ impl Plugins {
             }
             let events: Vec<_> = feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a) && e.seq <= feed.head).collect();
             let Some(last) = events.iter().map(|e| e.seq).max() else { return };
+            // Templates' first: a place in the feed is past both kinds. One
+            // that couldn't be kept is asked for again, from a fresh start
+            // when what's kept can't be read.
+            let changes: Vec<template_blocks::Change> = events
+                .iter()
+                .filter(|e| e.item_kind == Some(client::Kind::Template))
+                .filter_map(|e| match e.kind.as_str() {
+                    "take_down" => Some(template_blocks::Change::TakenDown(template_blocks::Block {
+                        id: e.id.clone(),
+                        version: e.version.clone(),
+                        hash: e.hash.clone(),
+                        reason: plain(&e.reason, 500),
+                        at: now_secs(),
+                    })),
+                    "restore" => Some(template_blocks::Change::Restored(e.id.clone(), e.version.clone())),
+                    _ => None,
+                })
+                .collect();
+            if let Err(error) = self.apply_template_changes(&templates_dir, changes).await {
+                tracing::warn!(%error, "store: a template's take-down couldn't be kept");
+                if template_blocks::read(&templates_dir).is_err() {
+                    let _ = self.update_state(|state| state.takedowns_after = None);
+                }
+                return;
+            }
             // (A template's is never a plugin's here.)
             let events = events.into_iter().filter(|e| e.item_kind == Some(client::Kind::Plugin));
             let candidates = self.store_candidates(None);
@@ -1127,18 +1165,86 @@ impl Plugins {
         }
     }
 
+    /// Make `changes` to what's blocked of templates, and say which of those
+    /// installed here that newly blocks.
+    async fn apply_template_changes(&self, dir: &Path, changes: Vec<template_blocks::Change>) -> Result<(), String> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let dir = dir.to_owned();
+        self.changing_blocks(move || template_blocks::apply(&dir, changes, now_secs())).await
+    }
+
+    /// Run `change` (to what's blocked of templates), then tell you of each
+    /// template here it newly blocks.
+    async fn changing_blocks(&self, change: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<(), String> {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let (changed, newly) = tokio::task::spawn_blocking(move || {
+            let blocked = || -> BTreeMap<String, template_blocks::Block> {
+                template_blocks::installed(&dir).into_iter().filter_map(|(id, _)| template_blocks::blocked(&dir, &dir.join(&id)).map(|b| (id, b))).collect()
+            };
+            let before = blocked();
+            let changed = change();
+            let newly: Vec<(String, template_blocks::Block)> = blocked().into_iter().filter(|(id, _)| !before.contains_key(id)).collect();
+            (changed, newly)
+        })
+        .await
+        .map_err(|_| "Couldn't keep it".to_string())?;
+        for (folder, block) in newly {
+            tracing::warn!(template = %folder, id = %block.id, version = %block.version, "store: a template was blocked");
+            let why = if block.reason.is_empty() { String::new() } else { format!(": {}", block.reason) };
+            self.key_notice(
+                &format!("template_blocked:{folder}:{}:{}", block.id, block.version),
+                "template_blocked",
+                None,
+                "Template blocked",
+                &format!("The template {folder} was taken down from the store{why}. Zeron won't run it."),
+            );
+        }
+        changed
+    }
+
     pub(in crate::plugins) async fn check_store_updates(&self, only: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+        let check = self.check_store(only).await;
+        (check.updates, check.errors)
+    }
+
+    async fn check_store(&self, only: Option<&str>) -> StoreCheck {
         let candidates = self.store_candidates(only);
-        if candidates.is_empty() {
-            return (Vec::new(), Vec::new());
+        let templates_dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        // (One plugin's check asks about it alone.)
+        let templates: Vec<template_blocks::Identity> = match only {
+            Some(_) => Vec::new(),
+            None => {
+                let dir = templates_dir.clone();
+                tokio::task::spawn_blocking(move || template_blocks::all_identities(&dir)).await.unwrap_or_default()
+            }
+        };
+        let mut check = StoreCheck { updates: Vec::new(), errors: Vec::new(), templates_settled: templates.is_empty() };
+        if candidates.is_empty() && templates.is_empty() {
+            return check;
         }
         let said = |c: &Candidate, error: &str| json!({ "id": c.id, "name": c.name, "error": error });
         let (client, caller) = match self.store_reader() {
             Ok(store) => store,
-            Err(error) => return (Vec::new(), candidates.iter().map(|c| said(c, &error.to_string())).collect()),
+            Err(error) => {
+                check.errors = candidates.iter().map(|c| said(c, &error.to_string())).collect();
+                return check;
+            }
         };
+        // At most the edge's limit per request, over both kinds together.
+        let mut asks: Vec<(&[Candidate], &[template_blocks::Identity])> = Vec::new();
+        let mut rest = &templates[..];
+        for plugins in candidates.chunks(MAX_UPDATE_ITEMS) {
+            let (with, later) = rest.split_at(rest.len().min(MAX_UPDATE_ITEMS - plugins.len()));
+            asks.push((plugins, with));
+            rest = later;
+        }
+        asks.extend(rest.chunks(MAX_UPDATE_ITEMS).map(|templates| (&[][..], templates)));
+        let mut settled: Vec<template_blocks::Identity> = Vec::new();
+        let mut template_downs: Vec<template_blocks::Block> = Vec::new();
         let by_id: HashMap<&str, &Candidate> = candidates.iter().map(|c| (c.id.as_str(), c)).collect();
-        let mut errors = Vec::new();
+        let mut errors: Vec<Value> = Vec::new();
         let mut offers: BTreeMap<String, Offer> = BTreeMap::new();
         let mut blocks = Vec::new();
         // The plugins the store answered about (offline batches aren't).
@@ -1146,15 +1252,14 @@ impl Plugins {
         // Those with an entry it sent that couldn't be read: whatever block
         // they have stays (it fails closed).
         let mut unread: BTreeSet<&str> = BTreeSet::new();
-        // At most the edge's limit per request.
-        for batch in candidates.chunks(MAX_UPDATE_ITEMS) {
+        for (batch, asked_templates) in asks {
             let ask = UpdatesAsk {
                 zeron: version::zeron().to_string(),
                 plugins: batch
                     .iter()
                     .map(|c| Asked { id: c.id.clone(), version: c.version.clone(), hash: c.hash.clone(), prerelease: c.prerelease })
                     .collect(),
-                templates: Vec::new(),
+                templates: asked_templates.iter().map(|t| Asked { id: t.id.clone(), version: t.version.clone(), hash: t.hash.clone(), prerelease: false }).collect(),
             };
             let reply = match client.updates(&ask, &caller).await {
                 Ok(reply) => reply,
@@ -1165,14 +1270,34 @@ impl Plugins {
                 }
             };
             answered.extend(batch.iter());
+            // Each template asked about, as the answer says: one it couldn't
+            // be read about keeps the block it has.
+            let anyone = reply.unreadable.iter().any(|id| id.as_deref().is_none_or(|id| !by_id.contains_key(id) && !asked_templates.iter().any(|t| t.id == id)));
+            // (And one of a kind this Zeron doesn't know, whatever it is.)
+            let unknown = |id: &str| reply.blocked.iter().any(|b| b.item_kind.is_none() && b.id == id);
+            let readable = |t: &&template_blocks::Identity| !anyone && !unknown(&t.id) && !reply.unreadable.iter().any(|id| id.as_deref() == Some(t.id.as_str()));
+            settled.extend(asked_templates.iter().filter(readable).cloned());
+            for t in asked_templates {
+                if let Some(block) = reply.blocked.iter().find(|b| b.item_kind == Some(client::Kind::Template) && b.id == t.id && same_version(&b.version, &t.version)) {
+                    template_downs.push(template_blocks::Block { id: t.id.clone(), version: t.version.clone(), hash: Some(t.hash.clone()), reason: plain(&block.reason, 500), at: now_secs() });
+                }
+            }
             for unreadable in &reply.unreadable {
                 match unreadable.as_deref().and_then(|id| by_id.get(id)) {
                     Some(c) => {
                         unread.insert(c.id.as_str());
                         errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
                     }
+                    None if unreadable.as_deref().is_some_and(|id| asked_templates.iter().any(|t| t.id == id)) => {}
                     // (Whose, it doesn't say: none of this batch's blocks lifts.)
                     None => unread.extend(batch.iter().map(|c| c.id.as_str())),
+                }
+            }
+            // One of a kind this Zeron doesn't know, naming one of these:
+            // whatever block it has stays.
+            for block in reply.blocked.iter().filter(|b| b.item_kind.is_none()) {
+                if let Some(c) = by_id.get(block.id.as_str()) {
+                    unread.insert(c.id.as_str());
                 }
             }
             blocks.extend(reply.blocked);
@@ -1182,6 +1307,14 @@ impl Plugins {
                 if by_id.contains_key(offer.id.as_str()) {
                     offers.entry(offer.id.clone()).or_insert(offer);
                 }
+            }
+        }
+        if !templates.is_empty() {
+            let all = settled.len() == templates.len();
+            let dir = templates_dir.clone();
+            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, now_secs())).await {
+                Ok(()) => check.templates_settled = all,
+                Err(error) => tracing::warn!(%error, "store: what's blocked of templates couldn't be kept"),
             }
         }
         // One block per plugin, for the version installed (the first the
@@ -1237,7 +1370,9 @@ impl Plugins {
             }
         }
         self.catch_up_verified(&client, &caller, &candidates).await;
-        (updates, errors)
+        check.updates = updates;
+        check.errors = errors;
+        check
     }
 
     /// Each version installed here unverified whose own record, read now,

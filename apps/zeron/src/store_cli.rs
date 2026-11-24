@@ -489,9 +489,13 @@ const STEP_UP_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 async fn token(client: &zeron_rpc::RpcClient, command: TokenCommand) -> anyhow::Result<()> {
     let call = |method: &'static str, params: Value| ask(client, method, params);
     match command {
-        TokenCommand::Create { name, plugins, all, expires_in_days } => {
-            let scope = if all { json!({ "all": true }) } else { json!({ "plugins": plugins }) };
-            let what = if all { "all of your plugins".to_owned() } else { plugins.join(", ") };
+        TokenCommand::Create { name, plugins, all, templates, expires_in_days } => {
+            let scope = if all { json!({ "all": true, "all_kinds": if templates { &["plugin", "template"][..] } else { &["plugin"] } }) } else { json!({ "plugins": plugins }) };
+            let what = match (all, templates) {
+                (true, true) => "all of your plugins and templates".to_owned(),
+                (true, false) => "all of your plugins".to_owned(),
+                _ => plugins.join(", "),
+            };
             let mut params = json!({ "name": name, "scope": scope });
             if let Some(days) = expires_in_days {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;

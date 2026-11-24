@@ -549,6 +549,11 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
     result.map(|()| replaced)
 }
 
+/// `package` in a fresh folder `staged`: its own files first, then
+/// `zeron-plugin.json`, then `.source.json`. That order is what this rests
+/// on where a disk gives files short names: a package's file named as one
+/// (`ZERON-~1.JSO`) is made before Zeron's own, so it isn't it. The manifest
+/// and the folder are read from the disk at every scan (`scan::inspect`).
 fn stage(staged: &Path, package: &Package, source: &Source) -> Result<(), String> {
     let write_error = |_| "Couldn't write its files".to_string();
     std::fs::create_dir_all(staged).map_err(write_error)?;

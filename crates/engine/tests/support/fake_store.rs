@@ -97,6 +97,9 @@ pub struct State {
     pub submitted: Vec<(String, Vec<u8>, String)>,
     /// Templates: each one's owner and versions, as published.
     pub templates: BTreeMap<String, (String, Vec<String>)>,
+    /// Templates' versions taken down, as the full check says them: `(id,
+    /// version)`.
+    pub templates_down: Vec<(String, String)>,
     /// A store from before templates: their routes aren't there.
     pub without_templates: bool,
     /// Templates submitted: `(id, package)`.
@@ -558,8 +561,12 @@ impl FakeStore {
                             .filter(|e| e.0 > after)
                             .take(500)
                             .map(|(seq, kind, id, version, reason)| {
-                                let item_kind = if state.template_events.contains(seq) { "template" } else { "plugin" };
-                                json!({ "seq": seq, "kind": kind, "item_kind": item_kind, "id": id, "version": version, "reason": reason })
+                                let template = state.template_events.contains(seq);
+                                let mut event = json!({ "seq": seq, "kind": kind, "item_kind": if template { "template" } else { "plugin" }, "id": id, "version": version, "reason": reason });
+                                if template {
+                                    event["hash"] = json!("ab".repeat(32));
+                                }
+                                event
                             })
                             .collect();
                         json_reply(200, json!({ "events": events, "head": head }))
@@ -640,6 +647,12 @@ impl FakeStore {
                     }
                 }
                 updates.append(&mut state.offer_anyway);
+                for asked in ask["templates"].as_array().into_iter().flatten() {
+                    let is = |(id, version): &&(String, String)| asked["id"] == id.as_str() && asked["version"] == version.as_str();
+                    if state.templates_down.iter().any(|d| is(&d)) {
+                        blocked.push(json!({ "item_kind": "template", "id": asked["id"], "version": asked["version"], "reason": "From the full check." }));
+                    }
+                }
                 blocked.extend(state.blocked_anyway.iter().cloned());
                 json_reply(200, json!({ "updates": updates, "blocked": blocked }))
             }
