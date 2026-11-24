@@ -26,6 +26,8 @@ describe("store catalog", () => {
       summary: `The ${id} plugin.`,
       // A path in the card's version's package (amendment 35), never a URL.
       icon: "icon.svg",
+      // Its first screenshot, the same way.
+      cover: "shots/one.png",
       author: { id: await publisherId(a.userId), username: a.username, badges: [] },
       categories: ["productivity"],
       keywords: [tag],
@@ -264,6 +266,45 @@ describe("store catalog", () => {
       [loved, 2],
       [quiet, 0]
     ]);
+  });
+
+  it("gives each card its version's first screenshot as its cover, a package path, or null when that version has none", async () => {
+    const a = await author();
+    const tag = `t${randomLetters(8)}`;
+    // (Read signed in: never through the cache, so each step reads the card as it is now.)
+    const cover = async (id: string) => (await list(`keyword=${tag}`, a.userId)).items.find((c) => c.id === id) as Card & { cover: string | null; version: string };
+    // Two screenshots: the first is the cover, a path, never a URL.
+    const shots = uniqueId();
+    await listed(a, shots, "1.0.0", { manifest: { keywords: [tag], screenshots: ["shots/two.png", "shots/one.png"] }, files: { "shots/two.png": PNG } });
+    expect(await cover(shots)).toMatchObject({ version: "1.0.0", cover: "shots/two.png" });
+    // None at all: null.
+    const bare = uniqueId();
+    await listed(a, bare, "1.0.0", { manifest: { keywords: [tag], screenshots: undefined } });
+    expect(await cover(bare)).toMatchObject({ version: "1.0.0", cover: null });
+    // A newer version with none: the card's version has none, so null, never
+    // an older version's.
+    await listed(a, shots, "1.1.0", { manifest: { keywords: [tag], screenshots: undefined } });
+    expect(await cover(shots)).toMatchObject({ version: "1.1.0", cover: null });
+    // A version taken down gives no cover: the card falls back to the version
+    // it shows, and its cover with it.
+    const down = uniqueId();
+    await listed(a, down, "1.0.0", { manifest: { keywords: [tag] } });
+    expect((await publish(a.userId, down, await makePackage({ id: down, version: "1.1.0", signer: a.signer, manifest: { keywords: [tag], screenshots: ["shots/two.png"] }, files: { "shots/two.png": PNG } }))).status).toBe(201);
+    expect(await cover(down)).toMatchObject({ version: "1.1.0", cover: "shots/two.png" });
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${down}/versions/1.1.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    expect(await cover(down)).toMatchObject({ version: "1.0.0", cover: "shots/one.png" });
+    // The same on the detail and the category shelves, which carry the card.
+    const detail = await json<{ cover: string | null; screenshots: string[] }>(await call(undefined, "GET", `/store/v1/plugins/${down}`));
+    expect(detail).toMatchObject({ cover: "shots/one.png", screenshots: ["shots/one.png"] });
+    // It's served as the detail's screenshots are: the files route, with the card's version.
+    const pic = await call(undefined, "GET", `/store/v1/plugins/${down}/files/1.0.0/shots/one.png`);
+    expect([pic.status, pic.headers.get("content-type")]).toEqual([200, "image/png"]);
+    // Nothing listed: no cover on the owner's card either.
+    const quiet = uniqueId();
+    expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${quiet}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    const mine = (await json<{ plugins: { id: string; cover: string | null; icon: string | null }[] }>(await call(a.userId, "GET", "/store/v1/me/plugins"))).plugins;
+    expect(mine.find((p) => p.id === quiet)).toMatchObject({ cover: null, icon: null });
   });
 
   it("purges the cached page and detail when a version is published, verified or yanked", async () => {
