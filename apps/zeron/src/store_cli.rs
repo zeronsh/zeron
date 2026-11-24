@@ -160,6 +160,11 @@ pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> a
             out!("{} {} meets the store's rules.", checked.id, checked.version);
             Ok(None)
         }
+        TemplateCommand::Stock { zeron } => {
+            let stock = zeron_engine::plugins::templates::stock(&zeron).map_err(|e| exit(SETUP, e))?;
+            println!("{}", serde_json::to_string_pretty(&stock)?);
+            Ok(None)
+        }
         TemplateCommand::Publish { target, dry_run } => {
             let Some(token) = deploy_token()? else {
                 return Err(exit(SETUP, format!("Set {} to a deploy token to publish a template (`zeron plugin token create`).", deploy_token::ENV)));

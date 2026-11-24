@@ -273,6 +273,13 @@ pub enum TemplateCommand {
     Status { id: String },
     /// Delete a template (it's set aside in the templates folder's .removed).
     Delete { id: String },
+    /// Print Zeron's own files by hash, for the store's stock/<version>.json
+    /// (the release's: what a template's first reviewer reads against).
+    #[command(hide = true)]
+    Stock {
+        /// Zeron's own template folder, as the app lays it out (`.zeron`).
+        zeron: std::path::PathBuf,
+    },
     /// Check a template against the store's rules (README, preview, listing,
     /// version, files): every problem, before anything is sent. Needs no
     /// Zeron running and no sign-in. Exits 1 when it doesn't meet them.

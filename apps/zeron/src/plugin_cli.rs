@@ -113,7 +113,7 @@ pub async fn run_template(
                 );
             }
         }
-        TemplateCommand::Check { .. } | TemplateCommand::Publish { .. } => unreachable!("the store's commands are run above"),
+        TemplateCommand::Check { .. } | TemplateCommand::Publish { .. } | TemplateCommand::Stock { .. } => unreachable!("the store's commands are run above"),
         TemplateCommand::Delete { id } => {
             let reply = call(&client, methods::DELETE_TEMPLATE, json!({ "id": id })).await?;
             println!("Deleted {}.", str_of(&reply, "deleted"));

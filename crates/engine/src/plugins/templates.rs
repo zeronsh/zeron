@@ -227,6 +227,34 @@ fn zeron_files(zeron: &Path) -> Vec<String> {
     app_files(zeron, &[MANIFEST, HASHES, CATALOG])
 }
 
+/// The most `stock/<version>.json` may be (the edge reads no more).
+const MAX_STOCK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Zeron's own files as the app lays them out (its `.zeron` folder), for the
+/// store's `stock/<version>.json`: what a template's first reviewer reads
+/// each of its files against. `{version, files: {rel: sha256}}`, the files a
+/// template copies (never `.zeron`'s bookkeeping).
+pub fn stock(zeron: &Path) -> Result<Value, String> {
+    let manifest: Manifest = read_regular(&zeron.join(MANIFEST))
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or("That isn't Zeron's own template folder (.zeron): it has no manifest that can be read")?;
+    let version = manifest.zeron_version.unwrap_or_default();
+    super::version::Version::parse(&version).map_err(|e| format!("Its Zeron version ({version:?}) isn't one a release has: {e}"))?;
+    let mut files = serde_json::Map::new();
+    for rel in zeron_files(zeron) {
+        let bytes = inside(zeron, &rel).and_then(|path| read_regular(&path)).ok_or_else(|| format!("Couldn't read {rel}"))?;
+        files.insert(rel, json!(super::signing::sha256_hex(&bytes)));
+    }
+    if !files.contains_key("app.luau") {
+        return Err("That isn't Zeron's own template folder (.zeron): it has no app.luau".into());
+    }
+    let stock = json!({ "version": version, "files": files });
+    if serde_json::to_vec(&stock).map_or(0, |b| b.len()) > MAX_STOCK_BYTES {
+        return Err("Zeron's own files are more than the store reads (4 MB)".into());
+    }
+    Ok(stock)
+}
+
 /// A template's own app files: none of its listing files
 /// (`listing::TEMPLATE_LISTING_FILES`), which are never part of its app.
 pub(super) fn own_files(template: &Path) -> Vec<String> {
@@ -678,6 +706,33 @@ mod tests {
             .iter()
             .map(|t| t["id"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    /// Zeron's own files as a release has them: each by its sha256, its
+    /// bookkeeping left out; anything else isn't Zeron's, or isn't a release.
+    #[test]
+    fn plugins_templates_stock_is_zeron_s_files_by_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let z = dir.path();
+        let put = |rel: &str, text: &str| {
+            std::fs::create_dir_all(z.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(z.join(rel), text).unwrap();
+        };
+        assert!(stock(z).is_err(), "no manifest");
+        put(MANIFEST, r#"{"id":"zeron","zeron_version":"0.3.18"}"#);
+        assert!(stock(z).is_err(), "no app");
+        for (rel, text) in [("app.luau", "app"), ("ds/tokens.luau", "tokens"), (".luaurc", "{}"), (HASHES, "{}"), (CATALOG, "{}"), (".hidden/x", "x")] {
+            put(rel, text);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(z.join("app.luau"), z.join("linked.luau")).unwrap();
+        let made = stock(z).unwrap();
+        let hash = |text: &str| json!(super::super::signing::sha256_hex(text.as_bytes()));
+        assert_eq!(made, json!({ "version": "0.3.18", "files": { ".luaurc": hash("{}"), "app.luau": hash("app"), "ds/tokens.luau": hash("tokens") } }));
+        for version in ["", "0.3", "dev"] {
+            put(MANIFEST, &json!({ "id": "zeron", "zeron_version": version }).to_string());
+            assert!(stock(z).is_err(), "{version:?} isn't a release");
+        }
     }
 
     #[test]
