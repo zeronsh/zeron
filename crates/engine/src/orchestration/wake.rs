@@ -65,7 +65,8 @@ pub(crate) fn due<Tz: TimeZone>(wake: &WakeSchedule, now: DateTime<Utc>, tz: &Tz
 }
 
 pub(crate) fn start(orchestration: Orchestration) {
-    tokio::spawn(async move {
+    let run = orchestration.clone();
+    run.spawn(async move {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

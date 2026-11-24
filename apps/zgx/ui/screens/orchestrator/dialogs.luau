@@ -311,7 +311,7 @@ local function NewDialog(): Node
 					-- And its plan in its notes, to follow until the engine
 					-- routes it: under any notes it has, never over them.
 					local had: string? = nil
-					for _, o in orchestration.now:peek().orchestrators or {} do
+					for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 						if o.id == id then
 							had = o.notes
 						end
@@ -598,7 +598,7 @@ local function of(id: string?): any
 	if not id then
 		return nil
 	end
-	for _, o in orchestration.now:peek().orchestrators or {} do
+	for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 		if o.id == id then
 			return o
 		end

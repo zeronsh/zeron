@@ -20,6 +20,8 @@ local code_editor_page = require("@demos/code_editor")
 -- Groups of pages kept in files of their own (each a chat's work).
 local primitives_groups = require("@demos/primitives")
 local patterns_groups = require("@demos/patterns")
+-- Which of Zeron's built-in plugins run (Orchestrators' demos here).
+local plugins = require("@account/plugins")
 ds.setup()
 
 -- What the workbench shows, kept across launches.
@@ -1088,30 +1090,6 @@ local GROUPS: { Group } = {
 		},
 	},
 	{
-		-- Orchestration's pieces (demos/orch_*.luau), each loaded on its own
-		-- so a slip there shows in its place.
-		title = "Orchestration",
-		pages = (function(): { Page }
-			local out: { Page } = {}
-			for _, name in { "orch_board", "orch_crew", "orch_reports", "orch_live" } do
-				local ok, result = pcall(function()
-					return (require :: any)(`@demos/{name}`)
-				end)
-				table.insert(out, if ok
-					then result
-					else {
-						id = name,
-						title = name,
-						about = "This page didn't load.",
-						demo = function()
-							return ui.text { tostring(result), literal = true, wrap = true, font = "$font.mono", text_size = "$font.size.sm", color = "$danger" }
-						end,
-					})
-			end
-			return out
-		end)(),
-	},
-	{
 		title = "Commands",
 		pages = { context_menu_page :: Page, command_palette_page :: Page },
 	},
@@ -1160,30 +1138,6 @@ local GROUPS: { Group } = {
 	{
 		title = "Code",
 		pages = { syntax_page :: Page, files_page :: Page, code_editor_page :: Page },
-	},
-	-- Orchestration's pieces (demos/orchestration.luau): the Control room's
-	-- and an orchestrator page's. Loaded on their own so a slip there shows
-	-- in their place.
-	{
-		title = "Orchestration",
-		pages = (function(): { Page }
-			local ok, result = pcall(function()
-				return require("@demos/orchestration")
-			end)
-			if ok then
-				return result
-			end
-			return {
-				{
-					id = "orch-hue",
-					title = "Orchestration",
-					about = "This page didn't load.",
-					demo = function()
-						return ui.text { tostring(result), literal = true, wrap = true, font = "$font.mono", text_size = "$font.size.sm", color = "$danger" }
-					end,
-				},
-			}
-		end)(),
 	},
 	{
 		title = "Containers",
@@ -1784,6 +1738,46 @@ local GROUPS: { Group } = {
 		},
 	},
 }
+
+-- Orchestration's pieces, while Orchestrators is on (its demos: `demos`,
+-- the Control room's and an orchestrator page's; `demo_board`, `demo_crew`,
+-- `demo_reports`, `demo_live`): each loaded on its own so a slip there
+-- shows in its place. Their groups go where they stood, before Commands and
+-- before Containers.
+if plugins.peek("orchestrators") then
+	local orch: any = require("@app/builtin/orchestrators")
+	local function failed(id: string, title: string, why: any): Page
+		return {
+			id = id,
+			title = title,
+			about = "This page didn't load.",
+			demo = function()
+				return ui.text { tostring(why), literal = true, wrap = true, font = "$font.mono", text_size = "$font.size.sm", color = "$danger" }
+			end,
+		} :: any
+	end
+	local function before(title: string, g: Group)
+		for i, other in GROUPS do
+			if other.title == title then
+				table.insert(GROUPS, i, g)
+				return
+			end
+		end
+		table.insert(GROUPS, g)
+	end
+	local pieces: { Page } = {}
+	for _, part in { "demo_board", "demo_crew", "demo_reports", "demo_live" } do
+		local ok, result = pcall(function(): any
+			return orch[part]
+		end)
+		table.insert(pieces, if ok then result else failed(part, part, result))
+	end
+	before("Commands", { title = "Orchestration", pages = pieces } :: any)
+	local ok, result = pcall(function(): any
+		return orch.demos
+	end)
+	before("Containers", { title = "Orchestration", pages = if ok then result else { failed("orch-hue", "Orchestration", result) } } :: any)
+end
 
 for _, extra in { patterns_groups, primitives_groups } do
 	for _, g in extra :: { Group } do

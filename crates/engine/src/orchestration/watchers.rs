@@ -39,9 +39,9 @@ const SWEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub(crate) fn start(orchestration: Orchestration) {
     let asks = orchestration.clone();
-    tokio::spawn(async move { ask_banners(asks).await });
+    orchestration.spawn(async move { ask_banners(asks).await });
     let sweep = orchestration.clone();
-    tokio::spawn(async move {
+    orchestration.spawn(async move {
         tokio::time::sleep(SWEEP_AFTER).await;
         if let Some(rpc) = sweep.rpc() {
             let settled = super::stale_dumps::sweep(&sweep, &rpc);
@@ -57,12 +57,12 @@ pub(crate) fn start(orchestration: Orchestration) {
     if let Some(rpc) = orchestration.rpc() {
         let incoming = orchestration.clone();
         rpc.doc_host_ref().set_incoming_messages(std::sync::Arc::new(move |chat: &str, prompt: &str| {
-            super::incoming::consume(&incoming, chat, prompt)
+            incoming.is_on() && super::incoming::consume(&incoming, chat, prompt)
         }));
     }
     // Question routes nobody answered.
     let chase = orchestration.clone();
-    tokio::spawn(async move {
+    orchestration.spawn(async move {
         let mut tick = tokio::time::interval(CHASE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -81,7 +81,7 @@ pub(crate) fn start(orchestration: Orchestration) {
     // transcript synced in after every retry, or came while this engine
     // wasn't running and its thread hasn't ended a turn since.
     let sweep = orchestration.clone();
-    tokio::spawn(async move {
+    orchestration.spawn(async move {
         tokio::time::sleep(SWEEP_AFTER).await;
         let mut tick = tokio::time::interval(SWEEP_QUESTIONS_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -94,7 +94,8 @@ pub(crate) fn start(orchestration: Orchestration) {
             }
         }
     });
-    tokio::spawn(async move { route_answers(orchestration).await });
+    let run = orchestration.clone();
+    run.spawn(async move { route_answers(orchestration).await });
 }
 
 /// Whether a condensed answer came back as a title ("Board Inbox And Next
@@ -654,12 +655,9 @@ const SYNC_RETRIES: [std::time::Duration; 4] = [
 ];
 
 async fn route_answers(orchestration: Orchestration) {
-    let mut sessions_rx = loop {
-        match orchestration.rpc() {
-            Some(rpc) => break rpc.sessions_ref().watch_sessions(),
-            None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-        }
-    };
+    let Some(rpc) = orchestration.rpc() else { return };
+    let mut sessions_rx = rpc.sessions_ref().watch_sessions();
+    drop(rpc);
     let mut rows_rx = orchestration.workspace().watch_session_rows();
     let mut seen: HashMap<String, Session> =
         sessions_rx.borrow_and_update().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
@@ -776,7 +774,7 @@ fn turns_ended(
         // message, so another engine raising it too makes the same row.
         if hosted == Hosted::Older && just_now && launched_here(orchestration, &dumps, &chat) {
             let (o, r, c, s) = (orchestration.clone(), rpc.clone(), chat.clone(), session.clone());
-            tokio::spawn(async move {
+            orchestration.spawn(async move {
                 tokio::time::sleep(SYNC_RETRIES[0] + SYNC_RETRIES[1]).await;
                 super::turn_asks::after_turn(&o, &r, &c, &s).await;
             });
@@ -789,8 +787,9 @@ fn turns_ended(
         if waiting.is_empty() {
             continue;
         }
+        let run = orchestration.clone();
         let (orchestration, rpc) = (orchestration.clone(), rpc.clone());
-        tokio::spawn(async move {
+        run.spawn(async move {
             // An older host's transcript may still be on its way.
             let retries: &[std::time::Duration] = if hosted == Hosted::Older && just_now { &SYNC_RETRIES } else { &[] };
             let mut left = waiting;
@@ -915,14 +914,12 @@ mod tests {
             running_subagents: 0,
             background_tasks: vec![],
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         assert_eq!(task_state(&base), RouteState::Done);
-        let half = Session { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.clone() };
+        let half = Session { live: zeron_proto::SessionLive { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.live.clone() }, ..base.clone() };
         assert_eq!(task_state(&half), RouteState::Answered);
-        let all = Session { todo: Some(TodoProgress { done: 2, total: 2, current: None }), ..base.clone() };
+        let all = Session { live: zeron_proto::SessionLive { todo: Some(TodoProgress { done: 2, total: 2, current: None }), ..base.live.clone() }, ..base.clone() };
         assert_eq!(task_state(&all), RouteState::Done);
         let helping = Session { running_subagents: 1, ..base.clone() };
         assert_eq!(task_state(&helping), RouteState::Answered);
@@ -1050,9 +1047,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: vec![],
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         let working = session(SessionStatus::Working, Some("t0"));
         let done = session(SessionStatus::Idle, Some("t1"));

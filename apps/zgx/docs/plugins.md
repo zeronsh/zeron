@@ -23,6 +23,7 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `permissions`: only what you use. The person allows them once, in Zeron. Asking for more later asks them again.
 - `ui.change`: the selectors you replace, each written exactly as in `zeron.place { at = … }`. Needs `"ui.change"`.
 - `ui.replace`: whole screens you replace (`"@app/screens/…"`; never `@app/screens/plugins` or `@app/screens/shell/settings`). Needs `"ui.replace"`. A screen replacement runs as Zeron's own code; prefer `ui.change`.
+- `app_modules`: for Zeron's own plugins shipped in the app alone (see [Zeron's own plugins](#zerons-own-plugins)). Yours are never given them.
 - `tools`: tools agents can call, each `{ "name", "description", "input" }`. `name` is `^[a-z][a-z0-9_]{0,40}$` without `__`, and `input` is a JSON Schema. Needs `"tools"`.
 - `settings`: what the person can set for your plugin (see [Settings](#settings)). Needs no permission.
 - `commands`: the programs it runs as you (`["gh", "git"]`), each by its name as it's found on the PATH, never a path. Needs `"commands"`, and the person sees each name when allowing it (see [Programs and a database](#programs-and-a-database)).
@@ -31,6 +32,7 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `mcp`: `{ "command": "./bin/server", "args": ["--quiet"], "env": { "LOG": "off" } }`, a program of its own that Zeron starts as an MCP server beside your agents on this device, named `plugin-<id>`. `command` is required: `./…` is a file in your plugin's folder, anything else runs as named. `args` is a list of text, `env` names and text values. Needs `"native"`.
 - `settings_description`: a line under your settings page's title, in place of Zeron's own. Plain text, 200 characters at most; line breaks and runs of spaces become one space.
 - `author`: your name, as text. Optional. It's kept in the manifest (and signed with it), but Zeron never shows it as who made the plugin: that comes from the signature (see [Who made it](#who-made-it)).
+- `switch`: `{ "default": "off", "scope": "account" }`, how its on/off switch behaves. For Zeron's own plugins only (shipped in the app's `plugins-builtin/`); anyone else's ignores it and is on once allowed, on that device. `default`: `"on"` (the default) or `"off"`, what it is until someone turns it on or off; nothing is saved for a default, so it holds on a fresh install and on an upgrade alike. `scope`: `"device"` (the default) keeps the switch per device, in that engine's plugin state; `"account"` makes it one switch for the whole account: Settings → Plugins on any device sets it, it syncs, and every engine of the account follows it, headless and Cloud ones included, even with none of the plugin's files (a Cloud machine reads it but can't set it). A device's own choice made before counts for nothing once the switch is the account's. Anything else in `switch` breaks the manifest. The plugin list says so on the item: `"scope": "account"` and `"default_off": true`, beside its `status` as it is in effect.
 - `signature`: Zeron writes it when it signs the plugin; never write it yourself. `{ "key", "files", "sig" }`: `key` is the signer's public key (ed25519, base64url), `files` each file's path and its SHA-256 (hex), and `sig` the signature over the manifest with `key` and `files` in it. `files` covers every file in the folder except the manifest and anything whose name starts with a dot. Changing any file, or the manifest, breaks the signature until it's signed again.
 
 Your own plugins are signed as yours, and re-signed and reloaded each time you save.
@@ -697,6 +699,44 @@ A plugin you wrote that shows as Unverified here (one you copied in unsigned, sa
 - What you grant, it has. A plugin with `commands`, `native` or `service` runs programs as you, so it can do anything you can. Grant those only to a plugin you trust.
 - Only you allow a plugin, in Zeron's window. An agent can make and install plugins, but never allow one for you.
 - Code already running as you on your computer (for example an agent with a shell) is trusted the same as you. Zeron doesn't try to confine it.
+
+## Zeron's own plugins
+
+Zeron ships some of its features as plugins, in the app's `plugins-builtin/` folder beside `ui/`: Git, GitHub, Parallax scenes and Orchestrators. They're listed "by Zeron", allowed what they ask with no sheet, and turned off (never removed) in Settings → Plugins. `"switch": { "default": "off", "scope": "account" }` in one's manifest keeps it off until it's turned on, with one switch for the whole account (see `switch` above).
+
+Most are plugins like yours, built only from what any plugin can use. One that is a large part of the app itself (Orchestrators: its screens, their stores, the Control room) runs instead as the app's own code, as a **bundled built-in**:
+
+- **What it is.** A plugin the engine lists as a built-in by Zeron, from the very folder this window ships (`<app>/plugins-builtin/<id>`, its path resolved on the window's own disk), whose manifest there has the same id (`Item::bundled`, `src/plugins/mod.rs`). It loads from that folder, not from the engine's snapshot. A plugin you install is never one, whatever its id or name: its folder is yours (and the engine lists one with a built-in's id as broken). Nor is a list that says "built-in" of a folder elsewhere, nor a folder in `plugins-builtin` that links out of it.
+- **What it's trusted with.** The app modules its manifest names in `app_modules` (`grants::bundled`): any `@app/…` module but `@app/screens/plugins` and `@app/screens/shell/settings`, never `*`. Each is granted as zgx's `OverrideModule` of that module alone, so the plugin's `ui.override { module, with }` puts its own file in that module's place. The file, and what it requires, runs in the app's VM as the app's code: it requires `@app/…`, `@ds/…`, `@account/…`, and the plugin's other files by relative paths (`./…`, `../…`). This is zgx's own trust grant; nothing in zgx is special to Zeron.
+- **How the app reaches it: one stable name.** The app ships a stand-in for each, `ui/builtin/<id>.luau`, which is `false`. The plugin replaces `@app/builtin/<id>` with its app-side module (Orchestrators' `index.luau`), a table of its parts, each required the first time it's read. The app's own code never requires a plugin's file; it asks `@account/plugins`. (While Orchestrators' modules are still in `ui/`, its stand-in is the same table of parts, with the same paths as the plugin's index: one part a line, `name = "module",`, so moving them in rewrites only those lines.)
+- **Hooks in the app's own code.** Some entry points live in the app's files, where no plugin API reaches (the command palette, the sidebar's rows, the transcript, the composer). Each is gated:
+
+  ```lua
+  local plugins = require("@account/plugins")
+  -- In a build or a computed it's followed: a toggle shows or hides it in place.
+  ui.show(function() return plugins.on("orchestrators") end, ...)
+  -- Its app-side module, or nil (off, not loaded, or failed and set aside).
+  local orch = plugins.module("orchestrators")
+  if orch then orch.proof.label() end
+  ```
+
+  `plugins.on(id)` reads the shared value `plugins.on` (`{ [id] = true }`), which the window sets from the engine's list: on there, and loaded here (`Bridge::publish_on`). It's said after the reload that loads or unloads the plugin, so a hook that sees it on finds its module there. Turning it off in Settings → Plugins needs no restart: the window reloads without it, `@app/builtin/<id>` is the app's `false` again, and the gated hooks go.
+
+  A built-in's module, and the parts its hooks read where they're tracked (`preload` in `@account/plugins`), are loaded outside any build or effect: as the window loads if it's on by then, else a frame after it's turned on; it reads as on only once they are. zgx gives what a module makes as it loads (its effects, its computeds) to whatever runs as it's first required, so a part first required inside a computed would lose them when that computed runs again. A hook never requires a part's module by its path, and reads `plugins.peek(id)` (the window's word, untracked) only for what a load declares once (a command and its key). Gated today: the sidebar's Control room row, Orchestrators section, crew marks and view menu groups; the routes and pages; the chat page's progress line; the transcript's engine blocks and crew updates; a paused card's held queue; the Control room's references on a composer; the palette's entries; the Control room's keys and the dialogs; the chat menu's Make orchestrator and Add to board; Settings → Orchestration; the gallery's Orchestration groups.
+- **Laying one out** (`plugins-builtin/orchestrators`):
+
+  | file | what it is |
+  |---|---|
+  | `zeron-plugin.json` | `"switch": { "default": "off", "scope": "account" }`, `"app_modules": ["@app/builtin/orchestrators"]`, its permissions |
+  | `init.luau` | its entry, in its own sandbox: `require("./overrides")` first, then what it adds as a plugin (pages, commands) |
+  | `overrides.luau` | its `ui.override` calls alone, needing nothing but `ui` (the Luau tests load it on its own) |
+  | `index.luau` | the app-side module: its parts by name, each required as it's first read |
+  | `app/` | the modules it's made of, as the app's code |
+  | `tests/` | its Luau UI tests (`*.test.luau`) and their fixtures |
+
+  A module moved in from `ui/` keeps its `@app/…`, `@ds/…` and `@account/…` requires; its requires of other moved modules become relative.
+
+**Tests.** `scripts/ci/test-zgx.sh ui` runs `zgx test ui`, then each built-in's `tests/` (`plugin_tests`) in a copy of `ui/` made for it: `ui/`'s own tests left out, the plugin's `*.test.luau` in `tests/`, and the rest of its `tests/` (fixtures, worlds) beside `app.luau`, where `mount("…_fixture.luau")` finds them (a name `ui/` has already is refused). A `zgx.json` written for the run loads the plugin's `overrides.luau` with the grants its `app_modules` give, so a test reaches its app-side modules as the app does. `plugins.on` is off there, as on a fresh install; a fixture turns it on with `require("@account/plugins").set({ orchestrators = true })`, from a `ui.state` its test sets to try both. Failures count, and are let through, as `ui/`'s do (`scripts/ci/zgx-known-failures.txt`). The trust itself is tested in Rust, `src/plugins/bundled_tests.rs`.
 
 ## Three examples
 

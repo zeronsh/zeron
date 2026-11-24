@@ -55,8 +55,6 @@ local Mark = require("@self/mark")
 local glass = require("@self/glass")
 local control = require("@self/control")
 local Quote = require("@self/quote")
-local OrchReports = require("@self/orch_reports")
-local OrchInjected = require("@self/orch_injected")
 local SelectionMenu = require("@self/selection_menu")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
@@ -71,7 +69,8 @@ export type Message = {
 	-- What the engine said into it (a crew ask, a relay, a board check):
 	-- `injected` says which, as ds/orch_injected reads it. A person's whose
 	-- text opens with one of the engine's headers reads as one too (a
-	-- message written before the engine said which).
+	-- message written before the engine said which). (Both Orchestrators',
+	-- `orchestrators`: without it, each reads as a person's.)
 	role: "user" | "assistant" | "switch" | "crew_reports" | "injected",
 	text: string,
 	-- A person's: what came with it.
@@ -118,10 +117,10 @@ export type Message = {
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
 	-- Crew updates': each report (ds/orch_reports), in the order filed.
-	reports: { OrchReports.Report }?,
+	reports: { any }?,
 	-- An injected message's kind and ids (ds/orch_injected), and when it
 	-- was written (Unix seconds).
-	injected: OrchInjected.Injected?,
+	injected: any?,
 	created: number?,
 }
 
@@ -227,6 +226,11 @@ export type Props = {
 	-- comes, the latest showing meanwhile; one that never comes leaves the
 	-- view where it is. The reader scrolling first lets it go.
 	focus: State<Focus?>?,
+	-- Orchestrators' parts while it's on (its `injected` and `reports`:
+	-- ds/orch_injected, ds/orch_reports), read as a row is made: the
+	-- engine's words and crew updates drawn as theirs. Without it, they're
+	-- a person's bubbles.
+	orchestrators: (() -> any)?,
 	-- A crew ask said into an orchestrator's conversation: its ask as
 	-- orchestration has it now (by id), what opens it (the decision
 	-- overlay), and what opens a chat at a message (the thread that asked,
@@ -454,13 +458,13 @@ end
 -- An orchestrator's crew updates (the engine's `crewReports` message, its
 -- wake turn): a card of their reports, each opening its thread; never a
 -- bubble of the person's.
-local function crew_reports(state: State<Message>, props: Props): Node
+local function crew_reports(state: State<Message>, props: Props, OrchReports: any): Node
 	return ui.column {
 		class = "message message-crew-reports",
 		provide = { message = state:peek().id },
 		w_full = true,
 		OrchReports {
-			reports = function(): { OrchReports.Report }
+			reports = function(): { any }
 				return state:get().reports or {}
 			end,
 			title_of = function(chat: string): string?
@@ -478,7 +482,7 @@ end
 
 -- What the engine said into the conversation (ds/orch_injected): a quiet
 -- block, never the person's bubble; who sent it over it, as a bubble has.
-local function injected(m: Message, i: OrchInjected.Injected, props: Props, sender: ((Message, Props) -> Node)?): Node
+local function injected(m: Message, i: any, props: Props, sender: ((Message, Props) -> Node)?, OrchInjected: any): Node
 	return ui.column {
 		class = "message message-injected",
 		provide = { message = m.id },
@@ -2689,10 +2693,14 @@ local function Transcript(props: Props): Node
 		-- The engine's words (a crew ask, a relay): a block, said by the
 		-- engine or read from a header; or a bubble whose header only shows
 		-- over it (a dump, crew rules, a quoted message).
-		local said = if m.role == "user" or m.role == "injected" then OrchInjected.known(OrchInjected.read(m.text, m.injected)) else nil
-		local over = OrchInjected.bubble(said)
+		-- (Orchestrators off: none of that, each a person's bubble.)
+		local orch = if props.orchestrators then props.orchestrators() else nil
+		local OrchInjected = if orch then orch.injected else nil
+		local said = if OrchInjected and (m.role == "user" or m.role == "injected") then OrchInjected.known(OrchInjected.read(m.text, m.injected)) else nil
+		local over = if OrchInjected then OrchInjected.bubble(said) else nil
+		local reports = orch ~= nil and m.role == "crew_reports"
 		local block = if said and not over then said else nil
-		local mine = (m.role == "user" or m.role == "injected") and not block
+		local mine = (m.role == "user" or m.role == "injected" or (m.role == "crew_reports" and not reports)) and not block
 		-- The runway: the room under the newest prompt (and any provider-switch
 		-- seam directly above it) that lets the turn start at the view's top
 		-- while its reply is written under it. A prompt sent alone holds the
@@ -2701,7 +2709,7 @@ local function Transcript(props: Props): Node
 		-- height, so nothing moves as the reply arrives.
 		local function need(): number
 			-- (Crew updates are the engine's: they hold no prompt's runway.)
-			if m.role == "crew_reports" or block then
+			if reports or block then
 				return 0
 			end
 			local h = held:get()
@@ -2824,7 +2832,7 @@ local function Transcript(props: Props): Node
 				relative = true,
 				lit(m),
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch" or m.role == "crew_reports" or block
+				on_hover = if m.role == "switch" or reports or block
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -2834,8 +2842,8 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
-					elseif m.role == "crew_reports" then crew_reports(state, props)
-					elseif block then injected(m, block, props, sender_line)
+					elseif reports then crew_reports(state, props, orch.reports)
+					elseif block then injected(m, block, props, sender_line, OrchInjected)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -2844,7 +2852,7 @@ local function Transcript(props: Props): Node
 						provide = { message = m.id },
 						w_full = true,
 						if m.sender then sender_line(m, props) else nil,
-						if over then OrchInjected.Over { injected = over } else nil,
+						if over then (OrchInjected :: any).Over { injected = over } else nil,
 						UserMessage {
 							id = m.id,
 							text = if over then over.body or "" else m.text,

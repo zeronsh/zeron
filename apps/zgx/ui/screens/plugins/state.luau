@@ -14,6 +14,8 @@
 --
 --   state.review(id, device?, device_name?)  the consent window for it
 --   state.set_off(id, off, device?)  a promise; turns an allowed plugin off or on
+--                             (one whose switch is the account's: on this
+--                             device's engine, whatever device is asked)
 --   state.remove(id, device?)  a promise
 --   state.new_plugin(name)    a promise of its id: a new plugin of yours
 --   state.open_folder(id?)    its folder (or the plugins folder) in Finder
@@ -26,7 +28,9 @@
 --   state.check_updates(device?)  a promise: every installed plugin's source
 --                             checked
 --
--- Plugins are per device. Settings → Plugins can show another of your
+-- Plugins are per device, but for Zeron's own with `scope = "account"`: one
+-- switch for the whole account, set here and synced (`default_off`: off
+-- until it's turned on). Settings → Plugins can show another of your
 -- devices' (src/plugins/remote.rs), never loaded here:
 --
 --   state.remote:get()   { device = id?, state = "idle" | "loading" |
@@ -67,6 +71,9 @@ export type Item = {
 	-- Where someone else's came from, and a newer version found there.
 	source: { kind: string, url: string?, ref: string? }?,
 	update: { version: string, added: { string }, removed: { string }, refused: string? }?,
+	-- "account": one switch for every device (absent: this device's own).
+	scope: string?,
+	default_off: boolean?,
 }
 export type Now = {
 	state: string,
@@ -119,6 +126,11 @@ function M.review(id: string, device: string?, device_name: string?)
 	else
 		ui.invoke("plugins.review", id)
 	end
+end
+
+-- Whether its switch is the account's, never a device's.
+function M.account(p: Item): boolean
+	return p.scope == "account"
 end
 
 function M.set_off(id: string, off: boolean, device: string?): any

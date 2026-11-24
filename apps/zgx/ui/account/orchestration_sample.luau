@@ -191,7 +191,7 @@ local items = {
 local asks = {
 	{ id = "ak-1", from_chat = "th-ui-orch", orchestrator_id = "orc-orch", item_id = "it-orch-screen", kind = "decision",
 		question = "Orchestrator page: conversation and live state side by side, or tabs?",
-		options = { { label = "Side by side", detail = "Chat left, crew + board right" }, { label = "Tabs", detail = "Chat · Board · Crew" } },
+		options = { { label = "Side by side", detail = "Chat on the left, crew and board on the right" }, { label = "Tabs", detail = "Chat, Board and Crew as tabs" } },
 		urgent = false, state = "open", created = ago(200) },
 	{ id = "ak-2", from_chat = "orc-vpn", orchestrator_id = "orc-vpn", item_id = "it-moscow", kind = "approval",
 		question = "Reboot the Moscow node at **02:00 MSK** tonight?",
@@ -212,7 +212,7 @@ local dumps = {
 		created = ago(40),
 		routes = {
 			{ id = "rt-5", excerpt = "the orchestrator page should be side by side not tabs", span = { from = 6, to = 59 },
-				target = { kind = "chat", id = "th-ui-orch" }, intent = "info", message = "Decision from the person: side by side (chat left, crew + board right), not tabs.", state = "done", candidates = {},
+				target = { kind = "chat", id = "th-ui-orch" }, intent = "info", message = "Decision from the person: side by side (chat on the left, crew and board on the right), not tabs.", state = "done", candidates = {},
 				answer = "Switched to side by side; the tabs are gone.", answer_full = "Done: the orchestrator page is **side by side** now (chat left, crew and board right). Tabs removed in `ui/screens/orchestrator/page.luau`." },
 			{ id = "rt-6", excerpt = "remind me to rerun omarchy update it needs sudo", span = { from = 66, to = 113 },
 				target = { kind = "item", id = "it-omarchy" }, intent = "task", message = "Rerun omarchy-update (needs sudo).", state = "delivered", candidates = {}, item_id = "it-omarchy" },

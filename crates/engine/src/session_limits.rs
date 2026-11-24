@@ -3,7 +3,7 @@
 //! ends on the limit, in the same row write as its `Errored`, and cleared
 //! when its next turn starts. What happens meanwhile (the account it ran on,
 //! the reset, the resume, an account switch) is
-//! [`crate::orchestration::limits`]'.
+//! [`crate::usage_limits`]'.
 
 use super::*;
 use crate::run_journal::LimitMark;
@@ -138,9 +138,7 @@ impl SessionsEngine {
                             running_subagents: 0,
                             background_tasks: Vec::new(),
                             waiting: None,
-                            activity: None,
-                            todo: None,
-                            limited: Some(mark.limit.clone()),
+                            live: zeron_proto::SessionLive { activity: None, todo: None, limited: Some(mark.limit.clone()) },
                         },
                     );
                 }

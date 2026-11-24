@@ -20,6 +20,8 @@ async fn core() -> (tempfile::TempDir, crate::EngineCore) {
         None,
     )
     .unwrap();
+    // Orchestrators on: these are its tests.
+    core.set_orchestrators(true).await;
     (temp, core)
 }
 

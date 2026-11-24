@@ -10,7 +10,9 @@
 //!   to the person.
 //! - When its orchestrator allows it ([`LimitPolicy::switch_account`]), the
 //!   chat continues on another account instead (`account_switch`), and
-//!   switches back at a turn boundary after the reset.
+//!   switches back at a turn boundary after the reset. (What a chat is to
+//!   orchestration is read only while Orchestrators is on; off, every chat
+//!   is a plain one: no switch, no paused cards, no Brain dump.)
 //! - When the reset passes (and the account's fresh probe, if it has one,
 //!   agrees), each waiting chat is sent [`RESUMED_AFTER_LIMIT`] once,
 //!   orchestrators first, then crew, then the rest, [`STAGGER_MIN_SECS`] to
@@ -19,7 +21,8 @@
 //! - The limit is cleared when the resumed turn starts.
 //!
 //! Each limit is marked beside the run journal (`{chat}.limited`), so a
-//! restart re-arms its wait. One task: it sleeps until the earliest reset
+//! restart re-arms its wait. One task, started with the engine whatever
+//! Orchestrators is ([`crate::resumes`]): it sleeps until the earliest reset
 //! or resume due, or a limited row changes.
 
 use std::collections::HashMap;
@@ -30,7 +33,8 @@ use zeron_proto::usage_limit::{
 };
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId, Session, SessionStatus};
 
-use super::{ChatRole, Orchestration};
+use crate::orchestration::ChatRole;
+use crate::resumes::Resumes;
 use crate::rpc::EngineRpc;
 use crate::usage_limit_text::{MAX_ATTEMPTS, check_backoff};
 
@@ -203,7 +207,7 @@ impl EngineRpc {
     /// What `chat`'s orchestrator (its own, or its crew's) says to do on a
     /// limit; off for any other chat.
     pub(crate) fn on_limit_policy(&self, chat: &str) -> LimitPolicy {
-        let orch = self.orchestration();
+        let Some(orch) = self.active_orchestration() else { return LimitPolicy::default() };
         let role = orch.role_of(chat);
         let Some(id) = role.orchestrator_id() else { return LimitPolicy::default() };
         orch.orchestrator(id).filter(|o| !o.archived).map(|o| o.crew.on_limit).unwrap_or_default()
@@ -258,8 +262,9 @@ impl EngineRpc {
         let rows = self.sessions_ref().limited_rows();
         book.chats.retain(|chat, _| rows.iter().any(|r| &r.chat_id == chat));
         let snapshot = self.agent_accounts_ref().watch_snapshots().borrow().clone();
-        let orch = self.orchestration();
-        let state = orch.state();
+        // (What orchestration says of these chats: nothing while it's off.)
+        let orch = self.active_orchestration();
+        let state = orch.map(|o| o.state()).unwrap_or_default();
         // (rank, since, chat): due for a resume, not yet scheduled.
         let mut due: Vec<(u8, DateTime<Utc>, String)> = Vec::new();
         for row in &rows {
@@ -353,7 +358,7 @@ impl EngineRpc {
                 entry.hold_until = Some(now + TimeDelta::seconds(PAUSED_RECHECK_SECS));
                 continue;
             }
-            let role = orch.role_of(chat);
+            let role = orch.map_or(ChatRole::Plain, |o| o.role_of(chat));
             let gone = self.workspace_host().chat(chat).ok().flatten().is_none_or(|c| c.archived);
             if gone || matches!(role, ChatRole::BrainDump { .. }) {
                 self.drop_limit(chat, limit.since);
@@ -392,7 +397,7 @@ impl EngineRpc {
         // A chat a restart resume just sent its "[Resumed]" (its cut-off turn,
         // its wait, its subagents, a cut-off send) is left a moment: that
         // turn clears its limit as it starts, and one message is enough.
-        let just_resumed = self.orchestration().resumed_since(now, TimeDelta::seconds(super::board_checks::RESUMED_GRACE_SECS));
+        let just_resumed = self.resumes().resumed_since(now, TimeDelta::seconds(crate::restart_resume::RESUMED_GRACE_SECS));
         for (_, chat) in firing {
             if !rows.iter().any(|r| r.chat_id == chat && r.limited.as_ref().is_some_and(SessionLimit::waiting)) {
                 continue;
@@ -404,7 +409,7 @@ impl EngineRpc {
                 chat_id: Some(chat.clone()),
                 ..zeron_doc::Injected::of(zeron_doc::injected::LIMIT_RESET)
             };
-            match super::ops::deliver(self, &chat, RESUMED_AFTER_LIMIT, None, super::ops::When::Next, Some(injected)) {
+            match crate::orchestration::ops::deliver(self, &chat, RESUMED_AFTER_LIMIT, None, crate::orchestration::ops::When::Next, Some(injected)) {
                 Ok(_) => {
                     if let Some(entry) = book.chats.get_mut(&chat) {
                         entry.resumed_at = Some(now);
@@ -434,25 +439,20 @@ fn signature(rows: &[Session]) -> Vec<(String, SessionLimit, Boundary)> {
 
 /// The task: re-arm the marked limits, then a pass whenever a limited row
 /// changes or the next reset or resume falls due.
-pub(crate) fn start(orchestration: Orchestration) {
+pub(crate) fn start(resumes: Resumes) {
     // (Tests drive the passes themselves, at the times they choose.)
     if cfg!(test) {
         return;
     }
     tokio::spawn(async move {
-        let mut sessions_rx = loop {
-            match orchestration.rpc() {
-                Some(rpc) => break rpc.sessions_ref().watch_sessions(),
-                None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-            }
-        };
+        let Some(rpc) = resumes.rpc() else { return };
+        let mut sessions_rx = rpc.sessions_ref().watch_sessions();
         let mut book = LimitBook::default();
-        if let Some(rpc) = orchestration.rpc() {
-            rpc.restore_limits(&mut book);
-        }
+        rpc.restore_limits(&mut book);
+        drop(rpc);
         let mut seen = signature(&sessions_rx.borrow_and_update());
         loop {
-            let Some(rpc) = orchestration.rpc() else { break };
+            let Some(rpc) = resumes.rpc() else { break };
             let now = Utc::now();
             rpc.limits_pass(&mut book, now).await;
             let wake = book.next_wake(&rpc.sessions_ref().limited_rows(), now);
@@ -479,5 +479,5 @@ pub(crate) fn start(orchestration: Orchestration) {
 }
 
 #[cfg(test)]
-#[path = "limits_tests.rs"]
+#[path = "usage_limits_tests.rs"]
 mod tests;

@@ -450,13 +450,13 @@ mod tests {
     #[tokio::test]
     async fn files_go_to_another_device_as_uploads() {
         let temp = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble_with_profile(
+        let core = crate::orchestration::on(crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
             std::sync::Arc::new(crate::registry::HarnessRegistry::new()),
             zeron_proto::HarnessId::Codex,
             None,
         )
-        .unwrap();
+        .unwrap()).await;
         let rpc = core.rpc_service();
         let file = temp.path().join("shot.png");
         std::fs::write(&file, b"png").unwrap();

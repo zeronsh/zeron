@@ -1352,7 +1352,8 @@ pub(crate) fn deliver_with(
     let doc_host = rpc.doc_host_ref();
     // A thread of a card the person paused: an agent's message waits in its
     // held queue until they resume the card.
-    let paused = from.is_some() && super::board_checks::paused_thread(rpc.orchestration(), chat_id);
+    let paused = from.is_some()
+        && rpc.active_orchestration().is_some_and(|orch| super::board_checks::paused_thread(orch, chat_id));
     if paused {
         doc_host.hold_queue(chat_id);
     }

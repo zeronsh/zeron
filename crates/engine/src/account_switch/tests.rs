@@ -38,6 +38,8 @@ async fn engine() -> Engine {
         None,
     )
     .unwrap();
+    // Orchestrators on: the switch is its orchestrator's policy.
+    core.set_orchestrators(true).await;
     let root = temp.path().join("accounts");
     let accounts = accounts(&root);
     live_claude(&root, "acct-a", "a@example.com");

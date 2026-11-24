@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Writes ui/ds/orch_force_marks.luau: the providers' marks the Map's force
+"""Writes ds/orch_force_marks.luau (in the Orchestrators plugin's app/ once
+its modules moved there, else in ui/): the providers' marks the Map's force
 Graph draws in its nodes, from the SVGs the app already ships (the vendors'
 own marks, ui/assets/icons), as canvas paths ready to draw:
 
@@ -22,7 +23,9 @@ import re
 
 here = pathlib.Path(__file__).resolve().parent.parent
 icons = here / "ui" / "assets" / "icons"
-out = here / "ui" / "ds" / "orch_force_marks.luau"
+# Where the module is: the plugin's app/ keeps ui/'s layout.
+moved = here / "plugins-builtin" / "orchestrators" / "app" / "ds" / "orch_force_marks.luau"
+out = moved if moved.exists() else here / "ui" / "ds" / "orch_force_marks.luau"
 
 MARKS = [
     ("claude", "claude-mark.svg"),

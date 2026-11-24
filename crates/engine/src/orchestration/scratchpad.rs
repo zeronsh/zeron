@@ -156,14 +156,17 @@ mod tests {
 
     use crate::registry::HarnessRegistry;
 
-    fn assemble(dir: &std::path::Path) -> crate::EngineCore {
-        crate::EngineCore::assemble_with_profile(
-            crate::EngineProfile::local(dir).unwrap(),
-            std::sync::Arc::new(HarnessRegistry::new()),
-            HarnessId::Codex,
-            None,
+    async fn assemble(dir: &std::path::Path) -> crate::EngineCore {
+        crate::orchestration::on(
+            crate::EngineCore::assemble_with_profile(
+                crate::EngineProfile::local(dir).unwrap(),
+                std::sync::Arc::new(HarnessRegistry::new()),
+                HarnessId::Codex,
+                None,
+            )
+            .unwrap(),
         )
-        .unwrap()
+        .await
     }
 
     fn agent(chat: &str) -> Caller {
@@ -264,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn the_scratchpad_survives_an_engine_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         pad(
             &core,
             Caller::Local,
@@ -279,7 +282,7 @@ mod tests {
         core.shutdown().await;
         drop(core);
 
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         let after = watched(&core).await;
         assert_eq!(after, before);
         assert_eq!(after.pad.text, "# Ideas\n\nsync later");
@@ -291,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn the_brain_dump_reads_writes_and_appends_and_its_edits_are_marked() {
         let temp = tempfile::tempdir().unwrap();
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         let (_, _, _, brain) = cast(&core).await;
         pad(
             &core,
@@ -372,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn orchestrators_and_crew_only_read_and_other_chats_nothing() {
         let temp = tempfile::tempdir().unwrap();
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         let (orch, crew, plain, _) = cast(&core).await;
         pad(
             &core,
@@ -418,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn history_undo_and_restore() {
         let temp = tempfile::tempdir().unwrap();
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         let (_, _, _, brain) = cast(&core).await;
         pad(&core, Caller::Local, json!({"op":"setText","text":"v1"}))
             .await
@@ -472,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn writing_never_routes_or_makes_work() {
         let temp = tempfile::tempdir().unwrap();
-        let core = assemble(temp.path());
+        let core = assemble(temp.path()).await;
         let (orch, _, _, brain) = cast(&core).await;
         let before = core.orchestration.state();
         let comms_before = core.orchestration.comms().recent().len();

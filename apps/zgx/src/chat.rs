@@ -988,10 +988,37 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
-    /// A lane that shows no transcript (`session_only`: Capture's composer,
-    /// which needs the chat's row and the send path): its transcript isn't
-    /// watched, and its `messages` stay empty.
-    session_only: Cell<bool>,
+}
+
+thread_local! {
+    /// The lanes that show no transcript (`session_only`: Capture's
+    /// composer, which needs the chat's row and the send path): their
+    /// transcript isn't watched, and their `messages` stay empty. Beside
+    /// [`View`], not in it: an option only Orchestrators' Capture asks for.
+    /// (Each held weakly: a view's place isn't another's while it's here.)
+    static SESSION_ONLY: RefCell<Vec<Weak<View>>> = const { RefCell::new(Vec::new()) };
+}
+
+impl View {
+    /// Whether this is a lane that shows no transcript.
+    fn session_only(&self) -> bool {
+        SESSION_ONLY.with(|lanes| lanes.borrow().iter().any(|lane| std::ptr::eq(lane.as_ptr(), self)))
+    }
+
+    /// Made one (`on`), or no longer; whether that changed it.
+    fn set_session_only(self: &Rc<Self>, on: bool) -> bool {
+        if self.session_only() == on {
+            return false;
+        }
+        SESSION_ONLY.with(|lanes| {
+            let mut lanes = lanes.borrow_mut();
+            lanes.retain(|lane| lane.strong_count() > 0 && !std::ptr::eq(lane.as_ptr(), Rc::as_ptr(self)));
+            if on {
+                lanes.push(Rc::downgrade(self));
+            }
+        });
+        true
+    }
 }
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
@@ -1329,7 +1356,6 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     if chats.views.borrow().len() == 1 {
@@ -1379,7 +1405,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             // (Its transcript wanted again, or no longer: the chat opened
             // afresh, so its watches are what it now wants.)
             let session_only = args.field("session_only").is_some_and(Value::truthy);
-            if view.session_only.replace(session_only) != session_only {
+            if view.set_session_only(session_only) {
                 view.open_chat(None);
             }
             // A finished subagent: its uploaded transcript first.
@@ -1615,7 +1641,6 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     let weak = Rc::downgrade(&view);
@@ -2847,7 +2872,7 @@ impl View {
             let mut open = chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() });
             // (No transcript is watched: none is coming, and its row is
             // what it shows.)
-            open.heard |= self.session_only.get();
+            open.heard |= self.session_only();
             open
         });
         let has_rows = next.as_ref().is_some_and(|o| o.heard);
@@ -2943,7 +2968,7 @@ impl View {
             params = with_known(params, open);
         }
         // (A lane showing no transcript: its row and queue alone.)
-        let transcript = (!self.session_only.get()).then(|| {
+        let transcript = (!self.session_only()).then(|| {
             rpc.watch("WatchDocMessages", params, move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -3299,7 +3324,7 @@ impl View {
     }
 
     fn publish_messages(&self) {
-        if self.session_only.get() {
+        if self.session_only() {
             self.messages.set(Value::List(Rc::from([])));
             return;
         }
@@ -3646,7 +3671,7 @@ impl View {
                 p.transfers = transfers;
             }
             self.mark_failed(&id, &message_id, Some(run));
-        } else if self.session_only.get() {
+        } else if self.session_only() {
             // (No transcript comes to say it arrived: delivered is done,
             // unless the outbox holds it, which says when it leaves.)
             let mut pending = self.pending.borrow_mut();
@@ -5931,8 +5956,7 @@ impl Subagents {
 /// answer, a relay…), as ds/orch_injected reads it: `{ kind, ask?, chat?,
 /// turn?, item?, items?, dump?, route?, by? }`. None: it's no engine message.
 fn injected_of(entry: &Json) -> Option<Value> {
-    let part = entry["parts"].as_array()?.iter().find(|p| p["kind"].as_str() == Some("injected"))?;
-    let i = &part["injected"];
+    let i = entry["parts"].as_array()?.iter().find_map(injected_part)?;
     let kind = i["kind"].as_str().filter(|k| !k.is_empty())?;
     let text = |key: &str| i[key].as_str().filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
     let items: Vec<Value> = i["itemIds"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(Value::from).collect();
@@ -5949,9 +5973,38 @@ fn injected_of(entry: &Json) -> Option<Value> {
     ]))
 }
 
+/// A part's `injected` (crates/doc's `MessagePart::Injected`): on the text
+/// part with no text it goes as (`{ kind: "text", text: "", injected }`,
+/// which released builds read as an empty text), or the `kind: "injected"`
+/// part written before.
+fn injected_part(p: &Json) -> Option<&Json> {
+    match p["kind"].as_str()? {
+        "text" | "injected" => p.get("injected").filter(|i| !i.is_null()),
+        _ => None,
+    }
+}
+
+/// A part's crew reports (crates/doc's `MessagePart::CrewReports`): a text
+/// part's `crewReports`, as `injected_part`, or the `reports` of the
+/// `kind: "crewReports"` part written before. None: it carries none.
+fn crew_reports_part(p: &Json) -> Option<&[Json]> {
+    let reports = match p["kind"].as_str()? {
+        "text" => p.get("crewReports").filter(|r| !r.is_null())?,
+        "crewReports" => &p["reports"],
+        _ => return None,
+    };
+    Some(reports.as_array().map_or(&[][..], Vec::as_slice))
+}
+
+/// Whether `p` is the text part an engine message's kind or crew reports
+/// ride (its own text none): no words of the entry's.
+fn carries_more_than_text(p: &Json) -> bool {
+    injected_part(p).is_some() || crew_reports_part(p).is_some()
+}
+
 /// Whether `entry` carries crew reports (an orchestrator's "Crew updates").
 fn is_crew_reports(entry: &Json) -> bool {
-    entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("crewReports"))
+    entry["parts"].as_array().into_iter().flatten().any(|p| crew_reports_part(p).is_some())
 }
 
 /// The crew reports `entry` carries, as ds/orch_reports reads them: each
@@ -5966,8 +6019,8 @@ fn crew_reports_of(entry: &Json) -> Option<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|p| p["kind"].as_str() == Some("crewReports"))
-        .flat_map(|p| p["reports"].as_array().into_iter().flatten())
+        .filter_map(crew_reports_part)
+        .flatten()
         .filter_map(|r| {
             let id = r["id"].as_str()?;
             let from = r["fromChat"].as_str()?;
@@ -6018,7 +6071,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|p| p["kind"].as_str() == Some("text"))
+                .filter(|p| p["kind"].as_str() == Some("text") && !carries_more_than_text(p))
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -7824,10 +7877,9 @@ mod tests {
     #[test]
     fn a_session_only_lane_is_ready_with_no_transcript() {
         use zgx_script::testing::TestApp;
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
-        let app = TestApp::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
+        let app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_push_fixture.luau"));
         let view = super::lane_view(&app.host, "capture-test");
-        view.session_only.set(true);
+        view.set_session_only(true);
         view.open_chat(Some("chat-brain".into()));
         assert!(view.open.borrow().as_ref().is_some_and(|o| o.heard && o.watches.is_empty()));
         view.publish_messages();
@@ -9165,6 +9217,17 @@ mod tests {
         let mut newer = entry.clone();
         newer["parts"][1]["injected"] = json!({ "kind": "someday" });
         assert!(is(message(&newer, None).expect("shows").field("role"), "injected"));
+        // As the engine sends it now (crates/doc's `MessagePart::Injected`
+        // on the wire): a text part with no text carrying it, which isn't
+        // one of the entry's paragraphs.
+        let mut wire = entry.clone();
+        wire["parts"][1] = json!({ "kind": "text", "id": "injected", "text": "", "injected": {
+            "kind": "crew_ask", "askId": "ak-1", "chatId": "th-a", "turnId": "m-9" } });
+        assert!(super::plainly_has_row(&wire));
+        let w = message(&wire, None).expect("a block shows");
+        assert!(is(w.field("role"), "injected"));
+        assert!(is(w.field("text"), text), "its words whole, no paragraph after them");
+        assert!(is(w.field("injected").and_then(|i| i.field("ask")), "ak-1"));
         // Without the part: a prompt, as ever.
         let plain = json!({ "id": "m2", "role": "user", "createdAt": 0, "parts": [ { "kind": "text", "id": "t0", "text": "hi" } ] });
         assert!(is(message(&plain, None).expect("shows").field("role"), "user"));
@@ -9212,6 +9275,17 @@ mod tests {
         assert!(reports[1].field("item_id").is_none_or(|v| matches!(v, Value::Nil)));
         assert_eq!(reports[1].field("at").and_then(Value::as_f64), Some(1_794_508_500.));
         assert!(is(reports[2].field("state"), "other"), "a newer peer's state");
+        // As the engine sends them now (crates/doc's `MessagePart::CrewReports`
+        // on the wire): a text part with no text carrying `crewReports`.
+        let mut wire = entry.clone();
+        let filed = wire["parts"][1]["reports"].take();
+        wire["parts"][1] = json!({ "kind": "text", "id": "crew", "text": "", "crewReports": filed });
+        assert!(super::plainly_has_row(&wire));
+        let w = message(&wire, None).expect("a card shows");
+        assert!(is(w.field("role"), "crew_reports"));
+        let Some(Value::List(sent)) = w.field("reports") else { panic!("reports") };
+        assert_eq!(sent.len(), 3);
+        assert!(is(sent[1].field("from_chat"), "th-b"));
         // A plain prompt is still the person's.
         let plain = json!({ "id": "u", "role": "user", "parts": [{ "kind": "text", "id": "t", "text": "hi" }] });
         assert!(is(message(&plain, None).unwrap().field("role"), "user"));
@@ -9867,7 +9941,6 @@ mod tests {
                 pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
-                session_only: Cell::new(false),
             })
         };
         let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
@@ -9924,7 +9997,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
             view.heard_frame(step["frame"].clone());
@@ -9966,7 +10038,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
         // What it holds, as it would tell the engine: ids and the engine's sums.
@@ -10055,7 +10126,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -10106,7 +10176,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let ids = || view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -10163,7 +10232,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         view.pending.borrow_mut().insert(
             "c".into(),

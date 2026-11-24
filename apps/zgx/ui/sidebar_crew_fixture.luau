@@ -11,12 +11,17 @@
 -- the macbook has a crew thread of a second orchestrator.
 
 ui.theme.strict("warn")
+-- (Orchestrators on, as these are its: off is the default everywhere.)
+require("@account/plugins").set({ orchestrators = true })
 local ds = require("@ds")
 ds.setup()
 local sessions = require("@account/sessions")
 local orchestration = require("@account/orchestration")
 local route = require("@app/screens/shell/route")
 route.launched:set(true)
+-- (Its parts bring the chat page's store, which would open a chat on the
+-- host as the route moves: there's no host here, only the route.)
+route.opening = nil
 local Sidebar = require("@app/screens/shell/sidebar")
 
 local NOW = os.time()

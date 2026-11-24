@@ -1,7 +1,7 @@
 -- A thread its provider's usage limit stopped (its session's `limited`,
--- ds/usage_limit): waiting for the reset ("Waiting for limit · resets
--- 14:05", local) or running on another account meanwhile ("On <account> ·
--- <original> resets 14:05"), on Progress's row (its countdown moving with
+-- ds/usage_limit): waiting for the reset ("Waiting for limit", "resets
+-- 14:05", local) or running on another account meanwhile ("On <account>",
+-- "<original> resets 14:05"), each fact apart, on Progress's row (its countdown moving with
 -- its clock), the Map's node and hover card; the Board's card as the
 -- engine's row says it (waiting for the limit, till when); and the
 -- orchestrator's settings writing `crew.onLimit`.
@@ -18,14 +18,22 @@ test("usage limit: the reset in local time; waiting or switched", function()
 	local day = 1_800_040_000
 	local reset = limit.local_at(day, 14, 5)
 	expect(limit.clock(reset)).to_be("14:05")
-	local waiting = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600 }
-	local switched = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600,
+	local waiting: any = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600 }
+	local switched: any = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600,
 		switched_to = { account_slot = "s2", account_label = "me@home.dev", at = reset - 3000 } }
 	expect(limit.waiting({ limited = waiting })).to_be(true)
 	expect(limit.waiting({ limited = switched })).to_be(false)
 	expect(limit.switched(switched)).to_be(true)
 	expect(limit.waiting({})).to_be(false)
 	expect(limit.of({ limited = "nope" })).to_be(nil)
+	-- Its facts apart, each its own words (their words are read where
+	-- they're drawn, below): waiting, and till when if that's known; where
+	-- it runs, and its own account's reset.
+	expect(#limit.parts(waiting)).to_be(2)
+	expect(#limit.parts(switched)).to_be(2)
+	expect(#limit.parts({ provider = "claude", since = 0 } :: any)).to_be(1)
+	expect(#limit.parts(nil)).to_be(0)
+	expect(limit.text(nil)).to_be("")
 	-- No countdown once past, or with no reset known.
 	expect(limit.left(waiting, reset + 1)).to_be("")
 	expect(limit.left({ since = 0 }, reset)).to_be("")
@@ -162,7 +170,9 @@ test("usage limit: a sidebar row stopped by its limit shows the limited glyph, i
 	app:frames(30)
 	local side = app:tree("#shell-sidebar") :: string
 	expect(has(side, 'button "Tidy the tests')).to_be(true)
-	expect(has(side, '"Waiting for limit · resets 14:05"')).to_be(true)
+	-- (Its label one phrase, no separator typed in it.)
+	expect(has(side, '"Waiting for limit, resets 14:05"')).to_be(true)
+	expect(has(side, "Waiting for limit \u{b7}")).to_be(false)
 end)
 
 -- The orchestrator's settings.

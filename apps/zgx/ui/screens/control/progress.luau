@@ -306,7 +306,7 @@ end
 
 -- A chat opened: an orchestrator's on its own page, any other as a session.
 function M.open(id: string)
-	for _, o in orchestration.now:peek().orchestrators or {} do
+	for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 		if o.id == id then
 			route.orchestrator(id)
 			return

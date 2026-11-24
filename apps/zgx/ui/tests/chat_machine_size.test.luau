@@ -45,8 +45,9 @@ test("a new chat starts on the pick while it's offered, else the default", funct
 	expect(logic.size_for(MACHINES, "huge", "large")).to_be("large")
 	-- An edge that offers no sizes: none sent, the edge's default.
 	expect(logic.size_for({}, "large", "large")).to_be(nil)
-	expect(logic.on_size("Cloud", logic.size_name(MACHINES, "large"))).to_be("Cloud · Large")
-	expect(logic.on_size("Cloud", logic.size_name(MACHINES, "huge"))).to_be("Cloud")
+	-- (The chip's words after "Cloud", each its own: no separator typed.)
+	expect(table.concat(logic.size_words(logic.size_name(MACHINES, "large")), "|")).to_be("Large")
+	expect(#logic.size_words(logic.size_name(MACHINES, "huge"))).to_be(0)
 end)
 
 test("an active chat's sizes wait out a running turn, and say what a pick does", function()
@@ -62,7 +63,7 @@ test("an active chat's sizes wait out a running turn, and say what a pick does",
 	local line = logic.line({ state = "stopping" }, { restarting = "Extra large" }) :: any
 	expect(line.text).to_be("Restarting on Extra large…")
 	expect(line.quiet).to_be(nil)
-	expect(logic.on_size("Cloud", "Extra large", true)).to_be("Cloud · Extra large · restarting")
+	expect(table.concat(logic.size_words("Extra large", true), "|")).to_be("Extra large|restarting")
 	expect(logic.size_note(nil, false)).to_be(nil)
 end)
 
@@ -127,6 +128,23 @@ local function chip_device(app: any): string
 	return app:text('role:button "Branch" >> #composer-place-device[1]')
 end
 
+-- The chip's size after the device: the cpu glyph, then its words, apart.
+local function chip_size(app: any, chip: string?): string
+	rested(app)
+	local at = `{chip or 'role:button "Branch"'} >> #composer-place-size`
+	expect(app:has(`{at} >> .composer-place-size-word`)).to_be(true)
+	local tree = app:tree(at) :: string
+	expect((string.find(tree, "\u{b7}", 1, true))).to_be(nil)
+	local words = {}
+	for line in tree:gmatch("[^\n]+") do
+		local t = line:match('text "([^"]*)"')
+		if t then
+			table.insert(words, t)
+		end
+	end
+	return table.concat(words, "|")
+end
+
 local function on_cloud(): any
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 760)
@@ -166,7 +184,8 @@ end)
 test("starts on the account's default, each size with its specs and rate", function()
 	local app = on_cloud()
 	expect(chosen(app, "Machine")).to_contain("Standard")
-	expect(chip_device(app)).to_be("Cloud · Standard")
+	expect(chip_device(app)).to_be("Cloud")
+	expect(chip_size(app)).to_be("Standard")
 	open_row(app, "Machine")
 	for _, name in { "Small", "Standard", "Large", "Extra large" } do
 		expect(app:has(`role:option ~"{name}"`)).to_be(true)
@@ -194,7 +213,8 @@ test("a size picked rides the create, then the next chat starts on the default a
 	local app = on_cloud()
 	pick_in(app, "Machine", "Extra large")
 	expect(chosen(app, "Machine")).to_contain("Extra large")
-	expect(chip_device(app)).to_be("Cloud · Extra large")
+	expect(chip_device(app)).to_be("Cloud")
+	expect(chip_size(app)).to_be("Extra large")
 	send(app, "Profile the build")
 	expect(app:state("calls")).to_contain("machine:xlarge")
 	-- A new chat: the default again.
@@ -224,12 +244,13 @@ test("a chat on Cloud names its machine's size on the chip", function()
 	app:command("session_on_cloud")
 	app:wait("#never-shown", { timeout_ms = 300 })
 	settle(app)
-	expect(app:has('~"Cloud · Large"')).to_be(true)
+	expect(app:has('#composer-place-device >> "Cloud"')).to_be(true)
+	expect(app:has('#composer-place-size >> "Large"')).to_be(true)
 	-- Resized while asleep: the chip follows the session.
 	app:command("cloud_stub.session.disk_warn_xlarge")
 	app:wait("#never-shown", { timeout_ms = 300 })
 	settle(app)
-	expect(app:has('~"Cloud · Extra large"')).to_be(true)
+	expect(app:has('#composer-place-size >> "Extra large"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 
@@ -332,7 +353,7 @@ test("an active Cloud chat's chip opens its sizes, the one it's on chosen, with 
 	expect(calls).to_contain("cloud.wake:s2:xlarge")
 	-- Restarting on it: the chip names the size, its glyph a restart's, and
 	-- the line says so as progress (no warning).
-	expect(app:has('~"Cloud · Extra large"')).to_be(true)
+	expect(app:has('#composer-place-size >> "Extra large"')).to_be(true)
 	expect(app:has(".place-lead-restart")).to_be(true)
 	app:click('role:button "Open Alerts"')
 	settle(app)
@@ -340,7 +361,7 @@ test("an active Cloud chat's chip opens its sizes, the one it's on chosen, with 
 	-- Up on it: the chip names the size alone.
 	app:command("cloud_stub.session.ready_xlarge")
 	rested(app)
-	expect(app:has('~"Cloud · Extra large"')).to_be(true)
+	expect(app:has('#composer-place-size >> "Extra large"')).to_be(true)
 	expect(app:has('~"restarting"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)

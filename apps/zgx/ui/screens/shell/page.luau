@@ -33,8 +33,8 @@ local DropOverlay = require("@ds/drop_overlay")
 local Dock = require("@app/screens/chat/dock")
 local control = require("@ds/control")
 local Glass = require("@ds/glass")
--- How a working session's work is going, a line in its head.
-local Progress = require("@app/screens/control/progress")
+-- Which of Zeron's built-in plugins run (Orchestrators' hooks here).
+local plugins = require("@account/plugins")
 
 export type Props = {
 	files: State<boolean>,
@@ -568,9 +568,16 @@ return function(props: Props): Node
 						text_size = "$font.size.sm",
 					},
 				},
-				Progress.Header(function(): string?
-					local s = route.session:get()
-					return if s then s.id else nil
+				-- How a working session's work is going, a line in its head
+				-- (Orchestrators', while it's on).
+				ui.show(function(): boolean
+					return plugins.on("orchestrators")
+				end, function(): Node
+					local orch = plugins.module("orchestrators")
+					return orch.progress.Header(function(): string?
+						local s = route.session:get()
+						return if s then s.id else nil
+					end)
 				end),
 			}
 		)
@@ -633,17 +640,18 @@ return function(props: Props): Node
 		)
 	)
 
-	-- The Control room and an orchestrator's page (screens/control,
-	-- screens/orchestrator): pages of their own, as a plugin's is, on the
-	-- window's material.
+	-- The Control room and an orchestrator's page (Orchestrators', its
+	-- `control_page` and `orchestrator_page`; their routes are only while
+	-- it's on): pages of their own, as a plugin's is, on the window's
+	-- material.
 	local function orchestration_page(kind: string): Node
 		if kind == "control" then
-			return boundary.screen(boundary.named("shell.boundary.screen.control"), "@app/screens/control/page", function(page): Node
-				return page.Page()
+			return boundary.screen(boundary.named("shell.boundary.screen.control"), "@app/builtin/orchestrators", function(orch): Node
+				return orch.control_page.Page()
 			end)
 		end
-		return boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/screens/orchestrator/page", function(page): Node
-			return page.Page {
+		return boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/builtin/orchestrators", function(orch): Node
+			return orch.orchestrator_page.Page {
 				id = function(): string?
 					return route.current:get().orchestrator
 				end,

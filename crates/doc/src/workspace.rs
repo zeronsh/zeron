@@ -905,9 +905,7 @@ impl From<RawSession> for Session {
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
             waiting: raw.waiting,
-            activity: raw.activity,
-            todo: raw.todo,
-            limited: raw.limited,
+            live: zeron_proto::SessionLive { activity: raw.activity, todo: raw.todo, limited: raw.limited },
         }
     }
 }
@@ -1028,9 +1026,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         }
     }
 

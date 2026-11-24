@@ -964,6 +964,9 @@ pub struct EngineRpc {
     /// Orchestrators, crews, the board, asks and dumps (one per engine:
     /// `with_orchestration`; a bare assembly gets its own).
     orchestration: crate::orchestration::Orchestration,
+    /// The engine's own resumes (usage limits, the start-up one): shared
+    /// with the engine (`with_resumes`); a bare assembly gets its own.
+    resumes: crate::resumes::Resumes,
     engine_info: EngineInfo,
 }
 
@@ -1035,6 +1038,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             orchestration,
+            resumes: Default::default(),
             engine_info,
         }
     }
@@ -1047,6 +1051,35 @@ impl EngineRpc {
 
     pub(crate) fn orchestration(&self) -> &crate::orchestration::Orchestration {
         &self.orchestration
+    }
+
+    /// Share the engine's resumes (its before-stop rows, who it resumed).
+    pub fn with_resumes(mut self, resumes: crate::resumes::Resumes) -> Self {
+        self.resumes = resumes;
+        self
+    }
+
+    pub(crate) fn resumes(&self) -> &crate::resumes::Resumes {
+        &self.resumes
+    }
+
+    /// Orchestration, for the general features that read what a chat is to
+    /// it (usage limits, the start-up resume): `None` while Orchestrators
+    /// is off, when every chat is a plain one.
+    pub(crate) fn active_orchestration(&self) -> Option<&crate::orchestration::Orchestration> {
+        self.orchestration.is_on().then_some(&self.orchestration)
+    }
+
+    /// Whether Orchestrators is on (`orchestration/switch.rs`).
+    pub(crate) fn orchestration_on(&self) -> bool {
+        self.orchestration.is_on()
+    }
+
+
+    /// The orchestration rows as the general features read them: empty while
+    /// Orchestrators is off.
+    pub(crate) fn orchestration_view(&self) -> zeron_proto::orchestration::OrchestrationState {
+        self.active_orchestration().map(|o| o.state()).unwrap_or_default()
     }
 
     pub(crate) fn workspace_host(&self) -> &WorkspaceHost {
@@ -2286,21 +2319,21 @@ impl EngineRpc {
                 // A voice orchestrator and the Brain dump are hidden, so the
                 // chats they create are the user's top-level sessions rather
                 // than their side chats.
+                // (While Orchestrators is off every chat is plain: a crew
+                // chat asked for is made a plain one.)
+                let role_of = |chat: &str| {
+                    self.active_orchestration()
+                        .map_or(crate::orchestration::ChatRole::Plain, |o| o.role_of(chat))
+                };
                 let parent_chat_id = parent_chat_id.filter(|parent| {
                     !zeron_proto::voice::is_orchestrator_chat(parent)
-                        && !matches!(
-                            self.orchestration.role_of(parent),
-                            crate::orchestration::ChatRole::BrainDump { .. }
-                        )
+                        && !matches!(role_of(parent), crate::orchestration::ChatRole::BrainDump { .. })
                 });
                 // A crew thread's parent is its orchestrator.
                 let child_kind = child_kind.filter(|kind| {
                     *kind != zeron_proto::ChildKind::Crew
                         || parent_chat_id.as_deref().is_some_and(|parent| {
-                            matches!(
-                                self.orchestration.role_of(parent),
-                                crate::orchestration::ChatRole::Orchestrator { .. }
-                            )
+                            matches!(role_of(parent), crate::orchestration::ChatRole::Orchestrator { .. })
                         })
                 });
                 let crew_of = parent_chat_id
@@ -3619,16 +3652,26 @@ impl RpcService for EngineRpc {
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         // A crew thread's message to its own orchestrator is a report
         // (rpc/crew_messages.rs), read before the gate attributes it.
-        if let Some(reply) = self.crew_message_as_report(method, &params).await? {
+        // All of that, and orchestration's own methods, only while
+        // Orchestrators is on (orchestration/switch.rs).
+        let orchestrating = self.orchestration_on();
+        if !orchestrating && crate::orchestration::switch::METHODS.contains(&method) {
+            return Err(crate::orchestration::switch::off_error());
+        }
+        if orchestrating && let Some(reply) = self.crew_message_as_report(method, &params).await? {
             return Ok(reply);
         }
         let mut params = params;
-        self.with_crew_rules(method, &mut params);
+        if orchestrating {
+            self.with_crew_rules(method, &mut params);
+        }
         let params = self.agent_gate(method, params)?;
-        self.note_agent_message(method, &params);
-        // An agent's send to a paused card's thread waits in its held queue.
-        if let Some(reply) = self.held_for_paused_card(method, &params)? {
-            return Ok(reply);
+        if orchestrating {
+            self.note_agent_message(method, &params);
+            // An agent's send to a paused card's thread waits in its held queue.
+            if let Some(reply) = self.held_for_paused_card(method, &params)? {
+                return Ok(reply);
+            }
         }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
@@ -3795,7 +3838,11 @@ impl RpcService for EngineRpc {
             .await;
         }
         match method {
-            methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
+            methods::ENGINE_INFO => {
+                let mut info = self.engine_info.clone();
+                info.capabilities = crate::orchestration::switch::capabilities(info.capabilities, self.orchestration_on());
+                RpcReply::value(&info)
+            }
             methods::LIST_CLOUD_BRANCHES => Box::pin(self.cloud_branches(params)).await,
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => {
@@ -4748,11 +4795,12 @@ impl RpcService for EngineRpc {
             // An agent sees its own part (orchestration/scope.rs).
             // A window asks for changes (`{"changes": true}`): frames of
             // what moved, not the whole state each time.
-            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+            // (Orchestration's streams end when it goes off.)
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(self.orchestration.until_off(match zeron_rpc::caller() {
                 zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_stream(chat),
                 _ if wants_changes(&params) => self.orchestration.changes_stream(),
                 _ => self.orchestration.stream(),
-            })),
+            }))),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
             // The Scratchpad: never routes, never makes work
             // (orchestration/scratchpad.rs).
@@ -4761,10 +4809,10 @@ impl RpcService for EngineRpc {
                 zeron_rpc::Caller::Agent { .. } => Err(RpcError::Failed(
                     "Agents read the Scratchpad with Scratchpad{op: read}".into(),
                 )),
-                _ => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_scratchpad()))),
+                _ => Ok(RpcReply::Stream(self.orchestration.until_off(watch_stream(self.workspace.watch_scratchpad())))),
             },
-            methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
-                std::sync::Arc::new(self.clone()),
+            methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(self.orchestration.until_off(
+                crate::orchestration::loads::stream(std::sync::Arc::new(self.clone())),
             ))),
             // An agent sees the chats it may check (orchestration/progress.rs).
             methods::WATCH_PROGRESS => {
@@ -4773,12 +4821,14 @@ impl RpcService for EngineRpc {
                     _ => None,
                 };
                 let changes = wants_changes(&params);
-                Ok(RpcReply::Stream(crate::orchestration::progress::stream(self.clone(), viewer, changes)))
+                Ok(RpcReply::Stream(
+                    self.orchestration.until_off(crate::orchestration::progress::stream(self.clone(), viewer, changes)),
+                ))
             }
-            methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+            methods::WATCH_COMMS => Ok(RpcReply::Stream(self.orchestration.until_off(match zeron_rpc::caller() {
                 zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
                 _ => crate::orchestration::comms::stream(self.orchestration.comms()),
-            })),
+            }))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

@@ -45,7 +45,7 @@ function M.board_props(props: Props): { [string]: any }
 	-- A card opened: its detail in the panel (by its lead thread, as the
 	-- panel's detail is asked for).
 	local function open_card(id: string)
-		for _, it in orchestration.now:peek().items or {} do
+		for _, it in (orchestration.now:peek() or {}).items or {} do
 			if it.id == id then
 				props.on_open_card((it.threads or {})[1] or "", it.id)
 				return
@@ -55,17 +55,17 @@ function M.board_props(props: Props): { [string]: any }
 	return {
 		id = "orch-page-board",
 		items = function(): { any }
-			return orchestration.now:get().items or {}
+			return (orchestration.now:get() or {}).items or {}
 		end,
 		cards = function(): { any }
-			return orchestration.now:get().cards or {}
+			return (orchestration.now:get() or {}).cards or {}
 		end,
 		asks = function(): any
 			local now = orchestration.now:get()
 			return now and now.asks
 		end,
 		orchestrators = function(): { any }
-			return orchestration.now:get().orchestrators or {}
+			return (orchestration.now:get() or {}).orchestrators or {}
 		end,
 		filter = props.of,
 		compact = true,

@@ -12,6 +12,9 @@
  *   another device's (its delegates aside), writes another device's project
  *   or session rows (their host's to keep), or touches the user's own kinds
  *   (preferences, sidebar pins).
+ * - Both reaches READ the account's plugin switches (`pluginSwitches`, one
+ *   row per plugin: is it on?), which every engine of the account follows,
+ *   Cloud ones included; like the user's other kinds, never written.
  * - `isolated`: the runner acts as its device alone. It sees every device
  *   row (names, presence), the rows it hosts, the projects of the chats it
  *   hosts, and its delegates (child chats it started on other machines) with
@@ -33,6 +36,10 @@ export const isRunnerReach = (value: unknown): value is RunnerReach => value ===
 /** Kinds whose rows name their host device in `fields.deviceId`
  * (crates/doc/src/registry.rs: spaces, chats, sessions). */
 const HOSTED_KINDS = new Set(["chats", "spaces", "sessions"]);
+
+/** The user's kinds a runner reads (never writes): account-wide settings
+ * its engine must follow (crates/doc/src/registry/plugin_switches.rs). */
+const ACCOUNT_READ_KINDS = new Set(["pluginSwitches"]);
 
 /** What a runner may not write on a chat hosted elsewhere (`devices`): its host. */
 const HOST_FIELD = "deviceId";
@@ -113,7 +120,8 @@ export const runnerOpRefusal = (
 /**
  * Whether runner `device`, of a session reaching `reach`, may see `row`.
  * `devices`: every device, chat, project and session row (live or
- * tombstoned), and none of the user's own kinds. `isolated`: every device
+ * tombstoned), and none of the user's own kinds but the plugin switches.
+ * Both reaches see the plugin switches. `isolated`: every device
  * row, the hosted rows it owns, the projects of the chats it hosts
  * (`scope.spaces`), its delegates and their session rows (`scope.children`;
  * a session row's id is its chat's), and tombstones of hosted kinds (they
@@ -121,6 +129,7 @@ export const runnerOpRefusal = (
  */
 export const runnerCanSee = (device: string, row: Row, reach: RunnerReach, scope: RunnerScope = NO_SCOPE): boolean => {
   if (row.kind === "devices") return true;
+  if (ACCOUNT_READ_KINDS.has(row.kind)) return true;
   if (!HOSTED_KINDS.has(row.kind)) return false;
   if (reach === "devices" || row.deleted) return true;
   if (hostOf(row) === device) return true;

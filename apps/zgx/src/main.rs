@@ -61,12 +61,14 @@ mod orchestration;
 mod orchestration_progress;
 mod scratchpad;
 mod orchestration_timeline;
+mod orchestrators;
 mod plugins;
 mod previews;
 mod projects;
 mod quit_prompt;
 mod relaunch;
 mod session_home;
+mod session_values;
 mod sessions;
 mod settings;
 #[cfg(target_os = "macos")]
@@ -157,6 +159,8 @@ mod updates;
 mod visuals_tests;
 #[cfg(test)]
 mod orchestration_board_tests;
+#[cfg(test)]
+mod fixture_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
@@ -392,8 +396,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
-    // Cards deleted on the board whose Undo hadn't run out: deleted now
-    // (src/orchestration.rs).
+    // Cards deleted on the board whose Undo hadn't run out: deleted now,
+    // with Orchestrators on; off, nothing is sent (src/orchestration.rs).
     orchestration::after_quit();
     // Quitting with "Keep Zeron running after you quit" off: the engine
     // stops once its work is done, asking first about any still running
@@ -851,15 +855,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
-        // Orchestrators, their crews, board, asks and Brain dump
-        // (src/orchestration.rs).
-        orchestration::install(cx, &host);
-        // What each chat has been doing lately (src/orchestration_timeline.rs).
-        orchestration_timeline::install(cx, &host);
-        // How far each chat's work has got (src/orchestration_progress.rs).
-        orchestration_progress::install(cx, &host);
-        // The Control Room's Scratchpad (src/scratchpad.rs).
-        scratchpad::install(cx, &host);
+        // Orchestrators, their crews, board, asks and Brain dump, what each
+        // chat has been doing lately, how far its work has got, and the
+        // Control Room's Scratchpad: only while the Orchestrators plugin is
+        // on (src/orchestrators.rs).
+        orchestrators::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
         updates::install(&host);
         // Adding a project, removing one (src/projects.rs).

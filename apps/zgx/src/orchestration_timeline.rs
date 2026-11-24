@@ -25,8 +25,9 @@ use std::{
     rc::Rc,
 };
 
-use zgx_desktop::WindowContext;
-use zgx_script::{ScriptHost, Shared, Value};
+use zgx_script::{ScriptHost, Value};
+
+use crate::orchestrators::Key;
 
 /// How far back entries are kept (seconds).
 const RETAIN: i64 = 2 * 60 * 60;
@@ -232,7 +233,7 @@ fn text(v: Option<&Value>) -> Option<&str> {
 struct Timeline {
     history: RefCell<History>,
     /// Each open window's state, let go of as it closes.
-    windows: RefCell<Vec<(u64, Shared)>>,
+    windows: RefCell<Vec<(u64, Key)>>,
     next_window: Cell<u64>,
 }
 
@@ -240,22 +241,49 @@ thread_local! {
     static TIMELINE: Rc<Timeline> = Rc::new(Timeline::default());
 }
 
-pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+/// `host`'s window, its timeline given now while Orchestrators is on.
+pub(crate) fn add(host: &ScriptHost) -> u64 {
     let t = TIMELINE.with(Rc::clone);
     let window = t.next_window.get();
     t.next_window.set(window + 1);
+    let shared = Key::new(host, "orchestration.timeline");
+    if crate::orchestrators::on() {
+        let value = t.history.borrow_mut().value();
+        shared.set(value);
+    }
+    t.windows.borrow_mut().push((window, shared));
+    window
+}
+
+/// `window` closed.
+pub(crate) fn remove(window: u64) {
+    TIMELINE.with(|t| t.windows.borrow_mut().retain(|(id, _)| *id != window));
+}
+
+/// Orchestrators on: each window given the timeline (nothing heard while
+/// it was off).
+pub(crate) fn show() {
+    let t = TIMELINE.with(Rc::clone);
     let value = t.history.borrow_mut().value();
-    t.windows.borrow_mut().push((window, host.shared("orchestration.timeline", value)));
-    let me = Rc::downgrade(&t);
-    cx.on_closed(move || {
-        if let Some(t) = me.upgrade() {
-            t.windows.borrow_mut().retain(|(id, _)| *id != window);
-        }
-    });
+    let targets: Vec<Key> = t.windows.borrow().iter().map(|(_, s)| s.clone()).collect();
+    for shared in targets {
+        shared.set(value.clone());
+    }
+}
+
+/// Orchestrators off: what was heard let go of, and each window's nil.
+pub(crate) fn close() {
+    let t = TIMELINE.with(Rc::clone);
+    *t.history.borrow_mut() = History::default();
+    let targets: Vec<Key> = t.windows.borrow().iter().map(|(_, s)| s.clone()).collect();
+    for shared in targets {
+        shared.clear();
+    }
 }
 
 /// `sessions` as just published: each chat's change written down, and
-/// every window told if there was one.
+/// every window told if there was one (src/sessions.rs, while
+/// Orchestrators is on).
 pub(crate) fn heard_sessions(sessions: &Value) {
     let t = TIMELINE.with(Rc::clone);
     let now = chrono::Utc::now().timestamp();
@@ -267,7 +295,7 @@ pub(crate) fn heard_sessions(sessions: &Value) {
         history.value()
     };
     // (Taken out first: setting one may run a script that calls back in.)
-    let targets: Vec<Shared> = t.windows.borrow().iter().map(|(_, s)| s.clone()).collect();
+    let targets: Vec<Key> = t.windows.borrow().iter().map(|(_, s)| s.clone()).collect();
     for shared in targets {
         shared.set(value.clone());
     }

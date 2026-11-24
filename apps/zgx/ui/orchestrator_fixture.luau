@@ -12,6 +12,8 @@
 --   orch.unknown / orch.known   orchestration as the host has it before its
 --                               first publish, and the sample again
 
+-- (Orchestrators on, as these are its: off is the default everywhere.)
+require("@account/plugins").set({ orchestrators = true })
 local shell = require("./shell_fixture")
 local sessions = require("@account/sessions")
 local orchestration = require("@account/orchestration")

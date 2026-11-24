@@ -7,5 +7,9 @@
 #                         exact name)
 #   luau: <test name>     `zgx test ui` (run; its FAIL line accepted)
 #
-# None now (2026-11-11): every test passes on macOS and Linux. A test that
-# can't pass yet goes here only with why, and whose fix it waits on.
+# A test that can't pass yet goes here only with why, and whose fix it waits on.
+
+# zgx's animation loses its first frames when it starts from idle (dt=0 on
+# the first tick, Engine::run); main passes only because its working ring
+# keeps the loop awake. Waits on the zgx fix (its own board card).
+rust: split_tests::a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_the_panes

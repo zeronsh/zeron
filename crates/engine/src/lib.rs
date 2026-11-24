@@ -65,6 +65,9 @@ pub mod keep_running;
 pub mod heap;
 pub mod managed;
 pub mod orchestration;
+pub mod resumes;
+mod restart_resume;
+mod usage_limits;
 mod hosted_models;
 mod model_catalogs;
 pub mod model_publish;
@@ -214,6 +217,8 @@ pub struct EngineCore {
     /// Orchestrators, crews, the board, asks and dumps (shared by every
     /// RPC service of this engine).
     pub orchestration: orchestration::Orchestration,
+    /// The engine's own resumes: usage limits' and the start-up one's.
+    pub resumes: resumes::Resumes,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -331,7 +336,7 @@ impl EngineCore {
         )?;
         // What was at work here when the engine last stopped: its session
         // rows as stored, before anything here rewrites them (crew threads
-        // left waiting are resumed by the board's start-up pass).
+        // left waiting are resumed by the start-up resume, `restart_resume.rs`).
         let before_stop: Vec<zeron_proto::Session> = workspace
             .read_sessions()
             .unwrap_or_default()
@@ -515,8 +520,15 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
-        let orchestration = orchestration::Orchestration::new(workspace.clone());
-        orchestration.set_before_stop(before_stop);
+        // One switch for all of orchestration: the Orchestrators plugin
+        // (account-wide, off unless turned on), read by every gate.
+        let orchestrating =
+            orchestration::OrchestrationSwitch::from_watch(plugins.watch(orchestration::switch::PLUGIN_ID));
+        sessions.set_orchestration(orchestrating.clone());
+        doc_host.set_orchestration(orchestrating.clone());
+        let orchestration = orchestration::Orchestration::with_switch(workspace.clone(), orchestrating);
+        let resumes = resumes::Resumes::default();
+        resumes.set_before_stop(before_stop);
         Ok(Self {
             sessions,
             doc_host,
@@ -539,6 +551,7 @@ impl EngineCore {
             local_import,
             plugins,
             orchestration,
+            resumes,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -687,6 +700,18 @@ impl EngineCore {
         zeron_rpc::HostRelay::spawn(config, service, on_nudge)
     }
 
+    /// Turn Orchestrators on or off for the account (its plugin switch, as
+    /// Settings → Plugins does) and wait until this engine follows: for
+    /// tests and tools; the app goes through `SetPluginOff`.
+    #[doc(hidden)]
+    pub async fn set_orchestrators(&self, on: bool) {
+        if let Err(error) = self.workspace.set_plugin_switch(orchestration::switch::PLUGIN_ID, on) {
+            tracing::warn!(%error, "orchestrators: the switch wasn't written");
+        }
+        let mut rx = self.orchestration.switch().watch();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|now| *now == on)).await;
+    }
+
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
@@ -722,7 +747,8 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
-        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()));
+        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()).with_resumes(self.resumes.clone()));
+        self.resumes.attach_rpc(&rpc);
         self.orchestration.attach_rpc(&rpc);
         rpc
     }

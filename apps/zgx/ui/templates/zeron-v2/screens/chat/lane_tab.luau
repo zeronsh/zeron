@@ -43,9 +43,8 @@ local Asks = require("@app/screens/chat/asks")
 local CardHold = require("@app/screens/chat/card_hold")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
-local Hold = require("@ds/hold")
-local orchestration = require("@account/orchestration")
-local decide = require("@ds/orch_decide")
+-- Which of Zeron's built-in plugins run (Orchestrators' hooks here).
+local plugins = require("@account/plugins")
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
@@ -1328,8 +1327,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- (A `read` tab kept built while hidden, `data.live`: the reply being
 	-- written held meanwhile, ds/hold; its rows not written to.)
 	local reply: any = view.draft
-	if tab.kind == "read" and data.live then
-		reply = Hold.computed(data.live, function(): any
+	-- (A `read` tab is the Control room's: Orchestrators', its `hold`.)
+	local orch = if tab.kind == "read" and data.live then plugins.module("orchestrators") else nil
+	if orch then
+		reply = orch.hold.computed(data.live, function(): any
 			return view.draft:get()
 		end, "chat")
 	end
@@ -1433,10 +1434,16 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		end,
 		open_link = open_link,
 		chat_of = Shared.chat_of,
+		-- (Orchestrators' blocks, while it's on: what the engine said into
+		-- the chat, crew updates.)
+		orchestrators = function(): any
+			return plugins.module("orchestrators")
+		end,
 		-- (A crew ask said into an orchestrator's conversation: its ask as it
 		-- stands, the decision overlay, and the thread at its question.)
 		ask_of = function(id: string): any?
-			for _, a in orchestration.asks:get() do
+			local orch = plugins.module("orchestrators")
+			for _, a in if orch then orch.orchestration.asks:get() else {} do
 				if a.id == id then
 					return a
 				end
@@ -1447,7 +1454,8 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		-- the engine cut it to one line, finds it.)
 		ask_by_question = function(question: string): any?
 			local want = (string.gsub((string.gsub(question, "\u{2026}$", "")), "%s+", " "))
-			for _, a in orchestration.asks:get() do
+			local orch = plugins.module("orchestrators")
+			for _, a in if orch then orch.orchestration.asks:get() else {} do
 				local q = (string.gsub(a.question or "", "%s+", " "))
 				if want ~= "" and string.sub(q, 1, #want) == want then
 					return a
@@ -1455,7 +1463,12 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 			return nil
 		end,
-		open_ask = decide.show,
+		open_ask = function(id: string)
+			local orch = plugins.module("orchestrators")
+			if orch then
+				orch.decide.show(id)
+			end
+		end,
 		open_at = function(chat: string, message: string?)
 			route.open_session(chat, { message = message })
 		end,

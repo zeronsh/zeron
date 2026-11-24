@@ -1066,6 +1066,213 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     assert_eq!((on["status"].as_str(), on["allowed"].as_array().map(Vec::len)), (Some("on"), Some(3)));
 }
 
+/// An engine scans as it starts, before any window has said where Zeron's
+/// own plugins are (`SetBuiltinPlugins`), and a headless one never hears it:
+/// a built-in's switch must outlive those scans, not be forgotten as a
+/// plugin that's gone.
+#[tokio::test]
+async fn plugins_a_builtin_s_switch_survives_scans_that_cant_see_it() {
+    let f = fixture();
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add"] }), None);
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": true })).await.unwrap();
+
+    // The engine restarts: a fresh service on the same data scans with no
+    // window yet.
+    let restarted = Plugins::new(&f.data, "dev-1");
+    restarted.rescan().await;
+    assert!(
+        State::load(f.plugins.plugins_dir()).switches.get("github") == Some(&false),
+        "the off switch is still saved"
+    );
+    // The window attaches: still off.
+    call(&restarted, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    assert_eq!(item(&restarted, "github").await["status"], "off");
+}
+
+fn workspace(data: &Path, device: &str, platform: &str) -> crate::WorkspaceHost {
+    let store = data.join(format!("ws-{device}"));
+    std::fs::create_dir_all(&store).unwrap();
+    crate::WorkspaceHost::open(
+        Arc::new(zeron_sync::DocsStore::open(&store).unwrap()),
+        crate::WorkspaceHostConfig {
+            device_id: device.into(),
+            device_name: device.into(),
+            platform: platform.into(),
+            org_id: "test-org".into(),
+            user_id: "test-user".into(),
+            edge: None,
+            local_only: false,
+        },
+    )
+    .unwrap()
+}
+
+/// `"switch": { "default": "off" }`: one of Zeron's own that's off until
+/// it's turned on, on this device, and stays as chosen through a restart.
+#[tokio::test]
+async fn plugins_a_builtin_can_be_off_until_turned_on() {
+    let f = fixture();
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "quiet", serde_json::json!({ "name": "Quiet", "switch": { "default": "off" } }), None);
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    let quiet = item(&f.plugins, "quiet").await;
+    assert_eq!((quiet["status"].as_str(), quiet["default_off"].as_bool()), (Some("off"), Some(true)), "{quiet}");
+    assert!(quiet.get("scope").is_none(), "this device's switch: {quiet}");
+    assert!(!f.plugins.is_on("quiet"));
+
+    call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "quiet", "off": false })).await.unwrap();
+    assert_eq!(item(&f.plugins, "quiet").await["status"], "on");
+    assert!(f.plugins.is_on("quiet"));
+    let restarted = Plugins::new(&f.data, "dev-1");
+    restarted.rescan().await;
+    call(&restarted, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    assert_eq!(item(&restarted, "quiet").await["status"], "on", "turned on stays on");
+
+    // Anyone else's plugin saying so is on once allowed, as ever.
+    write_plugin(f.plugins.plugins_dir(), "mine", serde_json::json!({ "switch": { "default": "off", "scope": "account" } }), None);
+    f.plugins.rescan().await;
+    let mine = item(&f.plugins, "mine").await;
+    assert_eq!(mine["status"], "pending", "{mine}");
+    assert!(mine.get("scope").is_none() && mine.get("default_off").is_none(), "{mine}");
+}
+
+/// `"switch": { "scope": "account" }`: the switch is the account's (a
+/// synced registry row), never this device's `.state.json`; off by default
+/// on a fresh install and on an upgrade that finds a device decision.
+#[tokio::test]
+async fn plugins_an_account_switch_is_written_for_the_account_and_watched() {
+    let f = fixture();
+    let ws = workspace(&f.data, "dev-1", "linux");
+    f.plugins.set_workspace(ws.clone());
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(
+        &shipped,
+        "orchestrators",
+        serde_json::json!({ "name": "Orchestrators", "switch": { "default": "off", "scope": "account" } }),
+        None,
+    );
+    // A device decision saying on (an older build's) counts for nothing.
+    f.plugins
+        .update_state(|state| {
+            let mut d = scan::builtin_entry(scan::inspect(&shipped.join("orchestrators"), true), None).facts().record(true);
+            d.off = false;
+            state.decisions.insert("orchestrators".into(), d);
+        })
+        .unwrap();
+    let mut watched = f.plugins.watch("orchestrators");
+    assert!(!*watched.borrow());
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    let orch = item(&f.plugins, "orchestrators").await;
+    assert_eq!(
+        (orch["status"].as_str(), orch["scope"].as_str(), orch["default_off"].as_bool()),
+        (Some("off"), Some("account"), Some(true)),
+        "{orch}"
+    );
+    assert!(!f.plugins.is_on("orchestrators"));
+
+    let on = call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "orchestrators", "off": false })).await.unwrap();
+    assert_eq!(on["status"], "on", "{on}");
+    assert_eq!(ws.plugin_switch("orchestrators"), Some(true), "written for the account");
+    assert!(f.plugins.is_on("orchestrators"));
+    tokio::time::timeout(Duration::from_secs(2), watched.changed()).await.unwrap().unwrap();
+    assert!(*watched.borrow_and_update());
+    let state = State::load(f.plugins.plugins_dir());
+    assert!(
+        state.switches.get("orchestrators") == Some(&true) && !state.decisions.contains_key("orchestrators"),
+        "this device's old choice is left as it was, a switch alone: {state:?}"
+    );
+
+    // Changed by the account (another device): read at once, before a rescan.
+    ws.set_plugin_switch("orchestrators", false).unwrap();
+    assert!(!f.plugins.is_on("orchestrators"));
+    f.plugins.rescan().await;
+    assert_eq!(item(&f.plugins, "orchestrators").await["status"], "off");
+    assert!(!*watched.borrow_and_update());
+}
+
+/// A headless or Cloud engine never hears where Zeron's own plugins are:
+/// it follows the account's switch by id, with no files; and a Cloud
+/// machine can't set it.
+#[tokio::test]
+async fn plugins_an_engine_without_the_files_follows_the_account_switch() {
+    let f = fixture();
+    let ws = workspace(&f.data, "devbox", "linux");
+    f.plugins.set_workspace(ws.clone());
+    f.plugins.rescan().await;
+    assert!(!f.plugins.is_on("orchestrators"), "no files, no switch: off");
+    let mut watched = f.plugins.watch("orchestrators");
+    ws.set_plugin_switch("orchestrators", true).unwrap();
+    assert!(f.plugins.is_on("orchestrators"));
+    // (`start` follows the switches; here the rescan it kicks tells them.)
+    f.plugins.rescan().await;
+    tokio::time::timeout(Duration::from_secs(2), watched.changed()).await.unwrap().unwrap();
+    assert!(*watched.borrow());
+    assert!(!f.plugins.is_on("something-else"));
+
+    let cloud = fixture();
+    cloud.plugins.set_workspace(workspace(&cloud.data, "cloud-1", zeron_proto::CLOUD_PLATFORM));
+    let shipped = cloud.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "orchestrators", serde_json::json!({ "switch": { "default": "off", "scope": "account" } }), None);
+    call(&cloud.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    let refused = call(&cloud.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "orchestrators", "off": false }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("whole account"), "{refused}");
+}
+
+/// What was allowed for a plugin whose folder went (by hand, not
+/// `RemovePlugin`) is never another plugin's under its id: not one made
+/// here before a rescan, not one copied in after scans that couldn't see
+/// Zeron's own (where only an on/off switch is kept, which allows nothing).
+#[tokio::test]
+async fn plugins_consent_for_a_gone_plugin_is_never_inherited_under_its_id() {
+    let f = fixture();
+    let allow = |id: &'static str| {
+        let plugins = f.plugins.clone();
+        async move {
+            plugins.rescan().await;
+            let hash = item(&plugins, id).await["hash"].as_str().unwrap().to_owned();
+            call(&plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": id, "allow": true, "hash": hash }))
+                .await
+                .unwrap()
+        }
+    };
+    // X, someone's (unsigned), allowed `network` and `ui.add`.
+    write_plugin(f.plugins.plugins_dir(), "focus", serde_json::json!({ "permissions": ["ui.add", "network"] }), None);
+    assert_eq!(allow("focus").await["status"], "on");
+    // Its folder goes by hand, and a plugin is made here under its id
+    // before any rescan: it asks for what it wants, nothing inherited.
+    std::fs::remove_dir_all(f.plugins.plugins_dir().join("focus")).unwrap();
+    let made = call(
+        &f.plugins,
+        methods::NEW_PLUGIN,
+        serde_json::json!({ "id": "focus", "name": "Focus", "permissions": ["network"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(made["status"], "pending", "{made}");
+    assert_eq!(made["allowed"], serde_json::json!([]), "{made}");
+
+    // Y allowed, gone by hand, scanned (no window: Zeron's own unknown),
+    // then a different plugin copied in as Y: asked again.
+    write_plugin(f.plugins.plugins_dir(), "notes", serde_json::json!({ "permissions": ["ui.add"] }), None);
+    assert_eq!(allow("notes").await["status"], "on");
+    std::fs::remove_dir_all(f.plugins.plugins_dir().join("notes")).unwrap();
+    f.plugins.rescan().await;
+    let state = State::load(f.plugins.plugins_dir());
+    assert!(!state.decisions.contains_key("notes"), "its consent went: {state:?}");
+    write_plugin(f.plugins.plugins_dir(), "notes", serde_json::json!({ "permissions": ["ui.add"], "description": "another" }), None);
+    f.plugins.rescan().await;
+    let other = item(&f.plugins, "notes").await;
+    assert_eq!((other["status"].as_str(), other["allowed"].clone()), (Some("pending"), serde_json::json!([])), "{other}");
+}
+
 #[tokio::test]
 async fn plugins_zeron_s_own_load_from_the_app_s_folder_with_none_of_yours_beside_it() {
     // (The test above has a folder of yours by the same name, which hid that
@@ -1483,7 +1690,7 @@ async fn plugins_removing_a_folder_that_squats_a_builtin_keeps_the_builtins() {
     call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await.unwrap();
     assert!(!f.plugins.plugins_dir().join("github").exists(), "your folder went");
     assert!(storage.join("github.json").is_file() && storage.join("github.settings.json").is_file(), "the built-in's storage stays");
-    assert!(State::load(f.plugins.plugins_dir()).decisions.get("github").is_some_and(|d| d.off), "and its off switch");
+    assert_eq!(State::load(f.plugins.plugins_dir()).switches.get("github"), Some(&false), "and its off switch");
     let list = call(&f.plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
     let github: Vec<_> = list["plugins"].as_array().unwrap().iter().filter(|p| p["id"] == "github").collect();
     assert_eq!(github.len(), 1, "{list}");

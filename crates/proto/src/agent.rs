@@ -825,6 +825,12 @@ impl McpServer {
         self.env.get(Self::ROUTER_ONLY_ENV).is_some_and(|value| value == "1")
     }
 
+    /// Set to `1` on Zeron's own server while Orchestrators is on where the
+    /// run's engine is: its server then offers the orchestration tools (by
+    /// the chat's role, and `ask`/`progress` to every chat) and the role's
+    /// instructions. Unset, the server is as it is without orchestration.
+    pub const ORCHESTRATION_ENV: &'static str = "ZERON_ORCHESTRATION";
+
     /// The chat Zeron's own server speaks for, set when the engine launched
     /// it for a chat's run (its in-chat tools are offered only then).
     pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";

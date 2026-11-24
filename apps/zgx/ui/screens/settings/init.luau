@@ -20,7 +20,6 @@ require("@app/screens/settings/chimes")
 local general = require("@app/screens/settings/general")
 local appearance = require("@app/screens/settings/appearance")
 local activity_page = require("@app/screens/settings/activity")
-local orchestration_page = require("@app/screens/settings/orchestration")
 local notifications = require("@app/screens/settings/notifications")
 local profile = require("@app/screens/settings/profile")
 local providers = require("@app/screens/settings/providers")
@@ -37,6 +36,7 @@ local about = require("@app/screens/settings/about")
 local cloud_page = require("@app/screens/settings/cloud")
 local billing_page = require("@app/screens/settings/billing")
 local cloud = require("@account/cloud")
+local plugins = require("@account/plugins")
 
 type Module = { ID: string, TITLE: string, view: () -> Node }
 
@@ -67,7 +67,22 @@ end
 add(general, "settings-minimalistic", "Personal")
 add(appearance, "tuning", "Personal")
 add(activity_page, "inbox", "Personal")
-add(orchestration_page, "users-group-rounded", "Personal")
+-- Orchestration: Orchestrators' (its `settings_page`), listed and its
+-- module loaded only while it's on.
+local function orchestrators_on(): boolean
+	return plugins.on("orchestrators")
+end
+settings.add {
+	id = "orchestration",
+	title = "Orchestration",
+	icon = "users-group-rounded",
+	group = "Personal",
+	view = function(): Node
+		return plugins.module("orchestrators").settings_page.view()
+	end,
+	before = ahead(),
+	shown = orchestrators_on,
+}
 add(notifications, "bell", "Personal")
 add(voice, "microphone", "Personal")
 add(files, "folder", "Personal")
@@ -111,6 +126,16 @@ ui.effect(function()
 	else
 		search.unindex(cloud_page.ID)
 		search.unindex(billing_page.ID)
+	end
+end)
+-- Orchestration found by the search only while Orchestrators is on: its
+-- page's module indexes its rows as it loads.
+ui.effect(function()
+	local orch = plugins.module("orchestrators")
+	if orch then
+		orch.settings_page.index()
+	else
+		search.unindex("orchestration")
 	end
 end)
 -- Cloud's status as the account signs in (whether it has Cloud lists the

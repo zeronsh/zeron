@@ -119,7 +119,7 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 	local crew = scroller("orch-crew-scroll", CrewList.CrewList {
 		members = props.crew,
 		asks = function(): { any }
-			return orchestration.now:get().asks or {}
+			return (orchestration.now:get() or {}).asks or {}
 		end,
 		device_name = props.device_name,
 		open = function(group: string): boolean

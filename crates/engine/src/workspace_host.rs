@@ -179,9 +179,10 @@ fn new_projectless_cwd(
 
 /// This device's advertised capabilities: the binary's, plus
 /// `cloud-session` on a Cloud session machine (device lists hide those and
-/// show the account's one Cloud device instead).
+/// show the account's one Cloud device instead). Orchestration's are left
+/// out until it's on here ([`WorkspaceHost::set_orchestration_capabilities`]).
 fn device_capabilities() -> Vec<String> {
-    let mut capabilities = zeron_proto::capabilities::current();
+    let mut capabilities = crate::orchestration::switch::capabilities(zeron_proto::capabilities::current(), false);
     if crate::runner::session().is_some() {
         capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
     }
@@ -231,6 +232,8 @@ struct WorkspaceHostInner {
     progress_tx: watch::Sender<Vec<zeron_proto::orchestration::Progress>>,
     /// The Scratchpad and its history (`crate::orchestration::scratchpad`).
     scratchpad_tx: watch::Sender<zeron_proto::scratchpad::ScratchpadState>,
+    /// The account's plugin switches (`pluginSwitches` rows), by plugin id.
+    plugin_switches_tx: watch::Sender<std::collections::BTreeMap<String, bool>>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
     /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
@@ -301,6 +304,7 @@ struct PublishedVersions {
     orchestration: u64,
     progress: u64,
     scratchpad: u64,
+    plugin_switches: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -527,6 +531,7 @@ impl WorkspaceHost {
         let orchestration_published = AtomicU64::new(doc.orchestration_version());
         let (progress_tx, _) = watch::channel(doc.read_progress());
         let (scratchpad_tx, _) = watch::channel(doc.read_scratchpad());
+        let (plugin_switches_tx, _) = watch::channel(doc.plugin_switches());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let edge_less = config.edge.is_none();
 
@@ -544,6 +549,7 @@ impl WorkspaceHost {
                 orchestration_published,
                 progress_tx,
                 scratchpad_tx,
+                plugin_switches_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
@@ -988,6 +994,12 @@ impl WorkspaceHost {
 
     /// Registry rows per kind and pending ops (introspection: the engine's
     /// `perf` stats line).
+    /// How many times rows of `kind` changed here (tests: nothing written).
+    #[cfg(test)]
+    pub(crate) fn kind_version(&self, kind: &str) -> u64 {
+        self.read(|doc| doc.kind_version(kind))
+    }
+
     pub(crate) fn registry_stats(&self) -> (Vec<(String, usize)>, usize) {
         self.read(|doc| (doc.row_counts(), doc.pending_ops_len()))
     }
@@ -1009,6 +1021,57 @@ impl WorkspaceHost {
     /// The Scratchpad and its history, republished on every change.
     pub fn watch_scratchpad(&self) -> watch::Receiver<zeron_proto::scratchpad::ScratchpadState> {
         self.inner.scratchpad_tx.subscribe()
+    }
+
+    /// The account's plugin switches (`pluginSwitches` rows) by plugin id,
+    /// republished when one changes here or lands from another device.
+    pub fn watch_plugin_switches(&self) -> watch::Receiver<std::collections::BTreeMap<String, bool>> {
+        self.inner.plugin_switches_tx.subscribe()
+    }
+
+    /// The account's switch for plugin `id`, as the registry holds it now.
+    pub fn plugin_switch(&self, id: &str) -> Option<bool> {
+        self.read(|doc| doc.plugin_switch(id))
+    }
+
+    /// Advertise orchestration's device capabilities on this device's row
+    /// (`on`), or take them off: other devices route orchestration work
+    /// only to a device that advertises them. Written only when it changes.
+    pub fn set_orchestration_capabilities(&self, on: bool) -> Result<bool, EngineError> {
+        let me = self.inner.config.device_id.clone();
+        let wanted = |current: &[String]| {
+            let mut next = crate::orchestration::switch::capabilities(current.to_vec(), false);
+            if on {
+                next.extend(crate::orchestration::switch::CAPABILITIES.iter().map(|c| (*c).to_owned()));
+            }
+            next
+        };
+        let Some(device) = self.read_devices()?.into_iter().find(|d| d.id == me) else { return Ok(false) };
+        if wanted(&device.capabilities) == device.capabilities {
+            return Ok(false);
+        }
+        self.mutate(|doc| -> Result<(), zeron_doc::DocError> {
+            let Some(mut device) = doc.read_devices()?.into_iter().find(|d| d.id == me) else { return Ok(()) };
+            device.capabilities = wanted(&device.capabilities);
+            doc.upsert_device(&device)
+        })?;
+        Ok(true)
+    }
+
+    /// Set plugin `id`'s switch for the whole account (synced). Published
+    /// to [`Self::watch_plugin_switches`] at once, not at the next publish.
+    pub fn set_plugin_switch(&self, id: &str, on: bool) -> Result<bool, EngineError> {
+        let (written, switches) = self.mutate(|doc| {
+            doc.set_plugin_switch(id, on).map(|written| (written, doc.plugin_switches()))
+        })?;
+        publish_if_changed(&self.inner.plugin_switches_tx, switches);
+        Ok(written)
+    }
+
+    /// Whether this engine runs a Cloud session's machine (whose registry
+    /// writes are limited to the rows it hosts).
+    pub fn is_cloud(&self) -> bool {
+        self.inner.config.platform == zeron_proto::CLOUD_PLATFORM
     }
 
     /// Read orchestration rows under the registry lock.
@@ -1872,6 +1935,7 @@ impl WorkspaceHostInner {
             orchestration: doc.orchestration_version(),
             progress: doc.progress_version(),
             scratchpad: doc.scratchpad_version(),
+            plugin_switches: doc.plugin_switches_version(),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -1882,6 +1946,7 @@ impl WorkspaceHostInner {
         let orchestration = changed(|v| v.orchestration).then(|| doc.read_orchestration());
         let progress = changed(|v| v.progress).then(|| doc.read_progress());
         let scratchpad = changed(|v| v.scratchpad).then(|| doc.read_scratchpad());
+        let plugin_switches = changed(|v| v.plugin_switches).then(|| doc.plugin_switches());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -1965,6 +2030,9 @@ impl WorkspaceHostInner {
         }
         if let Some(scratchpad) = scratchpad {
             publish_if_changed(&self.scratchpad_tx, scratchpad);
+        }
+        if let Some(plugin_switches) = plugin_switches {
+            publish_if_changed(&self.plugin_switches_tx, plugin_switches);
         }
         // A failed read retries every list on the next publish.
         *published = (!failed).then_some(now);
@@ -2864,9 +2932,7 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         for i in 0..300 {
             let id = format!("chat-{i:03}");
@@ -3200,9 +3266,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         }
     }
 

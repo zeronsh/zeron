@@ -3,19 +3,19 @@
 //! double click) and copies (Ctrl/Cmd+C), through ds/selection_menu as the
 //! transcript's do. A quote has a Copy of its own that copies its words as
 //! plain text, and a drag over an option's words selects them rather than
-//! choosing it. Mounted headless on ui/control_page_fixture.luau with
+//! choosing it. Mounted headless on control_page_fixture.luau with
 //! `fixture.decision_email` (a question whose context quotes an email to
 //! send, and a command), opened from Needs you floating over the Map, and
-//! ui/control_qa_fixture.luau (its Q&A under Notes).
+//! control_qa_fixture.luau (its Q&A under Notes); crate::fixture_tests
+//! finds them.
 
-use zgx_script::{ScriptHost, testing::TestApp};
+use zgx_script::testing::TestApp;
 
 const QUESTION: &str = "Could you send this support request to mhost.ee";
 const OVERLAY: &str = ".orch-decision";
 
 fn fixture(name: &str) -> TestApp {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
-    let mut app = TestApp::with_desktop(|runtime| ScriptHost::new(runtime, path));
+    let mut app = TestApp::with_desktop(|runtime| crate::fixture_tests::host(runtime, name));
     app.ui.scene.borrow_mut().resize(1440., 2000.);
     app.frames(30);
     assert_eq!(app.error(), None, "the fixture failed");

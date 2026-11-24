@@ -355,6 +355,10 @@ struct Inner {
     turn_listener: OnceLock<TurnListener>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// Whether Orchestrators is on (unset: off): a turn's live activity and
+    /// todo on its session row, a crew thread's own subagents, the
+    /// orchestration bit in the Zeron MCP server's env.
+    orchestration: OnceLock<crate::orchestration::OrchestrationSwitch>,
     /// Per chat: the usage limit cleared as its current turn started (its
     /// resume): a limit that turn runs straight back into counts on from it.
     limit_resumed: Mutex<HashMap<String, zeron_proto::usage_limit::SessionLimit>>,
@@ -531,6 +535,7 @@ impl SessionsEngine {
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 plugins: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 limit_resumed: Mutex::new(HashMap::new()),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
@@ -639,6 +644,11 @@ impl SessionsEngine {
     /// Wire the plugins service: local runs get its native MCP servers.
     pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
         let _ = self.inner.plugins.set(plugins);
+    }
+
+    /// Follow the Orchestrators switch (engine assembly; first set wins).
+    pub fn set_orchestration(&self, switch: crate::orchestration::OrchestrationSwitch) {
+        let _ = self.inner.orchestration.set(switch);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -3164,9 +3174,7 @@ impl Inner {
                     running_subagents: 0,
                     background_tasks: Vec::new(),
                     waiting: None,
-                    activity: None,
-                    todo: None,
-                    limited: None,
+                    live: Default::default(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3188,7 +3196,7 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
-            live::settle(entry, status, now);
+            live::settle(entry, status, now, self.orchestration_on());
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -3309,14 +3317,21 @@ impl Inner {
     /// thread: an orchestrator's thread delegates to subagents of its own.
     /// Nor while its parent is unknown here (its run outran its row).
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
+        // (A crew thread only while Orchestrators is on; off it's a plain child.)
+        let crew_delegates = self.orchestration_on();
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {
                 !ws.parent_unknown(chat_id)
                     && !ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
                         chat.parent_chat_id.is_some()
-                            && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+                            && !(crew_delegates && chat.child_kind == Some(zeron_proto::ChildKind::Crew))
                     })
             })
+    }
+
+    /// Whether Orchestrators is on.
+    pub(crate) fn orchestration_on(&self) -> bool {
+        self.orchestration.get().is_some_and(crate::orchestration::OrchestrationSwitch::is_on)
     }
 
     /// Zeron's own MCP server for a run of `chat_id`, stamped with the
@@ -3374,6 +3389,12 @@ impl Inner {
         if zeron_proto::orchestration::is_brain_dump_chat(chat_id) {
             env.insert(zeron_proto::McpServer::ROUTER_ONLY_ENV.to_owned(), "1".to_owned());
         }
+        // Orchestration's tools and role prompts only while it's on (the
+        // engine refuses its RPCs while it's off all the same).
+        let orchestration = self.orchestration_on();
+        if orchestration {
+            env.insert(zeron_proto::McpServer::ORCHESTRATION_ENV.to_owned(), "1".to_owned());
+        }
         let endpoint = lock(&self.mcp_endpoint).clone();
         if let Some(endpoint) = endpoint {
             let origin = zeron_mcp::Origin {
@@ -3381,6 +3402,7 @@ impl Inner {
                 device_id: Some(self.device_id.clone()),
                 side_chats_only,
                 waits_on_background: waits,
+                orchestration,
             };
             match endpoint.grant(origin) {
                 Ok(grant) => {
@@ -6859,7 +6881,7 @@ async fn drive_run(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {
@@ -6875,9 +6897,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         }
     }
 
@@ -7985,7 +8005,7 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    fn done(status: DoneStatus) -> AgentEvent {
+    pub(crate) fn done(status: DoneStatus) -> AgentEvent {
         AgentEvent::Done {
             status,
             result: None,
@@ -8260,18 +8280,18 @@ mod tests {
         }
     }
 
-    struct WakeRig {
-        core: crate::EngineCore,
-        feed: mpsc::UnboundedSender<AgentEvent>,
-        turn: TurnControl,
-        chat: &'static str,
-        _dir: tempfile::TempDir,
+    pub(crate) struct WakeRig {
+        pub(crate) core: crate::EngineCore,
+        pub(crate) feed: mpsc::UnboundedSender<AgentEvent>,
+        pub(crate) turn: TurnControl,
+        pub(crate) chat: &'static str,
+        pub(crate) _dir: tempfile::TempDir,
     }
 
     /// A run on [`WakeHarness`] whose runtime wakes its agent (`wakes`),
     /// started and mid-turn. The grace a wait gets once its work is gone is
     /// short here (`ZERON_WAKE_GRACE_MS`, read per run).
-    async fn wake_rig(chat: &'static str, wakes: bool) -> WakeRig {
+    pub(crate) async fn wake_rig(chat: &'static str, wakes: bool) -> WakeRig {
         // SAFETY: tests only; nothing reads this but the run loop, per run.
         unsafe { std::env::set_var("ZERON_WAKE_GRACE_MS", "300") };
         let (feed, rx) = mpsc::unbounded_channel();
@@ -8301,7 +8321,7 @@ mod tests {
         WakeRig { core, feed, turn, chat, _dir: dir }
     }
 
-    fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
+    pub(crate) fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
         zeron_proto::WaitingOn {
             id: id.into(),
             kind: zeron_proto::WaitingKind::Agent,
@@ -8319,12 +8339,12 @@ mod tests {
     }
 
     /// The session as the rig's engine says it once things settle.
-    async fn settled(rig: &WakeRig) -> Session {
+    pub(crate) async fn settled(rig: &WakeRig) -> Session {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         rig.core.sessions.session_status(rig.chat).expect("a session row")
     }
 
-    fn waits_on(session: &Session) -> Vec<String> {
+    pub(crate) fn waits_on(session: &Session) -> Vec<String> {
         session
             .waiting
             .as_ref()
@@ -8341,7 +8361,7 @@ mod tests {
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
         let s = settled(&rig).await;
         assert_eq!(s.status, SessionStatus::Errored);
-        let limit = s.limited.expect("limited");
+        let limit = s.live.limited.expect("limited");
         assert_eq!((limit.provider.as_str(), limit.window.as_deref(), limit.attempt), ("mock", Some("usage"), 0));
         let wait = limit.until.expect("its reset, from its words") - limit.since;
         assert!((wait - chrono::Duration::minutes(134)).num_seconds().abs() <= 60, "{wait}");
@@ -8362,7 +8382,7 @@ mod tests {
             })
             .unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
-        let limit = settled(&rig).await.limited.expect("limited");
+        let limit = settled(&rig).await.live.limited.expect("limited");
         assert_eq!((limit.window.as_deref(), limit.until), (Some("weekly"), Some(resets)));
         rig.core.sessions.shutdown().await;
     }
@@ -8376,7 +8396,7 @@ mod tests {
             })
             .unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
-        let limit = settled(&rig).await.limited.expect("limited");
+        let limit = settled(&rig).await.live.limited.expect("limited");
         assert_eq!((limit.window.as_deref(), limit.until), (Some("5-hour"), None));
         rig.core.sessions.shutdown().await;
     }
@@ -8387,7 +8407,7 @@ mod tests {
         rig.feed.send(AgentEvent::Error { message: "Harness exited with status 1".into() }).unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
         let s = settled(&rig).await;
-        assert_eq!((s.status, s.limited), (SessionStatus::Errored, None));
+        assert_eq!((s.status, s.live.limited), (SessionStatus::Errored, None));
         rig.core.sessions.shutdown().await;
     }
 
@@ -8402,7 +8422,7 @@ mod tests {
         );
         let inner = &engine.inner;
         let hit = || LimitHit { window: Some("5-hour".into()), until: Some(Utc::now() + chrono::Duration::hours(1)) };
-        let limit = |e: &SessionsEngine| e.session_status("c").and_then(|s| s.limited);
+        let limit = |e: &SessionsEngine| e.session_status("c").and_then(|s| s.live.limited);
         inner.set_status("c", SessionStatus::Working, true);
         inner.set_status_limited("c", HarnessId::Codex, None, Some(DoneStatus::Errored), hit());
         assert_eq!(limit(&engine).map(|l| (l.provider, l.attempt)), Some(("codex".to_owned(), 0)));
@@ -8469,124 +8489,6 @@ mod tests {
         assert!(s.waiting.is_none());
         assert!(s.last_completed_turn.is_some());
         rig.core.sessions.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn a_chat_waiting_on_its_background_work_when_the_engine_stops_is_resumed_once() {
-        use zeron_rpc::{Caller, RpcService, methods, with_caller};
-        let rig = wake_rig("chat-wait-stop", true).await;
-        // The chat as the workspace lists it (hosted here).
-        let device = rig.core.orchestration.device_id().to_owned();
-        with_caller(
-            Caller::Local,
-            rig.core.rpc_service().handle(
-                methods::MUTATE,
-                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
-                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
-            ),
-        )
-        .await
-        .unwrap();
-        // Its turn completed into a wait on its own build.
-        rig.turn.set_background(1);
-        rig.turn.set_background_agents(vec![waiting_agent("build")]);
-        rig.feed.send(done(DoneStatus::Completed)).unwrap();
-        assert_eq!(waits_on(&settled(&rig).await), ["build"]);
-        // The engine stops: the build and the wait end with it.
-        rig.core.shutdown().await;
-        let dir = rig._dir.path().to_path_buf();
-        drop(rig.core);
-
-        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
-        let rpc = core.rpc_service();
-        let before = core.orchestration.take_before_stop();
-        assert!(
-            before.iter().filter(|s| s.chat_id == "chat-wait-stop").all(|s| s.waiting.is_none()),
-            "its row no longer says it waited: the journal's mark does"
-        );
-        assert_eq!(rpc.resume_after_restart(before), ["chat-wait-stop"]);
-        // Once: the mark is taken.
-        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
-        let handle = core.doc_host.open("chat-wait-stop").unwrap();
-        let mut said: Vec<String> = handle
-            .doc()
-            .read_commands()
-            .unwrap()
-            .into_iter()
-            .filter_map(|c| match c.payload {
-                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
-                _ => None,
-            })
-            .collect();
-        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
-        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
-        assert_eq!(resumed.len(), 1, "{said:?}");
-        assert!(resumed[0].contains("agent build") && resumed[0].contains("run it again"), "{}", resumed[0]);
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn a_chat_whose_subagent_runs_when_the_engine_stops_is_resumed_once() {
-        use zeron_rpc::{Caller, RpcService, methods, with_caller};
-        let rig = wake_rig("chat-sub-stop", false).await;
-        let device = rig.core.orchestration.device_id().to_owned();
-        with_caller(
-            Caller::Local,
-            rig.core.rpc_service().handle(
-                methods::MUTATE,
-                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
-                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
-            ),
-        )
-        .await
-        .unwrap();
-        // The parent spawns a subagent, which streams; the parent's turn ends
-        // while it runs on.
-        rig.feed
-            .send(AgentEvent::ToolCall {
-                id: "toolu_sub1".into(),
-                call: zeron_proto::ToolCall::Unknown { name: "Agent".into(), input: None },
-            })
-            .unwrap();
-        rig.feed
-            .send(AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub1".into(),
-                event: Box::new(AgentEvent::TextDelta { text: "looking".into() }),
-            })
-            .unwrap();
-        rig.feed.send(done(DoneStatus::Completed)).unwrap();
-        let s = settled(&rig).await;
-        assert_eq!(s.running_subagents, 1, "{s:?}");
-        // The engine stops: the subagent with it.
-        rig.core.shutdown().await;
-        let dir = rig._dir.path().to_path_buf();
-        drop(rig.core);
-
-        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
-        let rpc = core.rpc_service();
-        let before = core.orchestration.take_before_stop();
-        assert!(
-            before.iter().filter(|s| s.chat_id == "chat-sub-stop").all(|s| s.running_subagents == 0),
-            "its row no longer counts the subagent: the journal's mark does"
-        );
-        assert_eq!(rpc.resume_after_restart(before), ["chat-sub-stop"]);
-        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty(), "once");
-        let handle = core.doc_host.open("chat-sub-stop").unwrap();
-        let mut said: Vec<String> = handle
-            .doc()
-            .read_commands()
-            .unwrap()
-            .into_iter()
-            .filter_map(|c| match c.payload {
-                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
-                _ => None,
-            })
-            .collect();
-        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
-        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted; your subagents")).collect();
-        assert_eq!(resumed.len(), 1, "{said:?}");
-        assert!(resumed[0].contains("chat-sub-stop--sub--toolu_sub1"), "{}", resumed[0]);
-        core.shutdown().await;
     }
 
     #[tokio::test]
@@ -8763,5 +8665,32 @@ mod tests {
         let start = Instant::now();
         sessions.ipc_port_ready(limit).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    /// Zeron's MCP server for a chat's run offers orchestration's tools
+    /// (`ZERON_ORCHESTRATION=1` in its env) only while Orchestrators is on:
+    /// off, none; on, there; turned off again, gone from the next launch.
+    #[tokio::test]
+    async fn the_mcp_env_says_orchestration_only_while_the_switch_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        sessions.set_ipc_port(27699);
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        sessions.set_orchestration(crate::orchestration::OrchestrationSwitch::from_watch(rx));
+        let env = || {
+            let (server, _grant) = sessions.inner.zeron_mcp("chat-1", false, false).expect("a server");
+            server.env.get(zeron_proto::McpServer::ORCHESTRATION_ENV).cloned()
+        };
+        assert_eq!(env(), None, "off: not set");
+        tx.send(true).unwrap();
+        assert_eq!(env().as_deref(), Some("1"), "on: set");
+        tx.send(false).unwrap();
+        assert_eq!(env(), None, "off again: gone from the next launch");
+        tx.send(true).unwrap();
+        assert_eq!(env().as_deref(), Some("1"), "on again: back");
     }
 }

@@ -461,9 +461,7 @@ mod gate_tests {
             running_subagents: running,
             background_tasks: Vec::new(),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         }
     }
 
@@ -593,7 +591,7 @@ mod gate_tests {
         assert!(session_stale(&session, later));
         // Waiting for its usage limit's reset: never stale.
         let limited = Session {
-            limited: Some(crate::usage_limit::SessionLimit {
+            live: crate::SessionLive { limited: Some(crate::usage_limit::SessionLimit {
                 provider: "codex".into(),
                 account_slot: None,
                 account_label: None,
@@ -602,7 +600,7 @@ mod gate_tests {
                 since: now,
                 attempt: 0,
                 switched_to: None,
-            }),
+            }), ..Default::default() },
             ..session.clone()
         };
         assert!(!session_stale(&limited, later + chrono::Duration::hours(5)));

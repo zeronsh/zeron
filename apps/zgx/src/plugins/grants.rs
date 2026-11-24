@@ -108,6 +108,36 @@ pub fn replaceable(module: &str) -> bool {
             .any(|never| module == *never || module.starts_with(&format!("{never}/")))
 }
 
+/// May a bundled built-in (one of Zeron's own, shipped inside the app:
+/// `Item::bundled`) replace `module`? Any one of the app's modules it
+/// names, as the app's own code may stand in for another, but never a
+/// screen where plugins are allowed (`NEVER_REPLACED`), nor every module
+/// (`*`), nor a path that leaves the app's.
+pub fn bundled_replaceable(module: &str) -> bool {
+    let Some(rest) = module.strip_prefix("@app/") else {
+        return false;
+    };
+    let plain = rest.split('/').all(|part| {
+        !part.is_empty() && part != "." && part != ".." && !part.contains(['*', '\\']) && !part.chars().any(char::is_whitespace)
+    });
+    plain
+        && !NEVER_REPLACED
+            .iter()
+            .any(|never| module == *never || module.starts_with(&format!("{never}/")))
+}
+
+/// What a bundled built-in is trusted with beyond its permissions: each
+/// app module its manifest names (`app_modules`), that module alone
+/// (`OverrideModule`), so its replacement runs as the app's code and may
+/// require `@app/…` and `@account/…`.
+pub fn bundled(modules: &[String]) -> Vec<Capability> {
+    modules
+        .iter()
+        .filter(|m| bundled_replaceable(m))
+        .map(|m| Capability::OverrideModule(m.clone()))
+        .collect()
+}
+
 /// May a plugin allowed "ui.change" be given `target`? Only an element's
 /// selector, as zgx reads one: a target naming a module or everything (`*`)
 /// is never given (zgx's `OverrideElement` doesn't reach modules anyway); nor

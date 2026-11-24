@@ -86,6 +86,14 @@ jobs:
             apps/zeron
       - name: Planner and admission tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+      # Main's tests as main has them, but for scripts/ci/main-parity-allow.txt:
+      # what's checked out (a pull request's merge, a merge group's commit)
+      # against the branch it goes into. Git objects alone, seconds.
+      - name: Main's tests unedited
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          MAIN_PARITY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: scripts/ci/main-parity.sh
       - id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}

@@ -332,7 +332,7 @@ end
 -- The Brain dump's chat: Capture's composer is its own (its model and
 -- agent the Brain dump's), every send a dump.
 local function brain_dump(): string?
-	for _, o in orchestration.now:get().orchestrators or {} do
+	for _, o in (orchestration.now:get() or {}).orchestrators or {} do
 		if o.kind == "brain_dump" then
 			return o.id
 		end
@@ -705,7 +705,7 @@ function M.show_dump(id: string?)
 	if not id then
 		return
 	end
-	local dumps = orchestration.now:peek().dumps or {}
+	local dumps = (orchestration.now:peek() or {}).dumps or {}
 	local first = dumps[1]
 	local function focus(r: any): boolean
 		local el = if r then r:peek() else nil
@@ -766,14 +766,14 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		card_build = card_build,
 		id = "control-board",
 		items = function(): { any }
-			return BD.now().items or {}
+			return (BD.now() or {}).items or {}
 		end,
 		-- (Where the engine says each card stands.)
 		cards = function(): { any }
-			return BD.now().cards or {}
+			return (BD.now() or {}).cards or {}
 		end,
 		orchestrators = function(): { any }
-			return BD.now().orchestrators or {}
+			return (BD.now() or {}).orchestrators or {}
 		end,
 		show_filter = true,
 		view = M.board_view,
@@ -984,7 +984,7 @@ end
 
 local function qa_computed(): any
 	return ui.computed(function(): { QA.Entry }
-		return QA.entries(orchestration.now:get().dumps or {}, QA.marks:get(), chats_now:get())
+		return QA.entries((orchestration.now:get() or {}).dumps or {}, QA.marks:get(), chats_now:get())
 	end)
 end
 local qa_entries = qa_computed()
@@ -1148,7 +1148,7 @@ end
 -- How many of the crew work now.
 local function working_now(): number
 	local working = 0
-	for _, m in orchestration.now:get().crew or {} do
+	for _, m in (orchestration.now:get() or {}).crew or {} do
 		local c = chats_now:get()[m.chat_id]
 		if not m.released and c and c.status == "working" then
 			working += 1
@@ -1164,7 +1164,7 @@ end
 local tally = {}
 function tally.orchestrators(): number
 	local n = 0
-	for _, o in orchestration.now:get().orchestrators or {} do
+	for _, o in (orchestration.now:get() or {}).orchestrators or {} do
 		if (o.kind == nil or o.kind == "standard") and not o.archived then
 			n += 1
 		end
@@ -1203,7 +1203,7 @@ local function board_counts(): { [string]: number }
 	local out: { [string]: number } = {}
 	-- (Done today as the board's Done column has it: since local midnight.)
 	local now = os.time()
-	for _, it in orchestration.now:get().items or {} do
+	for _, it in (orchestration.now:get() or {}).items or {} do
 		if data.shown_today(it, now) then
 			out[it.state] = (out[it.state] or 0) + 1
 		end

@@ -27,7 +27,6 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
         subagents: app.host.shared("test.subagents", Value::Nil),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     CHATS.with(|chats| {
         chats.made(
@@ -278,7 +277,6 @@ fn switch_chat_view(chat_id: &str) -> (TestApp, Rc<View>, Vec<Json>) {
         subagents: app.host.shared("test.subagents", Value::Nil),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     CHATS.with(|chats| {
         chats.made(

@@ -629,51 +629,6 @@ ui.command {
 		end
 	end,
 }
--- The open chat a thread of a card the person paused: its messages held
--- (screens/chat/card_hold). The board's ops are noted (`orch:<op>:<id>`)
--- and played as the engine would (resumed: into Now).
-do
-	local orchestration = require("@account/orchestration") :: any
-	-- (`orch_refuse`: refused, as the bridge refuses an op it doesn't know.)
-	local refuse = ui.state("orch_refuse", false)
-	orchestration.op = function(op: any): any
-		note(`orch:{op.op}:{op.id or ""}:{op.state or ""}`)
-		if refuse:peek() then
-			return { after = function(_: any, _done: any, failed: any) if failed then failed("not yours") end end }
-		end
-		if op.op == "resumeItem" then
-			local now = table.clone(orchestration.now:peek())
-			local items = {}
-			for _, it in now.items or {} do
-				if it.id == op.id then
-					it = table.clone(it)
-					it.state = op.state or "active"
-					it.paused_at = nil
-				end
-				table.insert(items, it)
-			end
-			now.items = items
-			orchestration.now:set(now)
-		end
-		return { after = function(_: any, done: (any) -> ()) done(nil) end }
-	end
-	ui.command {
-		id = "card_paused",
-		title = "The open chat's card is paused",
-		run = function()
-			if opened then
-				orchestration.now:set({
-					state = "ready",
-					orchestrators = {},
-					crew = {},
-					asks = {},
-					dumps = {},
-					items = { { id = "it-held", title = "Fix the flaky test", state = "blocked", paused_at = os.time() - 600, threads = { opened } } },
-				})
-			end
-		end,
-	}
-end
 ui.command {
 	id = "queue_switch",
 	title = "A provider-switching message waits in the queue while steering is available",

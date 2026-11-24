@@ -98,13 +98,13 @@ use zeron_proto::orchestration::frames::{Followed, Follower, Heard, Keyed, ListD
 use zeron_proto::orchestration::flow::{FlowEdge, FlowNode, FlowRun, Workflow};
 use zeron_proto::orchestration::board::{BoardCard, CardEvent};
 use zeron_proto::orchestration::{
-    Ask, ChatActivity, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget,
-    Score, TodoProgress, WorkItem, WorkLink,
+    Ask, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget, Score, WorkItem,
+    WorkLink,
 };
-use zgx_desktop::WindowContext;
-use zgx_script::{ScriptHost, Shared, Value};
+use zgx_script::{ScriptHost, Value};
 
 use crate::engine::{self, rpc::{Rpc, Watch}};
+use crate::orchestrators::Key;
 
 /// The most comms kept (the engine's own ring, `WatchComms`).
 const COMMS: usize = 100;
@@ -115,9 +115,9 @@ const HISTORY: usize = 72;
 /// One open window's states, and how many of its screens want loads.
 struct Window {
     id: u64,
-    now: Shared,
-    loads: Shared,
-    comms: Shared,
+    now: Key,
+    loads: Key,
+    comms: Key,
     wants_loads: u32,
 }
 
@@ -126,8 +126,6 @@ struct Orchestration {
     /// Each open window's, let go of as it closes.
     windows: RefCell<Vec<Window>>,
     next_window: Cell<u64>,
-    /// The engine watched (once, for every window).
-    watching: Cell<bool>,
     /// The state as the engine's frames have made it (none yet: loading),
     /// each row as scripts are given it, and that state as scripts were
     /// given it.
@@ -138,8 +136,9 @@ struct Orchestration {
     now: RefCell<Option<Value>>,
     comms: RefCell<Comms>,
     loads: RefCell<Value>,
-    /// Each device's CPU as it was heard, for its line (kept while the app
-    /// runs: a screen shown again has its last minutes at once).
+    /// Each device's CPU as it was heard, for its line (kept while
+    /// Orchestrators is on: a screen shown again has its last minutes at
+    /// once).
     history: RefCell<History>,
     /// Whether something the engine sent couldn't be read, said once.
     complained: Cell<bool>,
@@ -220,10 +219,38 @@ fn remove_op(id: &str) -> Json {
     json!({ "op": "removeItem", "id": id })
 }
 
+/// The deletes the quit sends: those still waiting, with Orchestrators on
+/// (off, none waits: its switch let them go, and no orchestration op is
+/// sent).
+fn removing_at_quit() -> Vec<String> {
+    let ids = removing_now();
+    if crate::orchestrators::on() { ids } else { Vec::new() }
+}
+
+/// The deletes waiting for their Undo, by id (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn waiting_deletes() -> Vec<String> {
+    let mut ids: Vec<String> = REMOVING.with(|r| r.borrow().keys().cloned().collect());
+    ids.sort();
+    ids
+}
+
+/// What the quit would send now, taken (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn sent_at_quit() -> Vec<String> {
+    removing_at_quit()
+}
+
+/// A `WatchOrchestration` frame, as the stream would give it (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn heard_for_tests(item: Json) {
+    ORCHESTRATION.with(Rc::clone).heard_state(item);
+}
+
 /// The app's quit (src/main.rs, once its windows are gone): the deletes
 /// still waiting for their Undo are sent now, as they would have been.
 pub fn after_quit() {
-    let ids = removing_now();
+    let ids = removing_at_quit();
     if ids.is_empty() {
         return;
     }
@@ -237,47 +264,92 @@ pub fn after_quit() {
     }
 }
 
-pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+/// `host`'s window, its states given now while Orchestrators is on
+/// (src/orchestrators.rs opens the streams).
+pub(crate) fn add(host: &ScriptHost) -> u64 {
     let o = ORCHESTRATION.with(Rc::clone);
     let window = o.next_window.get();
     o.next_window.set(window + 1);
-    o.windows.borrow_mut().push(Window {
+    let w = Window {
         id: window,
-        now: host.shared("orchestration", o.now_value()),
-        loads: host.shared("orchestration.loads", o.loads_now()),
-        comms: host.shared("orchestration.comms", o.comms.borrow().value()),
+        now: Key::new(host, "orchestration"),
+        loads: Key::new(host, "orchestration.loads"),
+        comms: Key::new(host, "orchestration.comms"),
         wants_loads: 0,
-    });
-    let me = Rc::downgrade(&o);
-    cx.on_closed(move || {
-        if let Some(o) = me.upgrade() {
-            o.windows.borrow_mut().retain(|w| w.id != window);
-            // (Its screens can't want loads any more.)
-            o.follow_loads();
+    };
+    if crate::orchestrators::on() {
+        o.give_to((w.now.clone(), w.loads.clone(), w.comms.clone()));
+    }
+    o.windows.borrow_mut().push(w);
+    window
+}
+
+/// `window` closed.
+pub(crate) fn remove(window: u64) {
+    let o = ORCHESTRATION.with(Rc::clone);
+    o.windows.borrow_mut().retain(|w| w.id != window);
+    // (Its screens can't want loads any more.)
+    o.follow_loads();
+}
+
+/// Orchestrators on: each window given the states as they are.
+pub(crate) fn show() {
+    let o = ORCHESTRATION.with(Rc::clone);
+    let windows: Vec<(Key, Key, Key)> = o.windows.borrow().iter().map(|w| (w.now.clone(), w.loads.clone(), w.comms.clone())).collect();
+    for keys in windows {
+        o.give_to(keys);
+    }
+}
+
+/// The streams on `rpc` (a connection, Orchestrators on): the state and
+/// comms, and device loads if a screen wants them.
+pub(crate) fn open(rpc: &Rpc) {
+    let o = ORCHESTRATION.with(Rc::clone);
+    let state = watch_state(rpc, Rc::downgrade(&o));
+    let heard = Rc::downgrade(&o);
+    let comms = rpc.watch("WatchComms", json!({}), move |item| {
+        if let Some(o) = heard.upgrade() {
+            o.heard_comms(&item);
         }
     });
-    if !o.watching.replace(true) {
-        let weak = Rc::downgrade(&o);
-        engine::get().on_connect(move |rpc| {
-            let Some(o) = weak.upgrade() else { return };
-            let state = watch_state(rpc, Rc::downgrade(&o));
-            let heard = Rc::downgrade(&o);
-            let comms = rpc.watch("WatchComms", json!({}), move |item| {
-                if let Some(o) = heard.upgrade() {
-                    o.heard_comms(&item);
-                }
-            });
-            *o.watches.borrow_mut() = vec![state, comms];
-            // (The old connection's is gone with it.)
-            let old = o.loads_watch.borrow_mut().take();
-            drop(old);
-            o.follow_loads_on(Some(rpc));
-        });
-    }
+    *o.watches.borrow_mut() = vec![state, comms];
+    // (The old connection's is gone with it.)
+    let old = o.loads_watch.borrow_mut().take();
+    drop(old);
+    o.follow_loads_on(Some(rpc));
+}
 
+/// Orchestrators off: every stream closed, what they said let go of, and
+/// each window's states nil.
+pub(crate) fn close() {
+    let o = ORCHESTRATION.with(Rc::clone);
+    let watches = std::mem::take(&mut *o.watches.borrow_mut());
+    drop(watches);
+    let loads = o.loads_watch.borrow_mut().take();
+    drop(loads);
+    *o.heard.borrow_mut() = Follower::default();
+    *o.rows.borrow_mut() = RowValues::default();
+    o.resyncing.set(false);
+    *o.now.borrow_mut() = None;
+    *o.comms.borrow_mut() = Comms::default();
+    *o.loads.borrow_mut() = Value::Nil;
+    *o.history.borrow_mut() = History::default();
+    // (The deletes waiting for their Undo let go of: none is sent, at its
+    // wait's end or at the quit.)
+    REMOVING.with(|r| r.borrow_mut().clear());
+    let keys: Vec<Key> = o.windows.borrow().iter().flat_map(|w| [w.now.clone(), w.loads.clone(), w.comms.clone()]).collect();
+    for key in keys {
+        key.clear();
+    }
+}
+
+/// The window's actions: refused while Orchestrators is off.
+pub(crate) fn actions(host: &ScriptHost, window: u64) {
+    let o = ORCHESTRATION.with(Rc::clone);
     host.async_action("orchestration.op", move |op| {
         let mut params = crate::plugins::value_json(&op);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.op")?;
             person_op(&params)?;
             if params["op"] == "dump" {
@@ -290,6 +362,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("orchestration.answer_ask", move |args| {
         let params = answer_params(&args);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.answer_ask")?;
             let params = params?;
             let reply = engine::get().call("Orchestrate", params).await?;
@@ -299,6 +372,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("orchestration.defer_ask", move |args| {
         let params = defer_params(&args);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.defer_ask")?;
             let params = params?;
             let reply = engine::get().call("Orchestrate", params).await?;
@@ -312,6 +386,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             _ => 0,
         };
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.remove_later")?;
             let id = id.ok_or("a card id")?;
             let wait = Duration::from_millis(ms).min(REMOVE_WAIT_MAX);
@@ -322,7 +397,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             // no engine now, the app's quit sends it.)
             engine::get().spawn(async move {
                 zgx::timer::sleep(wait).await;
-                let outcome = if remove_due(&id, turn) {
+                // (Turned off meanwhile: let go of, never sent.)
+                let outcome = if remove_due(&id, turn) && crate::orchestrators::on() {
                     engine::get().call("Orchestrate", remove_op(&id)).await.map(|_| true)
                 } else {
                     Ok(false)
@@ -333,13 +409,15 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
     host.action("orchestration.remove_undo", move |id| {
-        if crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
+        if crate::orchestrators::refuse().is_err() || crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
             return;
         }
         undo_remove(&crate::auth::text(&id));
     });
     let a = o.clone();
     host.action("orchestration.loads_wanted", move |on| {
+        // (Counted while off too: a screen mounts in the reload that turns
+        // Orchestrators on, before the switch says so.)
         if crate::plugins::preview::refuse("orchestration.loads_wanted").is_err() {
             return;
         }
@@ -483,6 +561,14 @@ fn person_op(params: &Json) -> Result<(), String> {
 }
 
 impl Orchestration {
+    /// A window's states (`now`, `loads`, `comms`) as they are.
+    fn give_to(&self, (now, loads, comms): (Key, Key, Key)) {
+        now.set(self.now_value());
+        loads.set(self.loads_now());
+        let value = self.comms.borrow().value();
+        comms.set(value);
+    }
+
     fn now_value(&self) -> Value {
         self.now.borrow().clone().unwrap_or_else(loading_value)
     }
@@ -548,6 +634,10 @@ impl Orchestration {
         RESYNCS.with(|n| n.set(n.get() + 1));
         engine::get().spawn(async move {
             let Some(rpc) = engine::get().current() else { return };
+            // (Orchestrators turned off meanwhile: nothing to watch.)
+            if !crate::orchestrators::on() {
+                return;
+            }
             ORCHESTRATION.with(|o| {
                 let state = watch_state(&rpc, Rc::downgrade(o));
                 if let Some(slot) = o.watches.borrow_mut().first_mut() {
@@ -596,7 +686,7 @@ impl Orchestration {
 
     /// Every window's state `pick` names, taken out first: setting one may
     /// run a script that calls back in.
-    fn targets(&self, pick: impl Fn(&Window) -> &Shared) -> Vec<Shared> {
+    fn targets(&self, pick: impl Fn(&Window) -> &Key) -> Vec<Key> {
         self.windows.borrow().iter().map(|w| pick(w).clone()).collect()
     }
 
@@ -615,7 +705,8 @@ impl Orchestration {
 
     /// [`Self::follow_loads`] on `rpc`, else the connection there is now.
     fn follow_loads_on(&self, rpc: Option<&Rpc>) {
-        let wanted = self.windows.borrow().iter().any(|w| w.wants_loads > 0);
+        // (Off: none, whatever is wanted.)
+        let wanted = crate::orchestrators::on() && self.windows.borrow().iter().any(|w| w.wants_loads > 0);
         if !wanted {
             let watch = self.loads_watch.borrow_mut().take();
             drop(watch);
@@ -1261,48 +1352,6 @@ fn comm_value(c: &CommEvent) -> Value {
         ("to", Value::from(c.to.as_str())),
         ("summary", Value::from(c.summary.as_str())),
         ("at", secs(&c.at)),
-    ])
-}
-
-/// What a chat's agent is doing, for its session row: `{ kind, label, since }`.
-pub(crate) fn activity_value(a: &ChatActivity) -> Value {
-    Value::record([("kind", word(&a.kind)), ("label", Value::from(a.label.as_str())), ("since", secs(&a.since))])
-}
-
-/// How far through its todo list a chat is, for its session row:
-/// `{ done, total, current? }`.
-pub(crate) fn todo_value(t: &TodoProgress) -> Value {
-    Value::record([
-        ("done", Value::from(f64::from(t.done))),
-        ("total", Value::from(f64::from(t.total))),
-        ("current", opt_str(t.current.as_deref())),
-    ])
-}
-
-/// A chat its provider's usage limit stopped, for its session row:
-/// `{ provider, account_slot?, account_label?, window?, until_at?, since,
-/// attempt, switched_to? = { account_slot, account_label, at, harness?,
-/// model? } }` (times in Unix seconds; `until_at`, `until` on the wire, nil
-/// while unknown: `until` is a Luau keyword).
-pub(crate) fn limited_value(l: &zeron_proto::usage_limit::SessionLimit) -> Value {
-    let switched = l.switched_to.as_ref().map_or(Value::Nil, |s| {
-        Value::record([
-            ("account_slot", Value::from(s.account_slot.as_str())),
-            ("account_label", Value::from(s.account_label.as_str())),
-            ("at", secs(&s.at)),
-            ("harness", opt_str(s.harness.as_deref())),
-            ("model", opt_str(s.model.as_deref())),
-        ])
-    });
-    Value::record([
-        ("provider", Value::from(l.provider.as_str())),
-        ("account_slot", opt_str(l.account_slot.as_deref())),
-        ("account_label", opt_str(l.account_label.as_deref())),
-        ("window", opt_str(l.window.as_deref())),
-        ("until_at", opt(l.until.as_ref(), secs)),
-        ("since", secs(&l.since)),
-        ("attempt", Value::from(f64::from(l.attempt))),
-        ("switched_to", switched),
     ])
 }
 
@@ -1976,19 +2025,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_and_todo_read_as_session_rows_carry_them() {
-        let a: ChatActivity =
-            serde_json::from_value(json!({ "kind": "testing", "label": "cargo test", "since": iso(NOW - 48) })).unwrap();
-        let v = activity_value(&a);
-        assert_eq!(text(v.field("kind")).as_deref(), Some("testing"));
-        assert_eq!(text(v.field("label")).as_deref(), Some("cargo test"));
-        assert_eq!(num(v.field("since")), Some((NOW - 48) as f64));
-        let t = todo_value(&TodoProgress { done: 3, total: 3, current: None });
-        assert_eq!((num(t.field("done")), num(t.field("total"))), (Some(3.), Some(3.)));
-        assert!(nil(t.field("current")));
-    }
-
-    #[test]
     fn loads_are_keyed_by_device() {
         let loads: Vec<DeviceLoad> = serde_json::from_value(json!([
             { "deviceId": "dev-desk", "cpu": 0.71, "memoryUsedBytes": 41_200_000_000u64, "memoryTotalBytes": 62_000_000_000u64,
@@ -2179,8 +2215,7 @@ mod tests {
     #[test]
     fn a_pushed_delta_runs_only_the_moved_card_s_selector() {
         use zgx_script::testing::TestApp;
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
-        let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+        let app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_push_fixture.luau"));
         app.frames(5);
         let shared = app.host.shared("orchestration", loading_value());
         let o = Orchestration::default();
@@ -2340,13 +2375,19 @@ mod tests {
                 }
             }
         }
-        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        // The app's modules, and Orchestrators' own (its app/ keeps ui/'s
+        // layout).
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        walk(&ui, &mut files);
+        for root in [app.join("ui"), app.join("plugins-builtin/orchestrators/app")] {
+            let mut found = Vec::new();
+            walk(&root, &mut found);
+            files.extend(found.into_iter().map(|path| (root.clone(), path)));
+        }
         let mut sent: Vec<(String, String)> = Vec::new();
-        for path in files {
+        for (root, path) in files {
             let text = std::fs::read_to_string(&path).unwrap();
-            let rel = path.strip_prefix(&ui).unwrap().display().to_string();
+            let rel = path.strip_prefix(&root).unwrap().display().to_string();
             let account = rel.replace('\\', "/") == "account/orchestration.luau";
             if !(text.contains("orchestration.op(") || (account && text.contains("M.op("))) {
                 continue;
@@ -2368,35 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn a_limited_chat_and_its_policy_reach_scripts_snake_cased() {
-        let waiting: zeron_proto::usage_limit::SessionLimit = serde_json::from_value(json!({
-            "provider": "claude", "accountLabel": "me@work.dev", "window": "5-hour",
-            "until": iso(NOW + 1800), "since": iso(NOW - 60), "attempt": 1
-        }))
-        .unwrap();
-        let v = limited_value(&waiting);
-        assert_eq!(text(v.field("provider")).as_deref(), Some("claude"));
-        assert_eq!(text(v.field("account_label")).as_deref(), Some("me@work.dev"));
-        assert_eq!(num(v.field("until_at")), Some((NOW + 1800) as f64));
-        assert_eq!(num(v.field("since")), Some((NOW - 60) as f64));
-        assert_eq!(num(v.field("attempt")), Some(1.0));
-        assert!(nil(v.field("switched_to")));
-        assert!(nil(v.field("account_slot")));
-
-        let switched: zeron_proto::usage_limit::SessionLimit = serde_json::from_value(json!({
-            "provider": "claude", "since": iso(NOW - 60),
-            "switchedTo": { "accountSlot": "s2", "accountLabel": "me@home.dev", "at": iso(NOW - 30), "model": "opus" }
-        }))
-        .unwrap();
-        let v = limited_value(&switched);
-        assert!(nil(v.field("until_at")));
-        let to = v.field("switched_to").unwrap();
-        assert_eq!(text(to.field("account_slot")).as_deref(), Some("s2"));
-        assert_eq!(text(to.field("account_label")).as_deref(), Some("me@home.dev"));
-        assert_eq!(num(to.field("at")), Some((NOW - 30) as f64));
-        assert_eq!(text(to.field("model")).as_deref(), Some("opus"));
-        assert!(nil(to.field("harness")));
-
+    fn a_crews_limit_policy_reaches_scripts_snake_cased() {
         let mut o: Orchestrator = serde_json::from_value(sample()["orchestrators"][1].clone()).unwrap();
         o.crew.on_limit.switch_account = true;
         let v = orchestrator_value(&o);

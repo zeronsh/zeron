@@ -377,7 +377,7 @@ impl EngineRpc {
                     let message = entries[at].id.clone();
                     let parts = split_compound(&found);
                     for (i, part) in parts.iter().enumerate() {
-                        let turn = if parts.len() > 1 { format!("{message}#{i}") } else { message.clone() };
+                        let turn = if parts.len() > 1 { super::turn_asks::part_turn(&message, i) } else { message.clone() };
                         let (dump, route, card) = best_card(part, &cards);
                         match super::turn_asks::part_answer(self.orchestration(), self, &chat, &entries, at, part).await {
                             Some(reply) => self.close_asks_for(&chat, part, &super::turn_asks::ask_id(&chat, &turn), &card.id, &reply),

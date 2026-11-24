@@ -36,22 +36,21 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 use zeron_proto::scratchpad::{Editor, Revision, RevisionInfo, ScratchpadState, Shape};
-use zgx_desktop::WindowContext;
-use zgx_script::{ScriptHost, Shared, Value};
+use zgx_script::{ScriptHost, Value};
 
-use crate::engine::{self, rpc::Watch};
+use crate::engine::{self, rpc::{Rpc, Watch}};
+use crate::orchestrators::Key;
 
 /// One open window's state.
 struct Window {
     id: u64,
-    shared: Shared,
+    shared: Key,
 }
 
 #[derive(Default)]
 struct Tracker {
     windows: RefCell<Vec<Window>>,
     next_window: Cell<u64>,
-    watching: Cell<bool>,
     /// The last frame, as heard (nil before the first).
     state: RefCell<Option<ScratchpadState>>,
     /// Whether something the engine sent couldn't be read, said once.
@@ -65,44 +64,72 @@ thread_local! {
     static TRACKER: Rc<Tracker> = Rc::new(Tracker::default());
 }
 
-pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+/// `host`'s window, its document given now while Orchestrators is on
+/// (src/orchestrators.rs opens the stream).
+pub(crate) fn add(host: &ScriptHost) -> u64 {
     let t = TRACKER.with(Rc::clone);
     let window = t.next_window.get();
     t.next_window.set(window + 1);
-    t.windows.borrow_mut().push(Window { id: window, shared: host.shared("scratchpad", t.value()) });
-    let me = Rc::downgrade(&t);
-    cx.on_closed(move || {
-        if let Some(t) = me.upgrade() {
-            t.windows.borrow_mut().retain(|w| w.id != window);
-        }
-    });
-    if !t.watching.replace(true) {
-        let weak = Rc::downgrade(&t);
-        engine::get().on_connect(move |rpc| {
-            let Some(t) = weak.upgrade() else { return };
-            let heard = Rc::downgrade(&t);
-            let ended = Rc::downgrade(&t);
-            let watch = rpc.watch_ending(
-                "WatchScratchpad",
-                json!({}),
-                move |item| {
-                    if let Some(t) = heard.upgrade() {
-                        t.heard(&item);
-                    }
-                },
-                move |why| {
-                    if let Some(t) = ended.upgrade() {
-                        t.ended(&why);
-                    }
-                },
-            );
-            *t.watch.borrow_mut() = Some(watch);
-        });
+    let shared = Key::new(host, "scratchpad");
+    if crate::orchestrators::on() {
+        shared.set(t.value());
     }
+    t.windows.borrow_mut().push(Window { id: window, shared });
+    window
+}
 
+/// `window` closed.
+pub(crate) fn remove(window: u64) {
+    TRACKER.with(|t| t.windows.borrow_mut().retain(|w| w.id != window));
+}
+
+/// Orchestrators on: each window given the document as it is.
+pub(crate) fn show() {
+    TRACKER.with(|t| t.publish());
+}
+
+/// `WatchScratchpad` on `rpc` (a connection, Orchestrators on).
+pub(crate) fn open(rpc: &Rpc) {
+    let t = TRACKER.with(Rc::clone);
+    let heard = Rc::downgrade(&t);
+    let ended = Rc::downgrade(&t);
+    let watch = rpc.watch_ending(
+        "WatchScratchpad",
+        json!({}),
+        move |item| {
+            if let Some(t) = heard.upgrade() {
+                t.heard(&item);
+            }
+        },
+        move |why| {
+            if let Some(t) = ended.upgrade() {
+                t.ended(&why);
+            }
+        },
+    );
+    *t.watch.borrow_mut() = Some(watch);
+}
+
+/// Orchestrators off: the stream closed, the document let go of, and each
+/// window's nil.
+pub(crate) fn close() {
+    let t = TRACKER.with(Rc::clone);
+    let watch = t.watch.borrow_mut().take();
+    drop(watch);
+    *t.state.borrow_mut() = None;
+    t.missing.set(false);
+    let keys: Vec<Key> = t.windows.borrow().iter().map(|w| w.shared.clone()).collect();
+    for key in keys {
+        key.clear();
+    }
+}
+
+/// The window's actions: refused while Orchestrators is off.
+pub(crate) fn actions(host: &ScriptHost) {
     host.async_action("scratchpad.set_text", move |text| {
         let text = crate::auth::text(&text);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("scratchpad.set_text")?;
             rev_of(engine::get().call("Scratchpad", json!({ "op": "setText", "text": text })).await?)
         }
@@ -110,6 +137,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("scratchpad.set_shapes", move |shapes| {
         let shapes = shapes_json(&shapes);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("scratchpad.set_shapes")?;
             let shapes = shapes?;
             rev_of(engine::get().call("Scratchpad", json!({ "op": "setShapes", "shapes": shapes })).await?)
@@ -118,6 +146,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("scratchpad.restore", move |id| {
         let id = crate::auth::text(&id);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("scratchpad.restore")?;
             if id.is_empty() {
                 return Err("invalid".to_string());
@@ -129,6 +158,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let id = crate::auth::text(&id);
         // (Read, not written: a preview's as much as the watch is.)
         async move {
+            crate::orchestrators::refuse()?;
             if id.is_empty() {
                 return Err("invalid".to_string());
             }
@@ -171,7 +201,7 @@ impl Tracker {
     fn publish(&self) {
         let value = self.value();
         // (Taken out first: setting one may run a script that calls back in.)
-        let targets: Vec<Shared> = self.windows.borrow().iter().map(|w| w.shared.clone()).collect();
+        let targets: Vec<Key> = self.windows.borrow().iter().map(|w| w.shared.clone()).collect();
         for shared in targets {
             shared.set(value.clone());
         }

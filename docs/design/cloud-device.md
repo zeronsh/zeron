@@ -194,7 +194,9 @@ once it holds. Enforced at the edge:
   the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
   `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
   `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
-  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  their session rows, and tombstones; never the user's own kinds, but for the account's
+  plugin switches (`pluginSwitches`), which either reach reads (never writes) so a Cloud
+  engine follows a switch like every other engine. A machine whose view
   changed (a reach changed, or one that synced while it saw only its own rows) holds a
   cursor that doesn't match what it now sees, so its next state is `full`
   (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,

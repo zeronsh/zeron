@@ -75,13 +75,13 @@ M.comms = ui.shared("orchestration.comms", {} :: { any })
 
 -- Its parts, each followed on its own.
 M.orchestrators = ui.computed(function(): { any }
-	return M.now:get().orchestrators or {}
+	return (M.now:get() or {}).orchestrators or {}
 end)
 M.dumps = ui.computed(function(): { any }
-	return M.now:get().dumps or {}
+	return (M.now:get() or {}).dumps or {}
 end)
 M.asks = ui.computed(function(): { any }
-	return M.now:get().asks or {}
+	return (M.now:get() or {}).asks or {}
 end)
 
 function M.op(op: { [string]: any }): any
@@ -94,7 +94,7 @@ end
 local DEFAULT_SETTINGS = { crew_auto_archive = true, crew_idle_hours = 4 }
 local asked = ui.state("orchestration_settings_asked", {} :: { [string]: any })
 M.settings = ui.computed(function(): { crew_auto_archive: boolean, crew_idle_hours: number }
-	local s = M.now:get().settings or DEFAULT_SETTINGS
+	local s = (M.now:get() or {}).settings or DEFAULT_SETTINGS
 	local a = asked:get()
 	local out = table.clone(s)
 	for k, v in a do
@@ -104,7 +104,7 @@ M.settings = ui.computed(function(): { crew_auto_archive: boolean, crew_idle_hou
 end)
 -- (What the engine now says puts an ask to rest.)
 ui.effect(function()
-	local s = M.now:get().settings
+	local s = (M.now:get() or {}).settings
 	local a = asked:peek()
 	if not s then
 		return
@@ -551,7 +551,7 @@ end
 
 -- Whether a chat has a card on the board not done yet.
 function M.on_board(chat_id: string): boolean
-	for _, it in M.now:peek().items or {} do
+	for _, it in (M.now:peek() or {}).items or {} do
 		if it.state ~= "done" then
 			for _, t in it.threads or {} do
 				if t == chat_id then
@@ -583,7 +583,7 @@ function M.paused_card(chat_id: string?): any
 	if not chat_id then
 		return nil
 	end
-	for _, it in M.now:get().items or {} do
+	for _, it in (M.now:get() or {}).items or {} do
 		if M.is_paused(it) and table.find(it.threads or {}, chat_id) then
 			return it
 		end

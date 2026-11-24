@@ -16,13 +16,16 @@ use crate::run_journal::LimitMark;
 const REMOTE: &str = "dev-remote";
 
 async fn core_at(dir: &std::path::Path) -> crate::EngineCore {
-    crate::EngineCore::assemble_with_profile(
+    let core = crate::EngineCore::assemble_with_profile(
         crate::EngineProfile::local(dir).unwrap(),
         std::sync::Arc::new(HarnessRegistry::new()),
         HarnessId::Codex,
         None,
     )
-    .unwrap()
+    .unwrap();
+    // Orchestrators on: orchestrators and their crews are ranked first.
+    core.set_orchestrators(true).await;
+    core
 }
 
 async fn call(core: &crate::EngineCore, caller: Caller, method: &str, params: Value) -> Value {
@@ -236,7 +239,7 @@ async fn the_account_switch_is_asked_only_where_the_orchestrator_allows_it() {
     assert_eq!(asked, expected);
     // No other account had quota here: each waits for its reset.
     for chat in all {
-        assert!(core.sessions.session_status(chat).unwrap().limited.unwrap().waiting(), "{chat}");
+        assert!(core.sessions.session_status(chat).unwrap().live.limited.unwrap().waiting(), "{chat}");
     }
     core.shutdown().await;
 }
@@ -297,7 +300,7 @@ async fn a_resume_that_runs_straight_back_into_the_limit_waits_again_with_a_back
         None,
     );
     assert!(rpc.limits_pass(&mut book, since).await.is_empty());
-    let l = core.sessions.session_status("relimit").unwrap().limited.unwrap();
+    let l = core.sessions.session_status("relimit").unwrap().live.limited.unwrap();
     assert_eq!((l.attempt, l.until), (1, Some(since + check_backoff(1))));
     assert!(rpc.limits_pass(&mut book, since + TimeDelta::minutes(5)).await.is_empty(), "no spam meanwhile");
     assert_eq!(rpc.limits_pass(&mut book, since + check_backoff(1)).await, ["relimit"]);
@@ -318,11 +321,11 @@ async fn a_chat_a_restart_just_resumed_gets_no_second_resume_at_its_reset() {
     let mut book = LimitBook::default();
     let reset = until + TimeDelta::seconds(1);
     // A restart path sent it its "[Resumed]" a moment ago.
-    core.orchestration.note_resumed(&["plain-a".to_owned()], reset);
+    core.resumes.note_resumed(&["plain-a".to_owned()], reset);
     assert!(rpc.limits_pass(&mut book, reset).await.is_empty(), "not a second message");
     assert_eq!(resumes_sent(&core, "plain-a"), 0);
     // Still limited past the grace (that turn never started): its own resume.
-    let later = reset + TimeDelta::seconds(crate::orchestration::board_checks::RESUMED_GRACE_SECS + 1);
+    let later = reset + TimeDelta::seconds(crate::restart_resume::RESUMED_GRACE_SECS + 1);
     assert_eq!(rpc.limits_pass(&mut book, later).await, ["plain-a"]);
     assert_eq!(resumes_sent(&core, "plain-a"), 1);
     core.shutdown().await;

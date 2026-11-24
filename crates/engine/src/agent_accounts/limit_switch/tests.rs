@@ -110,6 +110,8 @@ async fn a_switched_claude_chat_runs_on_the_other_accounts_token_and_the_machine
     assert!(accounts.end_limit_switch(CHAT).is_none());
 }
 
+/// A chat's own Codex home links the machine's; Windows has no such home.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_switched_codex_chat_gets_the_accounts_own_codex_home_beside_the_machines() {
     let tmp = tempfile::tempdir().unwrap();
@@ -148,6 +150,8 @@ async fn a_switched_codex_chat_gets_the_accounts_own_codex_home_beside_the_machi
     assert!(accounts.codex_home(&a).is_none_or(|home| !home.join("auth.json").exists()));
 }
 
+/// A chat's own Codex home links the machine's; Windows has no such home.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_codex_homes_refreshed_login_flows_back_to_its_slot_and_moves_to_the_machine_on_a_switch() {
     let tmp = tempfile::tempdir().unwrap();

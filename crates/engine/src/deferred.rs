@@ -51,7 +51,16 @@ struct DeferredEngineRpc {
 impl RpcService for DeferredEngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         if method == methods::ENGINE_INFO {
-            return RpcReply::value(&self.engine_info);
+            // Assembled: the engine's own answer (orchestration's
+            // capabilities only while Orchestrators is on). Before, its
+            // switch isn't known: none of them, so no device routes
+            // orchestration work here on the strength of a guess.
+            if let Some(service) = self.service.get() {
+                return service.handle(method, params).await;
+            }
+            let mut info = self.engine_info.clone();
+            info.capabilities = crate::orchestration::switch::capabilities(info.capabilities, false);
+            return RpcReply::value(&info);
         }
         if method == methods::ENGINE_READY {
             let mut state = self.state.clone();
@@ -281,6 +290,51 @@ mod tests {
             service: Arc::new(OnceCell::new()),
         };
         (dir, rpc)
+    }
+
+    /// The engine answers for itself once assembled.
+    struct Assembled(EngineInfo);
+
+    #[async_trait]
+    impl RpcService for Assembled {
+        async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            assert_eq!(method, methods::ENGINE_INFO);
+            RpcReply::value(&self.0)
+        }
+    }
+
+    async fn capabilities(rpc: &DeferredEngineRpc) -> Vec<String> {
+        match rpc.handle(methods::ENGINE_INFO, serde_json::json!({})).await.unwrap() {
+            RpcReply::Value(v) => serde_json::from_value::<EngineInfo>(v).unwrap().capabilities,
+            _ => panic!("EngineInfo replied with a stream"),
+        }
+    }
+
+    /// Before the profile is open, Orchestrators' switch isn't known: the
+    /// identity answered at once advertises none of orchestration's
+    /// capabilities (every other one as it is). Assembled, the engine's own
+    /// answer goes, with them when the switch is on.
+    #[tokio::test]
+    async fn engine_info_advertises_orchestration_only_once_the_engine_answers() {
+        let (state_tx, state) = watch::channel(DeferredState::Waiting);
+        let (_dir, mut rpc) = engine(state);
+        let all = zeron_proto::capabilities::current();
+        assert!(crate::orchestration::switch::CAPABILITIES.iter().all(|c| all.iter().any(|a| a == c)));
+        rpc.engine_info.capabilities = all.clone();
+        let early = capabilities(&rpc).await;
+        for c in crate::orchestration::switch::CAPABILITIES {
+            assert!(!early.iter().any(|e| e == c), "{c} advertised before the switch is known");
+        }
+        let others: Vec<String> =
+            all.iter().filter(|c| !crate::orchestration::switch::CAPABILITIES.contains(&c.as_str())).cloned().collect();
+        assert_eq!(early, others, "every other capability as it is");
+
+        // Assembled, with Orchestrators on: the engine's answer, with them.
+        let mut on = rpc.engine_info.clone();
+        on.capabilities = all.clone();
+        assert!(rpc.service.set(Arc::new(Assembled(on))).is_ok());
+        state_tx.send_replace(DeferredState::Ready);
+        assert_eq!(capabilities(&rpc).await, all);
     }
 
     /// The staging pass: signed in with no organization chosen, plugin and

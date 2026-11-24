@@ -354,8 +354,18 @@ impl Injected {
 }
 
 /// One rendered part of an assistant message.
+///
+/// (De)serialized by hand around the derived shape (`remote = "Self"`: the
+/// derive's inherent `MessagePart::serialize`/`MessagePart::deserialize`),
+/// for the two kinds released builds don't know: [`MessagePart::Injected`]
+/// and [`MessagePart::CrewReports`] go on the wire as a text part with no
+/// text, `{"kind":"text","id":…,"text":"","injected":{…}}` /
+/// `{…,"crewReports":[…]}`, which a released build's `Text` reads (it
+/// ignores the field) where `kind: "injected"` failed its whole frame. Read
+/// back from that, and from the `kind: "injected"` / `kind: "crewReports"`
+/// shapes written before. (The doc keeps its own part shape, `schema.rs`.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(remote = "Self", tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {
     Text {
         id: String,
@@ -523,6 +533,70 @@ pub enum MessagePart {
     /// drop the part (an empty text) and show the text.
     #[serde(rename_all = "camelCase")]
     Injected { id: String, injected: Injected },
+}
+
+/// [`MessagePart::Injected`] / [`MessagePart::CrewReports`] as they go on
+/// the wire: a text part with no text, carrying the one or the other.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextCarrier<'a> {
+    kind: &'static str,
+    id: &'a str,
+    text: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    injected: Option<&'a Injected>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crew_reports: Option<&'a [zeron_proto::orchestration::Report]>,
+}
+
+impl Serialize for MessagePart {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let carrier = |id, injected, crew_reports| TextCarrier {
+            kind: "text",
+            id,
+            text: "",
+            injected,
+            crew_reports,
+        };
+        match self {
+            MessagePart::Injected { id, injected } => carrier(id, Some(injected), None).serialize(serializer),
+            MessagePart::CrewReports { id, reports } => carrier(id, None, Some(reports)).serialize(serializer),
+            // (The derived shape: `remote = "Self"`'s inherent fn.)
+            _ => MessagePart::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessagePart {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        use serde_json::Value;
+        let value = Value::deserialize(deserializer)?;
+        if let Some(part) = value.as_object()
+            && part.get("kind").and_then(Value::as_str) == Some("text")
+        {
+            let id = || part.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if let Some(injected) = part.get("injected").filter(|v| !v.is_null()) {
+                // (One a newer peer wrote that this build can't read: the
+                // empty text it rides as, below.)
+                if let Ok(injected) = Injected::deserialize(injected) {
+                    return Ok(MessagePart::Injected { id: id(), injected });
+                }
+            } else if let Some(reports) = part.get("crewReports").filter(|v| !v.is_null()) {
+                // A report this build can't read costs that report, not the card.
+                let reports = reports
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| zeron_proto::orchestration::Report::deserialize(r).ok())
+                    .collect();
+                return Ok(MessagePart::CrewReports { id: id(), reports });
+            }
+        }
+        // (The derived shape: `remote = "Self"`'s inherent fn. The
+        // `kind: "injected"` / `"crewReports"` written before are its.)
+        MessagePart::deserialize(value).map_err(D::Error::custom)
+    }
 }
 
 impl MessagePart {

@@ -126,9 +126,17 @@ pub(crate) fn launch_of(
     direct(parent).map(|l| Launch { hand_to: None, ..l })
 }
 
-/// The ask id of `chat`'s turn that ended on message `turn`.
+/// The ask id of `chat`'s turn that ended on message `turn` (or on part of
+/// it, [`part_turn`]).
 pub(crate) fn ask_id(chat: &str, turn: &str) -> String {
     format!("turn-{chat}-{turn}")
+}
+
+/// Part `i` of a compound decision asked by message `turn`: `<turn>.<i>`.
+/// (Asks raised before used `#`, which the edge's registry refuses in an id,
+/// so those never synced; they are still read, [`turn_base`].)
+pub(crate) fn part_turn(turn: &str, i: usize) -> String {
+    format!("{turn}.{i}")
 }
 
 fn texts(entry: &SessionMessageEntry) -> String {
@@ -394,9 +402,16 @@ pub(crate) async fn answered_after_asking(
 }
 
 /// The message id a turn-end ask's turn names: a part of a compound
-/// decision is `<message>#<part>`.
+/// decision is `<message>.<part>` ([`part_turn`]), or `<message>#<part>`
+/// as asks were raised before.
 pub(crate) fn turn_base(turn_id: &str) -> &str {
-    turn_id.split('#').next().unwrap_or(turn_id)
+    if let Some((base, _)) = turn_id.split_once('#') {
+        return base;
+    }
+    match turn_id.rsplit_once('.') {
+        Some((base, part)) if !base.is_empty() && !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => turn_id,
+    }
 }
 
 /// What answered `part`, one decision asked by the message at `asked` in
@@ -692,7 +707,7 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
     let parts = turn_question::split_compound(&found);
     if parts.len() > 1 {
         for (i, part) in parts.iter().enumerate() {
-            raise(orch, rpc, chat, Some(&format!("{turn}#{i}")), part, &launch, None, Utc::now());
+            raise(orch, rpc, chat, Some(&part_turn(&turn, i)), part, &launch, None, Utc::now());
         }
         return;
     }
@@ -864,7 +879,8 @@ pub(crate) fn escalate_with(
 
 /// Look for stale asks every [`ESCALATE_EVERY`].
 pub(crate) fn start(orch: Orchestration) {
-    tokio::spawn(async move {
+    let run = orch.clone();
+    run.spawn(async move {
         let mut tick = tokio::time::interval(ESCALATE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

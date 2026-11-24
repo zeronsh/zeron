@@ -173,7 +173,8 @@ impl EngineRpc {
     /// The orchestrator whose policy `chat_id` follows: itself, or its
     /// crew's. `None` for a standalone chat.
     fn limit_orchestrator(&self, chat_id: &str) -> Option<zeron_proto::orchestration::Orchestrator> {
-        let orchestration = self.orchestration();
+        // (No orchestrator's policy while Orchestrators is off: no switch.)
+        let orchestration = self.active_orchestration()?;
         let id = match orchestration.role_of(chat_id) {
             ChatRole::Plain => return None,
             role => role.orchestrator_id()?.to_owned(),

@@ -1,15 +1,15 @@
 --!strict
 -- A thread its provider's usage limit stopped (its session row's `limited`,
 -- src/orchestration.rs `limited_value`): waiting for the reset ("Waiting
--- for limit · resets 14:05", local time; "Waiting for limit" while the
--- reset isn't known), or running meanwhile on another account ("On
--- me@home.dev · me@work.dev resets 14:05"). Pure but for the locale's words:
+-- for limit", "resets 14:05", local time; the first alone while the reset
+-- isn't known), or running meanwhile on another account ("On me@home.dev",
+-- "me@work.dev resets 14:05"). Pure but for the locale's words:
 -- every place a thread's status shows reads it the same.
 --
 --   limit.of(chat) -> Limit?        its limit, if any
 --   limit.waiting(chat) -> boolean  limited, and not switched
---   limit.text(l) -> string         the words above
---   limit.parts(l) -> { string }    those words' facts apart, to space
+--   limit.parts(l) -> { string }    the facts above, apart, to space
+--   limit.text(l) -> string         those as one phrase, for a label
 --   limit.left(l, now) -> string    "resets in 12m" (none once it's past
 --                                   or unknown), for a clock that already
 --                                   ticks
@@ -69,45 +69,40 @@ local function known_until(l: Limit): number?
 	return if type(l.until_at) == "number" and l.until_at > 0 then l.until_at else nil
 end
 
-function M.text(l: Limit?): string
+-- Its facts apart, each a phrase of its own ("Waiting for limit", "resets
+-- 14:05"; "On me@home.dev", "me@work.dev resets 14:05"), for a line that
+-- spaces them: no separator is ever typed between them.
+function M.parts(l: Limit?): { string }
 	if not l then
-		return ""
+		return {}
 	end
 	local reset = known_until(l)
 	local to = l.switched_to
 	if type(to) == "table" then
 		local account = to.account_label or to.account_slot or ""
 		local original = l.account_label or l.provider or locale.s("ds.limit.original")
-		if reset then
-			return locale.s("ds.limit.switched", { account = account, original = original, time = M.clock(reset) })
-		end
-		return locale.s("ds.limit.switched_unknown", { account = account, original = original })
+		return {
+			locale.s("ds.limit.on", { account = account }),
+			if reset
+				then locale.s("ds.limit.original_resets", { original = original, time = M.clock(reset) })
+				else locale.s("ds.limit.original_limited", { original = original }),
+		}
 	end
+	local out = { locale.s("ds.limit.waiting") }
 	if reset then
-		return locale.s("ds.limit.waiting_until", { time = M.clock(reset) })
-	end
-	return locale.s("ds.limit.waiting")
-end
-
--- Its facts apart ("Waiting for limit", "resets 14:05"), for a row that
--- spaces them: the locale keeps them apart with a separator that's never
--- shown typed.
-function M.parts(l: Limit?): { string }
-	local out = {}
-	local text, at = M.text(l), 1
-	while true do
-		local i, j = string.find(text, "\u{b7}", at, true)
-		local part = string.sub(text, at, if i then i - 1 else #text)
-		local t = string.match(part, "^%s*(.-)%s*$") or ""
-		if t ~= "" then
-			table.insert(out, t)
-		end
-		if not i then
-			break
-		end
-		at = (j :: number) + 1
+		table.insert(out, locale.s("ds.limit.resets", { time = M.clock(reset) }))
 	end
 	return out
+end
+
+-- Those facts as one phrase, for what reads it as a sentence (a label):
+-- "Waiting for limit, resets 14:05".
+function M.text(l: Limit?): string
+	local out: string? = nil
+	for _, t in M.parts(l) do
+		out = if out then locale.s("ds.limit.and_then", { first = out, rest = t }) else t
+	end
+	return out or ""
 end
 
 -- How long until it resets, to the minute ("resets in 12m"); "" when the

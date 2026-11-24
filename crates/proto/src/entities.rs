@@ -652,13 +652,27 @@ pub struct Session {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<SessionWaiting>,
+    /// What its host writes of the turn as it runs beside its status (its
+    /// live activity and todo progress, a usage limit it stopped on):
+    /// flattened, so the row's fields are `activity`, `todo` and `limited`
+    /// as before. Read through the row itself (`session.limited`, by
+    /// `Deref`).
+    #[serde(flatten)]
+    pub live: SessionLive,
+}
+
+/// A session row's [`Session::live`] fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLive {
     /// What the agent is doing right now (testing, merging…), classified
-    /// from its running tool. Host-written while `Working`; `None` otherwise
-    /// and on older peers. See `orchestration::ChatActivity`.
+    /// from its running tool. Host-written while `Working`, and only while
+    /// Orchestrators is on there; `None` otherwise and on older peers. See
+    /// `orchestration::ChatActivity`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<crate::orchestration::ChatActivity>,
-    /// Progress through the agent's newest todo/plan list. Host-written;
-    /// missing on older peers.
+    /// Progress through the agent's newest todo/plan list. Host-written
+    /// while Orchestrators is on there; missing on older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<crate::orchestration::TodoProgress>,
     /// Stopped by its provider's usage limit, waiting for the reset (or
@@ -666,6 +680,20 @@ pub struct Session {
     /// chat is resumed. Missing on older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limited: Option<crate::usage_limit::SessionLimit>,
+}
+
+impl std::ops::Deref for Session {
+    type Target = SessionLive;
+
+    fn deref(&self) -> &SessionLive {
+        &self.live
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut SessionLive {
+        &mut self.live
+    }
 }
 
 /// What a chat's agent waits on after its turn ended.
@@ -2676,5 +2704,49 @@ mod child_kind_tests {
             assert_eq!(chat.child_kind, None);
             assert!(serde_json::to_value(&chat).unwrap().get("childKind").is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod session_live_wire {
+    use super::*;
+
+    /// A session row's `activity`, `todo` and `limited` sit at the top of
+    /// its JSON as they always have ([`Session::live`] is flattened): a row
+    /// from before reads the same and is written back byte for byte.
+    #[test]
+    fn the_live_fields_keep_their_wire_shape() {
+        let full = serde_json::json!({
+            "lastCompletedTurn": "t1",
+            "chatId": "c1",
+            "deviceId": "d1",
+            "status": "working",
+            "startedAt": "2026-11-22T10:00:00Z",
+            "updatedAt": "2026-11-22T10:01:00Z",
+            "runningSubagents": 0,
+            "activity": {"kind": "testing", "label": "cargo test", "since": "2026-11-22T10:00:30Z"},
+            "todo": {"done": 1, "total": 3, "current": "wire it"},
+            "limited": {"provider": "claude", "since": "2026-11-22T09:00:00Z", "attempt": 0},
+        });
+        let row: Session = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(row.todo.as_ref().map(|t| t.total), Some(3), "read through the row");
+        assert_eq!(row.limited.as_ref().map(|l| l.provider.as_str()), Some("claude"));
+        let back = serde_json::to_value(&row).unwrap();
+        assert_eq!(back["activity"], full["activity"]);
+        assert_eq!(back["todo"], full["todo"]);
+        assert_eq!(back["limited"]["provider"], "claude");
+        assert!(back.get("live").is_none(), "no nesting: {back}");
+        assert_eq!(serde_json::from_value::<Session>(back.clone()).unwrap(), row);
+
+        // None of them: none of the keys, as a row without them always read.
+        let mut bare = full.as_object().unwrap().clone();
+        for key in ["activity", "todo", "limited"] {
+            bare.remove(key);
+        }
+        let row: Session = serde_json::from_value(serde_json::Value::Object(bare.clone())).unwrap();
+        assert_eq!(row.live, SessionLive::default());
+        let back = serde_json::to_value(&row).unwrap();
+        let keys: Vec<&String> = back.as_object().unwrap().keys().collect();
+        assert!(!keys.iter().any(|k| ["activity", "todo", "limited", "live"].contains(&k.as_str())), "{keys:?}");
     }
 }

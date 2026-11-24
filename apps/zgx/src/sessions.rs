@@ -714,15 +714,15 @@ fn child_row(
         // Who started it, when an orchestrator or the Brain dump did (and for
         // which dump and part): `{ chat_id, dump_id?, route_id? }`.
         ("started_by", started_by_value(&c["startedBy"])),
-        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
-        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::session_values::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::session_values::todo_value)),
         // When the turn it's working on began (Unix seconds), while it works:
         // the Q&A's "Answering" is a turn begun since its question came.
         ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
         // Stopped by its provider's usage limit, waiting for the reset, or
         // running on another account meanwhile (`switched_to`):
-        // `crate::orchestration::limited_value`'s shape.
-        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
+        // `crate::session_values::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::session_values::limited_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -806,15 +806,15 @@ fn top_row(
         ("child_kind", opt(c["childKind"].as_str())),
         ("started_by", started_by_value(&c["startedBy"])),
         // What its agent is doing while it works, and its todo progress.
-        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
-        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::session_values::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::session_values::todo_value)),
         // When the turn it's working on began (Unix seconds), while it works:
         // the Q&A's "Answering" is a turn begun since its question came.
         ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
         // Stopped by its provider's usage limit, waiting for the reset, or
         // running on another account meanwhile (`switched_to`):
-        // `crate::orchestration::limited_value`'s shape.
-        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::orchestration::limited_value)),
+        // `crate::session_values::limited_value`'s shape.
+        ("limited", with.limited.as_ref().map_or(Value::Nil, crate::session_values::limited_value)),
         // The last turn its agent finished (an opaque mark), and whether its
         // session row was fresh when that was read: the chimes ring
         // "finished" on this moving, never on the status alone ("done" is
@@ -1216,7 +1216,10 @@ impl Sessions {
             shared.set(value.clone());
         }
         self.look_again();
-        crate::orchestration_timeline::heard_sessions(&value);
+        // (The Control room's timeline, while Orchestrators is on.)
+        if crate::orchestrators::on() {
+            crate::orchestration_timeline::heard_sessions(&value);
+        }
     }
 
     /// Publishes again as the soonest live state showing goes stale, or a

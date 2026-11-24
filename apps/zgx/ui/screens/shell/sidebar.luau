@@ -33,11 +33,7 @@ local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
-local orchestration = require("@account/orchestration")
-local orch_data = require("@ds/orch_data")
-local orch_decide = require("@ds/orch_decide")
-local Name = require("@ds/orch_name")
-local orch_actions = require("@app/screens/orchestrator/actions")
+local plugins = require("@account/plugins")
 local ChatMenu = require("@app/screens/shell/chat_menu")
 
 export type Props = {
@@ -332,6 +328,18 @@ local function say(word: string): string
 	return locale.s(`shell.sidebar.filter.state.{word}`)
 end
 
+-- Orchestrators' parts while it's on (`@account/plugins`), else nil; and
+-- its record as it is (nothing while it's off). Tracked: a toggle shows or
+-- hides what reads them in place.
+local function orch(): any
+	return plugins.module("orchestrators")
+end
+local NO_ORCH = table.freeze({})
+local function orch_now(): any
+	local mod = orch()
+	return if mod then mod.orchestration.now:get() else NO_ORCH
+end
+
 -- Every orchestrator's chat (the Brain dump's too, archived or not): an
 -- orchestrator is listed in its own section, never as a session. (The same
 -- table while the ids are: what reads it wakes only when one comes or goes.)
@@ -339,7 +347,7 @@ local orch_ids_last: { [string]: boolean } = {}
 local orch_ids_key = ""
 local orch_ids = ui.computed(function(): { [string]: boolean }
 	local ids: { string } = {}
-	for _, o in orchestration.now:get().orchestrators or {} do
+	for _, o in orch_now().orchestrators or {} do
 		table.insert(ids, o.id)
 	end
 	table.sort(ids)
@@ -363,7 +371,8 @@ local crew_marks_last: { [string]: CrewMark } = {}
 local crew_marks_key = ""
 local crew_marks = ui.computed(function(): { [string]: CrewMark }
 	local parts: { string } = {}
-	for _, o in orchestration.now:get().orchestrators or {} do
+	local now = orch_now()
+	for _, o in now.orchestrators or {} do
 		table.insert(parts, `{o.id}={o.name or ""}={o.hue or ""}`)
 	end
 	table.sort(parts)
@@ -372,7 +381,7 @@ local crew_marks = ui.computed(function(): { [string]: CrewMark }
 		return crew_marks_last
 	end
 	local set: { [string]: CrewMark } = {}
-	for _, o in orchestration.now:peek().orchestrators or {} do
+	for _, o in now.orchestrators or {} do
 		set[o.id] = { name = o.name or "", hue = o.hue }
 	end
 	crew_marks_key, crew_marks_last = key, set
@@ -384,7 +393,8 @@ end)
 local crew_names_last: { [string]: string } = {}
 local crew_names_key = ""
 local crew_names = ui.computed(function(): { [string]: string }
-	local now = orchestration.now:get()
+	local mod = orch()
+	local now = orch_now()
 	local items: { [string]: any } = {}
 	for _, it in now.items or {} do
 		items[it.id] = it
@@ -392,7 +402,7 @@ local crew_names = ui.computed(function(): { [string]: string }
 	local set: { [string]: string } = {}
 	local parts: { string } = {}
 	for _, m in now.crew or {} do
-		local name = Name.fallback(m, m.item_id and items[m.item_id])
+		local name = mod.name.fallback(m, m.item_id and items[m.item_id])
 		if name and m.chat_id then
 			set[m.chat_id] = name
 			table.insert(parts, `{m.chat_id}={name}`)
@@ -420,8 +430,10 @@ local NO_MARK: CrewMark = { name = "", hue = nil }
 -- side chat.)
 local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [string]: string }): { any }
 	local out: { any } = table.clone(now.chats)
-	-- (Put away in the view menu's Show: none of them.)
-	if not shared.details.orchestrator_chats:get() then
+	-- (Orchestrators off, or put away in the view menu's Show: none of
+	-- them.)
+	local mod = orch()
+	if not mod or not shared.details.orchestrator_chats:get() then
 		return out
 	end
 	for parent, kids in now.children or {} do
@@ -429,7 +441,7 @@ local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [s
 			if c.child_kind == "crew" then
 				local row = table.clone(c)
 				row.crew = marks[parent] or NO_MARK
-				row.title = Name.crew(c, names[c.id], c.id)
+				row.title = mod.name.crew(c, names[c.id], c.id)
 				table.insert(out, row)
 			end
 		end
@@ -488,14 +500,15 @@ end)
 
 -- Each session's row as last made: kept while it says the same, so the
 -- row (ds/sidebar follows its session's own table) stays asleep as others
--- change.
+-- change. (`note_parts`, a list made again each time, says what `note`
+-- does: that one's compared.)
 local made_rows: { [string]: { [string]: any } } = {}
 local function kept(row: { [string]: any }): { [string]: any }
 	local was = made_rows[row.id]
 	if was then
 		local same = true
 		for k, v in row do
-			if was[k] ~= v then
+			if k ~= "note_parts" and was[k] ~= v then
 				same = false
 				break
 			end
@@ -636,10 +649,11 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local status = ASKED[asked[c.id] or ""] or c.status
 		-- (Stopped by its usage limit, waiting for the reset: limited, its
 		-- glyph saying till when, unless it's asking for you.)
-		local note: string? = nil
+		local note: string?, note_parts: { string }? = nil, nil
 		if limit.waiting(c) and not ASKED[asked[c.id] or ""] then
 			status = "limited"
 			note = limit.text(limit.of(c))
+			note_parts = limit.parts(limit.of(c))
 		end
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
@@ -659,6 +673,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			title = c.title,
 			status = status :: any,
 			note = note,
+			note_parts = note_parts,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,
@@ -1515,9 +1530,14 @@ local ASKING: { [string]: boolean } = { input = true, approval = true }
 -- chat or its crew's asking). (The same table while what it says is.)
 local orch_rows_last: { any } = {}
 local orch_rows_key = ""
+local NO_ROWS: { any } = table.freeze({}) :: any
 local orch_rows = ui.computed(function(): { any }
-	local now = orchestration.now:get()
-	local chats = orch_data.chats(sessions.now:get())
+	local mod = orch()
+	if not mod then
+		return NO_ROWS
+	end
+	local now = mod.orchestration.now:get() or {}
+	local chats = mod.data.chats(sessions.now:get())
 	local list: { any } = {}
 	local with_archived = shared.archived_orchestrators:get()
 	for _, o in now.orchestrators or {} do
@@ -1577,13 +1597,22 @@ M.show_orchestrator_chats = shared.details.orchestrator_chats
 -- What needs you, everywhere: open asks and chats awaiting input (not an
 -- ask answered and on its way: ds/orch_decide).
 M.needs_you = ui.computed(function(): number
-	return #orch_data.waiting_for_you(orchestration.now:get(), sessions.now:get(), nil, orch_decide.counted).needs
+	local mod = orch()
+	if not mod then
+		return 0
+	end
+	return #mod.data.waiting_for_you(mod.orchestration.now:get(), sessions.now:get(), nil, mod.decide.counted).needs
 end)
 
 -- An orchestrator's row menu: open it, pause or resume it, its settings,
 -- archive it.
 local function orchestrator_menu(id: string): { any }?
-	local o = orch_data.orchestrators(orchestration.now:peek())[id]
+	local mod = orch()
+	if not mod then
+		return nil
+	end
+	local orch_actions = mod.actions
+	local o = mod.data.orchestrators(mod.orchestration.now:peek())[id]
 	if not o then
 		return nil
 	end
@@ -1632,9 +1661,19 @@ end
 -- shown, archived ones in it) and the Control room (to it, its widgets, the
 -- Map's view it opens on, the Brain dump's model).
 local Menu = require("@ds/menu")
-local OrchMap = require("@ds/orch_map")
 local function control_page(): any
-	return boundary.load("@app/screens/control/page")
+	local mod = orch()
+	if not mod then
+		return nil
+	end
+	local ok, page = pcall(function(): any
+		return mod.control_page
+	end)
+	if not ok then
+		print(`zeron-zgx: the Control room's page didn't load: {page}`)
+		return nil
+	end
+	return page
 end
 M.show_orchestrators = shared.orchestrators
 M.show_archived_orchestrators = shared.archived_orchestrators
@@ -1644,6 +1683,12 @@ local function view_more(more: any): { Node }
 			st:set(not st:peek())
 		end
 	end
+	-- (Orchestrators off: none of these.)
+	local mod = orch()
+	if not mod then
+		return {}
+	end
+	local orch_actions, orchestration = mod.actions, mod.orchestration
 	-- (The Control room's page, for its widgets and its Map's view, loaded
 	-- as one of those is picked, never while the menu is made: loading it
 	-- then, the menu's first opening missed its time budget.)
@@ -1704,6 +1749,7 @@ local function view_more(more: any): { Node }
 						return
 					end
 					local out: { any } = { { heading = locale.s("orch.sidebar.view.map") } }
+					local OrchMap = mod.map
 					for _, v in OrchMap.LISTED do
 						table.insert(out, {
 							label = locale.s(`ds.orch.map.variant.{v}`),
@@ -1739,6 +1785,14 @@ end
 M.view_more = view_more
 
 local orchestration_prop = {
+	-- (Off: none of it made.)
+	on = function(): boolean
+		return plugins.on("orchestrators")
+	end,
+	Dot = function(p: any): Node
+		local mod = orch()
+		return if mod then mod.hue.Dot(p) else ui.div {}
+	end,
 	control = {
 		count = function(): number
 			return M.needs_you:get()
@@ -1756,10 +1810,16 @@ local orchestration_prop = {
 		return c.name == "orchestrator" and c.orchestrator == id
 	end,
 	on_open = function(id: string)
-		orch_actions.open(id)
+		local mod = orch()
+		if mod then
+			mod.actions.open(id)
+		end
 	end,
 	on_new = function()
-		orch_actions.new()
+		local mod = orch()
+		if mod then
+			mod.actions.new()
+		end
 	end,
 	menu = orchestrator_menu,
 	shown = function(): boolean

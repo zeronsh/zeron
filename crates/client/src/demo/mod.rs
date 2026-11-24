@@ -488,9 +488,7 @@ impl DemoHost {
                 },
                 updated_at: now,
                 waiting: None,
-                activity: None,
-                todo: None,
-                limited: None,
+                live: Default::default(),
             })
         });
     }
