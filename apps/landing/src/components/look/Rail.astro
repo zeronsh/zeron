@@ -52,7 +52,6 @@ const repository = httpsUrl(plugin.repository);
       </section>
     )
   }
-  {!onAsks && <div class="rule" aria-hidden="true"></div>}
   <section aria-labelledby="rail-details">
     <h2 class="rail-h" id="rail-details">Details</h2>
     <dl class="facts">
@@ -64,12 +63,14 @@ const repository = httpsUrl(plugin.repository);
   </section>
   {
     plugin.keywords.length > 0 && (
-      <ul class="tags" aria-label="Keywords">
-        {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })} title={k}>{k}</a></li>)}
-      </ul>
+      <section aria-labelledby="rail-keywords">
+        <h2 class="rail-h" id="rail-keywords">Keywords</h2>
+        <ul class="tags">
+          {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })} title={k}>{k}</a></li>)}
+        </ul>
+      </section>
     )
   }
-  <div class="rule" aria-hidden="true"></div>
   <ul class="links">
     {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Icon name="globe" />{store("plugins.store.fact.homepage")}<span class="o"><Icon name="out" /></span></a></li>}
     {repository && <li><a href={repository} rel="nofollow noopener ugc"><Icon name="term" />{store("plugins.store.fact.repository")}<span class="o"><Icon name="out" /></span></a></li>}

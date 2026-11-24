@@ -264,7 +264,7 @@ describe("an author's words, from a real package", () => {
     }
     await grace.post("/admin/plugins/probe/1.0.0/verify", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
     expect(grace.flash()).toBe("verified");
-    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/probe/asks", "/plugins/probe/versions", "/plugins/all?q=probe"]) {
+    for (const path of ["/plugins", "/plugins?sort=new", "/plugins/probe", "/plugins/probe/asks", "/plugins/probe/versions", "/plugins?q=probe"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       inert(body);
@@ -280,24 +280,24 @@ describe("an author's words, from a real package", () => {
 
 describe("the catalog, from the edge's real listing", () => {
   test("lists what's published; Verified only narrows it to what a reviewer verified", async () => {
-    for (const path of ["/plugins", "/plugins/all"]) {
+    for (const path of ["/plugins", "/plugins?sort=new"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       expect(body, path).toContain('href="/plugins/focus-timer"');
       expect(body, path).toContain('href="/plugins/pr-review"');
     }
-    expect((await new Browser().get("/plugins/all")).body).toContain('href="/plugins/theme-sync"');
-    const verified = await new Browser().get("/plugins/all?verified=1");
+    expect((await new Browser().get("/plugins?sort=new")).body).toContain('href="/plugins/theme-sync"');
+    const verified = await new Browser().get("/plugins?verified=1");
     expect(verified.response.status).toBe(200);
     expect(verified.body).toContain('href="/plugins/focus-timer"');
     expect(verified.body).not.toContain('href="/plugins/theme-sync"');
     // The count is the edge's total (amendment 38): exact, the public list's.
-    expect((await new Browser().get("/plugins/all")).body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
-    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<b class="num">0</b> plugins');
-    const git = await new Browser().get("/plugins/all?category=git");
+    expect((await new Browser().get("/plugins?sort=new")).body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
+    expect((await new Browser().get("/plugins?q=zzzzqqq")).body).toContain('<b class="num">0</b> plugins');
+    const git = await new Browser().get("/plugins?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
-    const search = await new Browser().get("/plugins/all?q=focus");
+    const search = await new Browser().get("/plugins?q=focus");
     expect(search.body).toContain('href="/plugins/focus-timer"');
   });
 
@@ -579,14 +579,14 @@ describe("the audit log", () => {
 
 describe("Newest, from the edge's cards", () => {
   test("says the day each was first listed (amendment 39)", async () => {
-    const { body } = await new Browser().get("/plugins/all?sort=new");
+    const { body } = await new Browser().get("/plugins?sort=new");
     // (A verified card's foot says the day it was first listed; one not verified says that instead.)
-    expect(body).toMatch(/<span class="count">Published [A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/span>/);
+    expect(body.slice(body.indexOf('<ul class="results"'))).toMatch(/<div class="pc-foot"><span>Published [A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/span>/);
   });
 });
 
 describe("every page, with what the real edge holds", () => {
-  const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/all?verified=1", "/plugins/focus-timer", "/plugins/focus-timer/versions", "/plugins/focus-timer/versions/1.1.0", "/plugins/probe", "/plugins/sitemap.xml"];
+  const PUBLIC = ["/plugins", "/plugins?sort=new", "/plugins?category=productivity", "/plugins?keyword=focus", "/plugins?sort=verified", "/plugins?verified=1", "/plugins/focus-timer", "/plugins/focus-timer/versions", "/plugins/focus-timer/versions/1.1.0", "/plugins/probe", "/plugins/sitemap.xml"];
   const MEMBER = ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
   const STAFF = [
     "/admin/plugins",

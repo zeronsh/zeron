@@ -154,12 +154,12 @@ describe("the columns the rule names", () => {
   test("no two items of a group that fill (hover, chosen, focus) touch: 2 px between any two", async () => {
     // (Each group, its items: the gaps within each one.)
     const groups: [string, string][] = [
-      ["/plugins/all", ".catlist|:scope > a"],
-      ["/plugins/all", ".sort|:scope > a"],
+      ["/plugins", ".catlist|:scope > a"],
+      ["/plugins", ".sort|:scope > a"],
       ["/plugins", ".nav|:scope > a"],
-      ["/plugins", ".cats|:scope > .chip"],
-      ["/plugins", ".list|:scope > li"],
-      ["/plugins/all", ".tags|:scope > li"],
+      ["/plugins", ".results|:scope > li"],
+      ["/plugins", ".feat-row|:scope > li"],
+      ["/plugins", ".tags|:scope > li"],
       ["/plugins/focus-timer", ".tabs|:scope > a"],
       ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", ".vmini|:scope > li"],
       ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", ".flist|:scope > li"],

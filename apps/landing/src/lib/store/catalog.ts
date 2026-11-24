@@ -1,4 +1,4 @@
-// The list's address: what /plugins/all?… asks for (every plugin, a
+// The store's address: what /plugins?… asks for (every plugin, a
 // category's, a search's), read strictly (anything
 // it can't use is dropped, never passed on), and the addresses of the
 // pages around it. A page's address is the whole of its state, so a search
@@ -7,15 +7,15 @@
 import type { Category, Sort } from "./types.ts";
 
 export const PAGE_SIZE = 24;
-/** Where the list of every plugin is (/plugins itself is Discover). */
-export const LIST = "/plugins/all";
+/** The store: every plugin, a category's, a search's (/plugins/all, the old list, sends here). */
+export const LIST = "/plugins";
 const SORTS: readonly Sort[] = ["relevance", "popular", "updated", "new", "verified"];
 export const SORT_LABELS: Record<Sort, string> = {
   relevance: "Best match",
   popular: "Most installed",
   updated: "Recently updated",
   new: "Newest",
-  verified: "Newly verified",
+  verified: "Recently verified",
 };
 
 export interface CatalogState {
@@ -98,8 +98,8 @@ export function range(state: CatalogState, shown: number): { from: number; to: n
   return { from, to: from + shown - 1 };
 }
 
-/** Whether this is the store's front: no search, no filter, its first page. */
-export const isFront = (state: CatalogState) => !state.q && !state.category && !state.keyword && !state.verified && !state.cursor && effectiveSort(state) === "popular";
+/** Whether the store is unfiltered on its first page (no search, category, keyword or Verified only), in any order: Featured shows above it. */
+export const isFront = (state: CatalogState) => !state.q && !state.category && !state.keyword && !state.verified && !state.cursor;
 
 /** Words as typed, with runs of space made one and control characters gone. */
 function clean(value: string): string {

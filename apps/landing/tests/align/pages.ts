@@ -36,17 +36,17 @@ export const EXCEPTIONS: [string, string][] = [
   ["pre > code", "a code block's lines start where the code puts them: its indentation is the code's"],
 ];
 
-/** The columns of the look: the page's, Browse's two, a plugin's rail and its Get, Files' two, a dialog's. */
-export const COLUMNS = [".wrap", ".facets", ".browse > section", ".rail", ".get", ".tree-pane", ".viewer", "dialog.question"];
+/** The columns of the look: the page's, the store's two (its sidebar, its list), a plugin's rail and its Get, Files' two, a dialog's. */
+export const COLUMNS = [".wrap", ".facets", ".listing", ".rail", ".get", ".tree-pane", ".viewer", "dialog.question"];
 
 export const ALIGN_PAGES: AlignPage[] = [
-  // Discover, Browse.
-  { name: "discover", path: "/plugins" },
-  { name: "discover-empty", path: "/plugins", fake: [["empty", { on: "1" }]] },
-  { name: "discover-down", path: "/plugins", fake: [["down", { on: "1" }]] },
-  { name: "browse", path: "/plugins/all" },
-  { name: "browse-category", path: "/plugins/all?category=productivity&keyword=focus" },
-  { name: "browse-none", path: "/plugins/all?q=nothing-matches-this" },
+  // The store: unnarrowed (Featured over the list), in another order, narrowed, nothing found, empty, down.
+  { name: "store", path: "/plugins" },
+  { name: "store-verified", path: "/plugins?sort=verified" },
+  { name: "store-category", path: "/plugins?category=productivity&keyword=focus" },
+  { name: "store-none", path: "/plugins?q=nothing-matches-this" },
+  { name: "store-empty", path: "/plugins", fake: [["empty", { on: "1" }]] },
+  { name: "store-down", path: "/plugins", fake: [["down", { on: "1" }]] },
   // A plugin: every part; none of its optional parts; its versions, its asks, one version.
   { name: "plugin", path: "/plugins/focus-timer" },
   { name: "plugin-worst", path: "/plugins/worst-case-listing-at-every-limit-xyz12" },

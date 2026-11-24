@@ -61,7 +61,7 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
 <Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current="browse" session={session}>
   <div class="wrap acct">
     <nav class="crumbs" aria-label="Where this is">
-      <a href="/plugins/all">All plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
+      <a href="/plugins">All plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
     </nav>
     <Flash flash={sent ? null : flash} />
     {
