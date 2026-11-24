@@ -254,6 +254,86 @@ end
 ds.toast.action("control.unread", function(batch: any)
 	M.undo_read(batch)
 end)
+-- Every closed board card archived (the Map's menus: Archive all done,
+-- beside Mark all done as read), as the Board's Done head does it
+-- (ds/orch_board_actions `archive`): off the board and its threads off the
+-- Map at once, each sent once its Undo's while is over.
+local function closed_now(): ({ any }, { [string]: boolean })
+	local model = require("@ds/orch_board_model")
+	local Actions = require("@ds/orch_board_actions")
+	return Actions.closed_of(model.board(orchestration.now:peek()))
+end
+M.archive_done = {
+	count = function(): number
+		return #(closed_now())
+	end,
+	run = function()
+		local cards, busy = closed_now()
+		local _, undo = require("@ds/orch_board_actions").archive(cards, {
+			on_remove = orchestration.remove_later,
+			on_undo_remove = orchestration.undo_remove,
+			busy = busy,
+		})
+		M.archive_done.undo = undo
+	end,
+	-- The last one's Undo (its toast's), while it may be.
+	undo = nil :: (() -> ())?,
+}
+
+-- What Mark all done as read would mark: the chats the Map shows,
+-- finished and unread (ds/orch_map_visibility `done_unread`), worked out
+-- from the page's world whether or not the Map is built (the Board's menu).
+function M.done_unread_now(): { string }
+	local MapModel = require("@ds/orch_map_model")
+	-- (From the rows themselves: the page needn't be built, as on an
+	-- orchestrator's page.)
+	local w = {
+		now = orchestration.now:peek(),
+		chats = data.chats(sessions.now:peek()),
+		show = Visibility.mode:peek(),
+		clock = os.time(),
+		read_at = sessions.read_at:peek(),
+		dismissed = Visibility.dismissed:peek(),
+	}
+	local ctx, at = MapModel.visibility(w)
+	local chats = w.chats or {}
+	local ids: { string } = {}
+	for id, c in chats do
+		if MapModel.shown(c) and Visibility.visible(c, at, ctx) ~= "hide" then
+			table.insert(ids, id)
+		end
+	end
+	for _, o in (w.now or {}).orchestrators or {} do
+		if chats[o.id] and not table.find(ids, o.id) then
+			table.insert(ids, o.id)
+		end
+	end
+	return Visibility.done_unread(ids, chats, ctx)
+end
+
+-- The Board's own menu after Archive all done (ds/orch_board `board_menu`):
+-- the Map's Unpin all and Mark all done as read, the same actions its
+-- space menu runs.
+function M.board_menu_extra(): { any }
+	local ids = M.done_unread_now()
+	local n = #ids
+	return {
+		{ label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
+			require("@ds/orch_force").unpin_all()
+		end },
+		{
+			label = if n > 0 then locale.s("ds.orch.map.mark_done_read", { count = n }) else locale.s("ds.orch.map.mark_done_read_none"),
+			icon = "check-circle",
+			disabled = n == 0,
+			on_select = function()
+				if n > 0 then
+					M.mark_done_read(ids)
+				end
+			end,
+		},
+	}
+end
+
 function M.mark_done_read(ids: { string })
 	if #ids == 0 then
 		return
@@ -840,6 +920,7 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		end,
 		on_remove = orchestration.remove_later,
 		on_undo_remove = orchestration.undo_remove,
+		board_menu = M.board_menu_extra,
 		expanded = M.board_expanded,
 		later_open = M.board_later,
 		on_start = function(id: string): any
@@ -967,6 +1048,7 @@ local function map(fill: boolean?): Node
 			-- A secondary click on anything on it (screens/control/map_menu).
 			menu = MapMenu().entries,
 			mark_read = M.mark_done_read,
+			archive_done = M.archive_done,
 			-- (The hover card's: Progress's row of a chat, and a card shown.)
 			progress = function(id: string): any
 				return (orchestration.progress:get() or {})[id]
@@ -1773,7 +1855,15 @@ local MapTab = ui.component(function(): Node
 				title = "control.tabs.map",
 				figures = map_figures(),
 				entries = function(): { any }
-					return OrchMap().menu(M.map_view)
+					local out = OrchMap().menu(M.map_view)
+					table.insert(out, { separator = true })
+					table.insert(out, {
+						label = locale.s("orch.board.archive_done"),
+						icon = "archive-minimalistic",
+						disabled = M.archive_done.count() == 0,
+						on_select = M.archive_done.run,
+					})
+					return out
 				end,
 				-- (Once the tab has measured its room: the Graph laid out
 				-- once, for the height it has.)

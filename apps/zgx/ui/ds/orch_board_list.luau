@@ -1,9 +1,14 @@
 --!strict
 -- The board as a list: the same places as folding sections (Needs you,
--- Running, Planned, Done), a line a card. A line is the card's status
--- glyph, whose it is, its title, then its status' words and clock, its
--- threads and its one chip; a card that needs the person carries its
--- question and the ask's own buttons under its line. Snoozed folds under
+-- Running, Planned, Done), a row a card, each on the board card's own
+-- surface (its fill and corners), a small gap between. A row's head line is
+-- the card's status glyph, whose it is, its title, then its status' words
+-- and clock, its threads, its one chip and, where it asks, the control that
+-- opens the ask whole; a card that needs the person carries its own
+-- question and the ask's buttons under that line. An ask that is no one
+-- card's (ds/orch_board_model's `shared`: the engine's "12 PRs to review",
+-- standing on every review card) is said once, as its own row at the head
+-- of Needs you, never under the cards it stands on. Snoozed folds under
 -- Needs you and Earlier under Done, as the board's drawers do. A click
 -- opens the card (its detail); a secondary click, its menu.
 --
@@ -28,9 +33,12 @@
 --   }
 
 local Icon = require("@self/icon")
+local IconButton = require("@self/icon_button").IconButton
 local Button = require("@self/button")
 local ContextMenu = require("@self/context_menu")
 local Choices = require("@self/orch_choices")
+local decide = require("@self/orch_decide")
+local material = require("@self/material")
 local Fold = require("@self/orch_fold")
 local hue = require("@self/orch_hue")
 local locale = require("@self/locale")
@@ -74,8 +82,71 @@ local HEAD: { [string]: string } = { needs_you = "asked", running = "working", p
 -- reach.
 local MARGIN = 240
 -- A row's guessed height: its line, and an ask's question and buttons, or
--- Resume, under it (measured: 30, 94, 62).
-local LINE_H, ASK_H, RESUME_H = 30, 94, 62
+-- Resume, under it, its surface's edges included (measured: 32, 82, 62). A
+-- head line is LINE_H high, the same with an expand control in it or a chip.
+local LINE_H = 30
+local ROW_H, ASK_H, RESUME_H = LINE_H + 2, 82, 62
+-- Between two rows (and the same in points, for the rows built at first).
+local ROW_GAP = "$space.1"
+local GAP = (ui.theme.get("space.1") :: number?) or 4
+-- A section's head (its fold's line) and the gap above it.
+local HEAD_H = 32 + ((ui.theme.get("space.2") :: number?) or 8)
+-- Under the title, past the glyph: where a row's question and buttons start.
+local INDENT = 29
+
+-- A row's surface: the board card's fill and corners (ds/orch_board_card),
+-- lit under the pointer and while its card is open.
+local rest = material.pick("$zeron.settings.note", "$zeron.settings.card")
+local function surface(props: any): Node
+	local selected: (() -> boolean)? = props.selected
+	local p: any = {
+		w_full = true,
+		min_w = 0,
+		rounded = Card.RADIUS,
+		bg = function(): string
+			return if selected ~= nil and selected() then "$hover" else rest()
+		end,
+		hover = { bg = "$hover" },
+		border = 1,
+		border_color = function(): string
+			return if selected ~= nil and selected() then "$focus.ring" else "#00000000"
+		end,
+	}
+	for k, v in props do
+		if k ~= "selected" then
+			p[k] = v
+		end
+	end
+	return ui.column(p)
+end
+
+-- The control that opens an ask whole, in a row's head line.
+local function expand_button(ask: () -> any?, on_expand: (ask: any) -> ()): Node
+	return ui.show(function(): boolean
+		return ask() ~= nil
+	end, IconButton {
+		class = "orch-list-expand",
+		icon = "expand-arrows",
+		label = locale.t("ds.orch.decide.expand"),
+		size = "sm",
+		tone = "quiet",
+		on_click = function()
+			local a = ask()
+			if a then
+				on_expand(a)
+			end
+		end,
+	})
+end
+
+-- Whether an ask's buttons have anything to show: its options, or a pick
+-- on its way, taken or turned down. (With none, no empty line.)
+local function has_choices(a: any?): boolean
+	if not a then
+		return false
+	end
+	return #decide.options(a) > 0 or decide.pending_of(a.id) ~= nil or decide.failed_of(a.id) ~= nil
+end
 -- The heights rows were laid out at, by card (and the list's density).
 local HEIGHTS: { [string]: number } = {}
 -- How far down a list builds its rows at once, past the window's height.
@@ -119,9 +190,10 @@ local Row = ui.component(function(props: RowProps): Node
 		end
 		return Card.words(x)
 	end)
+	-- Its own ask (not one shared with other cards: that has its own row).
 	local ask = ui.computed(function(): any?
 		local x = e()
-		return if x and x.place == "needs_you" then x.ask else nil
+		return if x and x.place == "needs_you" then x.own else nil
 	end)
 	-- How it comes in (ds/orch_board_motion): from where its card stood, as
 	-- the board turns into the list; from its last row, as it moves.
@@ -146,15 +218,14 @@ local Row = ui.component(function(props: RowProps): Node
 			return selected:get()
 		end,
 		w_full = true,
-		min_h = 30,
+		h = LINE_H,
 		px = "$space.2",
+		py = 0,
 		gap = "$space.2",
 		items = "center",
-		rounded = "$radius.md",
-		bg = function(): string
-			return if selected:get() then "$hover" else "#00000000"
-		end,
-		hover = { bg = "$hover" },
+		rounded = Card.RADIUS,
+		bg = "#00000000",
+		hover = {},
 		active = { bg = "$pressed" },
 		on_click = function()
 			ctx.open(id)
@@ -245,6 +316,11 @@ local Row = ui.component(function(props: RowProps): Node
 				return x ~= nil and x.card ~= nil and x.card.unseen == true and x.place == "done"
 			end,
 		},
+		if act.can("expand_ask")
+			then expand_button(function(): any?
+				return ask:get()
+			end, act.expand)
+			else nil,
 	}
 	-- Its question and the ask's own buttons, under its line.
 	local asked = ui.show(function(): boolean
@@ -254,9 +330,9 @@ local Row = ui.component(function(props: RowProps): Node
 			class = "orch-list-ask",
 			w_full = true,
 			min_w = 0,
-			pl = ui.raw(29, "under the title, past the glyph"),
+			pl = ui.raw(INDENT, "under the title, past the glyph"),
 			pr = "$space.2",
-			pb = "$space.1",
+			pb = "$space.2",
 			gap = "$space.1",
 			ui.text {
 				function(): string
@@ -273,17 +349,19 @@ local Row = ui.component(function(props: RowProps): Node
 				line_height = "$font.line.sm",
 				color = "$text.secondary",
 			},
-			Choices {
+			-- (Its expand control is in the head line.)
+			ui.show(function(): boolean
+				return has_choices(ask:get())
+			end, Choices {
 				ask = function(): any
 					return ask:get()
 				end,
 				on_answer = function(a: any, choice: any): any
 					return act.answer(a, choice)
 				end,
-				on_expand = if act.can("expand_ask") then act.expand else nil,
 				size = "xs",
 				class = "orch-list-choices",
-			},
+			}),
 		}
 	end)
 	-- A paused one's Resume.
@@ -293,8 +371,8 @@ local Row = ui.component(function(props: RowProps): Node
 	end, function(): Node
 		return ui.row {
 			w_full = true,
-			pl = ui.raw(29, "under the title, past the glyph"),
-			pb = "$space.1",
+			pl = ui.raw(INDENT, "under the title, past the glyph"),
+			pb = "$space.2",
 			Button {
 				class = "orch-list-resume",
 				size = "xs",
@@ -312,7 +390,7 @@ local Row = ui.component(function(props: RowProps): Node
 	end)
 	local whole = (ContextMenu {
 		label = locale.t("orch.board.card_actions"),
-		ring = "$radius.md",
+		ring = Card.RADIUS,
 		w_full = true,
 		shrink = 0,
 		items = function(): { any }?
@@ -320,7 +398,16 @@ local Row = ui.component(function(props: RowProps): Node
 			trace.hit("board.menu")
 			return if x then act.menu(x) else nil
 		end,
-		ui.column { w_full = true, min_w = 0, line, asked, resume },
+		surface {
+			class = "orch-list-item",
+			id = `orch-item-{id}`,
+			selected = function(): boolean
+				return selected:get()
+			end,
+			line,
+			asked,
+			resume,
+		},
 	}) :: Node
 	return ui.div {
 		w_full = true,
@@ -342,6 +429,144 @@ local Row = ui.component(function(props: RowProps): Node
 		},
 	}
 end)
+
+-- Needs you's shared asks (ds/orch_board_model's `shared`), each once, at
+-- its head (the list's section, the board's column): what stands on many
+-- cards said apart from them. Its head line opens it whole; its buttons, if
+-- it has any, under it. (Each counts one in Needs you's figures.)
+function M.SharedRows(ctx: Ctx.Ctx, act: Actions.Actions): Node
+	local shared_key = ui.computed(function(): string
+		local ids: { string } = {}
+		for _, a in ctx.board().shared do
+			table.insert(ids, a.id)
+		end
+		return table.concat(ids, "\n")
+	end)
+	local shared_ids = ui.computed(function(): { string }
+		local k = shared_key:get()
+		return if k == "" then {} else string.split(k, "\n")
+	end)
+	local function shared_of(ask_id: string): any?
+		for _, a in ctx.board().shared do
+			if a.id == ask_id then
+				return a
+			end
+		end
+		return nil
+	end
+	local function shared_row(ask_id: string): Node
+		local ask = ui.computed(function(): any?
+			return shared_of(ask_id)
+		end)
+		local function a(): any?
+			return ask:get()
+		end
+		local can_expand = act.can("expand_ask")
+		local line = ui.button {
+			class = "orch-list-shared-line",
+			label = function(): string
+				local x = a()
+				return if x then Card.plain(x.question or "") else ""
+			end,
+			w_full = true,
+			h = LINE_H,
+			px = "$space.2",
+			py = 0,
+			gap = "$space.2",
+			items = "center",
+			rounded = Card.RADIUS,
+			bg = "#00000000",
+			hover = {},
+			active = { bg = "$pressed" },
+			on_click = function()
+				local x = ask:peek()
+				if x and can_expand then
+					act.expand(x)
+				end
+			end,
+			Card.Glyph {
+				status = function(): string
+					local x = a()
+					return if x and x.origin == "review" then "review" else "asked"
+				end,
+				size = 13,
+			},
+			if ctx.owners
+				then ui.div {
+					class = "orch-list-owner",
+					role = "img",
+					shrink = 0,
+					hue.Dot {
+						hue = function(): number?
+							local x = a()
+							local o = x and ctx.owner(x.orchestrator_id)
+							return o and o.hue
+						end,
+						size = 7,
+					},
+				}
+				else nil,
+			ui.text {
+				function(): string
+					local x = a()
+					return if x then Card.plain(x.question or "") else ""
+				end,
+				class = "orch-list-title",
+				grow = 1,
+				basis = 0,
+				min_w = 64,
+				truncate = true,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+			},
+			if can_expand then expand_button(a, act.expand) else nil,
+		}
+		return surface {
+			class = "orch-list-shared",
+			id = `orch-list-ask-{ask_id}`,
+			line,
+			ui.show(function(): boolean
+				return has_choices(a())
+			end, function(): Node
+				return ui.column {
+					w_full = true,
+					min_w = 0,
+					pl = ui.raw(INDENT, "under the title, past the glyph"),
+					pr = "$space.2",
+					pb = "$space.2",
+					Choices {
+						ask = function(): any
+							return a()
+						end,
+						on_answer = function(x: any, choice: any): any
+							return act.answer(x, choice)
+						end,
+						size = "xs",
+						class = "orch-list-choices",
+					},
+				}
+			end),
+		}
+	end
+	local function shared_rows(): Node
+		return ui.show(function(): boolean
+			return shared_key:get() ~= ""
+		end, function(): Node
+			return ui.each(shared_ids, shared_row, {
+				key = function(ask_id: string): string
+					return ask_id
+				end,
+				class = "orch-list-shared-rows",
+				direction = "column",
+				gap = ROW_GAP,
+				w_full = true,
+				-- (Apart from the cards under it by a row's gap.)
+				pb = ROW_GAP,
+			})
+		end)
+	end
+	return shared_rows()
+end
 
 export type SectionsProps = {
 	ctx: Ctx.Ctx,
@@ -393,17 +618,19 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 	-- MARGIN) takes, in order.
 	local laid_out = false
 	local reach = first_reach()
+	-- (Needs you's shared asks stand first: their rows count too.)
+	reach -= #ctx.board().shared * (ROW_H + GAP)
 	local function guess(id: string): number
 		local e = ctx.entry(id)
 		if not e then
-			return LINE_H
+			return ROW_H
 		end
-		if e.place == "needs_you" and e.ask then
+		if e.place == "needs_you" and e.own then
 			return ASK_H
 		elseif e.status == "paused" and act.can("resume") then
 			return RESUME_H
 		end
-		return LINE_H
+		return ROW_H
 	end
 
 	-- A row's slot: its row while near the view, else its height.
@@ -416,7 +643,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 		local first = true
 		if not laid_out then
 			first = reach > 0
-			reach -= h
+			reach -= h + GAP
 		end
 		local near = ui.use_state(first)
 		local held = ui.use_state(h)
@@ -459,6 +686,11 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 	end
 
 	local function rows(place: string): Node
+		-- (Built at first: its section's head above it, and the gap before
+		-- it, take a row's worth of the reach too.)
+		if not laid_out then
+			reach -= HEAD_H
+		end
 		local ids = ui.computed(function(): { string }
 			trace.hit("board.ids")
 			local all = ctx.ids(place)
@@ -487,6 +719,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 				animate = reduce.layout({ duration = Motion.TRAVEL, ease = Motion.EASE }),
 				class = "orch-list-rows",
 				direction = "column",
+				gap = ROW_GAP,
 				w_full = true,
 			}),
 			ui.show(function(): boolean
@@ -563,8 +796,9 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 			Fold {
 				id = `orch-list-{place}`,
 				title = locale.t(`orch.board.place.{place}`),
+				-- (Needs you's: its shared asks' rows too.)
 				count = function(): number
-					return count(place)
+					return count(place) + (if place == "needs_you" then #ctx.board().shared else 0)
 				end,
 				icon = Card.Glyph {
 					status = function(): string
@@ -572,6 +806,8 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 					end,
 					size = 14,
 				},
+				-- (Done's: archive every closed card, Earlier's too.)
+				aside = if place == "done" then Actions.archive_button(act) else nil,
 				open = function(): boolean
 					return is_open(place)
 				end,
@@ -584,6 +820,9 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 					ui.show(function(): boolean
 						return is_open(place)
 					end, function(): Node
+						if place == "needs_you" then
+							return ui.column { w_full = true, min_w = 0, M.SharedRows(ctx, act), rows(place) }
+						end
 						return rows(place)
 					end),
 					ui.show(function(): boolean
@@ -626,12 +865,53 @@ export type Props = Ctx.Props
 M.List = ui.component(function(props: Props): Node
 	local ctx = Ctx.make(props)
 	local act = Actions.make(ctx)
+	-- Its own menu (ds/orch_board_actions `board_menu`): a "…" over the
+	-- sections at its end, and a secondary click around its rows.
+	local more_open = ui.use_state(false)
+	local more: Node? = nil
+	if act.board_menu() ~= nil then
+		more = ui.row {
+			class = "orch-list-head",
+			w_full = true,
+			justify = "end",
+			ContextMenu {
+				open = more_open,
+				label = locale.t("orch.board.menu"),
+				shrink = 0,
+				items = function(): { any }?
+					return act.board_menu()
+				end,
+				IconButton {
+					id = "orch-list-more",
+					icon = "more-horizontal",
+					label = locale.t("orch.board.menu"),
+					size = "sm",
+					tone = "quiet",
+					lit = function(): boolean
+						return more_open:get()
+					end,
+					on_click = function()
+						more_open:set(true)
+					end,
+				},
+			},
+		}
+	end
 	return ui.column {
 		id = props.id or "orch-board-list",
 		class = "orch-board-list",
 		w_full = true,
 		min_w = 0,
-		M.Sections { ctx = ctx, act = act, tab = props.tab, fold = props.fold },
+		more,
+		ContextMenu {
+			label = locale.t("orch.board.menu"),
+			w_full = true,
+			min_w = 0,
+			items = function(): { any }?
+				return act.board_menu()
+			end,
+			M.Sections { ctx = ctx, act = act, tab = props.tab, fold = props.fold },
+		},
 		ctx.motion.host(),
 	}
 end)

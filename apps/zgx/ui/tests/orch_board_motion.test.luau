@@ -340,11 +340,11 @@ test("board motion: the detail opens, and fades as it closes", function()
 end)
 
 test("board motion: the board to its list slides the cards in view, at most 24", function()
-	-- (Tall: more cards in view than the cap; the window says so, as a
-	-- window's host does.)
-	local app = open(nil, 1500, 2600)
+	-- (Tall: more cards in view than the cap, the list's rows on their
+	-- surfaces apart; the window says so, as a window's host does.)
+	local app = open(nil, 1500, 3000)
 	pcall(function()
-		app:set_state("zgx.window.size", { width = 1500, height = 2600 })
+		app:set_state("zgx.window.size", { width = 1500, height = 3000 })
 	end)
 	app:frames(2)
 	app:set_state("board_view", "list")

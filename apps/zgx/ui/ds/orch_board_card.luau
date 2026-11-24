@@ -164,8 +164,10 @@ end
 -- else what it last reported, or how it ended; before any of that, what it
 -- was asked to do.
 function M.summary(ctx: Ctx.Ctx, e: Ctx.Entry): string
-	if e.place == "needs_you" and e.ask and (e.ask.question or "") ~= "" then
-		return clipped(plain(e.ask.question))
+	-- (Its own: an ask shared with other cards, as the engine's one for an
+	-- orchestrator's open PRs, says nothing of this one.)
+	if e.place == "needs_you" and e.own and (e.own.question or "") ~= "" then
+		return clipped(plain(e.own.question))
 	end
 	if e.place == "running" then
 		local lead = (e.item.threads or {})[1]
@@ -384,7 +386,7 @@ M.Card = ui.component(function(props: Props): Node
 			if p == "hold" or p == "fade_out" or p == "out" then
 				return kept
 			end
-			if x and x.place == "needs_you" and x.ask == nil and (kept :: Ctx.Entry).ask ~= nil then
+			if x and x.place == "needs_you" and x.own == nil and (kept :: Ctx.Entry).own ~= nil then
 				return kept
 			end
 		end

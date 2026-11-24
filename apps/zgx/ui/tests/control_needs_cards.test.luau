@@ -266,3 +266,83 @@ test("needs cards: in the narrow float, the card's title whole and 1 more under 
 	expect(more < chip).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+-- The engine's one ask for an orchestrator's open PRs stands on every
+-- review card (each card's row lists it): one row of its own, never on a
+-- card's row, and one in every count of Needs you's.
+test("needs cards: a shared PR ask is one row of its own, on no card's row, and counts one everywhere", function()
+	local data = require("@ds/orch_data")
+	local model = require("@ds/orch_board_model")
+	local now = {
+		items = {
+			{ id = "it-r1", title = "R1", orchestrator_id = "orc-a", state = "review", threads = {}, updated = 5 },
+			{ id = "it-r2", title = "R2", orchestrator_id = "orc-a", state = "review", threads = {}, updated = 6 },
+			{ id = "it-q", title = "Q", orchestrator_id = "orc-a", state = "blocked", threads = { "th-q" }, updated = 7 },
+		},
+		cards = {
+			{ id = "it-r1", place = "needs_you", status = "review", old_state = "review", since = 5, asks = { "prs-orc-a" } },
+			{ id = "it-r2", place = "needs_you", status = "review", old_state = "review", since = 6, asks = { "prs-orc-a" } },
+			{ id = "it-q", place = "needs_you", status = "asked", old_state = "blocked", since = 7, asks = { "a1" } },
+		},
+		asks = {
+			{ id = "prs-orc-a", from_chat = "orc-a", orchestrator_id = "orc-a", kind = "approval", origin = "review", question = "2 PRs to review", options = {}, state = "open", created = 3 },
+			{ id = "a1", from_chat = "th-q", item_id = "it-q", kind = "question", question = "?", options = {}, state = "open", created = 10 },
+		},
+	}
+	local board = model.board(now)
+	local needs = data.needs(now, {})
+	-- Three cards and the shared ask: 4 in the column's count, the tabs',
+	-- the widget's rows and the badge.
+	expect(board.counts.needs_you).to_be(4)
+	expect(#needs).to_be(4)
+	expect(#data.waiting_for_you(now, {}).needs).to_be(4)
+	local shared_rows = 0
+	for _, n in needs do
+		if n.kind == "ask" and n.ask.id == "prs-orc-a" then
+			shared_rows += 1
+		end
+		if n.kind == "card" then
+			-- (No card's row carries it.)
+			expect(n.ask == nil or n.ask.id ~= "prs-orc-a").to_be(true)
+			for _, a in n.asks or {} do
+				expect(a.id).never.to_be("prs-orc-a")
+			end
+		end
+	end
+	expect(shared_rows).to_be(1)
+	-- Put off: no row, no count, its cards snoozed with it.
+	now.asks[1] = table.clone(now.asks[1])
+	now.asks[1].deferred_until = os.time() + 3600
+	now.asks = table.clone(now.asks)
+	expect(model.board(now).counts.needs_you).to_be(3)
+	expect(#data.needs(now, {})).to_be(3)
+end)
+
+test("needs cards: in the float, the shared PR ask is one row and the review cards' rows don't say it", function()
+	local app = open()
+	local before = app:count(`{W} >> .orch-need`)
+	app:command("fx.shared")
+	app:frames(40)
+	local rows = app:count(`{W} >> .orch-need`)
+	expect(rows).to_be(before + 3)
+	local saying = 0
+	for i = 1, rows do
+		local t = app:tree(`{W} >> .orch-need[{i}]`)
+		if t:find("12 PRs to review", 1, true) then
+			saying += 1
+			expect(t:find("Review card", 1, true)).to_be_nil()
+		end
+	end
+	expect(saying).to_be(1)
+	-- Its figure: the rows, and the board's Needs you count.
+	local model = require("@ds/orch_board_model")
+	local board = model.board(app:state("orchestration"))
+	expect(app:tree(FLOAT)).to_contain(`"{rows}"`)
+	local data = require("@ds/orch_data")
+	expect(#data.waiting_for_you(app:state("orchestration"), app:state("sessions")).needs).to_be(rows)
+	-- (The column's, the shared ask among them, and CI speed's ask of no
+	-- card.)
+	expect(board.counts.needs_you + 1).to_be(rows)
+	expect(app:error()).to_be_nil()
+end)
+

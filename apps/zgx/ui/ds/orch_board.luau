@@ -544,9 +544,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 				ui.div { grow = 1, min_w = 0 },
 				drop.Badge(place),
+				-- (Done's: archive every closed card, Earlier's too.)
+				if place == "done" then Actions.archive_button(act) else nil,
 				ui.text {
+					-- (Needs you's: its shared asks' rows too.)
 					function(): string
-						return tostring(count())
+						return tostring(count() + (if place == "needs_you" then #ctx.board().shared else 0))
 					end,
 					class = "orch-column-count",
 					tabular = true,
@@ -554,6 +557,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 					color = "$text.tertiary",
 				},
 			},
+			-- (Needs you's shared asks first, each once: ds/orch_board_list.)
+			if place == "needs_you" then List.SharedRows(ctx, act) else nil,
 			cards(place, false),
 			-- (Once the last card has left, not under it: then in.)
 			-- (Its room taken as the last card leaves, so the drawer settles
@@ -809,6 +814,35 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
+	-- The board's own menu, its "…" (ds/orch_board_actions `board_menu`).
+	local more_open = ui.use_state(false)
+	local function board_more(): Node?
+		if act.board_menu() == nil then
+			return nil
+		end
+		return (ContextMenu {
+			open = more_open,
+			label = locale.t("orch.board.menu"),
+			shrink = 0,
+			items = function(): { any }?
+				return act.board_menu()
+			end,
+			IconButton {
+				id = "orch-board-more",
+				icon = "more-horizontal",
+				label = locale.t("orch.board.menu"),
+				size = "lg",
+				tone = "quiet",
+				lit = function(): boolean
+					return more_open:get()
+				end,
+				on_click = function()
+					more_open:set(true)
+				end,
+			},
+		}) :: Node
+	end
+
 	local function count_of(key: string): () -> number
 		return function(): number
 			trace.hit("board.counts")
@@ -839,6 +873,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		ui.div { grow = 1, min_w = 0 },
 		if props.show_filter then filter_button() else nil,
 		view_switch(),
+		board_more(),
 		if props.on_new_task
 			then Button {
 				id = "orch-board-new",
@@ -986,33 +1021,46 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	local function main(): Node
 		local reduced = reduce.reduced_now()
-		return ui.presence(function(): string
-			local v = view:get()
-			if last_view ~= nil and v ~= last_view then
-				ctx.motion.begin_switch()
-			end
-			last_view = v
-			return v
-		end, function(v: string): Node
-			if v == "list" then
-				return List.Sections { ctx = ctx, act = act, tab = tab }
-			end
-			return columns()
-		end, {
+		-- (A secondary click around the cards, on a column or the list: the
+		-- board's own menu; on a card, its own.)
+		return ContextMenu {
+			label = locale.t("orch.board.menu"),
 			w_full = true,
 			min_w = 0,
-			-- (What leaves fades where it stands; what comes, its cards and rows
-			-- aside, fades in where it lands.)
-			exit = { opacity = 0, duration = if reduced then Motion.FADE else Motion.SWITCH_OUT, ease = "linear" },
-			-- (From a hundredth, not nothing: a list counts what is wholly
-			-- transparent out of view, and would build its rows a frame late.)
-			enter = {
-				opacity = { 0.01, 1 },
-				duration = if reduced then Motion.FADE else Motion.SWITCH_IN,
-				delay = if reduced then 0 else Motion.SWITCH_DELAY,
-				ease = "linear",
-			},
-		})
+			items = function(): { any }?
+				return act.board_menu()
+			end,
+			hook = function(open_at: (x: number, y: number) -> boolean)
+				Actions.open_board_menu = open_at
+			end,
+			ui.presence(function(): string
+				local v = view:get()
+				if last_view ~= nil and v ~= last_view then
+					ctx.motion.begin_switch()
+				end
+				last_view = v
+				return v
+			end, function(v: string): Node
+				if v == "list" then
+					return List.Sections { ctx = ctx, act = act, tab = tab }
+				end
+				return columns()
+			end, {
+				w_full = true,
+				min_w = 0,
+				-- (What leaves fades where it stands; what comes, its cards and rows
+				-- aside, fades in where it lands.)
+				exit = { opacity = 0, duration = if reduced then Motion.FADE else Motion.SWITCH_OUT, ease = "linear" },
+				-- (From a hundredth, not nothing: a list counts what is wholly
+				-- transparent out of view, and would build its rows a frame late.)
+				enter = {
+					opacity = { 0.01, 1 },
+					duration = if reduced then Motion.FADE else Motion.SWITCH_IN,
+					delay = if reduced then 0 else Motion.SWITCH_DELAY,
+					ease = "linear",
+				},
+			}),
+		}
 	end
 
 	return ui.column {

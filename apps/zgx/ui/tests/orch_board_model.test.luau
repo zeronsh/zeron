@@ -241,3 +241,42 @@ test("board model: a card with no row finds its asks by its id and by its thread
 	expect(b.by_id["threaded"].status).to_be("review")
 	expect(b.by_id["quiet"].place).to_be("done")
 end)
+
+test("board model: an ask that is no one card's is shared, said once, and no card's own", function()
+	local a, b, c = item("it-a", "review"), item("it-b", "review"), item("it-c", "blocked")
+	local prs = { id = "prs-orc-a", state = "open", from_chat = "orc-a", orchestrator_id = "orc-a", origin = "review", question = "2 PRs to review", created = T - DAY }
+	local own = { id = "ak-c", state = "open", item_id = "it-c", from_chat = "orc-a", origin = "stall", question = "What now?", created = T - HOUR }
+	-- (A thread's ask on no card, standing on two cards: shared too.)
+	local loose = { id = "ak-loose", state = "open", from_chat = "th-x", origin = "tool", question = "Which one?", created = T - 2 * HOUR }
+	local d = item("it-d", "blocked", { threads = { "th-x" } })
+	local e = item("it-e", "blocked", { threads = { "th-x" } })
+	-- (And a thread's ask on no card, on one card: that card's own.)
+	local single = { id = "ak-single", state = "open", from_chat = "th-y", origin = "tool", question = "Go?", created = T - 3 * HOUR }
+	local f = item("it-f", "blocked", { threads = { "th-y" } })
+	local bd = board({ a, b, c, d, e, f }, {
+		row(a, "needs_you", "review", { asks = { "prs-orc-a" } }),
+		row(b, "needs_you", "review", { asks = { "prs-orc-a" } }),
+		row(c, "needs_you", "stalled", { asks = { "ak-c", "prs-orc-a" } }),
+		row(d, "needs_you", "asked", { asks = { "ak-loose" } }),
+		row(e, "needs_you", "asked", { asks = { "ak-loose" } }),
+		row(f, "needs_you", "asked", { asks = { "ak-single" } }),
+	}, { prs, own, loose, single })
+	-- Each card still has it (its place and putting it off follow it).
+	expect(bd.by_id["it-a"].ask.id).to_be("prs-orc-a")
+	expect(bd.by_id["it-a"].own).to_be_nil()
+	expect(bd.by_id["it-b"].own).to_be_nil()
+	expect(bd.by_id["it-c"].own.id).to_be("ak-c")
+	expect(bd.by_id["it-d"].own).to_be_nil()
+	expect(bd.by_id["it-f"].own.id).to_be("ak-single")
+	-- Said once each, the oldest first.
+	expect(#bd.shared).to_be(2)
+	expect(bd.shared[1].id).to_be("prs-orc-a")
+	expect(bd.shared[2].id).to_be("ak-loose")
+	-- Put off: not said.
+	prs.deferred_until = T + HOUR
+	local later = board({ a, b }, {
+		row(a, "snoozed", "review", { asks = { "prs-orc-a" } }),
+		row(b, "snoozed", "review", { asks = { "prs-orc-a" } }),
+	}, { prs })
+	expect(#later.shared).to_be(0)
+end)

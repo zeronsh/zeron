@@ -9,6 +9,10 @@
 --   act.close(entry, dropped), act.reopen(entry), act.reopen_start(entry),
 --   act.hold(entry, held),
 --   act.pause(entry), act.resume(entry), act.start(entry), act.remove(entry),
+--   act.archive_done() (every closed card archived: Done's and Earlier's),
+--   act.closed_count(),
+--   act.board_menu() -> { ContextMenu.Entry }? (the board's own: its "…"
+--   and a secondary click around its cards)
 --   act.request_changes(entry, text), act.snooze(ask, until_ms?),
 --   act.answer(ask, choice), act.expand(ask), act.open_thread(entry, chat?)
 --   act.menu(entry) -> { ContextMenu.Entry }
@@ -18,6 +22,7 @@ local locale = require("@self/locale")
 local toast = require("@self/toast")
 local decide = require("@self/orch_decide")
 local Ctx = require("@self/orch_board_ctx")
+local IconButton = require("@self/icon_button").IconButton
 
 local M = {}
 
@@ -38,6 +43,9 @@ export type Actions = {
 	resume: (e: Ctx.Entry) -> (),
 	start: (e: Ctx.Entry) -> (),
 	remove: (e: Ctx.Entry) -> (),
+	archive_done: () -> boolean,
+	closed_count: () -> number,
+	board_menu: () -> { any }?,
 	request_changes: (e: Ctx.Entry, text: string) -> (),
 	snooze: (ask: any, until_ms: number?) -> (),
 	answer: (ask: any, choice: any) -> any,
@@ -61,6 +69,197 @@ local function reason(err: any): string
 		end
 	end
 	return if err ~= nil then tostring(err) else ""
+end
+
+-- Archiving every closed card at once (`M.archive`): what each is.
+export type Archived = { id: string, title: string?, threads: { string }? }
+export type ArchiveHooks = {
+	-- The host's delayed delete (orchestration.remove_later): sent once its
+	-- wait is over, or at quit; a promise.
+	on_remove: (id: string, wait_ms: number) -> any,
+	on_undo_remove: ((id: string) -> ())?,
+	-- Chats on a card still open: never put away from the Map.
+	busy: { [string]: boolean }?,
+}
+
+-- Each archive's toast its own (one Undo, its own cards).
+local archive_batch = 0
+
+-- Every card given taken off the board at once, as Delete takes one: off
+-- every board and list at once (Ctx.removing), each sent by the host once
+-- the Undo's while is over (its delayed delete, one per card, so a quit
+-- sends what still waits). One toast, one Undo putting them all back as
+-- they were: nothing was sent. Refused, those come back and one toast in
+-- the danger's tone says why. Their threads on no card still open leave
+-- the Map as Mark done as read puts chats away (ds/orch_map_visibility's
+-- `dismissed`: gone until they move again), and come back with them.
+-- Whether anything was archived, and its Undo (the toast's).
+function M.archive(cards: { Archived }, hooks: ArchiveHooks): (boolean, (() -> ())?)
+	local gone = Ctx.removing:peek()
+	local list: { Archived } = {}
+	for _, c in cards do
+		if not gone[c.id] then
+			table.insert(list, c)
+		end
+	end
+	if #list == 0 then
+		return false, nil
+	end
+	archive_batch += 1
+	-- Off the board, and their threads off the Map, at once.
+	local Visibility = require("@self/orch_map_visibility")
+	local now = os.time()
+	local busy = hooks.busy or {}
+	local was: { [string]: number | false } = {}
+	local d = table.clone(Visibility.dismissed:peek() or {})
+	for _, c in list do
+		for _, chat in c.threads or {} do
+			if not busy[chat] and was[chat] == nil then
+				was[chat] = d[chat] or false
+				d[chat] = now
+			end
+		end
+	end
+	Visibility.dismissed:set(d :: any)
+	local hidden = table.clone(Ctx.removing:peek())
+	for _, c in list do
+		hidden[c.id] = true
+	end
+	Ctx.removing:set(hidden)
+	-- One card back on the board, its threads back on the Map (those that
+	-- nothing else put away since).
+	local function back(c: Archived)
+		Ctx.removing:set_key({ c.id }, nil)
+		local dd = table.clone(Visibility.dismissed:peek() or {})
+		local changed = false
+		for _, chat in c.threads or {} do
+			local w = was[chat]
+			if w ~= nil and dd[chat] == now then
+				dd[chat] = if w == false then nil else w
+				changed = true
+			end
+		end
+		if changed then
+			Visibility.dismissed:set(dd :: any)
+		end
+	end
+	local refused = false
+	local undone = false
+	-- (Those the host took to wait on: refused as asked, a card is back
+	-- at once and isn't counted.)
+	local taken: { Archived } = {}
+	for _, c in list do
+		local function failed(err: any)
+			back(c)
+			if not refused then
+				refused = true
+				toast.show { title = locale.s("orch.board.archive_failed"), body = reason(err), tone = "danger" }
+			end
+		end
+		local ok, sent = pcall(hooks.on_remove, c.id, M.UNDO_MS)
+		if ok then
+			table.insert(taken, c)
+		end
+		if not ok then
+			failed(sent)
+		elseif type(sent) == "table" or type(sent) == "userdata" then
+			-- Sent: the engine's rows leave it out a moment later. (Undone:
+			-- back already.)
+			sent:after(function()
+				if not undone then
+					ui.after(M.LAND_MS, function()
+						Ctx.removing:set_key({ c.id }, nil)
+					end)
+				end
+			end, failed)
+		else
+			-- (A host that says nothing of how it went.)
+			ui.after(M.UNDO_MS + M.LAND_MS, function()
+				Ctx.removing:set_key({ c.id }, nil)
+			end)
+		end
+	end
+	if #taken == 0 then
+		return false, nil
+	end
+	local undo = hooks.on_undo_remove
+	local undo_all: (() -> ())? = if undo
+		then function()
+			if undone then
+				return
+			end
+			undone = true
+			for _, c in taken do
+				undo(c.id)
+				back(c)
+			end
+		end
+		else nil
+	toast.show {
+		key = `orch-board-archived-{archive_batch}`,
+		title = locale.s("orch.board.archived", { n = #taken }),
+		duration = M.UNDO_MS,
+		action = if undo_all
+			then {
+				label = locale.s("orch.board.undo"),
+				run = function(_: any)
+					(undo_all :: () -> ())()
+				end,
+			}
+			else nil,
+	}
+	return true, undo_all
+end
+
+-- A board's closed cards (Done's and Earlier's) as `M.archive` takes them
+-- (none already on its way off), and the chats on its cards still open.
+function M.closed_of(board: any): ({ Archived }, { [string]: boolean })
+	local gone = Ctx.removing:peek()
+	local out: { Archived } = {}
+	for _, place in { "done", "earlier" } do
+		for _, e in board[place] or {} do
+			if not gone[e.id] then
+				table.insert(out, { id = e.id, title = e.item.title, threads = e.item.threads })
+			end
+		end
+	end
+	local busy: { [string]: boolean } = {}
+	for _, place in { "needs_you", "snoozed", "running", "planned" } do
+		for _, e in board[place] or {} do
+			for _, chat in e.item.threads or {} do
+				busy[chat] = true
+			end
+		end
+	end
+	return out, busy
+end
+
+-- The last board built's own menu opened at a point in the window, as a
+-- secondary click there would (for pictures, which have no secondary
+-- click): false where none opened.
+M.open_board_menu = function(_x: number, _y: number): boolean
+	return false
+end
+
+-- Done's Archive all: the head's glyph button (Done's column, Done's list
+-- section), shown while anything is closed. None where the host deletes no
+-- cards.
+function M.archive_button(act: any): Node?
+	if not act.can("remove") then
+		return nil
+	end
+	return ui.show(function(): boolean
+		return act.closed_count() > 0
+	end, IconButton {
+		class = "orch-archive-done",
+		icon = "archive-minimalistic",
+		label = locale.t("orch.board.archive_done"),
+		size = "sm",
+		tone = "quiet",
+		on_click = function()
+			act.archive_done()
+		end,
+	})
 end
 
 -- Whether a card is closed (done or dropped).
@@ -235,6 +434,44 @@ function M.make(ctx: Ctx.Ctx): Actions
 				}
 				else nil,
 		}
+	end
+	-- Every closed card archived at once (`M.archive`). Offered where the
+	-- host deletes cards (`on_remove`).
+	function act.closed_count(): number
+		return #ctx.ids("done") + #ctx.ids("earlier")
+	end
+	function act.archive_done(): boolean
+		local f = props.on_remove
+		if not f then
+			return false
+		end
+		local cards, busy = M.closed_of(ctx.board())
+		return (M.archive(cards, { on_remove = f, on_undo_remove = props.on_undo_remove, busy = busy }))
+	end
+	-- The board's own menu: Archive all done (where the host deletes cards),
+	-- then the host's (`board_menu`: the Map's Unpin all and Mark all done
+	-- as read, which the Control room and an orchestrator's page give).
+	-- Nil with nothing in it.
+	function act.board_menu(): { any }?
+		local out: { any } = {}
+		if props.on_remove then
+			local n = act.closed_count()
+			table.insert(out, {
+				label = locale.s("orch.board.archive_done"),
+				icon = "archive-minimalistic",
+				disabled = n == 0,
+				on_select = function()
+					act.archive_done()
+				end,
+			})
+		end
+		local extra = props.board_menu :: (() -> { any }?)?
+		if extra ~= nil then
+			for _, e in extra() or {} do
+				table.insert(out, e)
+			end
+		end
+		return if #out > 0 then out else nil
 	end
 	function act.snooze(ask: any, until_ms: number?)
 		local f = props.on_snooze

@@ -90,7 +90,11 @@ M.drag_by = function(_id: string, _dx: number, _dy: number) end
 M.drag_end = function(_id: string) end
 M.recentre = function() end
 M.unpin_children = function(_id: string) end
-M.unpin_all = function() end
+-- (No Map built: its kept pins let go of, as the Map would on its next
+-- build. A Map built does it in place, its nodes settling.)
+M.unpin_all = function()
+	M.pins_of():set({} :: any)
+end
 M.done_unread_ids = function(): { string }
 	return {}
 end
@@ -241,6 +245,8 @@ M.View = ui.component(function(props: {
 	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 	-- Marks these chats done as read (the space's menu), with its Undo.
 	mark_read: ((ids: { string }) -> ())?,
+	-- Archives every closed board card (the space's menu), with its Undo.
+	archive_done: { count: () -> number, run: () -> () }?,
 	-- Progress's row of a chat (its note, steps, ETA), for the hover card.
 	progress: ((id: string) -> any)?,
 	-- Shows a board card (the hover card's Open card).
@@ -1637,6 +1643,8 @@ M.View = ui.component(function(props: {
 		unpin(function(_i: number): boolean
 			return true
 		end)
+		-- (And what's kept of nodes not on it now.)
+		M.pins_of():set({} :: any)
 	end
 
 	-- Fit: the Brain back in the centre (where it was dragged, if it was),
@@ -2295,6 +2303,18 @@ M.View = ui.component(function(props: {
 						end
 					end,
 				},
+				-- (Every closed board card off the board, and its threads off
+				-- the Map, an Undo for a moment.)
+				if props.archive_done
+					then {
+						label = locale.s("orch.board.archive_done"),
+						icon = "archive-minimalistic",
+						disabled = props.archive_done.count() == 0,
+						on_select = function()
+							(props.archive_done :: any).run()
+						end,
+					}
+					else nil,
 			}
 		end
 		local i = fmodel.index[id]

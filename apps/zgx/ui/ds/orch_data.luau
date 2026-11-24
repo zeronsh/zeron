@@ -350,8 +350,10 @@ export type Need = {
 }
 
 -- What needs the person, as the board has it (ds/orch_board_model): one
--- row a card in Needs you (its first ask, the rest counted on it), one an
--- open ask not put off that belongs to no such card, one a chat awaiting
+-- row a card in Needs you (its first own ask, the rest counted on it), one
+-- an open ask not put off that belongs to no such card (a shared ask, the
+-- engine's one for an orchestrator's open PRs that stands on every review
+-- card, among them: one row of its own, never on the cards'), one a chat awaiting
 -- input that is no such card's thread. Urgent first, then the newest, as
 -- the column orders its cards: one card has one place in every list.
 local function needs_now(now: any, sessions_now: any, board: any, at: number): { Need }
@@ -370,6 +372,10 @@ local function needs_now(now: any, sessions_now: any, board: any, at: number): {
 		local asks: { any } = {}
 		local input = false
 		for _, a in e.asks do
+			-- (A shared ask is no card's: its own row, below.)
+			if model.shared(now, a) then
+				continue
+			end
 			carded[a.id] = true
 			if not M.deferred(a, at) then
 				table.insert(asks, a)
