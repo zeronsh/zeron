@@ -1822,7 +1822,14 @@ impl Bridge {
             None => {}
         }
         self.publish_templates();
-        self.publish_page();
+        // Settings → Plugins again only for a look that found something: its
+        // elements report reads and scans every script on this thread, and
+        // off macOS and Windows a look comes every `TEMPLATES_LOOK` (an idle
+        // window's largest cost, growing with `ui/`). The same `.live`, the
+        // same template and trust: the same scripts, the same report.
+        if compose || kept || retry || was != id || cached.is_none() {
+            self.publish_page();
+        }
         if (kept || (changed > 0 && template))
             && let Err(error) = self.host.reload()
         {
