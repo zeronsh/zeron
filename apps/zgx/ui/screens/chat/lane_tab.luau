@@ -250,13 +250,13 @@ export type Footer = { access: boolean?, place: boolean? }
 -- A second placement of a page's composer (the Control room's floating
 -- one): the same draft, chips and picks as the first, shown another way.
 -- `mirror`: the first one keeps the chat's picks and edits, this one only
--- shows them. `bare`: no footer and no chips over the draft (one line).
--- `expanded`: opened out from the start. `on_escape`: Escape's, first.
+-- shows them. `on_escape`: Escape's, first.
 -- `on_focus`: told as its field takes the keys and lets them go (either
 -- placement's, so the keys can follow it from one to the other).
 -- `keeps`: a mirror with no first placement (the Control room's Capture,
--- a bar now): it keeps the chat's picks itself.
-export type Form = { mirror: boolean?, keeps: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
+-- a bar now): it keeps the chat's picks itself. `over_art`: its footer on
+-- the pill's glass (ds.Composer's), where it floats over a page.
+export type Form = { mirror: boolean?, keeps: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())?, over_art: (() -> boolean)? }
 local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?, form: Form?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?, dock_target: State<number>?): Node
 	local mirror = form ~= nil and form.mirror == true
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -1146,16 +1146,11 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			p[k] = nil
 		end
 	end
-	-- (Another placement's form: one line with nothing over it or under it,
-	-- or opened out from the start.)
-	if form and form.bare then
-		p.cargo, p.bare = nil, true
-	end
-	if form and form.expanded then
-		p.expanded = true
-	end
 	if form and form.on_focus then
 		p.on_field_focus = form.on_focus
+	end
+	if form and form.over_art then
+		p.over_art = form.over_art
 	end
 	return ds.Composer(p :: any)
 end
@@ -1243,11 +1238,8 @@ end
 --
 -- A second placement of the same composer (`mirror = true`, the same
 -- `slot`): one composer shown in two places, its draft, chips and picks
--- the first one's. Its focus is its own (`focus`); `bare()` while it's one
--- line with nothing over or under it, opened out otherwise; `on_escape`
--- has Escape first; `on_open_model` is asked for while it's bare and its
--- model picker is wanted (`/model`, the sidebar's): it opens out, then
--- the picker. While a mirror shows, the model picker asked for from
+-- the first one's. Its focus is its own (`focus`); `on_escape` has Escape
+-- first. While a mirror shows, the model picker asked for from
 -- elsewhere opens in it rather than in the first (likely out of view).
 -- The slot's session is watched while either is there.
 local holders: { [string]: number } = {}
@@ -1274,10 +1266,9 @@ M.Composer = ui.component(function(props: {
 	mirror: boolean?,
 	keeps: boolean?,
 	focus: State<number>?,
-	bare: (() -> boolean)?,
 	on_escape: (() -> boolean)?,
-	on_open_model: (() -> ())?,
 	on_focus: ((focused: boolean) -> ())?,
+	over_art: (() -> boolean)?,
 	lazy: boolean?,
 	-- Its chat's row and send path alone, no transcript watched (Capture's:
 	-- it never shows one). Every placement of a slot passes the same.
@@ -1385,33 +1376,6 @@ M.Composer = ui.component(function(props: {
 		live_pickers[slot] = list
 		pickers[slot] = open_model
 	end
-	-- (Bare, its picker wanted: opened out first, then the picker, once
-	-- the opened-out form is made.)
-	local bare = props.bare
-	if mirror and bare then
-		local seen = open_model:peek()
-		local again = false
-		ui.effect(function()
-			local n = open_model:get()
-			if n == seen then
-				return
-			end
-			seen = n
-			if again then
-				again = false
-				return
-			end
-			if bare() and props.on_open_model then
-				props.on_open_model()
-				ui.after(0, function()
-					ui.after(0, function()
-						again = true
-						open_model:add(1)
-					end)
-				end)
-			end
-		end)
-	end
 	-- (Taken a frame on, once its composer and its picker are made, and
 	-- only by one still there. A page coming may make it again as it lays
 	-- itself out: one let go just after it opened its picker hands the
@@ -1480,32 +1444,18 @@ M.Composer = ui.component(function(props: {
 		local c = composer(id, view, `lane.{slot}`, focus, open_model, false, nil, true, props.take, props.placeholder, props.footer, form)
 		return if props.drop then M.DropZone { slot = slot, chat = props.chat, focus = props.focus, place = if mirror then "mirror" else nil, c } else c
 	end
-	-- (A real swap: the chat it's bound to, once known; a mirror's form,
-	-- bare or opened out, as it changes.)
+	-- (A real swap: the chat it's bound to, once known.)
 	return ui.presence(function(): string
-		local id = props.chat() or ""
-		if mirror and bare and id ~= "" then
-			return if bare() then `{id}#bare` else `{id}#open`
-		end
-		return id
+		return props.chat() or ""
 	end, function(key: string): Node
 		if key == "" then
 			return ui.div {}
 		end
-		local id, how = nil, nil
-		if mirror and bare then
-			id, how = string.match(key, "^(.-)#(%a+)$")
-		end
+		local id = key
 		local form: Form? = nil
-		if id and how then
-			local f: Form = { mirror = true, keeps = props.keeps, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
+		if mirror or on_focus then
+			local f: Form = { mirror = mirror, keeps = props.keeps, on_escape = props.on_escape, on_focus = on_focus, over_art = props.over_art }
 			form = f
-		else
-			id = key
-			if mirror or on_focus then
-				local f: Form = { mirror = mirror, keeps = props.keeps, on_escape = props.on_escape, on_focus = on_focus }
-				form = f
-			end
 		end
 		-- (Its `id` is the component's node's: zgx gives it there.)
 		-- (Lazy: the pointer coming over it wakes its chat, so its picks are

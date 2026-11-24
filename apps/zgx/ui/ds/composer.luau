@@ -143,9 +143,6 @@ export type Props = {
 	keep: string?,
 	-- Always opened out (a new chat's), rather than one line while it fits.
 	expanded: (boolean | () -> boolean)?,
-	-- No footer under the pill (its pickers shown elsewhere, or not at
-	-- all): a composer that's only its draft, + and Send.
-	bare: boolean?,
 	-- Told as the draft's field takes the keys (true) and lets them go.
 	on_field_focus: ((focused: boolean) -> ())?,
 	-- Moved as the composer is shown for something else (a new chat's
@@ -3076,7 +3073,7 @@ return ui.component(function(props: Props): Node
 			ui.column { ref = deck_size, w_full = true, shrink = 0, trays },
 			ui.popover(m.popover(surface)),
 		},
-		ui.column { ref = footer_size, w_full = true, shrink = 0, if props.bare then nil else footer },
+		ui.column { ref = footer_size, w_full = true, shrink = 0, footer },
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).

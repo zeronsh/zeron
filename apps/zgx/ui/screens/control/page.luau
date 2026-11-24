@@ -539,12 +539,14 @@ local FOOTER: any = { access = false, place = false }
 -- Capture's composer is out of the page's view, above it: it floats.
 -- Capture's history, opened over the page from its bar.
 M.history_panel = ui.state("control_history_panel", false)
--- The floating one opened out.
-M.float_open = ui.state("control_capture_float_open", false)
 -- (Whether the floating one holds the keys, followed as focus moves.)
 local float_focused = false
 -- The floating one's height as laid out (the Chat tab keeps its foot clear).
 M.float_h = ui.state("control_capture_float_h", 0)
+-- Its height at rest, the least it has been laid out at: what a tab that
+-- fills the page (the Map) keeps clear of. Grown (lines, chips, opened
+-- out) it lies over the page, which never lays itself out again for it.
+M.float_rest_h = ui.state("control_capture_float_rest_h", 0)
 -- Asked for the keys: bumped, the floating one takes them.
 local float_wanted = ui.state("control_capture_float_wanted", 0)
 -- The floating one's own element, to let go of the keys before it goes.
@@ -1400,8 +1402,13 @@ local function head(): Node
 	}
 end
 
--- The floating composer's widths: bare (one line), opened out.
-local FLOAT_W, FLOAT_OPEN_W = 600, 720
+-- The floating composer's width: a conversation's, as a chat's composer
+-- is (Settings' conversation width).
+local function float_w(): number
+	return prefs.conversation_width:get()
+end
+-- (Narrowed down to this, at the least, to sit beside Needs you floating.)
+local FLOAT_MIN_W = 480
 -- Clear of the page's sides, and of its foot.
 local FLOAT_SIDE, FLOAT_FOOT = 24, 20
 -- Needs you floating (on Board and Chat): its width, and its list's
@@ -1410,25 +1417,36 @@ local NEEDS_W = 380
 local NEEDS_MAX_H = 460
 -- Clear of a toast stack beside it.
 local FLOAT_TOAST_GAP = 12
--- The companion's size: the pill's own one line (ds.Composer's ONE_LINE
--- plus its hairlines).
-local FLOAT_KNOB = 51
+-- The floating composer's width on a page `page_w` wide: a conversation's,
+-- narrowed to sit beside Needs you while that floats (`beside`), but not
+-- past FLOAT_MIN_W; and whether it still can't (Needs you then stands over
+-- it).
+local function bar_width(page_w: number, beside: boolean): (number, boolean)
+	local room = math.max(0, page_w - FLOAT_SIDE * 2)
+	if not beside then
+		return math.min(float_w(), room), false
+	end
+	local next_to = page_w - 2 * (NEEDS_W + FLOAT_SIDE + FLOAT_TOAST_GAP)
+	if next_to >= FLOAT_MIN_W then
+		return math.min(float_w(), next_to), false
+	end
+	return math.min(float_w(), room), true
+end
+-- (Less than this, it's still being laid out: not its height at rest.)
+local FLOAT_REST_MIN = 24
 
--- Capture's composer floating at the page's foot (Capture scrolled up out
--- of view): bare, one line and beside it a knob (what it carries, counted;
--- a click opens it out), or opened out, its chips over the draft and its
--- model under it. Escape, or the knob, folds it back. Its own drop zone,
--- as Capture is one. `take_keys`: it takes them as it comes (they were in
+-- Capture's composer floating at the page's foot, over the page: a chat's
+-- composer, its chips over the draft and its model and effort under it,
+-- on the pill's glass (the page under it never reads through). Grown, it
+-- lies over the page. Its own drop zone, as Capture is one. `take_keys`: it takes them as it comes (they were in
 -- Capture's).
 -- Kept built while the page is (`shown`: whether it floats now), so going to
 -- a tab where it floats only shows it.
 local Invitation: () -> Node
 local HistoryPanel: any
-local FloatingCapture = ui.component(function(props: { width: () -> number, shown: () -> boolean }): Node
-	local open = M.float_open
+local FloatingCapture = ui.component(function(props: { width: () -> number, shown: () -> boolean, beside: () -> boolean }): Node
 	local focus = ui.use_state(0)
-	-- (The keys asked for once its form is laid out: one made again, bare
-	-- or opened out, takes them as it comes.)
+	-- (The keys asked for once its form is laid out.)
 	local alive = true
 	local function take_keys()
 		ui.after(0, function()
@@ -1466,9 +1484,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 				end
 				float_focused = false
 			end
-			if open:peek() then
-				open:set(false)
-			end
 		end)
 	end)
 	local wanted = float_wanted:peek()
@@ -1483,37 +1498,8 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 		alive = false
 		float_focused = false
 	end)
-	-- Its model picker asked for while bare: opened out, then asked for
-	-- again once the opened-out form is there (the bar is the only
-	-- composer, none other to open it in). (Here, where it outlives the
-	-- bare form the request came to.)
-	local reask = ui.use_state(0)
-	local reasked = reask:peek()
-	ui.effect(function()
-		local n = reask:get()
-		if n == reasked then
-			return
-		end
-		reasked = n
-		ui.after(60, function()
-			if alive and open:peek() then
-				LaneTab().open_model_when(SLOT)
-			end
-		end)
-	end)
-	local function set_open(on: boolean)
-		if open:peek() ~= on then
-			open:set(on)
-		end
-		take_keys()
-	end
-	local count = ui.computed(function(): number
-		local chat = brain_dump()
-		return if chat then #Shared.cargo_of(chat) else 0
-	end)
 	local w = ui.computed(function(): number
-		local room = math.max(0, props.width() - FLOAT_SIDE * 2)
-		return math.min(if open:get() then FLOAT_OPEN_W else FLOAT_W, room)
+		return (bar_width(props.width(), props.beside()))
 	end)
 	-- (Where it stands in the window, as last laid out: a toast stack in
 	-- the corner beside it lifts it over the stack.)
@@ -1534,93 +1520,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 		end
 		return math.max(0, ds.toast.foot() + h + FLOAT_TOAST_GAP - FLOAT_FOOT)
 	end)
-	local knob = ui.button {
-		id = "control-float-knob",
-		label = locale.t("control.capture.expand"),
-		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
-		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
-		shrink = 0,
-		gap = "$space.1",
-		items = "center",
-		justify = "center",
-		rounded = "$radius.full",
-		border = 1,
-		border_color = "$zeron.composer.edge",
-		bg = function(): string
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end,
-		backdrop_blur = function(): number
-			return if material.see_through() then 16 else 0
-		end,
-		shadow = function(): string
-			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
-		end,
-		hover = { border_color = "$border.strong" },
-		color = "$text.secondary",
-		focus_on_press = false,
-		on_click = function()
-			set_open(true)
-		end,
-		ui.presence(function(): string
-			return if count:get() > 0 then "count" else "open"
-		end, function(kind: string): Node
-			if kind == "count" then
-				return ui.row {
-					gap = ui.raw(2, "the clip and its number, one mark"),
-					items = "center",
-					Icon { name = "paperclip", size = 14 },
-					ui.text {
-						function(): string
-							return tostring(count:get())
-						end,
-						class = "control-float-count",
-						tabular = true,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-					},
-				}
-			end
-			return Icon { name = "expand-arrows", size = 16 }
-		end, {
-			enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.8, 1 }, duration = 160, ease = "out(3)" }),
-			exit = motion.transition({ opacity = 0, duration = 100 }),
-		}),
-	}
-	-- Its history: a knob as the first, opening it over the page.
-	local history_knob = ui.button {
-		id = "control-history-open",
-		label = locale.t("control.capture.history_title"),
-		expanded = function(): boolean
-			return M.history_panel:get()
-		end,
-		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
-		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
-		shrink = 0,
-		items = "center",
-		justify = "center",
-		rounded = "$radius.full",
-		border = 1,
-		border_color = "$zeron.composer.edge",
-		bg = function(): string
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end,
-		backdrop_blur = function(): number
-			return if material.see_through() then 16 else 0
-		end,
-		shadow = function(): string
-			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
-		end,
-		hover = { border_color = "$border.strong" },
-		color = function(): string
-			return if M.history_panel:get() then "$text.primary" else "$text.secondary"
-		end,
-		focus_on_press = false,
-		on_click = function()
-			M.history_panel:set(not M.history_panel:peek())
-		end,
-		Icon { name = "clock-circle", size = 16 },
-	}
 	return ui.row {
 		w_full = true,
 		-- (Off the page's foot, and over a toast stack beside it.)
@@ -1639,6 +1538,11 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 			on_resize = function(size: { w: number, h: number }, el: Element)
 				if math.abs(size.h - M.float_h:peek()) >= 1 then
 					M.float_h:set(size.h)
+				end
+				-- (Not while it's still coming: no height yet.)
+				local rest = M.float_rest_h:peek()
+				if size.h >= FLOAT_REST_MIN and (rest <= 0 or size.h < rest - 0.5) then
+					M.float_rest_h:set(size.h)
 				end
 				local x, bw = el.x, el.width
 				if x and bw then
@@ -1663,42 +1567,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 						id = "control-float-panel",
 						grow = 1,
 						min_w = 0,
-						relative = true,
-						-- Opened out, on a panel of the menus' glass (the page under
-						-- it never reads through), the model's footer inside it.
-						p = function(): any
-							return if open:get() then "$space.3" else 0
-						end,
-						ui.show(function(): boolean
-							return open:get()
-						end, ui.div(glass.style({
-							class = "control-float-surface",
-							absolute = true,
-							left = 0,
-							right = 0,
-							top = 0,
-							bottom = 0,
-							pointer_events = "none",
-							rounded = "$radius.xl",
-						}, "menu") :: any)),
-						-- Its head: folding it back, at the right.
-						ui.show(function(): boolean
-							return open:get()
-						end, ui.row {
-							w_full = true,
-							justify = "end",
-							pb = "$space.2",
-							IconButton {
-								id = "control-float-collapse",
-								icon = "collapse-arrows",
-								label = locale.t("control.capture.collapse"),
-								size = "md",
-								tone = "quiet",
-								on_click = function()
-									set_open(false)
-								end,
-							},
-						}),
 						LaneTab().Composer {
 							id = "control-float-composer",
 							slot = SLOT,
@@ -1712,19 +1580,9 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 							-- (The only placement now: the chat's picks are its own.)
 							keeps = true,
 							focus = focus,
-							bare = function(): boolean
-								return not open:get()
-							end,
-							on_escape = function(): boolean
-								if open:peek() then
-									set_open(false)
-									return true
-								end
-								return false
-							end,
-							on_open_model = function()
-								set_open(true)
-								reask:add(1)
+							-- (Over the page: its model and effort on the pill's glass.)
+							over_art = function(): boolean
+								return true
 							end,
 							on_focus = function(on: boolean)
 								float_focused = on
@@ -1732,20 +1590,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 							shown = props.shown,
 						},
 					},
-					-- (Beside it, bare: opened out, its panel's head folds it.)
-					ui.show(function(): boolean
-						return not open:get()
-					end, ui.div {
-						shrink = 0,
-						knob,
-					}),
-					-- Its history (the dumps sent, where each went), over the page.
-					ui.show(function(): boolean
-						return CP ~= nil and CP.dumps()[1] ~= nil
-					end, ui.div {
-						shrink = 0,
-						history_knob,
-					}),
 				},
 			},
 		},
@@ -1871,6 +1715,36 @@ local MapTab = ui.component(function(): Node
 	-- frames. The first, at once.)
 	local SETTLE_MS = 150
 	local latest = 0
+	-- (The tab's height as last laid out.)
+	local tab_h = 0
+	local function fit()
+		if tab_h <= 0 then
+			return
+		end
+		local fill = OrchMap().fill_h
+		local room = math.floor(math.max(0, tab_h - MAP_CHROME - M.float_rest_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
+		latest = room
+		if fill:peek() <= 0 then
+			fill:set(room)
+			return
+		end
+		ui.after(SETTLE_MS, function()
+			if latest == room and math.abs(room - fill:peek()) >= 1 then
+				fill:set(room)
+			end
+		end)
+	end
+	-- (Capture's bar at rest known, or its rest changed: its form, not its
+	-- draft. Its lines and chips don't come here: grown, it lies over the
+	-- Map.)
+	local rest_seen = M.float_rest_h:peek()
+	ui.effect(function()
+		local r = M.float_rest_h:get()
+		if r ~= rest_seen then
+			rest_seen = r
+			fit()
+		end
+	end)
 	return ui.column {
 		id = "control-map-tab",
 		w_full = true,
@@ -1878,23 +1752,13 @@ local MapTab = ui.component(function(): Node
 		min_h = 0,
 		items = "center",
 		on_resize = function(size: { w: number, h: number })
-			local fill = OrchMap().fill_h
-			local room = math.floor(math.max(0, size.h - MAP_CHROME - M.float_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
-			latest = room
-			if fill:peek() <= 0 then
-				fill:set(room)
-				return
-			end
-			ui.after(SETTLE_MS, function()
-				if latest == room and math.abs(room - fill:peek()) >= 1 then
-					fill:set(room)
-				end
-			end)
+			tab_h = size.h
+			fit()
 		end,
 		px = "$space.6",
 		pt = "$space.2",
 		pb = function(): any
-			return ui.raw(M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar, measured")
+			return ui.raw(M.float_rest_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar at rest, measured")
 		end,
 		ui.column {
 			w_full = true,
@@ -2082,6 +1946,44 @@ local ChatTab = ui.component(function(): Node
 			return stage.Later(1, build)
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	}
+end)
+
+-- Capture's history, floating at the page's foot on the left as Needs you
+-- floats on the right: a pill (the clock and its name) opening the history
+-- over the page above it. Shown once a dump has been sent.
+local HISTORY_PILL_W = 120
+local HISTORY_PILL_H = 36
+local HistoryFloat = ui.component(function(): Node
+	return ui.button(glass.style({
+		id = "control-history-open",
+		class = "control-history-pill",
+		label = locale.t("control.capture.history_title"),
+		expanded = function(): boolean
+			return M.history_panel:get()
+		end,
+		h = ui.raw(HISTORY_PILL_H, "a pill, one line, as Needs you's"),
+		px = "$space.3",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$radius.full",
+		pointer_events = "auto",
+		focus_on_press = false,
+		on_click = function()
+			M.history_panel:set(not M.history_panel:peek())
+		end,
+		ui.div {
+			color = function(): string
+				return if M.history_panel:get() then "$text.primary" else "$text.secondary"
+			end,
+			Icon { name = "clock-circle", size = 14 },
+		},
+		ui.text {
+			locale.t("control.capture.history_title"),
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+		},
+	}, "menu") :: any)
 end)
 
 -- Needs you, floating on Board and Chat (Overview has its widget): what
@@ -2431,15 +2333,26 @@ M.Page = ui.component(function(): Node
 		if M.history_panel:peek() then
 			M.history_panel:set(false)
 		end
-		if M.float_open:peek() then
-			M.float_open:set(false)
-		end
 	end)
+	-- Whether Needs you floats now (the Board has it as cards).
+	local function needs_floats(): boolean
+		return M.tab:get() ~= "board" and not M.inviting() and tally.needs(false) > 0
+	end
 	-- Needs you floating: off the page's foot, and over the floating
 	-- composer where the page has no room for both side by side.
 	local function needs_bottom(): number
-		local both = FLOAT_W + 2 * (NEEDS_W + FLOAT_SIDE)
-		if width:get() < both then
+		local _, over = bar_width(width:get(), true)
+		if over then
+			return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+		end
+		return FLOAT_FOOT
+	end
+	-- Capture's history pill: off the page's foot on the left, and over
+	-- the floating composer where the page has no room beside it.
+	local function history_bottom(): number
+		local w = width:get()
+		local bar_w = bar_width(w, needs_floats())
+		if w / 2 - bar_w / 2 < FLOAT_SIDE + HISTORY_PILL_W + FLOAT_TOAST_GAP then
 			return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
 		end
 		return FLOAT_FOOT
@@ -2494,15 +2407,25 @@ M.Page = ui.component(function(): Node
 			end, function(): Node
 				return ui.row {
 					w_full = true,
-					justify = "center",
+					pl = FLOAT_SIDE,
 					HistoryPanel { w = history_w },
 				}
 			end, {
 				w_full = true,
 				shrink = 0,
-				pt = "$space.2",
+				-- (Room only while it shows: the wrapper stays, and its room
+				-- the composer's height, the tabs would give it up as the
+				-- composer grows.)
+				pt = function(): any
+					return if M.history_panel:get() then "$space.2" else 0
+				end,
 				pb = function(): any
-					return ui.raw(M.float_h:get() + FLOAT_FOOT + 8, "over Capture's bar")
+					if not M.history_panel:get() then
+						return 0
+					end
+					local over_pill = history_bottom() + HISTORY_PILL_H + 8
+					local over_bar = M.float_h:get() + FLOAT_FOOT + 8
+					return ui.raw(math.max(over_pill, over_bar), "over its pill and Capture's bar")
 				end,
 				enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
 				exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
@@ -2553,18 +2476,32 @@ M.Page = ui.component(function(): Node
 				shown = function(): boolean
 					return float_shown:get()
 				end,
+				beside = needs_floats,
 			},
 		},
+		-- Capture's history pill, once a dump has been sent.
+		ui.presence(function(): string?
+			if not float_shown:get() or CP == nil or CP.dumps()[1] == nil then
+				return nil
+			end
+			return "history"
+		end, function(): Node
+			return HistoryFloat {}
+		end, {
+			absolute = true,
+			left = FLOAT_SIDE,
+			bottom = history_bottom,
+			pointer_events = "none",
+			enter = motion.transition({ opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+		}),
 		-- An account with no orchestrator yet: what one is, and a way to make
 		-- the first.
 		ui.show(M.inviting, Invitation()),
 		-- Needs you, floating, on every tab but the Board (it has it as
 		-- cards) while something waits.
 		ui.presence(function(): string?
-			if M.tab:get() == "board" or M.inviting() or tally.needs(false) == 0 then
-				return nil
-			end
-			return "needs"
+			return if needs_floats() then "needs" else nil
 		end, function(): Node
 			return NeedsFloat { bottom = needs_bottom }
 		end, {
