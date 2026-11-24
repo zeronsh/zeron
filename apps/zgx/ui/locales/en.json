@@ -4574,7 +4574,45 @@
       "runs_as_zeron_body": "It can do anything Zeron can.",
       "update_replaces_edits": "You changed this template on this device. Updating replaces your changes.",
       "changed_here": "Changed on this device",
-      "runs_as_zeron_said": "Runs as Zeron itself. It can do anything Zeron can."
+      "runs_as_zeron_said": "Runs as Zeron itself. It can do anything Zeron can.",
+      "publish_body": "Send a version to the template store. It's there at once, under your username, for everyone to install; it shows as not verified until Zeron's reviewers have read it.",
+      "sent_toast": "{name} {version} is in the template store",
+      "check": {
+        "preview": "A preview picture",
+        "zeron_version": "The Zeron it's made for"
+      },
+      "summary": {
+        "none": "Not in the template store",
+        "unknown": "Share it in the template store",
+        "listed_verified": "{version} in the template store, verified",
+        "listed_waiting": "{version} in the template store, not verified yet",
+        "listed_declined": "{version} in the template store, not verified"
+      },
+      "fix": {
+        "not_semver": "Give it a version of three numbers, like 1.2.0, in zeron-template.json.",
+        "id_reserved": "This id is taken: Zeron keeps it for itself, for the store's own pages, or for someone else. Duplicate the template under another name.",
+        "not_newer": "Give it a version newer than every one you've sent, in zeron-template.json.",
+        "version_exists": "You've sent this version already. Give it a new one in zeron-template.json.",
+        "protected_file": "This file is Zeron's own, and no template can replace it. Delete it.",
+        "bad_package": "It holds a file Zeron doesn't write for a template. Leave it out.",
+        "none_of": "A template has no “{field}”. Take it out of zeron-template.json.",
+        "missing_listing": {
+          "preview": "Add a picture of it, preview.png, to its folder: it's the first thing people see.",
+          "description": "Say what it looks like in zeron-template.json (\"description\").",
+          "name": "Give it a name in zeron-template.json (\"name\").",
+          "keywords": "Add keywords in zeron-template.json (\"keywords\").",
+          "screenshots": "Add its pictures in zeron-template.json (\"screenshots\").",
+          "homepage": "Add its website in zeron-template.json (\"homepage\").",
+          "repository": "Add where its source is in zeron-template.json (\"repository\").",
+          "license": "Name its license in zeron-template.json (\"license\").",
+          "zeron_version": "Say which Zeron it's made for in zeron-template.json (\"zeron_version\")."
+        },
+        "bad_listing": {
+          "preview": "Its preview.png must be a PNG the store can show, and not too big.",
+          "zeron_version": "The Zeron it's made for must be three numbers, like 0.3.20."
+        },
+        "missing_readme": "Write README.md in its folder: it's the template's page in the store."
+      }
     }
   },
   "themes": {

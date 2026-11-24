@@ -4,6 +4,8 @@
 --   template_stub.hold / release   answers wait until released
 --   template_stub.offline          every call fails as offline
 --   template_stub.empty            the store has none
+--   template_stub.published        Hot Pink is yours there, verified, then not
+--   template_stub.problems         the next checks find what a template lacks
 --   template_stub.few              the store has eight, a page
 
 local store: any = require("@app/screens/templates/store")
@@ -199,6 +201,49 @@ store.set_updates = function(id: string?, prefer: string?): any
 	end)
 end
 
+-- Yours there, and publishing one (`PrepareTemplatePublish`, `PublishTemplate`).
+local mine: { any } = {}
+local problems = false
+store.mine = function(): any
+	return answer("mine", function(): any
+		return { publisher_id = "p_1", templates = table.clone(mine) }
+	end)
+end
+store.prepare = function(id: string): any
+	return answer(`prepare:{id}`, function(): any
+		return {
+			id = id,
+			name = "Hot Pink",
+			version = "1.1.0",
+			hash = `{id}-1.1.0`,
+			ok = not problems,
+			problems = if problems
+				then {
+					{ rule = "missing_listing", field = "preview", words = "no preview.png" },
+					{ rule = "bad_listing", field = "categories", words = "categories" },
+					{ rule = "protected_file", path = "app.luau", words = "protected" },
+					{ rule = "missing_readme", words = "no README.md" },
+				}
+				else {},
+			warnings = {},
+			package = { files = 6, bytes = 12000 },
+			ticket = if problems then nil else "ticket-1.1.0",
+			store_checked = true,
+		}
+	end)
+end
+store.publish = function(id: string, hash: string, ticket: string): any
+	return answer(`publish:{id}:{hash}:{ticket}`, function(): any
+		mine = { { id = id, name = "Hot Pink", version = "1.1.0", versions = { { version = "1.1.0", status = "listed", verified = false, published_at = NOW, via = "device", review = { decided = false } } } } }
+		return { ok = true, id = id, version = "1.1.0", status = "listed", verified = false, checks = {}, url = `https://zeron.example/templates/{id}` }
+	end)
+end
+store.version_action = function(id: string, version: string, action: string): any
+	return answer(`version_action:{id}:{version}:{action}`, function(): any
+		return { ok = true }
+	end)
+end
+
 for name, run in
 	{
 		hold = function()
@@ -217,6 +262,19 @@ for name, run in
 		end,
 		empty = function()
 			empty = true
+		end,
+		problems = function()
+			problems = true
+		end,
+		published = function()
+			mine = {
+				{
+					id = "hot-pink",
+					name = "Hot Pink",
+					version = "1.0.0",
+					versions = { { version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 1e8, published_at = NOW - 1e9, via = "device", review = { decided = true, decision = "verified", decided_at = NOW - 1e8 } } },
+				},
+			}
 		end,
 		few = function()
 			few = true

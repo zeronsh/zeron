@@ -381,6 +381,10 @@ ui.command {
 local theme_names = ui.state("theme_names", "")
 ui.command { id = "theme_names", title = "List the themes", run = function() theme_names:set(table.concat(ui.theme.names(), ",")) end }
 
+for _, name in { "en", "zh-Hans" } do
+	ui.command { id = `locale_{name}`, title = name, run = function() ui.locale:set(name) end }
+end
+
 -- Light, for pictures of it (src/audit_shots.rs: `!theme_light`).
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 

@@ -61,6 +61,24 @@ for _, key in {
 } do
 	words["plugins.store." .. key] = "templates.store." .. key
 end
+-- (Publishing one of yours.)
+local FIELDS = { preview = true, description = true, name = true, keywords = true, screenshots = true, homepage = true, repository = true, license = true, zeron_version = true }
+local RULES = { missing_readme = true, not_semver = true, id_reserved = true, too_large = true, binary_file = true, no_notes = true, raw_html = true, footnote = true, math = true, not_newer = true, version_exists = true, protected_file = true, bad_package = true }
+for field in FIELDS do
+	words[`plugins.store.fix.missing_listing.{field}`] = `templates.store.fix.missing_listing.{field}`
+	if field == "preview" or field == "zeron_version" then
+		words[`plugins.store.fix.bad_listing.{field}`] = `templates.store.fix.bad_listing.{field}`
+	end
+end
+for _, key in { "missing_readme", "not_semver", "id_reserved", "not_newer", "version_exists", "protected_file", "bad_package", "none_of" } do
+	words["plugins.store.fix." .. key] = "templates.store.fix." .. key
+end
+for _, key in { "none", "unknown", "listed_verified", "listed_waiting", "listed_declined" } do
+	words["plugins.store.summary." .. key] = "templates.store.summary." .. key
+end
+for _, key in { "check.preview", "check.zeron_version", "publish_body", "sent_toast" } do
+	words["plugins.store." .. key] = "templates.store." .. key
+end
 
 local kind: kinds.Kind = {
 	id = "template",
@@ -68,6 +86,7 @@ local kind: kinds.Kind = {
 	store = require("@app/screens/templates/store"),
 	nav = require("@app/screens/templates/nav"),
 	state = {
+		list = state.list,
 		shown = shown,
 		-- Which updates each takes here: this device's own choice for none.
 		store_updates = ui.shared("templates.store_updates", nil :: any),
@@ -114,6 +133,16 @@ local kind: kinds.Kind = {
 	words = words,
 	cards = true,
 	fact = "templates.store.runs_as_zeron_list",
+	checks = {
+		{ id = "readme", rule = "missing_readme" },
+		{ id = "description", rule = "listing", field = "description" },
+		{ id = "preview", rule = "listing", field = "preview" },
+		{ id = "version", rule = "not_semver" },
+		{ id = "zeron_version", rule = "listing", field = "zeron_version" },
+	},
+	fields = FIELDS,
+	rules = RULES,
+	none_of = { icon = true, engines = true, permissions = true, commands = true, services = true, tools = true, categories = true, builtin_theme = true, builtin_template = true },
 }
 
 return kind

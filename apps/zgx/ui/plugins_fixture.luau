@@ -17,6 +17,7 @@ local page = require("@app/screens/plugins/page")
 -- (The plugin store, answered with its made-up catalog: Yours asks it
 -- where your plugins stand.)
 require("./store_stub")
+require("./template_store_stub")
 
 type Extra = { permissions: { string }?, ask: { string }? }
 

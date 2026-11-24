@@ -4574,7 +4574,45 @@
       "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
       "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。",
       "changed_here": "在这台设备上修改过",
-      "runs_as_zeron_said": "以 Zeron 自身的身份运行。它可以做 Zeron 能做的一切。"
+      "runs_as_zeron_said": "以 Zeron 自身的身份运行。它可以做 Zeron 能做的一切。",
+      "publish_body": "把一个版本发送到模板商店。它会立即以你的用户名出现在商店中，所有人都可以安装；在 Zeron 审核人员审阅之前，它会显示为尚未验证。",
+      "sent_toast": "{name} {version} 已在模板商店",
+      "check": {
+        "preview": "预览图片",
+        "zeron_version": "适用的 Zeron 版本"
+      },
+      "summary": {
+        "none": "未发布到模板商店",
+        "unknown": "把它分享到模板商店",
+        "listed_verified": "{version} 已在模板商店，已验证",
+        "listed_waiting": "{version} 已在模板商店，尚未验证",
+        "listed_declined": "{version} 已在模板商店，未通过验证"
+      },
+      "fix": {
+        "not_semver": "在 zeron-template.json 里给它一个由三个数字组成的版本号，例如 1.2.0。",
+        "id_reserved": "这个 id 已被保留：Zeron 把它留给自己、商店自己的页面或他人。请换一个名字复制这个模板。",
+        "not_newer": "在 zeron-template.json 里给它一个比你发送过的所有版本都新的版本号。",
+        "version_exists": "这个版本你已经发送过了。请在 zeron-template.json 里换一个新版本号。",
+        "protected_file": "这个文件属于 Zeron，任何模板都不能替换它。请删除它。",
+        "bad_package": "它包含 Zeron 不会为模板写入的文件。请去掉它。",
+        "none_of": "模板没有“{field}”。请从 zeron-template.json 里去掉它。",
+        "missing_listing": {
+          "preview": "在它的文件夹里添加一张图片 preview.png：这是大家最先看到的。",
+          "description": "在 zeron-template.json 里说明它的样子（\"description\"）。",
+          "name": "在 zeron-template.json 里给它起个名字（\"name\"）。",
+          "keywords": "在 zeron-template.json 里添加关键词（\"keywords\"）。",
+          "screenshots": "在 zeron-template.json 里添加图片（\"screenshots\"）。",
+          "homepage": "在 zeron-template.json 里添加网站（\"homepage\"）。",
+          "repository": "在 zeron-template.json 里写明源代码位置（\"repository\"）。",
+          "license": "在 zeron-template.json 里写明许可证（\"license\"）。",
+          "zeron_version": "在 zeron-template.json 里写明它适用的 Zeron 版本（\"zeron_version\"）。"
+        },
+        "bad_listing": {
+          "preview": "preview.png 必须是商店能显示的 PNG，且不能太大。",
+          "zeron_version": "适用的 Zeron 版本必须由三个数字组成，例如 0.3.20。"
+        },
+        "missing_readme": "在它的文件夹里写好 README.md：这是模板在商店里的页面。"
+      }
     }
   },
   "themes": {

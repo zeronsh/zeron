@@ -21,7 +21,19 @@ export type Kind = {
 	fact: string?,
 	-- Whether the store sorts it into categories.
 	categories: boolean?,
+	-- What the store needs of one before it's published, in the order a person
+	-- fixes them (each passes unless a problem the engine found names it).
+	checks: { Check },
+	-- The listing's fields whose fixes it has words for (`fix.missing_listing`,
+	-- `fix.bad_listing`), and the engine's rules (`fix.<rule>`).
+	fields: { [string]: boolean },
+	rules: { [string]: boolean },
+	-- Fields one has none of (in its words: take it out).
+	none_of: { [string]: boolean }?,
 }
+
+-- (`rule` "listing": missing or bad, `field` which.)
+export type Check = { id: string, rule: string, field: string? }
 
 -- A sentence as this kind says it: `ui.t`'s key, the plugins' or its own.
 export type Say = (key: string, args: { [string]: any }?) -> Message
