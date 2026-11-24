@@ -180,7 +180,7 @@
 .hljs-punctuation, .hljs-operator { color: var(--text-2); }
 
 /* ---- the rail: what a person weighs before installing ---- */
-.rail { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: 84px; }
+.rail { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: var(--s32); }
 .rail-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: var(--label); }
 .rail .none { font-size: 14px; line-height: 20px; color: var(--text-2); }
 .rail .more { margin-top: var(--s12); font-size: 13px; }
@@ -208,13 +208,18 @@
 /* ---- Versions: every one, newest first, each saying whether Zeron verified it ---- */
 .vintro { padding-top: var(--s24); color: var(--text-2); max-width: 40em; }
 .vlist { margin-top: var(--s24); padding: 0; list-style: none; }
-.v { display: grid; grid-template-columns: 148px minmax(0, 1fr) auto; gap: var(--s24); padding: var(--s24) 0; box-shadow: 0 -1px 0 var(--line); align-items: start; }
+/* (A release's head on its own line, as GitHub's: the version and its chips after it, Install at the right; its
+   state and notes under them, as wide as the row.) */
+.v { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s12) var(--s24); padding: var(--s24) 0; box-shadow: 0 -1px 0 var(--line); align-items: start; }
+.v .vbody { grid-column: 1 / -1; grid-row: 2; }
+.v .act { grid-column: 2; grid-row: 1; }
 .v:first-child { box-shadow: none; padding-top: var(--s8); }
-/* (A tag the line begins with hangs by its padding; the gap grows by as much: store.css .pills.) */
-.v .vno { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s8) var(--s16); font: 600 17px/24px var(--mono); letter-spacing: -0.02em; min-width: 0; }
+/* (The version, then its chips on its line after it; one too many for the line goes on to the next, after the
+   version still, never hanging under it.) */
+.v .vno { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s8); font: 600 17px/24px var(--mono); letter-spacing: -0.02em; min-width: 0; }
 .v .vno a { overflow-wrap: anywhere; border-radius: 4px; }
 .v .vno a:hover { box-shadow: 0 1px 0 var(--line-2); }
-.v .new { margin-left: calc(-1 * var(--s8)); font: 500 11px/18px var(--sans); letter-spacing: 0.02em; padding: 0 var(--s8); border-radius: 6px; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.v .new { font: 500 11px/18px var(--sans); letter-spacing: 0.02em; padding: 0 var(--s8); border-radius: 6px; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
 .v .st { display: flex; align-items: center; flex-wrap: wrap; row-gap: var(--s8); font-size: 13px; line-height: 20px; color: var(--text-3); }
 .v .notes { margin-top: var(--s12); padding-top: 0; font-size: 15px; line-height: 24px; }
 .v .notes > * + * { margin-top: var(--s12); }
@@ -226,7 +231,8 @@
 
 /* ---- What it asks for, all of it ---- */
 .warnline { margin-top: var(--s16); margin-left: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }
-.asklist { margin-top: var(--s16); margin-inline: calc(-1 * var(--s16)); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1); padding: 0; list-style: none; }
+/* (Rows, no box round them, a straight rule between, as Review's are; each hangs by its padding.) */
+.asklist { margin-top: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: 0; list-style: none; }
 .asklist-none { margin-top: var(--s16); color: var(--text-2); }
 .ar { display: flex; align-items: flex-start; gap: var(--s16); padding: var(--s16) var(--s16); font-size: 15px; line-height: 22px; }
 .ar + .ar { box-shadow: 0 -1px 0 var(--line); }
@@ -291,7 +297,7 @@
   /* (As wide as the column, as wide as the screen.) */
   .prose pre, .warnline { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; max-width: none; }
   .get { --get-hang: var(--s16); }
-  .asklist { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; }
+  .asklist { margin-inline: calc(-1 * var(--gutter)); }
   .asklist .ar { padding-inline: var(--gutter); }
   .prose { padding-top: var(--s24); }
   .prose h1, .prose h2 { margin-top: var(--s32); }

@@ -80,7 +80,7 @@ const dialogId = (id: string) => `free-${id}`;
       <section class="reserve" aria-labelledby="reserve-heading">
         <h2 id="reserve-heading">Reserve an id</h2>
         <p class="lead2">Held for the account named, or for nobody. An id in use moves by a transfer instead.</p>
-        <form method="post" action={here} class="card askcard reserve-form">
+        <form method="post" action={here} class="askcard reserve-form">
           <input type="hidden" name="csrf" value={session.csrf} />
           <div class="body">
             <div>

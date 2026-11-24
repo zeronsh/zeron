@@ -1,10 +1,15 @@
 ---
-// One of your plugins: every version you've published, where each stands
-// and whether Zeron verified it (amendment 45: each is listed at once),
-// what it means, the reviewer's words, how it was sent, and the one thing
-// you can do with it (stop new installs, or allow them again). Its deploy
-// tokens are your account's (contract a315eef5a): Deploy tokens. Yours only: anyone
-// else's id is the 404 page. Signed out, it says so and offers sign-in.
+// One of your plugins: a plugin page's head (its tile, name, its id and where
+// it stands, See it in the store), then every version you've published as
+// your own pages' table: a row each, where it stands and whether Zeron
+// verified it (amendment 45: each is listed at once; the pills say what that
+// means), when it was published ("via token" when a deploy token sent it),
+// and the one thing you can do with it (stop new installs, or allow them
+// again). A second line only for what the pills can't say: why a newer
+// version stopped it, a reviewer's note, why it was taken down.
+// Its deploy tokens are your account's (contract a315eef5a): Deploy tokens.
+// Yours only: anyone else's id is the 404 page. Signed out, it says so and
+// offers sign-in.
 import AccountHead from "../../../components/look/AccountHead.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
@@ -22,7 +27,7 @@ import { day, unbidi } from "../../../lib/store/format.ts";
 import { hueClass } from "../../../lib/store/hue.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
-import { everListed, listingState, PILL_TONE, verificationState, versionState } from "../../../lib/store/states.ts";
+import { everListed, listingState, PILL_TONE, versionState } from "../../../lib/store/states.ts";
 import type { VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
 import { statusWords, store } from "../../../lib/store/words.ts";
@@ -92,8 +97,8 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
         </div>
       ) : (
         <>
-          <header class="mhead">
-            <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="l" />
+          <header class="ohead">
+            <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
@@ -101,7 +106,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 {listing && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
               </p>
             </div>
-            {plugin.listing === "listed" && <a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a>}
+            {plugin.listing === "listed" && <div class="head-act"><a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a></div>}
           </header>
 
           {idle && <p class="flash info">No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</p>}
@@ -114,55 +119,43 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 <p>Versions you publish show here, each saying whether Zeron verified it.</p>
               </div>
             ) : (
-              <div class="card vlist">
-                <div class="vr h" aria-hidden="true"><span>Version</span><span>What it means</span><span>Published</span><span></span></div>
+              <div class="tbl vers">
+                <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>
                 <ul aria-label={store("plugins.store.your_versions")}>
                   {plugin.versions.map((v) => {
                     const verified = verifiedPill(v);
                     const status = statusPill(v);
-                    const state = versionState(v);
-                    const verification = verificationState(v);
                     const action = actionOf(v);
                     const ask = action ? AUTHOR_ACTIONS[action].ask(name, v.version) : null;
                     const live = v.status === "listed" || v.status === "yanked";
+                    // (What only words can say: why a newer one stopped it, the reviewer's note, why it was taken down, that
+                    // it was turned off.)
+                    const notes = [
+                      v.yanked_by === "superseded" && versionState(v).about,
+                      v.review?.message && `The reviewer's note: “${v.review.message}”${[v.review.reason ? ` · ${reasonLabel(v.review.reason)}` : "", v.review.decided_at ? ` · ${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "read"} ${day(v.review.decided_at, now)}` : ""].join("")}`,
+                      v.removal?.reason && `“${v.removal.reason}” · ${v.status === "taken_down" ? "Taken down" : "Removed"} ${day(v.removal.at, now)}${v.status === "taken_down" ? ", and turned off on the devices that had it." : ""}`,
+                      v.blocked && v.status !== "taken_down" && "It was turned off on the devices that had it.",
+                    ].filter((x): x is string => Boolean(x));
                     return (
-                      <li class:list={["vr", { off: !live }]}>
-                        <div class="vn pills">
+                      <li class:list={["trow", { off: !live, two: notes.length > 0 }]}>
+                        <span class="c-ver">
                           <b class="mono">{v.version}</b>
                           {/* (Whether Zeron verified it beside the version, always first; where it stands after it.) */}
-                          {(v.status === "listed" || v.status === "yanked") && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}
+                          {live && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}
                           {status && <span class:list={["state", status.tone]} data-kind="status">{status.label}</span>}
-                        </div>
-                        <div class="means">
-                          {/* (Superseded: why it takes no new installs comes first; the reviewer's words after.) */}
-                          {((said) => said && <p>{said}</p>)(v.review?.message ? (v.yanked_by === "superseded" ? state.about : null) : live ? `${state.about} ${verification.about}` : state.about)}
-                          {v.review?.message && (
-                            <blockquote class="said-was">
-                              <p>“{v.review.message}”</p>
-                              <footer>{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "read"} ${day(v.review.decided_at, now)}` : null].filter(Boolean).join(" · ")}</footer>
-                            </blockquote>
-                          )}
-                          {v.removal?.reason && (
-                            <blockquote class="said-was">
-                              <p>“{v.removal.reason}”</p>
-                              <footer>{`${v.status === "taken_down" ? "Taken down" : "Removed"} ${day(v.removal.at, now)}`}</footer>
-                            </blockquote>
-                          )}
-                          {/* (Taken down says it was turned off already; said once.) */}
-                          {v.blocked && v.status !== "taken_down" && <small>It was turned off on the devices that had it.</small>}
-                        </div>
-                        <div class="pub">
-                          <div><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time></div>
-                          {v.via === "deploy_token" && <small><Icon name="key" />{v.deploy_token?.name ?? "A deploy token"}</small>}
-                          {v.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
-                        </div>
-                        <div class="act">
+                        </span>
+                        <span class="c-pub">
+                          <span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time>
+                          {v.via === "deploy_token" && <span class="via" title={v.deploy_token?.name ? `Sent by the deploy token “${v.deploy_token.name}”` : "Sent by a deploy token"}><Icon name="key" />via token<span class="sr-only">: {v.deploy_token?.name ?? "a deploy token"}</span></span>}
+                        </span>
+                        <span class="c-act">
                           {action && ask && (
-                            <a class="btn sec sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
+                            <a class="btn ghost sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
                               {ask.confirm}<span class="sr-only"> {v.version}</span>
                             </a>
                           )}
-                        </div>
+                        </span>
+                        {notes.length > 0 && <span class="c-note">{notes.join(" ")}</span>}
                       </li>
                     );
                   })}

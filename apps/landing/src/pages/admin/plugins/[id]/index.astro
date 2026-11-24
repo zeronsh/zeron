@@ -1,8 +1,11 @@
 ---
-// One plugin, for its reviewers: its place in the store and its owner;
-// what can be done to it (feature, move, suspend or restore); every version
-// in every state, verified or not, each to its review, a listed one's Take
-// down in the action column; its reports; its history in the audit log.
+// One plugin, for its reviewers, as its owner's page sets it: a plugin
+// page's head (its tile, name, id and where it stands, its owner, how many
+// have it; Its page and what can be done to it at the right: feature, move,
+// suspend or restore); every version in every state as your own pages'
+// table, each row to its review, a listed one's Take down at its end, a
+// second line only for what was said; its reports, a table too; its history
+// in the audit log.
 import TakeDown from "../../../../components/kit/TakeDown.astro";
 import Flash from "../../../../components/look/Flash.astro";
 import Icon from "../../../../components/look/Icon.astro";
@@ -56,8 +59,8 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
         </div>
       ) : (
         <>
-          <header class="mhead">
-            <Tile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size="l" />
+          <header class="ohead">
+            <Tile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
@@ -70,52 +73,55 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
                 <span class="num">{count(a.plugin.installs)} {a.plugin.installs === 1 ? "install" : "installs"}</span>
               </p>
             </div>
-            {a.status === "listed" && <a class="btn sec" href={pluginUrl(a.plugin.id)}>Its page<Icon name="out" /></a>}
-          </header>
-          <div class="staff-acts">
-            <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
-              <input type="hidden" name="csrf" value={session.csrf} />
-              <button class="btn sec sm" type="submit">{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
-            </form>
-            <a class="btn sec sm" href={act("transfer")} data-dialog="transfer">Move…</a>
-            {a.status === "suspended" ? (
-              <form method="post" action={act("restore")}>
+            <div class="head-act staff-acts">
+              <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
                 <input type="hidden" name="csrf" value={session.csrf} />
-                <button class="btn sec sm" type="submit">Restore</button>
+                <button class="btn sec sm" type="submit">{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
               </form>
-            ) : (
-              <a class="btn sec sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
-            )}
-          </div>
+              <a class="btn sec sm" href={act("transfer")} data-dialog="transfer">Move…</a>
+              {a.status === "suspended" ? (
+                <form method="post" action={act("restore")}>
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <button class="btn sec sm" type="submit">Restore</button>
+                </form>
+              ) : (
+                <a class="btn sec sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
+              )}
+              {a.status === "listed" && <a class="btn sec sm" href={pluginUrl(a.plugin.id)}>Its page<Icon name="out" /></a>}
+            </div>
+          </header>
 
           {a.status === "suspended" && a.plugin.suspend_reason && <p class="flash bad"><b>Suspended.</b> {a.plugin.suspend_reason}</p>}
 
           <section class="mvers" aria-labelledby="versions-heading">
             <h2 id="versions-heading">Versions<span class="num">{count(a.versions.length)}</span></h2>
-            <div class="card vlist">
-              <div class="vr h" aria-hidden="true"><span>Version</span><span>What was said</span><span>Published</span><span></span></div>
+            <div class="tbl vers">
+              <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>
               <ul aria-label="Its versions, the newest first">
                 {a.versions.map((v) => {
                   const st = versionState(v);
                   const ver = verificationState(v);
                   const decided = v.review?.decided_at;
+                  // (What was said: why it was taken down or removed, the reviewer's words; with their reason and when.)
+                  const words = v.removal?.reason ? `“${v.removal.reason}”` : v.review?.message ? `“${v.review.message}”` : null;
+                  const when = [v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ");
+                  // (A second line only when someone said something: when they did, its reason and its date beside it.)
+                  const note = words ? [words, when].filter(Boolean).join(" · ") : "";
                   return (
-                    <li class="vr">
-                      <div class="vn pills">
-                        <a class="mono vlink" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
+                    /* (The row opens its review: the version's link, stretched over the row; Take down is its own.) */
+                    <li class:list={["trow", { two: Boolean(note) }]}>
+                      <span class="c-ver">
+                        <a class="mono stretch" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
                         <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>
                         <span class:list={["state", PILL_TONE[ver.tone]]}>{ver.label}</span>
                         {v.blocked && <span class="state bad" title="Turned off on the devices that had it">Off</span>}
-                      </div>
-                      <div class="means">
-                        <p>{v.removal?.reason ? `“${v.removal.reason}”` : v.review?.message ? `“${v.review.message}”` : v.review && !v.review.decided && v.status === "listed" ? "Listed, waiting for a reviewer." : st.about}</p>
-                        {(v.review?.reason || decided) && <small>{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</small>}
-                      </div>
-                      <div class="pub"><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></div>
-                      <div class="act">
+                      </span>
+                      <span class="c-pub"><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span>
+                      <span class="c-act">
                         {removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/take_down`} data-dialog={vid(v.version)}>Take down…<span class="sr-only"> {v.version}</span></a>}
                         {v.status === "taken_down" && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/restore`}>Restore…<span class="sr-only"> {v.version}</span></a>}
-                      </div>
+                      </span>
+                      {note && <span class="c-note">{note}</span>}
                     </li>
                   );
                 })}
@@ -131,16 +137,16 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
             {a.reports.length === 0 ? (
               <p class="none">No one has reported it.</p>
             ) : (
-              <div class="card srows rep">
-                <div class="sr h" aria-hidden="true"><span>State</span><span>Reason</span><span>What they said</span><span>Sent</span><span></span></div>
+              <div class="tbl preps">
+                <div class="trow th" aria-hidden="true"><span>State</span><span>Reason</span><span>What they said</span><span>Sent</span><span></span></div>
                 <ul aria-label="Its reports, the newest first">
                   {a.reports.map((r) => (
-                    <li class="sr">
+                    <li class="trow">
                       <span>{r.status === "open" ? <span class="state no">Open</span> : <span class="t2">{REPORT[r.status].label}</span>}</span>
-                      <span>{r.reason === "malware" ? <span class="state bad">{reasonWords(r.reason)}</span> : <span class="t2">{reasonWords(r.reason)}</span>}</span>
-                      <span>
-                        {r.text ? <span class="said">{r.text}</span> : <span class="t3">No words given.</span>}
-                        <small>from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</small>
+                      <span class="c-reason">{r.reason === "malware" ? <span class="state bad">{reasonWords(r.reason)}</span> : <span class="t2">{reasonWords(r.reason)}</span>}</span>
+                      <span class="c-said">
+                        <span class="c-line">{r.text ? <span class="said" title={r.text}>{r.text}</span> : <span class="t3">No words given.</span>}</span>
+                        <span class="c-sub">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</span>
                       </span>
                       <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
                       {r.status === "open" ? <a class="btn ghost sm" href={`/admin/reports#close-${r.id}`}>Close it…</a> : <span></span>}

@@ -30,7 +30,7 @@
 .browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: var(--s64); align-items: start; }
 
 /* The sidebar: its groups a group's distance apart, each label its step above what it labels. */
-.facets { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: 88px; }
+.facets { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: var(--s32); }
 .facet-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: var(--label); }
 /* (4 px between any two items, so a hovered one never meets the chosen one edge to edge.) */
 .catlist { --pad: var(--s12); display: flex; flex-direction: column; gap: var(--s4); margin-inline: calc(-1 * var(--pad)); }
