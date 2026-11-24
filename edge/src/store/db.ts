@@ -34,6 +34,8 @@ export interface PluginRow {
   readonly name: string | null;
   readonly summary: string | null;
   readonly icon: string | null;
+  /** The card version's first screenshot, a package path (0002_card_cover.sql). */
+  readonly cover: string | null;
   readonly categories: string | null;
   readonly keywords: string | null;
   readonly author_username: string | null;
@@ -181,6 +183,7 @@ export const relist = (db: D1Database, id: string, author: string | null): D1Pre
          name = (SELECT name FROM best),
          summary = (SELECT summary FROM best),
          icon = (SELECT icon FROM best),
+         cover = (SELECT json_extract(screenshots, '$[0]') FROM best),
          categories = (SELECT categories FROM best),
          keywords = (SELECT keywords FROM best),
          author_username = COALESCE(?2, author_username),

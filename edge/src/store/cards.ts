@@ -66,15 +66,17 @@ export const packageUrl = (id: string, version: string): string =>
   `/store/v1/plugins/${id}/versions/${encodeURIComponent(version)}/package`;
 
 /**
- * A plugin's card. `icon` (like a detail's `screenshots`) is a path in the
- * package of the card's `version` (amendment 35), fetched through the files
- * route with that version; never a URL. No version, no icon.
+ * A plugin's card. `icon` and `cover` (like a detail's `screenshots`) are
+ * paths in the package of the card's `version` (amendment 35), fetched
+ * through the files route with that version; never URLs. `cover` is that
+ * version's first screenshot, null when it has none. No version, neither.
  */
 export const pluginCard = (p: PluginRow, author: Author) => ({
   id: p.id,
   name: p.name,
   summary: p.summary,
   icon: p.listed_version ? p.icon : null,
+  cover: p.listed_version ? p.cover : null,
   author,
   categories: parseList(p.categories),
   keywords: parseList(p.keywords),

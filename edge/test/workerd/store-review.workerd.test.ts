@@ -106,12 +106,13 @@ describe("store admin routes", () => {
     expect(sub.base.version).toBe("1.0.0");
     expect(sub.publisher).toMatchObject({ id: await publisherId(a.userId), username: a.username, created_at: Date.parse("2026-10-31T10:00:00.000Z"), decisions: { verified: 1, declined: 0 } });
     expect(sub.superseded).toBeNull();
-    // A PluginCard, its icon a path in the card's version (the newest listed, unverified).
+    // A PluginCard, its icon and cover paths in the card's version (the newest listed, unverified).
     expect(sub.plugin).toEqual({
       id,
       name: id.replace(/-/g, " "),
       summary: expect.any(String),
       icon: "icon.svg",
+      cover: "shots/one.png",
       author: { id: await publisherId(a.userId), username: a.username, badges: [] },
       categories: ["productivity"],
       keywords: expect.any(Array),
