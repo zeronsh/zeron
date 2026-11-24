@@ -51,7 +51,7 @@ pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/",
 fn not_the_app(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or(rel);
     matches!(first, "demos" | "tests" | ".zgx") || super::official::source_file(rel)
-        || matches!(rel, "gallery.luau" | "intro.luau" | "consent.luau" | "template_consent.luau")
+        || matches!(rel, "gallery.luau" | "intro.luau" | "consent.luau" | "template_consent.luau" | "store_consent.luau")
         || (!rel.contains('/') && rel.ends_with("_fixture.luau"))
 }
 

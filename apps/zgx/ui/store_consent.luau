@@ -1,0 +1,32 @@
+-- Acting as you in the store (publishing, taking new installs again, a new
+-- deploy token), asked in a window of its own once a template that isn't
+-- Zeron's has run (src/plugins/act_consent.rs opens it over the main
+-- window). Nothing else runs here: no plugin, no template, none of the main
+-- window's screens. That's what makes its answer yours alone, and a new
+-- token seen here alone.
+
+ui.theme.strict("warn")
+local ds = require("@ds")
+local material = require("@ds/material")
+ds.setup()
+
+local consent = require("@screens/plugins/act_consent")
+
+-- The look chosen in setup, as the main window has it.
+local onboarding = require("@screens/onboarding/state")
+local actions = require("@screens/onboarding/actions")
+actions.apply_scheme(onboarding.appearance:peek())
+
+return ui.column {
+	w_full = true,
+	h_full = true,
+	relative = true,
+	-- The window's glass, or (opaque) its colour: the main window's.
+	bg = function(): string
+		return if material.frosted:get() then "$zeron.window" else "$background"
+	end,
+	consent.View(),
+	-- Its title bar's room, above the sheet (its top padding), moves the
+	-- window: the sheet's content would take the drag otherwise.
+	ui.div { absolute = true, left = 0, right = 0, top = 0, h = "$space.7", window_drag = true },
+}

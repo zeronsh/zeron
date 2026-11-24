@@ -146,6 +146,51 @@ static SAFE: AtomicBool = AtomicBool::new(false);
 /// A template other than Zeron's own is laid over it now (approved or not).
 static TEMPLATE_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// A template that isn't Zeron's has run since Zeron started: what the main
+/// window shows since may be drawn, or wired, by someone else.
+static ANOTHER_S_RAN: AtomicBool = AtomicBool::new(false);
+
+/// Whether one has (`note_running`). Never cleared: a switch or a reload
+/// leaves what it may have set up. Publishing as you and a new deploy token
+/// are asked in Zeron's own window from then on (act_consent.rs).
+pub fn another_s_ran() -> bool {
+    #[cfg(test)]
+    if let Some(ran) = TEST_RAN.with(std::cell::Cell::get) {
+        return ran;
+    }
+    ANOTHER_S_RAN.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own, on its thread alone.
+    static TEST_RAN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub fn another_s_ran_for_test(ran: bool) {
+    TEST_RAN.with(|r| r.set(Some(ran)));
+}
+
+/// Whether template `id` in `templates` isn't Zeron's: neither the default
+/// nor an official one exactly as this build wrote it (`official::verified`,
+/// never the id or the mark alone).
+pub fn another_s(templates: &Path, id: &str) -> bool {
+    id != live::BUILTIN && super::official::verified(&templates.join(id)).is_none()
+}
+
+/// Template `id` is about to run. (Told before it's laid over Zeron's own.)
+pub fn note_running(templates: &Path, id: &str) {
+    if !ANOTHER_S_RAN.load(Ordering::Relaxed) && another_s(templates, id) {
+        note_another_s();
+    }
+}
+
+/// One that isn't Zeron's runs, or can't be told from one.
+pub fn note_another_s() {
+    ANOTHER_S_RAN.store(true, Ordering::Relaxed);
+}
+
 pub fn current() -> Option<Preview> {
     NOW.with(|n| n.borrow().clone())
 }
@@ -690,6 +735,23 @@ mod tests {
         // Zeron's own needs no keeping.
         assert!(trusted_at(&templates, live::BUILTIN, &approvals));
         set(None);
+    }
+
+    /// A template that isn't Zeron's, by what its folder holds and never by
+    /// its id or its mark: one that says it's official isn't until it is.
+    #[test]
+    fn another_s_template_is_any_but_zeron_s_own() {
+        let root = dir("another");
+        let templates = root.join("templates");
+        assert!(!another_s(&templates, live::BUILTIN));
+        write(&templates, "mine/zeron-template.json", r#"{"id":"mine"}"#);
+        write(&templates, "zeron-v2/zeron-template.json", r#"{"id":"zeron-v2","builtin_template":"zeron-v2"}"#);
+        write(&templates, "zeron-v2/app.luau", "-- someone's");
+        assert!(another_s(&templates, "mine"));
+        assert!(another_s(&templates, "zeron-v2"), "a mark isn't enough");
+        assert!(another_s(&templates, "gone"), "nor is being gone");
+        let installed = super::super::official::install_one(&crate::ui_dir(), &root.join("real"), super::super::official::find("zeron-v2").as_ref().unwrap()).unwrap();
+        assert!(!another_s(&root.join("real"), &installed), "Zeron's own, as this build wrote it");
     }
 
     /// A template kept while its changelog and screenshots still counted is

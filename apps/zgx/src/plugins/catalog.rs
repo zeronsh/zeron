@@ -52,7 +52,7 @@
 //! `plugins.install { store, version?, device? }` (mod.rs), and turning a
 //! version the store took down back on is `plugins.set_off`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -61,7 +61,8 @@ use std::time::Duration;
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, Value};
 
-use super::json_value;
+use super::act_consent::{self, Act};
+use super::{json_value, preview};
 use crate::auth::text;
 
 /// An icon, at most (an installed plugin's too, mod.rs `icon_svg`).
@@ -81,6 +82,7 @@ thread_local! {
 pub(super) type Engine = Rc<dyn Fn(&'static str, Json, Option<String>) -> Pin<Box<dyn Future<Output = Result<Json, String>>>>>;
 
 pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
+    let asking = me.clone();
     let engine: Engine = Rc::new(move |method, params, device| {
         let me = me.clone();
         Box::pin(async move {
@@ -90,11 +92,20 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
             }
         })
     });
-    install_with(host, engine);
+    let asker: Asker = {
+        let me = asking;
+        Rc::new(move |act| Box::pin(super::act_consent::ask(me.clone(), act)))
+    };
+    install_with(host, engine, asker);
 }
 
-/// The store's actions on `engine`.
-pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
+/// What you do as yourself, asked in a window of its own (act_consent.rs);
+/// a test's stands in for it.
+pub(super) type Asker = Rc<dyn Fn(Act) -> Pin<Box<dyn Future<Output = Result<Json, String>>>>>;
+
+/// The store's actions on `engine`. Once a template that isn't Zeron's has
+/// run, publishing, taking new installs again and a new token go by `asker`.
+pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
     let e = engine.clone();
     host.async_action("plugins.store.search", move |arg| {
         let e = e.clone();
@@ -238,9 +249,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             ask(&e, "StoreMyPlugins", json!({})).await
         }
     });
-    let e = engine.clone();
+    let (e, a) = (engine.clone(), asker.clone());
     host.async_action("plugins.store.version_action", move |arg| {
-        let e = e.clone();
+        let (e, a) = (e.clone(), a.clone());
         async move {
             crate::plugins::preview::refuse("plugins.store.version_action")?;
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
@@ -251,7 +262,16 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             if !["yank", "unyank"].contains(&action.as_str()) {
                 return Err("invalid".into());
             }
-            answer(&e, "StoreVersionAction", json!({ "id": id, "version": version, "action": action })).await
+            let params = json!({ "id": id, "version": version, "action": action });
+            // (Stopping installs takes nothing from anyone; taking them
+            // again puts a version back in front of everyone.)
+            if action == "unyank" && preview::another_s_ran() {
+                let item = act_consent::unyanking("plugin", &id, &version);
+                let reply = a(act(item, move || async move { e("StoreVersionAction", params, None).await })).await?;
+                answered(&reply)?;
+                return Ok(json_value(&reply));
+            }
+            answer(&e, "StoreVersionAction", params).await
         }
     });
     let e = engine.clone();
@@ -260,18 +280,29 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         async move {
             crate::plugins::preview::refuse("plugins.store.prepare")?;
             let id = store_id(&text(&id)).ok_or("not_in_store")?;
-            ask(&e, "PreparePluginPublish", json!({ "id": id })).await
+            let reply = e("PreparePluginPublish", json!({ "id": id }), None).await?;
+            remember_prepared(&reply);
+            Ok(json_value(&reply))
         }
     });
-    let e = engine.clone();
+    let (e, a) = (engine.clone(), asker.clone());
     host.async_action("plugins.store.publish", move |arg| {
-        let e = e.clone();
+        let (e, a) = (e.clone(), a.clone());
         async move {
             crate::plugins::preview::refuse("plugins.store.publish")?;
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let hash = arg.field("hash").map(text).unwrap_or_default();
             let ticket = arg.field("ticket").map(text).unwrap_or_default();
-            let reply = e("PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket }), None).await?;
+            let params = json!({ "id": id, "hash": hash, "ticket": ticket });
+            let reply = if preview::another_s_ran() {
+                // (What's asked is what the engine said it checked for this
+                // ticket, never what the page says of it.)
+                let was = prepared(&id, &hash, &ticket).ok_or("changed")?;
+                let item = act_consent::publishing("plugin", &id, &was.name, &was.version);
+                a(act(item, move || async move { e("PublishPlugin", params, None).await })).await?
+            } else {
+                e("PublishPlugin", params, None).await?
+            };
             // (A listing refused for a cause it names: the page says which,
             // in its own words, so the refusal comes as the answer.)
             if let Some(refused) = listing_refusal(&reply) {
@@ -291,9 +322,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             ask(&e, "ListDeployTokens", json!({})).await
         }
     });
-    let e = engine.clone();
+    let (e, a) = (engine.clone(), asker.clone());
     host.async_action("plugins.store.create_token", move |arg| {
-        let e = e.clone();
+        let (e, a) = (e.clone(), a.clone());
         async move {
             crate::plugins::preview::refuse("plugins.store.create_token")?;
             let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
@@ -308,7 +339,26 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             {
                 params["expires"] = json!(*at as i64);
             }
-            create_token(&e, params).await
+            if preview::another_s_ran() {
+                let item = act_consent::token(&params);
+                let stop = {
+                    let e = e.clone();
+                    move || {
+                        STEP_UP.with(|n| n.set(n.get() + 1));
+                        let e = e.clone();
+                        crate::engine::get().spawn(async move {
+                            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
+                        });
+                    }
+                };
+                let mut reply = a(Act { item, run: Box::new(move || Box::pin(async move { create_token(&e, params).await })), stop: Box::new(stop) }).await?;
+                // (The window that made it shows it; this one never has it.)
+                if let Some(record) = reply.as_object_mut() {
+                    record.remove("secret");
+                }
+                return Ok(json_value(&reply));
+            }
+            create_token(&e, params).await.map(|reply| json_value(&reply))
         }
     });
     let e = engine.clone();
@@ -320,6 +370,7 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             // An engine without CancelStepUp yet answers no; nothing else
             // to do then.)
             STEP_UP.with(|n| n.set(n.get() + 1));
+            act_consent::give_up();
             let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
             Ok(Value::Nil)
         }
@@ -351,6 +402,45 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             answer(&e, "StoreReport", params).await
         }
     });
+}
+
+/// `run` as an act asked in its window, with nothing to stop half-way.
+fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl FnOnce() -> F + 'static) -> Act {
+    Act { item, run: Box::new(move || Box::pin(run())), stop: Box::new(|| {}) }
+}
+
+/// What the engine checked and gave a ticket for: what publishing with it
+/// sends.
+#[derive(Clone)]
+struct Prepared {
+    id: String,
+    hash: String,
+    ticket: String,
+    name: String,
+    version: String,
+}
+
+thread_local! {
+    /// The last few, newest last.
+    static PREPARED: RefCell<Vec<Prepared>> = const { RefCell::new(Vec::new()) };
+}
+
+const PREPARED_MOST: usize = 16;
+
+fn remember_prepared(reply: &Json) {
+    let field = |k: &str| reply[k].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    let (Some(id), Some(hash), Some(ticket), Some(version)) = (field("id"), field("hash"), field("ticket"), field("version")) else { return };
+    let name = reply["name"].as_str().filter(|s| !s.trim().is_empty()).map_or_else(|| id.clone(), |s| s.chars().take(64).collect());
+    PREPARED.with(|p| {
+        let mut p = p.borrow_mut();
+        p.push(Prepared { id, hash, ticket, name, version });
+        let over = p.len().saturating_sub(PREPARED_MOST);
+        p.drain(..over);
+    });
+}
+
+fn prepared(id: &str, hash: &str, ticket: &str) -> Option<Prepared> {
+    PREPARED.with(|p| p.borrow().iter().rev().find(|p| p.id == id && p.hash == hash && p.ticket == ticket).cloned())
 }
 
 /// What a report may say is wrong (the plan's amendment 13).
@@ -502,11 +592,11 @@ fn token_scope(scope: Option<&Value>) -> Option<Json> {
 /// one token), asked again each second until it lands, is cancelled, or ten
 /// minutes pass. Asked once first, so what makes no token at all (not
 /// published yet, not yours) is said before the browser opens.
-async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
+async fn create_token(e: &Engine, params: Json) -> Result<Json, String> {
     let reply = e("CreateDeployToken", params.clone(), None).await?;
     if reply["ok"].as_bool() != Some(false) || reply["error"].as_str() != Some("step_up_required") {
         answered(&reply)?;
-        return Ok(json_value(&reply));
+        return Ok(reply);
     }
     let live = STEP_UP.with(|n| {
         n.set(n.get() + 1);
@@ -533,7 +623,7 @@ async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
             }
             _ => {
                 answered(&reply)?;
-                return Ok(json_value(&reply));
+                return Ok(reply);
             }
         }
     }

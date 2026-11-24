@@ -21,10 +21,9 @@
 local ds = require("@ds")
 local field = require("@ds/field")
 local locale = require("@ds/locale")
-local control = require("@ds/control")
-local PrivateText = require("@ds/private_text")
 local auth = require("@account/auth")
 local store = require("@app/screens/plugins/store")
+local token_block = require("@app/screens/plugins/token_block")
 
 local M = {}
 
@@ -143,9 +142,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	local made_phase = ui.use_state("idle")
 	local secret = made
 	local secret_open = made_open
-	-- Copied: its Copy says so a moment; its line under the block, while
-	-- the dialog is up.
-	local copied = ui.use_state(false)
+	-- Copied: its line under the block, while the dialog is up.
 	local copied_once = ui.use_state(false)
 	-- (Its secret held only while its dialog is up, however that closes.)
 	ui.effect(function()
@@ -225,6 +222,8 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		local scope: store.Scope = if scope_kind:peek() == "all" then { all = true } else { plugins = chosen_ids() }
 		store.create_token({ name = n, scope = scope, expires = expires }):after(function(r: any)
 			-- (`secret`: the token, `zdt_…`, this once; `token`, its record.
+			-- None when Zeron's own window made it, and shows it there: once
+			-- a template that isn't Zeron's has run, src/plugins/act_consent.)
 			-- Kept first, the app's: shown as Yours comes back if it was
 			-- left meanwhile.)
 			if type(r) == "table" and type(r.secret) == "string" and r.secret ~= "" then
@@ -569,107 +568,16 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					secret_open:set(false)
 				end,
 			},
-			-- The token as the app shows a line of code to copy (a chat
-			-- reply's code block: its strip, a label and Copy, over its
-			-- line in the code face, wrapped so the whole token shows to
-			-- check by eye), drawn as private text: blurred while addresses
-			-- are hidden (the screen may be seen), shown by a click, and
-			-- never in a picture an agent is handed (src/plugins
-			-- `PRIVATE_REGIONS`). Copy puts it on the clipboard as a secret
-			-- (src/secrets.rs), whether it's shown or not. (Not a Markdown
-			-- block: no copy of it is kept with the block.)
-			ui.column {
-				id = "key-secret",
-				w_full = true,
-				min_w = 0,
-				rounded = "$radius.xl",
-				bg = "$zeron.prose.code.bg",
-				border = 1,
-				border_color = "$zeron.prose.code.edge",
-				overflow = "hidden",
-				ui.row {
-					h = 34,
-					pl = "$space.4",
-					pr = ui.raw(5, "even with Copy's room in the 34 strip, as a code block's"),
-					items = "center",
-					gap = "$space.1",
-					selectable = false,
-					ui.text {
-						"token",
-						literal = true,
-						text_size = "$font.size.xs",
-						color = "$text.tertiary",
-						grow = 1,
-						min_w = 0,
-					},
-					ui.button {
-						id = "key-secret-copy",
-						label = locale.t("ds.markdown.copy_code"),
-						h = 24,
-						px = "$space.2",
-						gap = "$space.1",
-						items = "center",
-						rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the block: its corner less its edge and inset, as a code block's Copy"),
-						bg = "#00000000",
-						color = "$text.tertiary",
-						text_size = "$font.size.xs",
-						hover = { bg = "$hover", color = "$text.primary" },
-						active = { bg = "$pressed" },
-						focus = { border = 0 },
-						on_click = function()
-							local token = secret:peek()
-							if not token then
-								return
-							end
-							store.copy_secret(token):after(function()
-								copied:set(true)
-								copied_once:set(true)
-								ui.after(1400, function()
-									copied:set(false)
-								end)
-							end, function()
-								ds.toast.show { title = ui.t("plugins.store.key.copy_failed"), tone = "warning" }
-							end)
-						end,
-						ds.Icon {
-							name = function(): string
-								return if copied:get() then "check" else "copy"
-							end,
-							size = 12,
-						},
-						ui.text(function(): string
-							return if copied:get() then locale.s("ds.markdown.copied") else locale.s("common.copy")
-						end),
-					},
-				},
-				PrivateText {
-					function(): string
-						return secret:get() or ""
-					end,
-					name = ui.t("plugins.store.key.show_token"),
-					font = "$font.mono",
-					text_size = "$zeron.prose.code.size",
-					line_height = "$zeron.prose.code.line",
-					color = "$text.primary",
-					wrap = true,
-					w_full = true,
-					pl = "$space.4",
-					pr = "$space.5",
-					pb = "$space.3",
-				},
+			-- The token, to copy (screens/plugins/token_block).
+			token_block.Block {
+				secret = function(): string?
+					return secret:get()
+				end,
+				copy = function(token: string): any
+					return store.copy_secret(token)
+				end,
+				copied = copied_once,
 			},
-			-- Copied: how long it stays there.
-			ui.show(function(): boolean
-				return copied_once:get()
-			end, ui.text {
-				id = "key-secret-copied",
-				ui.t("plugins.store.key.copied"),
-				w_full = true,
-				wrap = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.tertiary",
-			}),
 		},
 		ds.Dialog {
 			open = revoke_open,

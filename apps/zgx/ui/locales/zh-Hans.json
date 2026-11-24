@@ -4210,6 +4210,28 @@
         "repeated": {
           "keywords": "关键词“{word}”重复了。"
         }
+      },
+      "act": {
+        "not_now": "暂不",
+        "id": "ID",
+        "version": "版本",
+        "why_title": "为什么 Zeron 在这里询问",
+        "why_body": "自 Zeron 启动以来，运行过一个不是 Zeron 自己的模板。模板会绘制 Zeron 的主窗口，所以 Zeron 在自己的窗口中询问你。",
+        "publish": {
+          "title": "发布 {name} {version}？",
+          "body": "它会立即以你的用户名出现在商店中，所有人都可以安装。",
+          "allow": "发布"
+        },
+        "unyank": {
+          "title": "允许重新安装 {name} {version}？",
+          "body": "人们可以再次安装这个版本。",
+          "allow": "允许安装"
+        },
+        "token": {
+          "title": "创建这个部署令牌？",
+          "body": "任何拿到它的人都能以你的身份发布它所对应内容的新版本。Zeron 会先请你重新登录，并在这个窗口中显示令牌。",
+          "allow": "创建令牌"
+        }
       }
     }
   },

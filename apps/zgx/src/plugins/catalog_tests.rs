@@ -10,7 +10,8 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, testing::TestApp};
 
-use super::{Engine, install_with};
+use super::{Asker, Engine, install_with, remember_prepared};
+use crate::plugins::preview;
 
 /// What the engine was asked: (method, params, device).
 type Asked = Rc<RefCell<Vec<(String, Json, Option<String>)>>>;
@@ -18,7 +19,10 @@ type Asked = Rc<RefCell<Vec<(String, Json, Option<String>)>>>;
 /// A script that makes `call` (Luau, one `ui.call`) as a button's click and
 /// shows its outcome as `#out`: `ok:<json of what it got>` or `err:<word>`.
 fn script(call: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-store-seam-{}-{}", std::process::id(), rand_name(call)));
+    // (Its own folder: tests making the same call run at once.)
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zgx-store-seam-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let code = format!(
@@ -56,17 +60,14 @@ return ui.column {{
     path
 }
 
-fn rand_name(s: &str) -> String {
-    let mut n: u64 = 1469598103934665603;
-    for b in s.bytes() {
-        n = (n ^ b as u64).wrapping_mul(1099511628211);
-    }
-    format!("{n:x}")
-}
-
 /// `call` made against an engine answering `reply` to every method; what
 /// the script showed, and what the engine was asked.
 fn run(call: &str, reply: Json) -> (String, Vec<(String, Json, Option<String>)>) {
+    run_asking(call, reply, Rc::new(|_| Box::pin(async { panic!("asked, with no template but Zeron's run") })))
+}
+
+/// `run`, what you do as yourself asked by `asker` (act_consent.rs).
+fn run_asking(call: &str, reply: Json, asker: Asker) -> (String, Vec<(String, Json, Option<String>)>) {
     let asked: Asked = Rc::default();
     let path = script(call);
     let (a, r) = (asked.clone(), reply.clone());
@@ -77,7 +78,7 @@ fn run(call: &str, reply: Json) -> (String, Vec<(String, Json, Option<String>)>)
             let r = r.clone();
             Box::pin(async move { Ok(r) })
         });
-        install_with(&host, engine);
+        install_with(&host, engine, asker.clone());
         host
     });
     app.frames(3);
@@ -268,4 +269,66 @@ fn a_picture_is_the_engine_s_kept_file_and_never_anything_else() {
     let (out, asked) = run(r#"ui.call("plugins.store.picture", { id = "focus", version = "1.0.0", path = "%2e%2e/a.png" })"#, json!({}));
     assert_eq!(out, "err:not_in_store");
     assert!(asked.is_empty());
+}
+
+/// An asker that says yes (or no), and what it was asked.
+fn asker(allow: bool) -> (Asker, Rc<RefCell<Vec<Json>>>) {
+    let items: Rc<RefCell<Vec<Json>>> = Rc::default();
+    let seen = items.clone();
+    let asker: Asker = Rc::new(move |act| {
+        seen.borrow_mut().push(act.item);
+        match allow {
+            true => (act.run)(),
+            false => Box::pin(async { Err("cancelled".to_string()) }),
+        }
+    });
+    (asker, items)
+}
+
+/// Once a template that isn't Zeron's has run, publishing, taking new
+/// installs again and a new token are asked in Zeron's own window, saying
+/// what the engine said of it; not allowed, the engine is asked nothing.
+/// Before, and for anything else, nothing is asked.
+#[test]
+fn acting_as_you_is_asked_in_zeron_s_window_once_another_s_template_ran() {
+    remember_prepared(&json!({ "id": "focus-timer", "name": "Focus timer", "version": "1.3.0", "hash": "h1", "ticket": "t1" }));
+    let publish = r#"ui.call("plugins.store.publish", { id = "focus-timer", hash = "h1", ticket = "t1", name = "Anything", version = "9.9.9" })"#;
+    let unyank = r#"ui.call("plugins.store.version_action", { id = "focus-timer", version = "1.2.0", action = "unyank" })"#;
+    let yank = r#"ui.call("plugins.store.version_action", { id = "focus-timer", version = "1.2.0", action = "yank" })"#;
+    let token = r#"ui.call("plugins.store.create_token", { name = "CI", scope = { plugins = { "focus-timer" } }, expires = 5 })"#;
+    let made = json!({ "ok": true, "token": { "id": "t" }, "secret": "zdt_secret" });
+
+    // Zeron's own alone: as it was (`run`'s asker would panic).
+    preview::another_s_ran_for_test(false);
+    for call in [publish, unyank, yank, token] {
+        assert_eq!(run(call, made.clone()).1.len(), 1, "{call}");
+    }
+    assert!(run(token, made.clone()).0.contains("secret=zdt_secret"), "the app's own flow shows it");
+
+    preview::another_s_ran_for_test(true);
+    for (call, method, item) in [
+        (publish, "PublishPlugin", json!({ "act": "publish", "kind": "plugin", "id": "focus-timer", "name": "Focus timer", "version": "1.3.0" })),
+        (unyank, "StoreVersionAction", json!({ "act": "unyank", "kind": "plugin", "id": "focus-timer", "name": "focus-timer", "version": "1.2.0" })),
+        (token, "CreateDeployToken", json!({ "act": "token", "name": "CI", "scope": { "plugins": ["focus-timer"] }, "expires": 5 })),
+    ] {
+        let (no, items) = asker(false);
+        let (out, asked) = run_asking(call, made.clone(), no);
+        assert_eq!((out.as_str(), asked.len()), ("err:cancelled", 0), "{call}");
+        assert_eq!(*items.borrow(), vec![item], "{call}");
+        let (yes, _) = asker(true);
+        let (_, asked) = run_asking(call, made.clone(), yes);
+        assert_eq!(asked.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), [method], "{call}");
+    }
+    // The token itself never reaches the window that asked for it.
+    let (yes, _) = asker(true);
+    let (out, _) = run_asking(token, made.clone(), yes);
+    assert!(out.contains("id=t") && !out.contains("zdt_") && !out.contains("secret"), "{out}");
+    // Stopping installs takes nothing from anyone: not asked.
+    assert_eq!(run(yank, made.clone()).1.len(), 1);
+    // A ticket the engine never gave for this: nothing to say of it.
+    for other in [r#"hash = "h2", ticket = "t1""#, r#"hash = "h1", ticket = "t2""#] {
+        let (yes, items) = asker(true);
+        let (out, asked) = run_asking(&format!(r#"ui.call("plugins.store.publish", {{ id = "focus-timer", {other} }})"#), made.clone(), yes);
+        assert_eq!((out.as_str(), asked.len(), items.borrow().len()), ("err:changed", 0, 0), "{other}");
+    }
 }

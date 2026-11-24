@@ -53,6 +53,7 @@ pub mod official;
 pub mod tokens;
 pub mod looks;
 pub mod template_consent;
+pub mod act_consent;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
@@ -827,6 +828,7 @@ pub fn prepare_live() -> PathBuf {
     }
     let ui = crate::ui_dir();
     let id = live::active(&root);
+    preview::note_running(&root, &id);
     // `.live` as the last launch left it, from the same Zeron and template:
     // it runs as it is (live::LaunchStamp), nothing read or written.
     let stamp = live::LaunchStamp::now(&ui, &root, &id);
@@ -1819,7 +1821,16 @@ impl Bridge {
             Some(t) => t,
             None => {
                 let (root, id) = (root.to_path_buf(), id.clone());
-                let t = off_thread(move || preview::trusted(&root, &id)).await.unwrap_or(false);
+                let t = off_thread(move || {
+                    preview::note_running(&root, &id);
+                    preview::trusted(&root, &id)
+                })
+                .await;
+                // (Unknown: as if someone else's.)
+                let t = t.unwrap_or_else(|| {
+                    preview::note_another_s();
+                    false
+                });
                 *self.trust.borrow_mut() = Some((trust_key, t));
                 t
             }
