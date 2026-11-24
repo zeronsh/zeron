@@ -9331,7 +9331,7 @@ version = "0.3.18"
 
 [[package]]
 name = "zeron-plugin-db"
-version = "0.3.17"
+version = "0.3.18"
 dependencies = [
  "rusqlite",
  "serde_json",
