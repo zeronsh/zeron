@@ -51,8 +51,9 @@ const ALTERNATIVE_PAGES: usize = 4;
 /// with plugins: at each take-down check; and a publish from here looks at
 /// the next).
 const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-/// The most plugins one update check asks about (the edge's limit).
-pub const MAX_UPDATE_PLUGINS: usize = 200;
+/// The most items (plugins and templates together) one update check asks
+/// about (the edge's limit, `max_update_items`).
+pub const MAX_UPDATE_ITEMS: usize = 200;
 /// What a report may say it's about (contract amendment 13).
 pub const REPORT_REASONS: &[&str] = &["malware", "misleading", "broken", "copyright", "other"];
 pub const CACHE_DIR: &str = "store-cache";
@@ -1131,7 +1132,7 @@ impl Plugins {
         // they have stays (it fails closed).
         let mut unread: BTreeSet<&str> = BTreeSet::new();
         // At most the edge's limit per request.
-        for batch in candidates.chunks(MAX_UPDATE_PLUGINS) {
+        for batch in candidates.chunks(MAX_UPDATE_ITEMS) {
             let ask = UpdatesAsk {
                 zeron: version::zeron().to_string(),
                 plugins: batch

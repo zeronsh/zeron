@@ -25,7 +25,7 @@ use super::install::{self, Package, StoreSource, failure};
 use super::signing;
 use client::{PackageRecord, Publisher, reason};
 
-pub use device::{MAX_UPDATE_PLUGINS, REPORT_REASONS, handles};
+pub use device::{MAX_UPDATE_ITEMS, REPORT_REASONS, handles};
 pub(in crate::plugins) use device::StoreHandle;
 #[cfg(test)]
 pub(in crate::plugins) use device::publishes_idle;

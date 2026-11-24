@@ -37,7 +37,8 @@ use serde_json::{Value, json};
 
 use super::files::{MAX_BYTES, MAX_FILES};
 use super::install::{self, Found, Origin, Source};
-use super::signing::{self, FileHashes, SigCheck, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
+use super::package::{self, MAX_PACKAGE_BYTES};
+use super::signing::{self, FileHashes, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
 use super::status::Author;
 use super::templates::{self, MANIFEST, PREVIEW, ZERON, inside, valid_id};
 
@@ -50,8 +51,6 @@ pub const UPDATES: &str = ".updates";
 /// The app's mark of one of Zeron's built-in themes (apps/zgx
 /// theme_templates `MARK`): never written from a package.
 const BUILTIN_THEME: &str = "builtin_theme";
-/// A package's largest size on disk: its files' limit, as base64, and room.
-const MAX_PACKAGE_BYTES: u64 = MAX_BYTES * 4 / 3 + 1024 * 1024;
 
 /// What no template replaces: the app always loads Zeron's own (the app's
 /// `NEVER_TEMPLATED`, apps/zgx/src/plugins/live.rs).
@@ -72,13 +71,30 @@ const UNSIGNED: &str = "This template isn't signed, so Zeron can't tell who made
 const TAMPERED: &str = "This template was changed after it was signed, so Zeron won't install it. Ask its author for a fresh copy.";
 const BAD_SIGNATURE: &str = "This template's signature doesn't check out, so Zeron won't install it. Ask its author for a fresh copy.";
 const NOT_A_PACKAGE: &str = "This isn't a Zeron template. Templates are shared as .zeron-template files, exported from Zeron.";
+const TOO_BIG: &str = "This template is too big to install.";
+const BAD_FILE_START: &str = "This template has a file Zeron won't write";
+const STORE_MISMATCH: &str = "This template is signed, but the store's record names no signer, so it wasn't installed.";
+const BAD_ID: &str = "This template's id can't be used";
+const CLASH: &str = "This template can't be installed";
+
+/// A template package's words for a refusal (`package::parse`).
+const WORDS: package::Words = package::Words {
+    not_a_package: NOT_A_PACKAGE,
+    unsigned: UNSIGNED,
+    tampered: TAMPERED,
+    bad_signature: BAD_SIGNATURE,
+    too_big: TOO_BIG,
+    bad_file: "This template has a file Zeron won't write: {rel}.",
+};
 
 /// A package, read and verified.
+#[derive(Debug)]
 pub struct Package {
     /// Its manifest, signed.
     pub manifest: Value,
-    /// The key that signed it (b64url).
-    pub key: String,
+    /// The key that signed it (b64url); none for one the store served
+    /// unsigned ([`parse_from_store`]).
+    pub key: Option<String>,
     /// The files it installs: its app files and its preview.
     pub files: BTreeMap<String, Vec<u8>>,
     /// Files it carried that no template may replace, left out.
@@ -86,6 +102,10 @@ pub struct Package {
     /// sha256 of the package file as read: what you're shown is what's
     /// installed.
     pub hash: String,
+    /// Its content hash (`signing::content_hash_of` over its manifest
+    /// without the signature and every file it carries): what a store
+    /// record's `hash` names.
+    pub content_hash: String,
     raw: Vec<u8>,
 }
 
@@ -105,6 +125,16 @@ impl Package {
     pub fn name(&self) -> String {
         let name = self.text("name");
         if name.is_empty() { self.id() } else { name }
+    }
+
+    /// Who made it, as `author_of` knows its signer. One the store served
+    /// unsigned has no signer to know (the store's record names its
+    /// publisher).
+    fn author(&self, author_of: impl Fn(&str) -> Author) -> Author {
+        match &self.key {
+            Some(key) => author_of(key),
+            None => Author::unknown("Not signed"),
+        }
     }
 
     /// What the consent window and the tools show of it.
@@ -254,49 +284,37 @@ pub fn read(path: &Path) -> Result<Package, String> {
 }
 
 pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
-    let value: Value = serde_json::from_slice(&raw).map_err(|_| NOT_A_PACKAGE.to_string())?;
-    if value["format"].as_str() != Some(FORMAT) {
-        return Err(NOT_A_PACKAGE.into());
+    parse_package(raw, true)
+}
+
+/// [`parse`] for a package the store serves: `signed` is whether its
+/// record names a signer. A version published with a deploy token is
+/// unsigned, its record naming none: taken by its contents, which the
+/// record's content hash then vouches for. Under a record naming no signer,
+/// a signed package is refused: unsigned is taken there, and nothing else.
+pub fn parse_from_store(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    let package = parse_package(raw, signed)?;
+    if !signed && package.key.is_some() {
+        return Err(STORE_MISMATCH.into());
     }
-    let manifest = value["manifest"].clone();
-    let files = value["files"].as_object().ok_or(NOT_A_PACKAGE)?;
-    if !manifest.is_object() {
-        return Err(NOT_A_PACKAGE.into());
+    Ok(package)
+}
+
+fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    // Every name a plain path inside the template (`templates::inside`: no
+    // `..`, no absolute part, no dotfile but `.luaurc`).
+    let keep = |rel: &str| inside(Path::new("t"), rel).is_some();
+    let package::Verified { manifest, key, files: mut decoded, raw, hash } =
+        package::parse(raw, FORMAT, TEMPLATE_PAYLOAD_PREFIX, keep, &WORDS, signed)?;
+    // Over every file it carries, as its signature is.
+    let mut unsigned = manifest.clone();
+    if let Some(m) = unsigned.as_object_mut() {
+        m.remove("signature");
     }
-    if files.len() > MAX_FILES {
-        return Err("This template has too many files to install.".into());
-    }
-    let mut decoded = BTreeMap::new();
-    let mut total = 0u64;
-    for (rel, data) in files {
-        // Every name a plain path inside the template (`templates::inside`:
-        // no `..`, no absolute part, no dotfile but `.luaurc`).
-        if inside(Path::new("t"), rel).is_none() {
-            return Err(format!("This template has a file Zeron won't write: {rel:?}."));
-        }
-        let bytes = data
-            .as_str()
-            .and_then(|s| B64.decode(s).ok())
-            .ok_or_else(|| format!("This template's {rel} can't be read."))?;
-        total += bytes.len() as u64;
-        decoded.insert(rel.clone(), bytes);
-    }
-    if total > MAX_BYTES {
-        return Err("This template is too big to install.".into());
-    }
-    let hashes: FileHashes = decoded
-        .iter()
-        .map(|(rel, bytes)| (rel.clone(), signing::sha256_hex(bytes)))
-        .collect();
-    let key = match signing::check_raw(TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes) {
-        SigCheck::Valid(key) => key,
-        SigCheck::Unsigned => return Err(UNSIGNED.into()),
-        SigCheck::FilesDiffer => return Err(TAMPERED.into()),
-        SigCheck::BadSignature => return Err(BAD_SIGNATURE.into()),
-    };
+    let content_hash = signing::content_hash_of(&unsigned, &package::hashes(&decoded));
     let id = manifest["id"].as_str().unwrap_or("").trim();
     if !valid_id(id) || id == ZERON {
-        return Err(format!("This template's id ({id:?}) can't be used."));
+        return Err(format!("{BAD_ID} ({id:?})."));
     }
     // Checked as signed; then what no template replaces is set aside, and
     // what isn't an app file (a manifest of its own) too.
@@ -313,16 +331,41 @@ pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
     // manifest and `.imported.json` among them): refused before anything is
     // written, on every disk alike, as a plugin's are.
     if let Some(clash) = super::listing::clashes(decoded.keys().map(String::as_str), &[MANIFEST, IMPORTED]).first() {
-        return Err(format!("This template can't be installed: {}.", clash.words()));
+        return Err(format!("{CLASH}: {}.", clash.words()));
     }
     Ok(Package {
         manifest,
         key,
         files: decoded,
         ignored,
-        hash: signing::sha256_hex(&raw),
+        hash,
+        content_hash,
         raw,
     })
+}
+
+/// The word for why a package was refused ([`parse`], [`parse_from_store`]):
+/// one of `install::reason`'s, as a plugin package's are (`not_a_package`,
+/// `too_big`, `bad_file`, `unsigned`, `tampered`, `bad_signature`,
+/// `store_mismatch`, `paths_collide`) or `bad_id`.
+pub fn refusal(error: &str) -> Option<&'static str> {
+    use install::reason;
+    let words: [(&str, &'static str); 7] = [
+        (NOT_A_PACKAGE, reason::NOT_A_PACKAGE),
+        (TOO_BIG, reason::TOO_BIG),
+        (UNSIGNED, reason::UNSIGNED),
+        (TAMPERED, reason::TAMPERED),
+        (BAD_SIGNATURE, reason::BAD_SIGNATURE),
+        (STORE_MISMATCH, reason::STORE_MISMATCH),
+        (BAD_FILE_START, reason::BAD_FILE),
+    ];
+    if let Some((_, word)) = words.iter().find(|(words, _)| error.starts_with(words.trim_end_matches('.'))) {
+        return Some(word);
+    }
+    if error.starts_with(BAD_ID) {
+        return Some("bad_id");
+    }
+    error.starts_with(CLASH).then_some(reason::PATHS_COLLIDE)
 }
 
 /// A free id for `want` in `dir`: itself, else `want-2`, `want-3`…
@@ -422,7 +465,7 @@ pub fn import(dir: &Path, path: &Path, author_of: impl Fn(&str) -> Author) -> Re
 /// A package read and verified (from a file, or a link: `source`), as
 /// `import` does with it: yours installs, anyone else's waits.
 pub fn import_package(dir: &Path, package: Package, from: &str, source: Source, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
-    let author = author_of(&package.key);
+    let author = package.author(&author_of);
     if author == Author::You {
         let id = install(dir, &package, &author, Some(&source))?;
         return Ok(json!({
@@ -545,17 +588,17 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
             return Err(error);
         }
     };
-    if package.hash != hash || about["key"].as_str() != Some(package.key.as_str()) {
+    if package.hash != hash || about["key"] != json!(package.key) {
         return Err("This template changed while it waited for you. Import it again to see what it is now.".into());
     }
-    let author = author_of(&package.key);
+    let author = package.author(&author_of);
     let mut source: Option<Source> = serde_json::from_value(about["origin"].clone()).ok();
     // An update that changes its code, allowed: in place of the template it
     // updates, if that's still the one it was for.
     if let Some(of) = about["update_of"].as_str() {
         let folder = templates::template_dir(dir, of).ok_or_else(|| format!("There's no template {of} to update any more"))?;
         let installed = imported(&folder).ok_or("It wasn't installed from a package")?;
-        if installed["key"].as_str() != Some(package.key.as_str()) {
+        if installed["key"] != json!(package.key) {
             return Err("The new version is signed by someone else, so it won't be installed".into());
         }
         let was = installed["version"].as_str().unwrap_or("");
@@ -742,7 +785,7 @@ pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, s
     let was = folder.as_deref().and_then(imported).and_then(|i| i["version"].as_str().map(str::to_owned)).unwrap_or_default();
     let refused = if fetched.id() != package_id {
         Some(format!("The new version is a different template ({})", fetched.id()))
-    } else if fetched.key != key {
+    } else if fetched.key.as_deref() != Some(key) {
         Some("The new version is signed by someone else, so it won't be installed".to_string())
     } else if !install::newer(&fetched.version(), &was) {
         Some(install::not_newer(&fetched.version(), &was))
@@ -802,7 +845,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
     if package.hash != found.hash {
         return Err("The update changed since it was found; check again".into());
     }
-    if imported["key"].as_str() != Some(package.key.as_str()) {
+    if imported["key"] != json!(package.key) {
         return Err("The new version is signed by someone else, so it won't be installed".into());
     }
     let was = imported["version"].as_str().unwrap_or("");
@@ -830,7 +873,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
         let mut out = package.about();
         out["pending"] = json!(pending);
         out["update_of"] = json!(id);
-        out["author"] = json!(author_of(&package.key));
+        out["author"] = json!(package.author(&author_of));
         out["needs_consent"] = json!(true);
         return Ok(out);
     }
@@ -838,7 +881,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
         source.version = package.text("version");
         source.installed_at = super::now_secs();
     }
-    let author = author_of(&package.key);
+    let author = package.author(&author_of);
     replace(dir, id, &folder, &package, &author, source.as_ref())?;
     forget_found(dir, id);
     Ok(json!({
@@ -933,6 +976,40 @@ mod tests {
 
     fn package_json(path: &Path) -> Value {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A package the store serves under a record naming no signer (a deploy
+    /// token's): taken unsigned, by its contents; a signed one there is
+    /// refused, and unsigned is refused anywhere else. Its content hash
+    /// covers every file it carries, as a plugin's does.
+    #[test]
+    fn plugins_template_packages_from_the_store_unsigned_by_their_contents() {
+        let d = with_template("store-unsigned");
+        let out = d.parent().unwrap().join("midnight.zeron-template");
+        export(&d, "midnight", &out, &key()).unwrap();
+        let signed = std::fs::read(&out).unwrap();
+        let mut value = package_json(&out);
+        value["manifest"].as_object_mut().unwrap().remove("signature");
+        let unsigned = serde_json::to_vec(&value).unwrap();
+
+        let taken = parse_from_store(unsigned.clone(), false).unwrap();
+        assert_eq!((taken.key.as_deref(), taken.id()), (None, "midnight".to_owned()));
+        let mut manifest = value["manifest"].clone();
+        manifest.as_object_mut().unwrap().remove("signature");
+        let carried: BTreeMap<String, Vec<u8>> = value["files"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(rel, b64)| (rel.clone(), B64.decode(b64.as_str().unwrap()).unwrap()))
+            .collect();
+        assert_eq!(taken.content_hash, signing::content_hash_of(&manifest, &package::hashes(&carried)));
+        // The same contents signed hash the same: the signature isn't part of it.
+        assert_eq!(parse(signed.clone()).unwrap().content_hash, taken.content_hash);
+
+        assert_eq!(refusal(&parse_from_store(signed.clone(), false).unwrap_err()), Some(install::reason::STORE_MISMATCH));
+        assert_eq!(refusal(&parse(unsigned.clone()).unwrap_err()), Some(install::reason::UNSIGNED));
+        assert_eq!(refusal(&parse_from_store(unsigned, true).unwrap_err()), Some(install::reason::UNSIGNED));
+        assert!(parse_from_store(signed, true).unwrap().key.is_some());
     }
 
     #[test]
