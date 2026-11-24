@@ -6,7 +6,7 @@
 
 local function open(show: string?): any
 	local app = mount("store_consent_fixture.luau")
-	app:resize(460, 480)
+	app:resize(460, 540)
 	if show then
 		app:command(show)
 	end
@@ -54,7 +54,8 @@ test("a new token says its name, what it can publish and when it ends", function
 	expect(app:tree("#store-consent")).to_contain("Never")
 	app:command("token_both")
 	app:frames(20)
-	expect(app:tree("#store-consent")).to_contain("All your plugins and templates. A template can do anything")
+	expect(app:tree("#store-consent")).to_contain("All your plugins and templates")
+	expect(app:tree("#store-consent")).to_contain("A template can do anything Zeron can.")
 end)
 
 test("while it's being made it can be stopped and not asked again", function()
@@ -79,6 +80,54 @@ test("the token is shown in this window, once made, with its Copy", function()
 	app:click("#store-consent-done")
 	app:frames(4)
 	expect(app:state("calls")).to_contain("close")
+end)
+
+-- What's asked is never cut: the facts card holds every row of it, and where
+-- the window can't hold it all it scrolls, the answer staying in view.
+test("every fact is whole, and the answer stays in view", function()
+	for _, where in { "en", "zh-Hans" } do
+		local app = open()
+		app:command(`locale_{where}`)
+		for _, show in { "publish", "unyank", "token", "token_both", "token_all", "hostile", "many" } do
+			app:command(show)
+			app:frames(20)
+			local facts, said, view = box(app, "#store-consent-facts"), box(app, "#store-consent-said"), box(app, "#store-consent-scroll")
+			-- (Its rows, each inside it; all of it above what's under it, so
+			-- its card isn't squeezed over it; that inside what scrolls.)
+			expect(facts.y + facts.h <= box(app, "#store-consent-why").y).to_be(true)
+			for line in app:tree("#store-consent-facts"):gmatch("[^\n]+") do
+				local y, h = line:match('text "[^"]*" %-?[%d.]+,(%-?[%d.]+) [%d.]+x([%d.]+)')
+				if y then
+					expect((tonumber(y) :: number) >= facts.y).to_be(true)
+					expect((tonumber(y) :: number) + (tonumber(h) :: number) <= facts.y + facts.h + 0.5).to_be(true)
+				end
+			end
+			expect(facts.y + facts.h <= said.y + said.h + 0.5).to_be(true)
+			local allow = box(app, "#store-consent-allow")
+			expect(view.y + view.h <= allow.y).to_be(true)
+			expect(allow.y + allow.h <= 540).to_be(true)
+			-- (And nothing in it wider than it: wrapped, not cut.)
+			for line in app:tree("#store-consent-facts"):gmatch("[^\n]+") do
+				local x, w = line:match('text "[^"]*" (%-?[%d.]+),%-?[%d.]+ ([%d.]+)x')
+				if x then
+					expect((tonumber(x) :: number) + (tonumber(w) :: number) <= facts.x + facts.w).to_be(true)
+				end
+			end
+			if show == "many" then
+				-- Fifty ids, on as many lines as they take.
+				expect(facts.h > 400).to_be(true)
+			end
+			local last = app:tree("#store-consent-facts")
+			if show == "token" or show == "token_all" then
+				expect(last).to_contain(if where == "en" then "Can publish" else "可以发布")
+			end
+			-- All of it can be reached.
+			app:scroll("#store-consent-scroll", 5000)
+			app:frames(10)
+			local end_said = box(app, "#store-consent-said")
+			expect(end_said.y + end_said.h <= view.y + view.h + 1).to_be(true)
+		end
+	end
 end)
 
 test("a thing's own words are drawn as they are and everything stays on the sheet", function()

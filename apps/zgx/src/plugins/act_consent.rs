@@ -27,7 +27,7 @@ use zgx_script::{ScriptHost, Shared, Value};
 use super::{Bridge, json_value};
 
 /// The window, in points: the consent windows'.
-const SIZE: (f64, f64) = (460., 480.);
+const SIZE: (f64, f64) = (460., 540.);
 
 pub type Answer = Pin<Box<dyn Future<Output = Result<Json, String>>>>;
 /// What it does once you say so.

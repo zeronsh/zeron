@@ -36,45 +36,85 @@ local function title(it: any): string | Message
 	return ui.t("plugins.store.act.token.title")
 end
 
-local function scope_words(scope: any): string
+-- What a token can publish, every word of it: which of them, each id on its
+-- line's own terms, and for all of both kinds what a template can do.
+local function scope_lines(scope: any): { () -> string }
 	if type(scope) ~= "table" or scope.all == true then
 		local both = type(scope) == "table" and type(scope.all_kinds) == "table" and table.find(scope.all_kinds, "template") ~= nil
-		return if both
-			then `{ui.t("plugins.store.key.scope.all_both"):get()}. {ui.t("plugins.store.key.scope.all_both_hint"):get()}`
-			else ui.t("plugins.store.key.scope.all"):get()
+		if not both then
+			return {
+				function(): string
+					return ui.t("plugins.store.key.scope.all"):get()
+				end,
+			}
+		end
+		return {
+			function(): string
+				return ui.t("plugins.store.key.scope.all_both"):get()
+			end,
+			function(): string
+				return ui.t("plugins.store.key.scope.all_both_hint"):get()
+			end,
+		}
 	end
-	local ids: { string } = {}
-	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
-		table.insert(ids, plain(id, 40))
+	return {
+		function(): string
+			local ids: { string } = {}
+			for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
+				table.insert(ids, plain(id, 40))
+			end
+			return table.concat(ids, ui.t("plugins.words.list_sep"):get())
+		end,
+	}
+end
+
+-- A fact's words, whole: on as many lines as they take, a word longer than
+-- one broken (what's decided here is never cut).
+local function whole(lines: { () -> string }): Node
+	local texts: { Node } = {}
+	for i, words_of in lines do
+		table.insert(texts, ui.text {
+			words_of,
+			w_full = true,
+			wrap = true,
+			text_size = if i == 1 then "$font.size.md" else "$font.size.sm",
+			line_height = if i == 1 then "$font.line.md" else "$font.line.sm",
+			color = if i == 1 then "$text.primary" else "$text.secondary",
+		})
 	end
-	return table.concat(ids, ui.t("plugins.words.list_sep"):get())
+	return ui.column { grow = 1, basis = 0, min_w = 0, gap = "$zeron.space.hair", table.unpack(texts) }
 end
 
 local function facts(it: any): Node
 	local items: { any } = {}
-	local function add(key: string, value: () -> string)
-		table.insert(items, { key = ui.t(key), value = value })
+	local function add(key: string, lines: { () -> string })
+		table.insert(items, { key = ui.t(key), value = whole(lines) })
+	end
+	local function one(said: () -> string): { () -> string }
+		return { said }
 	end
 	if it.act == "token" then
-		add("plugins.store.key.name", function(): string
+		add("plugins.store.key.name", one(function(): string
 			return plain(it.name, 64)
-		end)
-		add("plugins.store.key.scope.label", function(): string
-			return scope_words(it.scope)
-		end)
-		add("plugins.store.key.expiry_label", function(): string
+		end))
+		add("plugins.store.key.scope.label", scope_lines(it.scope))
+		add("plugins.store.key.expiry_label", one(function(): string
 			return if type(it.expires) == "number" then locale.date(it.expires / 1000) else ui.t("plugins.store.key.expiry.never"):get()
-		end)
+		end))
 	else
-		add("plugins.store.act.id", function(): string
+		add("plugins.store.act.id", one(function(): string
 			return plain(it.id, 40)
-		end)
-		add("plugins.store.act.version", function(): string
+		end))
+		add("plugins.store.act.version", one(function(): string
 			return plain(it.version, 32)
-		end)
+		end))
 	end
-	return ds.Settings.Group {
-		ui.column { id = "store-consent-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+	return ui.div {
+		w_full = true,
+		shrink = 0,
+		ds.Settings.Group {
+			ui.column { id = "store-consent-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+		},
 	}
 end
 
@@ -92,34 +132,51 @@ local function asking(): Node
 		w_full = true,
 		h_full = true,
 		gap = "$space.5",
-		ui.row {
+		-- What's asked, all of it: it keeps its height and scrolls where the
+		-- window can't hold it (a name on many lines, many ids), never cut;
+		-- the answer stays under it.
+		ui.scroll {
+			id = "store-consent-scroll",
 			w_full = true,
-			gap = "$space.3",
-			items = "center",
-			ds.Tile { label = plain(it.name, 64), hue = words.hue(plain(it.id or it.name, 64)), size = 40 },
-			ui.text {
-				title(it),
-				heading = 1,
-				grow = 1,
-				min_w = 0,
-				text_size = "$font.size.lg",
-				line_height = "$font.line.lg",
-				weight = "$font.weight.semibold",
-				color = "$text.primary",
-				wrap = true,
+			grow = 1,
+			basis = 0,
+			min_h = 0,
+			fade = { 12, 12 },
+			fade_overflow = true,
+			ui.column {
+				id = "store-consent-said",
+				w_full = true,
+				shrink = 0,
+				gap = "$space.5",
+				ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "center",
+					ds.Tile { label = plain(it.name, 64), hue = words.hue(plain(it.id or it.name, 64)), size = 40 },
+					ui.text {
+						title(it),
+						heading = 1,
+						grow = 1,
+						min_w = 0,
+						text_size = "$font.size.lg",
+						line_height = "$font.line.lg",
+						weight = "$font.weight.semibold",
+						color = "$text.primary",
+						wrap = true,
+					},
+				},
+				ui.text {
+					ui.t(`plugins.store.act.{act}.body`),
+					w_full = true,
+					wrap = true,
+					text_size = "$font.size.md",
+					line_height = 20,
+					color = "$text.secondary",
+				},
+				facts(it),
+				ui.div { id = "store-consent-why", w_full = true, shrink = 0, ds.Callout { tone = "info", title = ui.t("plugins.store.act.why_title"), body = ui.t("plugins.store.act.why_body") } },
 			},
 		},
-		ui.text {
-			ui.t(`plugins.store.act.{act}.body`),
-			w_full = true,
-			wrap = true,
-			text_size = "$font.size.md",
-			line_height = 20,
-			color = "$text.secondary",
-		},
-		facts(it),
-		ds.Callout { tone = "info", title = ui.t("plugins.store.act.why_title"), body = ui.t("plugins.store.act.why_body") },
-		ui.div { grow = 1 },
 		ui.show(function(): boolean
 			return busy() and act == "token"
 		end, ui.text {

@@ -14,6 +14,17 @@ local ACTS: { [string]: any } = {
 	publish = { act = "publish", kind = "plugin", id = "focus-timer", name = "Focus timer", version = "1.3.0" },
 	unyank = { act = "unyank", kind = "plugin", id = "focus-timer", name = "focus-timer", version = "1.2.0" },
 	token = { act = "token", name = "GitHub Actions", scope = { plugins = { "focus-timer", "tidy" } }, expires = 1795132800000 },
+	many = {
+		act = "token",
+		name = "Release everything",
+		scope = { plugins = (function(): { string }
+			local ids = {}
+			for i = 1, 50 do
+				table.insert(ids, `a-plugin-with-a-long-id-number-{i}`)
+			end
+			return ids
+		end)() },
+	},
 	token_both = { act = "token", name = "Both", scope = { all = true, all_kinds = { "plugin", "template" } } },
 	token_all = { act = "token", name = "CI", scope = { all = true } },
 	hostile = {
@@ -62,6 +73,13 @@ ui.command { id = "made", title = "Made", run = function()
 	shown:set({ busy = false, item = ACTS.token, secret = "zdt_abcdefgh0123456789" } :: any)
 end }
 
+-- (Pictures: each scheme.)
+local actions = require("@screens/onboarding/actions")
+for _, scheme in { "light", "dark" } do
+	ui.command { id = scheme, title = scheme, run = function()
+		actions.apply_scheme(scheme :: any)
+	end }
+end
 for _, name in { "en", "zh-Hans" } do
 	ui.command { id = `locale_{name}`, title = name, run = function()
 		ui.locale:set(name)
@@ -72,6 +90,6 @@ shown:set({ busy = false, item = ACTS.publish } :: any)
 
 return ui.column {
 	w = 460,
-	h = 480,
+	h = 540,
 	consent.View(),
 }
