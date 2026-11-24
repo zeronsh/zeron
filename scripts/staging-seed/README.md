@@ -27,7 +27,7 @@ headless`, or the app), signed in as that account, with a username. On one
 machine, each author has their own `HOME`, `ZERON_DATA_DIR` and
 `ZERON_IPC_PORT`. Each author signs in once, by any real path:
 `zeron login`'s headless code, or the app. The usernames the catalog's
-authors are listed under are in `catalog.mjs` (`stg-ada` … `stg-fen`).
+authors are listed under are in `catalog.mjs` (`stg-ada`, `stg-ben`, `stg-cy`, `stg-dee`, `stg-eli`, `stg-fen`).
 
 The accounts file names them:
 
@@ -45,6 +45,43 @@ The accounts file names them:
 `slot` is the catalog's author (1–6), and `zeron` defaults to the one on
 `PATH`. Deploy tokens are never in the file, only in the environment, under
 each author's `token_env`.
+
+## Making the sessions (sessions.mjs)
+
+`sessions.mjs` makes them through the real paths, on one machine. It runs one
+`zeron headless` per author, with its own `HOME`, data folder and IPC port
+(27711–27716). Its `up` command:
+- signs each author in with the engine's headless sign-in: AuthKit's hosted
+  page, then the edge's `/auth/cli/callback` code;
+- gives each a workspace of its own (`CreateOrg`, as the app's first run does;
+  the engine counts a session as signed in only in a workspace);
+- claims each author's username.
+
+Its `tokens` command makes each author's deploy token with the CLI. A headless
+browser (Playwright) fills the hosted page with each account's email and
+password: nothing is bypassed.
+
+```sh
+node scripts/staging-seed/sessions.mjs up --zeron <zeron build> --edge https://staging.zeron.sh \
+  --client-id client_01KWD0E9SYPV2WE4QN9TP9DP0W --logins <logins.json> --dir <folder> --playwright <folder with playwright and ws>
+node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json            # pass 1, exit 3
+node scripts/staging-seed/sessions.mjs tokens …the same…                        # writes <folder>/tokens.env (0600)
+node scripts/staging-seed/sessions.mjs up …the same…                            # restarts the engines `tokens` stopped
+(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json)
+node scripts/staging-seed/sessions.mjs down --dir <folder>                      # stops the engines by their own pids
+```
+
+The logins file lists the six accounts in the catalog's order, as
+`{username, email, user_id, password}`. Passwords are read only: never printed,
+logged or written.
+
+The folder keeps each author's home and data, `accounts.json` and `tokens.env`,
+for reruns. `up` signs in only who isn't signed in, and `tokens` makes only the
+tokens not yet made.
+
+A fresh sign-in comes back to the engine's loopback, on the one port the
+redirect list names (27641, every engine's). So `tokens` runs one author's
+engine at a time.
 
 ## Running it
 
