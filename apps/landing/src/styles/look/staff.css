@@ -47,6 +47,15 @@
 .reps .trow > .btn { grid-column: 6; }
 /* Reserved ids: the id, for whom, why, since when; Free. */
 .res .trow { grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1.6fr) 96px 64px; }
+/* A plugin's own reports, on its staff page: where each stands, why, what they said (and who), when; Close it. */
+.preps .trow { grid-template-columns: 88px minmax(0, 0.9fr) minmax(0, 2fr) 72px 88px; }
+.preps .trow > .btn { grid-column: 5; }
+.preps .c-reason .state { display: inline-block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+/* (Its head's actions, at its right: Feature, Move, Suspend or Restore, its page.) */
+.head-act.staff-acts { margin: 0; }
+.head-act.staff-acts form { display: contents; }
+.staff-plugin .vers .c-ver a { font: 550 14px/20px var(--mono); color: var(--text); }
+
 /* The log: when, who, what, and what else it recorded. */
 .log .trow { grid-template-columns: 136px minmax(0, 0.6fr) minmax(0, 1.3fr) minmax(0, 1.4fr) 16px; }
 .log .c-what { display: flex; align-items: center; gap: var(--s8); min-width: 0; white-space: nowrap; }
@@ -90,50 +99,20 @@
   .log .trow > :first-child { grid-column: 2; grid-row: 2; font-size: 13px; }
   .log .trow > .c-said { grid-column: 1 / -1; grid-row: 3; font-size: 13px; }
   .log .trow > .c-said:empty { display: none; }
-  /* (A plugin's own rows on its staff page: one column of lines, the row's button beside its first.) */
-  .sr.h { display: none; }
-  .srows { border-radius: 0; }
-  .srows ul > .sr { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s4); column-gap: var(--s16); }
-  .sr > * { grid-column: 1 / -1; }
-  .sr > :first-child { grid-column: 1; }
-  .sr > .btn { grid-column: 2; grid-row: 1; }
-  .srows .sr:not(.h) > :not(.btn, :first-child) { padding-top: 0; }
 }
 
-/* ---- A plugin's own rows on its staff page: a card of rows, its head the columns' names ---- */
-.srows { margin-top: var(--s32); margin-inline: calc(-1 * var(--card)); }
-.srows ul { padding: 0; list-style: none; }
-.sr { display: grid; column-gap: var(--s32); align-items: start; padding: var(--s16) var(--card); font-size: 14px; line-height: 22px; }
-.srows li + li.sr, .sr.h + ul .sr { box-shadow: 0 -1px 0 var(--line); }
-.sr.h { padding-top: var(--s16); padding-bottom: var(--s12); font-size: 13px; line-height: 20px; color: var(--text-3); }
-.sr > * { min-width: 0; overflow-wrap: anywhere; }
-/* (A row's words share a middle with its button, 32 high: 5 down to a 22-high line.) */
-.sr:not(.h) > :not(.btn) { padding-top: var(--s4); }
-.sr > .btn { justify-self: end; margin-right: calc(-1 * var(--pad)); }
-.sr .id { font: 500 13px/22px var(--mono); letter-spacing: -0.01em; }
-.sr small { display: block; font-size: 13px; line-height: 20px; color: var(--text-3); }
-.sr .why { color: var(--text-2); }
-/* Reserve an id: under the list, a form of its own. */
+/* Reserve an id: under the list, a form of its own, as the report page's: no box round it, at most 560. */
 .reserve { margin-top: var(--s64); }
 .reserve h2 { font-size: 19px; line-height: 26px; }
 .reserve .lead2 { margin-top: var(--s4); font-size: 14px; line-height: 21px; color: var(--text-2); }
-.reserve .askcard { margin-top: var(--s16); max-width: 560px; }
+.reserve .askcard { max-width: 560px; margin: var(--s16) 0 0; padding: 0; overflow: visible; background: none; box-shadow: none; border-radius: 0; }
 .reserve .body { margin-top: 0; }
 .site-ids { font-size: 13px; line-height: 20px; color: var(--text-3); }
 .site-ids .words { color: var(--text-2); }
 
 /* One plugin, for its reviewers (the author's plugin page's look): its head, what can be done to it, its versions, its reports. */
-.staff-plugin .mhead .by a { color: var(--text-2); font-weight: 500; }
-.staff-plugin .mhead .by a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 .staff-acts { display: flex; flex-wrap: wrap; gap: var(--s8); margin-top: var(--s16); margin-left: calc(-1 * var(--s12)); }
 .staff-acts form { display: contents; }
-.staff-plugin .vr .vlink { font: 600 14px/22px var(--mono); color: var(--text); border-radius: 4px; }
-.staff-plugin .vr .vlink:hover { text-decoration: underline; text-underline-offset: 3px; }
-.staff-plugin .vr .means { gap: var(--s4); }
-.staff-plugin .vr .means p { font-size: 14px; line-height: 22px; overflow-wrap: anywhere; }
-.staff-plugin .vr .means small { display: block; margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); }
-.staff-plugin .vr .pub { font-size: 14px; line-height: 22px; color: var(--text-2); }
-.staff-plugin .vr .act .btn { margin-right: calc(-1 * var(--pad)); }
 .sec-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s16); }
 .sec-row h2 { display: flex; align-items: baseline; gap: var(--s8); font-size: 19px; line-height: 26px; }
 .sec-row h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
@@ -141,13 +120,9 @@
 .sec-row .more:hover, .tools-line .more:hover { color: var(--text); }
 .sec-row .more svg, .tools-line .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .staff-plugin .none { margin-top: var(--s12); font-size: 14px; color: var(--text-3); }
-.rep .sr { grid-template-columns: 96px minmax(0, 0.8fr) minmax(0, 2fr) 80px 84px; }
-.sr .said { display: block; color: var(--text); }
 
 /* Reports: its states, chips under the head; each report a row. */
 .chips { display: flex; flex-wrap: wrap; gap: var(--s8); margin-top: var(--s24); margin-left: calc(-1 * var(--s12)); }
-.sr .pname { font-weight: 550; color: var(--text); border-radius: 4px; }
-.sr .pname:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 /* The log: when, who, what, and what else it recorded; a plugin's own when it's asked for. */
 .tools-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s4) var(--s16); margin-top: var(--s24); font-size: 14px; line-height: 20px; color: var(--text-2); }
@@ -244,24 +219,24 @@ em.mi { font-style: normal; color: var(--danger); }
 
 /* Files and Changes, views of their own. */
 .files-view { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: var(--s24); align-items: start; }
-.tree-pane { position: sticky; top: 84px; max-height: calc(100vh - 104px); overflow: auto; padding: var(--s8); border-radius: 16px; }
+.tree-pane { position: sticky; top: var(--s32); max-height: calc(100vh - 2 * var(--s32)); overflow: auto; padding: var(--s8); border-radius: 16px; }
 .file-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s8) var(--s12); margin-bottom: var(--s12); font-size: 13px; line-height: 20px; color: var(--text-3); }
 .file-head code { font: 500 13px/20px var(--mono); color: var(--text); overflow-wrap: anywhere; }
 .file-head .more { display: inline-flex; align-items: center; gap: var(--s4); color: var(--text-2); font-weight: 500; }
 .file-head .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .file-picture { display: block; max-width: 100%; margin-bottom: var(--s12); border-radius: 12px; box-shadow: var(--shadow-1); }
 .changes-view { display: flex; flex-direction: column; gap: var(--s16); }
-.change-block { overflow: hidden; margin-inline: calc(-1 * var(--s16)); border-radius: 16px; scroll-margin-top: 84px; }
+.change-block { overflow: hidden; margin-inline: calc(-1 * var(--s16)); border-radius: 16px; scroll-margin-top: var(--s32); }
 .dh { display: flex; align-items: center; gap: var(--s12); padding: var(--s12) var(--s16); font-size: 13px; line-height: 20px; box-shadow: 0 1px 0 var(--line); }
 .dh .fn:hover { text-decoration: underline; text-underline-offset: 3px; }
 .change-block .diff { border-radius: 0; box-shadow: none; background: none; }
 /* (On an added or removed line's wash, its numbers and its comments a step darker, to read.) */
 .change-block .diff :is(.added, .removed) :is(.n, .hljs-comment) { color: var(--text-2); }
 
-/* The decision, which never scrolls away (the rail runs the page's height; the card sticks under the bar); then who
+/* The decision, which never scrolls away (the rail runs the page's height; the card sticks a step from the top); then who
    sent it, what's reported, its versions, a group's step apart, each under the same label. */
 .rail.rv-rail { position: static; align-self: stretch; }
-.decide { position: sticky; top: calc(60px + var(--s32)); z-index: 2; display: flex; flex-direction: column; gap: var(--s12); margin-inline: calc(-1 * var(--s24)); padding: var(--s24); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-2); }
+.decide { position: sticky; top: var(--s32); z-index: 2; display: flex; flex-direction: column; gap: var(--s12); margin-inline: calc(-1 * var(--s24)); padding: var(--s24); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-2); }
 .decide h2 { font-size: 15px; line-height: 22px; }
 .decide p { font-size: 14px; line-height: 21px; color: var(--text-2); }
 .decide p.t3 { color: var(--text-3); }

@@ -65,13 +65,14 @@ const said = (field: Refusal["field"]) => (refusal && refusal.field === field ? 
   </div>
   <fieldset class="tf scopes" aria-describedby={said("plugins")}>
     <legend class="field-label">{store("plugins.store.key.scope.label")}</legend>
-    <label class="opt">
+    {/* (Each a card to choose, as the report page's reasons: its words, its radio at the right; the chosen one ringed.) */}
+    <label class="rcard">
+      <span class="rc-words"><b>{store("plugins.store.key.scope.all")}</b><small>{count(plugins.length)} today, and any you publish later</small></span>
       <input type="radio" name="scope" value="all" checked={fields.scope === "all"} />
-      <span><b>{store("plugins.store.key.scope.all")}</b><small>{count(plugins.length)} today, and any you publish later</small></span>
     </label>
-    <label class="opt">
+    <label class="rcard">
+      <span class="rc-words"><b>{store("plugins.store.key.scope.chosen")}</b><small>Only these, up to {MOST_PLUGINS}</small></span>
       <input type="radio" name="scope" value="chosen" checked={fields.scope === "chosen"} disabled={plugins.length === 0} />
-      <span><b>{store("plugins.store.key.scope.chosen")}</b><small>Only these, up to {MOST_PLUGINS}</small></span>
     </label>
     {
       plugins.length > 0 && (

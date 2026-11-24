@@ -6,10 +6,10 @@
 .wrap.acct { padding-top: var(--s64); }
 .acct .crumbs { padding-top: 0; margin-top: calc(-1 * var(--s32)); margin-bottom: var(--s24); }
 /* (Each crumb on one line; the last, a plugin's name, cut: the head below says it whole.) */
-.acct .crumbs a { flex: none; }
-.acct .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct .crumbs a, .rpt .crumbs a { flex: none; }
+:is(.acct, .rpt) .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A crumb between the first and the last, a plugin's name, is cut too when the line is short.) */
-.acct .crumbs a:not(:first-child) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(.acct, .rpt) .crumbs a:not(:first-child) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The head: the title and the page's one action on one row (the button level with the title), the lead under. */
 .acct .hd-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s24); }
 .acct .hd-row h1 { min-width: 0; }
@@ -25,7 +25,7 @@
 .sub a:focus-visible { outline-offset: -2px; }
 
 /* Signed out: the page's own invitation. */
-.please { margin-top: var(--s32); margin-left: calc(-1 * var(--s32)); padding: var(--s32); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-1); max-width: 34em; }
+.please { margin-top: var(--s32); max-width: 34em; }
 .please h2 { font-size: 19px; line-height: 26px; }
 .please p { margin-top: var(--s4); color: var(--text-2); }
 .please .btn { margin-top: var(--s16); }
@@ -67,36 +67,31 @@ a.trow:focus-visible { outline-offset: -2px; }
 .trow.off .tile { filter: grayscale(1); opacity: 0.7; }
 .trow.off .nm, .trow.off .c-n { color: var(--text-2); }
 
-/* (When a version was published, and from where: a device's or a token's mark, small, beside its name. The owner's
-   page and the staff's plugin page both draw it.) */
-.pub { font-size: 14px; line-height: 20px; padding-top: var(--s4); min-width: 0; }
-.pub small { display: flex; align-items: center; gap: var(--s8); margin-top: var(--s4); font-size: 13px; line-height: 18px; color: var(--text-3); min-width: 0; }
-.pub small svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ---- One of your plugins: its versions, each where it stands, what that means, and what you can do ---- */
-.mhead { display: flex; align-items: center; gap: var(--s16); }
-.mhead .txt { flex: 1; min-width: 0; }
-.mhead h1 { font-size: 32px; line-height: 38px; letter-spacing: -0.03em; overflow-wrap: anywhere; text-wrap: balance; }
-.mhead .by { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); margin-top: var(--s4); color: var(--text-3); font-size: 14px; line-height: 20px; }
-.mhead .by .mono { font: 450 13px/20px var(--mono); overflow-wrap: anywhere; }
-.mhead .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
-.mhead > .btn { flex: none; }
+/* Its head, as a plugin's page heads it: the tile (80), the name, its id and where it stands on the line under it,
+   and its one action at the right, level with the tile's middle. (The staff's plugin page heads it the same.) */
+.ohead { --tile: 80px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: var(--s24); align-items: start; }
+.ohead .txt { min-width: 0; display: flex; flex-direction: column; justify-content: center; min-height: var(--tile); }
+.ohead h1 { font-size: 32px; line-height: 40px; letter-spacing: -0.03em; overflow-wrap: anywhere; }
+.ohead .by { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); margin-top: var(--s4); font-size: 14px; line-height: 20px; color: var(--text-3); }
+.ohead .by .mono { font: 450 13px/20px var(--mono); overflow-wrap: anywhere; }
+.ohead .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.ohead .by a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
+.ohead .by a:hover { color: var(--text); }
+.head-act { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--s8); min-height: var(--tile); }
+/* Its versions: your own pages' table (.tbl): the version and its pills, when it was published, its action. */
+/* (Its action column one width on every row, an empty one too: the columns line up down the table.) */
+.vers .trow { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 168px; }
+.vers .c-ver { gap: var(--s8); flex-wrap: wrap; row-gap: var(--s4); white-space: normal; }
+.vers .c-act { justify-self: end; }
+.vers .c-act .btn { margin-right: calc(-1 * var(--pad)); }
+.vers .c-note { grid-column: 1 / -1; }
+.vers .trow.off .c-ver b { color: var(--text-2); }
 .acct > .flash { margin-top: var(--s24); }
 .mvers { margin-top: var(--s48); }
 .mvers > h2 { display: flex; align-items: baseline; gap: var(--s8); font-size: 19px; line-height: 26px; }
 .mvers > h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
-.vlist { margin-top: var(--s16); margin-inline: calc(-1 * var(--card)); }
-.vlist ul { padding: 0; list-style: none; }
-.vr { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 0.8fr) 168px; gap: var(--s32); align-items: start; padding: var(--s24) var(--card); }
-.vlist li + li.vr, .vr.h + ul .vr { box-shadow: 0 -1px 0 var(--line); }
-.vr.h { padding-top: var(--s16); padding-bottom: var(--s12); font-size: 13px; line-height: 20px; color: var(--text-3); }
-.vn { display: flex; flex-wrap: wrap; align-items: center; row-gap: var(--s8); min-width: 0; }
-.vn b { font: 600 14px/24px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
-.means { display: flex; flex-direction: column; gap: var(--s12); min-width: 0; font-size: 14px; line-height: 21px; color: var(--text-2); }
-.means > p { padding-top: var(--s4); }
-.means small { font-size: 13px; line-height: 20px; color: var(--text-3); }
-.vr .act { justify-self: end; }
-.vr.off .vn b { color: var(--text-2); }
 .mkeys { margin-top: var(--s24); font-size: 14px; line-height: 20px; color: var(--text-3); }
 .mkeys a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
 .mkeys a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
@@ -152,19 +147,16 @@ a.trow:focus-visible { outline-offset: -2px; }
 .tokform .tf { min-width: 0; margin: 0; padding: 0; border: 0; }
 .tokform .field-label { display: block; margin-bottom: var(--s8); padding: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
 .tokform .field { position: relative; }
-.tokform :is(.input, select) { --pad: var(--s12); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); height: 40px; padding: 0 var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+.tokform :is(.input, select) { --pad: var(--s16); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); height: 40px; padding: 0 var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
 .tokform select { appearance: none; padding-right: var(--s32); }
 .tokform .input::placeholder { color: var(--text-3); }
 .tokform :is(.input, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .tokform .input[aria-invalid] { box-shadow: inset 0 0 0 1px var(--danger); }
 .tokform .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
-.tokform .opt { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: var(--s12); align-items: start; padding: var(--s8) 0; cursor: pointer; }
-.tokform .opt input { width: 16px; height: 16px; margin: var(--s4) 0 0; accent-color: var(--text); }
-.tokform .opt b { display: block; font-size: 14px; line-height: 20px; font-weight: 500; }
-.tokform .opt small { display: block; font-size: 13px; line-height: 18px; color: var(--text-3); }
-.tokform .opt:has(input:disabled) { cursor: default; opacity: 0.55; }
+/* (Its scope: the report page's cards to choose, .rcard; the chosen plugins' list under them.) */
+.tokform .scopes .rcard + .rcard { margin-top: var(--s8); }
 /* (Chosen plugins: each to tick, the list in its own well; with all of yours, nothing to choose.) */
-.tokform .picks { --pad: var(--s12); display: grid; gap: var(--s4); max-height: 248px; overflow: auto; margin: var(--s8) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
+.tokform .picks { --pad: var(--s16); display: grid; gap: var(--s4); max-height: 248px; overflow: auto; margin: var(--s8) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
 .tokform .scopes:has(input[value="all"]:checked) .picks { display: none; }
 .tokform .pick-pl { display: flex; align-items: center; gap: var(--s12); min-height: 36px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; cursor: pointer; }
 .tokform .pick-pl input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
@@ -173,16 +165,12 @@ a.trow:focus-visible { outline-offset: -2px; }
 .tokform > .said { margin-top: 0; }
 .tokform .note { font-size: 13.5px; line-height: 20px; color: var(--text-2); }
 .tokform .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s4); }
-.askcard.newtoken { max-width: 560px; }
 
 /* The token, shown once: its words, the token to copy, what it is, and done. */
-.reveal { max-width: 600px; }
-.reveal .secret { --pad: var(--s16); display: flex; align-items: center; gap: var(--s8); margin: var(--s24) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--s8) var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); }
-.reveal .secret code { flex: 1; min-width: 0; font: 500 13.5px/20px var(--mono); color: var(--text); overflow-wrap: anywhere; user-select: all; }
-.reveal .secret button { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 8px; color: var(--text-2); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
-.reveal .secret button:hover { color: var(--text); background: var(--surface); }
-.reveal .secret button.is-done { color: var(--verified); }
-.reveal .secret svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* (The token in the guide's block of code, wrapped whole, every character of it on screen; the warning under it.) */
+.reveal .secret { margin-top: var(--s24); }
+.reveal .secret pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.reveal .warnline { margin-top: var(--s12); margin-left: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--warn-wash); color: var(--warn); font-size: 14px; line-height: 20px; }
 .reveal .made { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s8) var(--s24); margin-top: var(--s24); font-size: 14px; line-height: 20px; }
 .reveal .made > div { display: contents; }
 .reveal .made dt { color: var(--text-3); }
@@ -196,22 +184,9 @@ a.trow:focus-visible { outline-offset: -2px; }
 .how p { margin-top: var(--s8); color: var(--text-2); font-size: 14px; line-height: 21px; }
 .how code { font: 500 12.5px/1 var(--mono); padding: var(--s4) var(--s4); border-radius: 5px; background: var(--sunken); color: var(--text); }
 
-/* The Publishing guide: a page of prose in the store's measure, its parts listed under its lead. */
-.guide-page .guide { max-width: 680px; padding-top: 0; margin-top: var(--s24); }
-.guide .guide-lead { font-size: 18px; line-height: 29px; color: var(--text-2); }
-.guide .guide-parts { margin-top: var(--s24); margin-inline: calc(-1 * var(--s16)); padding: var(--s16) var(--s16); border-radius: 14px; background: var(--sunken); }
-/* (Its numbers hang in the well's padding, its words on the column.) */
-.guide .guide-parts ol { margin: 0; padding-left: 0; font-size: 15px; line-height: 24px; }
-.guide .guide-parts li + li { margin-top: var(--s4); }
-.guide .guide-parts a { box-shadow: none; }
-.guide .guide-parts a:hover { box-shadow: 0 1px 0 var(--text-3); }
-/* (A part opened from the list lands clear of the bar.) */
-.guide h2[id] { scroll-margin-top: 84px; }
-.guide .guide-next { margin-top: var(--s48); }
-.guide .guide-next .btn { margin-left: calc(-1 * var(--pad)); box-shadow: none; }
-
 /* A question before something that can't be taken back. */
-.askcard { max-width: 520px; margin-top: var(--s8); margin-left: calc(-1 * var(--s32)); padding: var(--s32); overflow: visible; }
+/* (In the page's quiet column, .wrap.rpt, as the report page's form: no box round it.) */
+.askcard { margin-top: var(--s24); overflow: visible; }
 .askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .askcard p { margin-top: var(--s8); color: var(--text-2); }
 .askcard .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s24); }
@@ -233,14 +208,15 @@ a.trow:focus-visible { outline-offset: -2px; }
 .rcard:hover { box-shadow: inset 0 0 0 1px var(--line-2); }
 .rcard:has(input:checked) { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--text); }
 .rcard:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.rcard:has(input:disabled) { cursor: default; opacity: 0.55; }
+.rcard:has(input:disabled):hover { box-shadow: inset 0 0 0 1px var(--line); }
 .rc-words { flex: 1; min-width: 0; }
 .rc-words b { display: block; font-size: 15px; line-height: 22px; font-weight: 550; }
 .rc-words small { display: block; font-size: 13px; line-height: 20px; color: var(--text-3); }
 .rcard input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
 .rcard input:focus-visible { outline: none; }
 .rpt-more { margin-top: var(--s32); }
-/* (The field hangs as the reasons' cards do, its words on the column with theirs.) */
-.rpt-form .field textarea { --pad: var(--s16); padding: var(--s12) var(--s16); }
+.rpt-form .field textarea { padding-block: var(--s12); }
 .rpt-form .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s32); }
 /* (Sent: a check, the thanks, and the way back.) */
 .rpt-ok { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: var(--s16); border-radius: 50%; color: var(--verified); background: var(--verified-wash); }
@@ -250,29 +226,12 @@ a.trow:focus-visible { outline-offset: -2px; }
 .back-link:hover { color: var(--text); }
 .back-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-/* A report: whom it's about, then why. */
-.askcard.report { max-width: 560px; }
-.report-who { display: flex; align-items: flex-start; gap: var(--s16); }
-.report-who > div { min-width: 0; }
-.report-who p { margin-top: var(--s4); font-size: 14px; color: var(--text-3); }
 
 @media (max-width: 1024px) {
-  .vr { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.8fr) auto; gap: var(--s24); }
   .mine .trow { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 72px 16px; column-gap: var(--s16); }
   .keys .trow { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.9fr) 72px; column-gap: var(--s16); }
 }
 @media (max-width: 860px) {
-  .vr.h { display: none; }
-  .vr { grid-template-columns: minmax(0, 1fr) auto; gap: var(--s12) var(--s16); padding: var(--s16) var(--card); }
-  .vr .vn { grid-column: 1; }
-  .vr .act { grid-column: 2; grid-row: 1; }
-  .vr .means, .vr .pub { grid-column: 1 / -1; }
-  .vr .pub { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s4) var(--s12); padding: 0; }
-  .vr .pub small { margin: 0; }
-  /* (The store's link under the name, in the name's column: the name keeps the row.) */
-  .mhead { flex-wrap: wrap; row-gap: var(--s16); }
-  .mhead .txt { flex-basis: calc(100% - 74px); }
-  .mhead > .btn { margin-left: var(--s64); }
   .how { grid-template-columns: minmax(0, 1fr); gap: var(--s24); }
 }
 @media (max-width: 720px) {
@@ -281,7 +240,19 @@ a.trow:focus-visible { outline-offset: -2px; }
   .acct h1 { font-size: 32px; line-height: 36px; }
   .sub { margin-top: var(--s32); gap: var(--s24); }
   /* (As wide as the column, as wide as the screen: the cards hang the whole gutter.) */
-  .vlist { border-radius: 0; }
+  /* (A plugin's head on a phone: its tile at the title's first line, its action under its words.) */
+  .ohead { --tile: 56px; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); }
+  .ohead > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
+  .ohead .txt { justify-content: flex-start; min-height: 0; }
+  .ohead h1 { font-size: 26px; line-height: 32px; margin-top: var(--s12); }
+  .head-act { grid-column: 1 / -1; justify-content: flex-start; min-height: 0; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }
+  .vers .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s4); }
+  .vers .trow::before { display: none; }
+  .vers .trow.th { display: none; }
+  .vers .c-ver { grid-column: 1; grid-row: 1; }
+  .vers .c-act { grid-column: 2; grid-row: 1; }
+  .vers .c-pub { grid-column: 1 / -1; grid-row: 2; font-size: 13px; color: var(--text-3); }
+  .vers .c-note { grid-row: 3; }
   /* (The head: the title, its lead, then the button, its own width, hanging by its padding.) */
   .acct .hd { display: flex; flex-direction: column; align-items: flex-start; }
   .acct .hd-row { display: contents; }
@@ -330,7 +301,7 @@ a.trow:focus-visible { outline-offset: -2px; }
   :is(.mine .c-pub, .mine .c-n)::before { content: "·"; color: var(--text-3); }
   .mine .c-n::before { margin-right: var(--s8); }
   .c-n .unit { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
-  .please, .askcard { margin-inline: calc(-1 * var(--gutter)); padding: var(--s24) var(--gutter); border-radius: 0; max-width: none; }
+
   .askcard .answers { flex-direction: column-reverse; }
   .askcard .answers .btn { width: 100%; }
   .wrap.rpt { padding-top: var(--s32); }

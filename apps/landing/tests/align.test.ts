@@ -56,6 +56,23 @@ describe("every run of text that begins a line puts its ink on its column", () =
     }, 120_000);
 });
 
+describe("the bar scrolls away with the page (nothing sticks over what you read)", () => {
+  test("on a store page, a plugin's, the guide, your own and the staff's, wide and on a phone", async () => {
+    for (const p of [{ path: "/plugins" }, { path: "/plugins/focus-timer" }, { path: "/plugins/publishing" }, { path: "/account", user: "user_ada" }, { path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" }])
+      for (const width of [1440, 390]) {
+        const page = await open(p, width, "dark");
+        try {
+          await page.evaluate(() => window.scrollTo(0, 600));
+          const bar = await page.evaluate(() => { const top = document.querySelector(".top")!; return { position: getComputedStyle(top).position, bottom: top.getBoundingClientRect().bottom }; });
+          expect(bar.position, `${p.path} at ${width}`).not.toMatch(/sticky|fixed/);
+          expect(bar.bottom, `${p.path} at ${width}: scrolled off`).toBeLessThanOrEqual(0);
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 120_000);
+});
+
 describe("every icon is drawn at an icon's size", () => {
   // (An icon whose size went with its rule draws as the browser's default, a black square over the page.)
   for (const p of ALIGN_PAGES)
@@ -197,7 +214,7 @@ describe("the columns the rule names", () => {
       }
   }, 240_000);
 
-  test("Review: the decision stays in view as the page scrolls, under the bar, at 1728 by 1117", async () => {
+  test("Review: the decision stays in view as the page scrolls, a step from the window's top, at 1728 by 1117", async () => {
     const page = await open({ path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" }, 1728, "dark", 1117);
     try {
       const height = await page.evaluate(() => document.documentElement.scrollHeight);
@@ -205,7 +222,8 @@ describe("the columns the rule names", () => {
       for (let y = 0; y < height; y += 400) {
         await page.evaluate((y) => window.scrollTo(0, y), y);
         const box = await page.locator("#decide").evaluate((el) => { const r = el.getBoundingClientRect(); return [r.top, r.bottom]; });
-        expect(box[0]!, `at ${y}: its top, under the bar`).toBeGreaterThanOrEqual(60);
+        // (The bar scrolls away: the card sticks 32 from the window's top, once the page is past where it starts.)
+        expect(box[0]!, `at ${y}: its top, a step from the window's`).toBeGreaterThanOrEqual(31);
         expect(box[1]!, `at ${y}: its bottom, on screen`).toBeLessThanOrEqual(1117);
       }
     } finally {
