@@ -2457,9 +2457,15 @@ M.Page = ui.component(function(): Node
 	ui.effect(function()
 		M.page_w:set(width:get())
 	end)
-	-- Capture's history panel's width: as the bar opened out, in the page.
+	-- Capture's history panel's width: as the bar opened out, in the page;
+	-- while Needs you floats at the page's right, short of it (a narrow
+	-- page's panel never under it).
 	local function history_w(): number
-		return math.min(HISTORY_W, math.max(0, width:get() - FLOAT_SIDE * 2))
+		local room = width:get() - FLOAT_SIDE * 2
+		if needs_floats() then
+			room = width:get() - NEEDS_W - FLOAT_SIDE * 3
+		end
+		return math.min(HISTORY_W, math.max(0, room))
 	end
 	-- Capture's bar: on every tab, but over the invitation of an account
 	-- with no orchestrator yet.
