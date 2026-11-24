@@ -801,6 +801,8 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 					end,
 					size = 14,
 				},
+				-- (Done's: archive every closed card, Earlier's too.)
+				aside = if place == "done" then Actions.archive_button(act) else nil,
 				open = function(): boolean
 					return is_open(place)
 				end,

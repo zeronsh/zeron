@@ -241,6 +241,8 @@ M.View = ui.component(function(props: {
 	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 	-- Marks these chats done as read (the space's menu), with its Undo.
 	mark_read: ((ids: { string }) -> ())?,
+	-- Archives every closed board card (the space's menu), with its Undo.
+	archive_done: { count: () -> number, run: () -> () }?,
 	-- Progress's row of a chat (its note, steps, ETA), for the hover card.
 	progress: ((id: string) -> any)?,
 	-- Shows a board card (the hover card's Open card).
@@ -2295,6 +2297,18 @@ M.View = ui.component(function(props: {
 						end
 					end,
 				},
+				-- (Every closed board card off the board, and its threads off
+				-- the Map, an Undo for a moment.)
+				if props.archive_done
+					then {
+						label = locale.s("orch.board.archive_done"),
+						icon = "archive-minimalistic",
+						disabled = props.archive_done.count() == 0,
+						on_select = function()
+							(props.archive_done :: any).run()
+						end,
+					}
+					else nil,
 			}
 		end
 		local i = fmodel.index[id]

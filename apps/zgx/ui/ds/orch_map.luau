@@ -63,6 +63,10 @@ export type Props = {
 	-- Marks these chats done as read (the space's menu: Mark all done as
 	-- read), with its Undo.
 	mark_read: ((ids: { string }) -> ())?,
+	-- Archives every closed board card (the space's menu: Archive all done,
+	-- beside Mark all done as read), with its Undo: `count` says how many,
+	-- `run` does it.
+	archive_done: { count: () -> number, run: () -> () }?,
 	-- Progress's row of a chat, and showing a board card (the force Map's
 	-- hover card).
 	progress: ((id: string) -> any)?,
@@ -338,6 +342,7 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_orchestrator = props.on_open_orchestrator,
 					menu = props.menu,
 					mark_read = props.mark_read,
+					archive_done = props.archive_done,
 					progress = props.progress,
 					on_open_card = props.on_open_card,
 					on_resume_card = props.on_resume_card,

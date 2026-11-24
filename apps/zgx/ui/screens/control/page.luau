@@ -254,6 +254,32 @@ end
 ds.toast.action("control.unread", function(batch: any)
 	M.undo_read(batch)
 end)
+-- Every closed board card archived (the Map's menus: Archive all done,
+-- beside Mark all done as read), as the Board's Done head does it
+-- (ds/orch_board_actions `archive`): off the board and its threads off the
+-- Map at once, each sent once its Undo's while is over.
+local function closed_now(): ({ any }, { [string]: boolean })
+	local model = require("@ds/orch_board_model")
+	local Actions = require("@ds/orch_board_actions")
+	return Actions.closed_of(model.board(orchestration.now:peek()))
+end
+M.archive_done = {
+	count = function(): number
+		return #(closed_now())
+	end,
+	run = function()
+		local cards, busy = closed_now()
+		local _, undo = require("@ds/orch_board_actions").archive(cards, {
+			on_remove = orchestration.remove_later,
+			on_undo_remove = orchestration.undo_remove,
+			busy = busy,
+		})
+		M.archive_done.undo = undo
+	end,
+	-- The last one's Undo (its toast's), while it may be.
+	undo = nil :: (() -> ())?,
+}
+
 function M.mark_done_read(ids: { string })
 	if #ids == 0 then
 		return
@@ -967,6 +993,7 @@ local function map(fill: boolean?): Node
 			-- A secondary click on anything on it (screens/control/map_menu).
 			menu = MapMenu().entries,
 			mark_read = M.mark_done_read,
+			archive_done = M.archive_done,
 			-- (The hover card's: Progress's row of a chat, and a card shown.)
 			progress = function(id: string): any
 				return (orchestration.progress:get() or {})[id]
@@ -1773,7 +1800,15 @@ local MapTab = ui.component(function(): Node
 				title = "control.tabs.map",
 				figures = map_figures(),
 				entries = function(): { any }
-					return OrchMap().menu(M.map_view)
+					local out = OrchMap().menu(M.map_view)
+					table.insert(out, { separator = true })
+					table.insert(out, {
+						label = locale.s("orch.board.archive_done"),
+						icon = "archive-minimalistic",
+						disabled = M.archive_done.count() == 0,
+						on_select = M.archive_done.run,
+					})
+					return out
 				end,
 				-- (Once the tab has measured its room: the Graph laid out
 				-- once, for the height it has.)

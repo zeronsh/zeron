@@ -4482,7 +4482,10 @@
         "question": "只有提问会放到这里",
         "answer": "请先回答",
         "parked": "已被其编排器搁置"
-      }
+      },
+      "archive_done": "Archive all done",
+      "archived": "{n, plural, one {Archived # done task} other {Archived # done tasks}}",
+      "archive_failed": "Couldn't archive them"
     },
     "reports": {
       "title": "Crew updates",

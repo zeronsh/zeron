@@ -4447,7 +4447,10 @@
         "question": "Only a question puts it here",
         "answer": "Answer it first",
         "parked": "Parked by its orchestrator"
-      }
+      },
+      "archive_done": "Archive all done",
+      "archived": "{n, plural, one {Archived # done task} other {Archived # done tasks}}",
+      "archive_failed": "Couldn't archive them"
     },
     "reports": {
       "title": "Crew updates",

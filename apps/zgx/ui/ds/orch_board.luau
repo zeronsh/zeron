@@ -544,6 +544,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 				ui.div { grow = 1, min_w = 0 },
 				drop.Badge(place),
+				-- (Done's: archive every closed card, Earlier's too.)
+				if place == "done" then Actions.archive_button(act) else nil,
 				ui.text {
 					function(): string
 						return tostring(count())

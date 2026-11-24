@@ -377,6 +377,34 @@ end }
 ui.command { id = "map_mark_read_do", title = "Map: Mark all done as read", run = function()
 	page.mark_done_read(require("@ds/orch_force").done_unread_ids())
 end }
+-- Archive all done, from the Map's menus (the page's own action, its Undo
+-- toast): the closed cards it would archive and their threads (into
+-- `archive`), and doing it.
+local archive_seen = ui.state("archive", {} :: any)
+ui.command { id = "map_archive_count", title = "Map: what Archive all done would archive", run = function()
+	local model = require("@ds/orch_board_model")
+	local cards, busy = require("@ds/orch_board_actions").closed_of(model.board(orchestration.now:peek()))
+	local ids, threads = {}, {}
+	for _, c in cards do
+		table.insert(ids, c.id)
+		for _, t in c.threads or {} do
+			if not busy[t] then
+				table.insert(threads, t)
+			end
+		end
+	end
+	archive_seen:set({ count = page.archive_done.count(), ids = ids, threads = threads })
+end }
+ui.command { id = "map_archive_do", title = "Map: Archive all done", run = function()
+	page.archive_done.run()
+end }
+-- (Its toast's Undo, as pressed: no toasts drawn here.)
+ui.command { id = "map_archive_undo", title = "Map: Undo the last Archive all done", run = function()
+	local undo = page.archive_done.undo
+	if undo then
+		undo()
+	end
+end }
 -- The force Map's hover cards: Windows installer at work with Progress's
 -- row of it (a note, steps, its last step), Code signing done and unread
 -- with its card's outcome and pull request.
