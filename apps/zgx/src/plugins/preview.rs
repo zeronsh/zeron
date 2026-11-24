@@ -68,6 +68,13 @@ pub const BLOCKED: &[&str] = &[
     "plugins.store.prereleases",
     "plugins.store.updates",
     "plugins.store.report",
+    "templates.store.mine",
+    "templates.store.prepare",
+    "templates.store.publish",
+    "templates.store.version_action",
+    "templates.store.prereleases",
+    "templates.store.updates",
+    "templates.store.report",
     "templates.use",
     "templates.create",
     "templates.duplicate",
@@ -1003,7 +1010,12 @@ return ui.column {{
         }
         for action in BLOCKED {
             let (checked, aloud) = (format!("refuse(\"{action}"), format!("refuse_aloud(\"{action}"));
-            assert!(sources.contains(&checked) || sources.contains(&aloud), "nothing refuses {action}");
+            // (The store's, of either kind: catalog.rs `Kind::hold`.)
+            let of_a_kind = ["plugins.store.", "templates.store."].iter().find_map(|calls| action.strip_prefix(calls)).map(|name| format!("kind.hold(\"{name}\")"));
+            assert!(
+                sources.contains(&checked) || sources.contains(&aloud) || of_a_kind.is_some_and(|held| sources.contains(&held)),
+                "nothing refuses {action}"
+            );
         }
     }
 

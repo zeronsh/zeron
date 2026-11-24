@@ -302,7 +302,7 @@ fn a_publish_s_ticket_stays_in_the_host() {
 /// A publish of `id` the engine checked: the page's call for it (its handle),
 /// and the engine's own ticket.
 fn prepared_publish(id: &str, hash: &str) -> (String, &'static str) {
-    let shown = keep_prepared(json!({ "id": id, "name": "Focus timer", "version": "1.3.0", "hash": hash, "ticket": "ticket-real" }));
+    let shown = keep_prepared(json!({ "id": id, "name": "Focus timer", "version": "1.3.0", "hash": hash, "ticket": "ticket-real" }), "plugin");
     let handle = shown["ticket"].as_str().unwrap();
     assert_ne!(handle, "ticket-real");
     (format!(r#"ui.call("plugins.store.publish", {{ id = "{id}", hash = "{hash}", ticket = "{handle}", name = "Anything", version = "9.9.9" }})"#), "ticket-real")
@@ -396,4 +396,50 @@ fn a_token_made_as_another_s_template_starts_isn_t_shown_in_the_main_window() {
     // (And revoked: it's nobody's.)
     assert_eq!(app.text("out"), "err:cancelled");
     assert_eq!(asked.borrow().iter().map(|a| (a.0.clone(), a.1["id"].clone())).next_back().unwrap(), ("RevokeDeployToken".into(), json!("t")));
+}
+
+/// A template's calls are the engine's with its kind, its own publish pair,
+/// and neither kind is ever answered with the other's.
+#[test]
+fn a_template_s_calls_say_what_they_re_for() {
+    for (call, method, params) in [
+        (r#"ui.call("templates.store.search", { q = "dark", verified = true })"#, "StoreSearch", json!({ "q": "dark", "verified": true, "kind": "template" })),
+        (r#"ui.call("templates.store.detail", "midnight")"#, "StorePlugin", json!({ "id": "midnight", "kind": "template" })),
+        (r#"ui.call("templates.store.versions", { id = "midnight" })"#, "StoreVersions", json!({ "id": "midnight", "kind": "template" })),
+        (r#"ui.call("templates.store.version", { id = "midnight", version = "1.0.0" })"#, "StoreVersion", json!({ "id": "midnight", "version": "1.0.0", "kind": "template" })),
+        (r#"ui.call("templates.store.mine", nil)"#, "StoreMyPlugins", json!({ "kind": "template" })),
+        (r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "yank" })"#, "StoreVersionAction", json!({ "id": "midnight", "version": "1.0.0", "action": "yank", "kind": "template" })),
+        (r#"ui.call("templates.store.updates", { id = "midnight", prefer = "verified" })"#, "SetPluginUpdates", json!({ "id": "midnight", "prefer": "verified", "kind": "template" })),
+        (r#"ui.call("templates.store.report", { id = "midnight", reason = "malware" })"#, "StoreReport", json!({ "id": "midnight", "reason": "malware", "kind": "template" })),
+        (r#"ui.call("templates.store.prepare", "midnight")"#, "PrepareTemplatePublish", json!({ "id": "midnight" })),
+    ] {
+        let (out, asked) = run(call, json!({ "ok": true, "kind": "template" }));
+        assert!(out.starts_with("ok:"), "{call}: {out}");
+        assert_eq!((asked[0].0.as_str(), &asked[0].1), (method, &params), "{call}");
+    }
+    for (call, kind) in [("plugins.store.detail", "template"), ("templates.store.detail", "plugin")] {
+        let (out, _) = run(&format!(r#"ui.call("{call}", "midnight")"#), json!({ "id": "midnight", "kind": kind }));
+        assert_eq!(out, "err:not_in_store", "{call}");
+    }
+    let ids = |kind: super::Kind| {
+        let reply = json!({ "items": [{ "id": "midnight", "kind": "template" }, { "id": "focus", "kind": "plugin" }, { "id": "old" }] });
+        let Some(zgx_script::Value::List(items)) = kind.all(reply).unwrap().field("items").cloned() else { panic!("no items") };
+        items.iter().map(|item| crate::auth::text(item.field("id").unwrap())).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(super::TEMPLATES), ["midnight"]);
+    assert_eq!(ids(super::PLUGINS), ["focus", "old"], "a store that says no kind has plugins alone");
+    // A handle of one kind publishes nothing of the other's, and a template's
+    // goes out by its own call.
+    let shown = keep_prepared(json!({ "id": "midnight", "version": "1.0.0", "hash": "h", "ticket": "ticket-real" }), "template");
+    let call = |calls: &str| format!(r#"ui.call("{calls}.publish", {{ id = "midnight", hash = "h", ticket = "{}" }})"#, shown["ticket"].as_str().unwrap());
+    let (out, asked) = run(&call("plugins.store"), json!({ "ok": true }));
+    assert_eq!((out.as_str(), asked.len()), ("err:changed", 0));
+    let (_, asked) = run(&call("templates.store"), json!({ "ok": true }));
+    assert_eq!((asked[0].0.as_str(), &asked[0].1), ("PublishTemplate", &json!({ "id": "midnight", "hash": "h", "ticket": "ticket-real" })));
+    // Asked in Zeron's window, as a template's.
+    preview::another_s_ran_for_test(true);
+    let (no, items) = asker(false);
+    run_asking(r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "unyank" })"#, json!({}), no);
+    assert_eq!(items.borrow()[0]["kind"], "template");
+    preview::another_s_ran_for_test(false);
 }
