@@ -1432,9 +1432,6 @@ local function bar_width(page_w: number, beside: boolean): (number, boolean)
 	end
 	return math.min(float_w(), room), true
 end
--- The companion's size: the pill's own one line (ds.Composer's ONE_LINE
--- plus its hairlines).
-local FLOAT_KNOB = 51
 -- (Less than this, it's still being laid out: not its height at rest.)
 local FLOAT_REST_MIN = 24
 
@@ -1523,40 +1520,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 		end
 		return math.max(0, ds.toast.foot() + h + FLOAT_TOAST_GAP - FLOAT_FOOT)
 	end)
-	-- Its history: a knob as the first, opening it over the page.
-	local history_knob = ui.button {
-		id = "control-history-open",
-		label = locale.t("control.capture.history_title"),
-		expanded = function(): boolean
-			return M.history_panel:get()
-		end,
-		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
-		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
-		shrink = 0,
-		items = "center",
-		justify = "center",
-		rounded = "$radius.full",
-		border = 1,
-		border_color = "$zeron.composer.edge",
-		bg = function(): string
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end,
-		backdrop_blur = function(): number
-			return if material.see_through() then 16 else 0
-		end,
-		shadow = function(): string
-			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
-		end,
-		hover = { border_color = "$border.strong" },
-		color = function(): string
-			return if M.history_panel:get() then "$text.primary" else "$text.secondary"
-		end,
-		focus_on_press = false,
-		on_click = function()
-			M.history_panel:set(not M.history_panel:peek())
-		end,
-		Icon { name = "clock-circle", size = 16 },
-	}
 	return ui.row {
 		w_full = true,
 		-- (Off the page's foot, and over a toast stack beside it.)
@@ -1627,13 +1590,6 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 							shown = props.shown,
 						},
 					},
-					-- Its history (the dumps sent, where each went), over the page.
-					ui.show(function(): boolean
-						return CP ~= nil and CP.dumps()[1] ~= nil
-					end, ui.div {
-						shrink = 0,
-						history_knob,
-					}),
 				},
 			},
 		},
@@ -1990,6 +1946,44 @@ local ChatTab = ui.component(function(): Node
 			return stage.Later(1, build)
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	}
+end)
+
+-- Capture's history, floating at the page's foot on the left as Needs you
+-- floats on the right: a pill (the clock and its name) opening the history
+-- over the page above it. Shown once a dump has been sent.
+local HISTORY_PILL_W = 120
+local HISTORY_PILL_H = 36
+local HistoryFloat = ui.component(function(): Node
+	return ui.button(glass.style({
+		id = "control-history-open",
+		class = "control-history-pill",
+		label = locale.t("control.capture.history_title"),
+		expanded = function(): boolean
+			return M.history_panel:get()
+		end,
+		h = ui.raw(HISTORY_PILL_H, "a pill, one line, as Needs you's"),
+		px = "$space.3",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$radius.full",
+		pointer_events = "auto",
+		focus_on_press = false,
+		on_click = function()
+			M.history_panel:set(not M.history_panel:peek())
+		end,
+		ui.div {
+			color = function(): string
+				return if M.history_panel:get() then "$text.primary" else "$text.secondary"
+			end,
+			Icon { name = "clock-circle", size = 14 },
+		},
+		ui.text {
+			locale.t("control.capture.history_title"),
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+		},
+	}, "menu") :: any)
 end)
 
 -- Needs you, floating on Board and Chat (Overview has its widget): what
@@ -2353,6 +2347,16 @@ M.Page = ui.component(function(): Node
 		end
 		return FLOAT_FOOT
 	end
+	-- Capture's history pill: off the page's foot on the left, and over
+	-- the floating composer where the page has no room beside it.
+	local function history_bottom(): number
+		local w = width:get()
+		local bar_w = bar_width(w, needs_floats())
+		if w / 2 - bar_w / 2 < FLOAT_SIDE + HISTORY_PILL_W + FLOAT_TOAST_GAP then
+			return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+		end
+		return FLOAT_FOOT
+	end
 	-- (The page's width, for Chat to tell whether Needs you reaches its
 	-- transcript.)
 	ui.effect(function()
@@ -2403,7 +2407,7 @@ M.Page = ui.component(function(): Node
 			end, function(): Node
 				return ui.row {
 					w_full = true,
-					justify = "center",
+					pl = FLOAT_SIDE,
 					HistoryPanel { w = history_w },
 				}
 			end, {
@@ -2419,7 +2423,9 @@ M.Page = ui.component(function(): Node
 					if not M.history_panel:get() then
 						return 0
 					end
-					return ui.raw(M.float_h:get() + FLOAT_FOOT + 8, "over Capture's bar")
+					local over_pill = history_bottom() + HISTORY_PILL_H + 8
+					local over_bar = M.float_h:get() + FLOAT_FOOT + 8
+					return ui.raw(math.max(over_pill, over_bar), "over its pill and Capture's bar")
 				end,
 				enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
 				exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
@@ -2473,6 +2479,22 @@ M.Page = ui.component(function(): Node
 				beside = needs_floats,
 			},
 		},
+		-- Capture's history pill, once a dump has been sent.
+		ui.presence(function(): string?
+			if not float_shown:get() or CP == nil or CP.dumps()[1] == nil then
+				return nil
+			end
+			return "history"
+		end, function(): Node
+			return HistoryFloat {}
+		end, {
+			absolute = true,
+			left = FLOAT_SIDE,
+			bottom = history_bottom,
+			pointer_events = "none",
+			enter = motion.transition({ opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+		}),
 		-- An account with no orchestrator yet: what one is, and a way to make
 		-- the first.
 		ui.show(M.inviting, Invitation()),
