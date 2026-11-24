@@ -7,8 +7,10 @@ a bundle whose zgx.json was changed after the build.
 Nothing of the person's is used or shown: a copy of the package without its
 engine (so none is started), a home and data folder thrown away after, an IPC
 port nothing serves (never Zeron's own), proxies that go nowhere, and no
-screen: an Xvfb of its own on Linux, zgx's offscreen windows on macOS. Each
-run is its own process group, ended with it.
+screen: an Xvfb of its own on Linux, zgx's offscreen windows on macOS. On
+Linux its session bus is its own too, one that starts no services (the
+desktop's portals, which would outlive the run). Each run is its own process
+group, ended with it.
 """
 
 import os
@@ -26,6 +28,18 @@ MARK = re.compile(r"profile mark .* ms: (.+)$")
 ENGINES = ("zeron-engine", "Zeron Engine")
 OUR_PORTS = {27654, 27655, 27871}
 WAIT = 90
+BUS = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path={path}</listen>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"""
 
 
 def free_port():
@@ -35,6 +49,33 @@ def free_port():
             port = found.getsockname()[1]
         if port not in OUR_PORTS:
             return port
+
+
+def bus(run):
+    """A session bus of its own in `run`, and its address."""
+    path, config = os.path.join(run, "bus"), os.path.join(run, "bus.conf")
+    with open(config, "w") as file:
+        file.write(BUS.format(path=path))
+    daemon = subprocess.Popen(
+        ["dbus-daemon", f"--config-file={config}", "--nofork", "--nopidfile"],
+        env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    ended = time.monotonic() + 10
+    while not os.path.exists(path):
+        if daemon.poll() is not None or time.monotonic() > ended:
+            end(daemon)
+            sys.exit("its own session bus (dbus-daemon) didn't start")
+        time.sleep(0.05)
+    return daemon, f"unix:path={path}"
+
+
+def end(process):
+    """Ends `process` and all it started."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
 
 
 def opened(binary, work, display):
@@ -55,8 +96,10 @@ def opened(binary, work, display):
         "HTTPS_PROXY": nowhere,
         "ALL_PROXY": nowhere,
     }
+    daemon = None
     if display:
         env["DISPLAY"] = display
+        daemon, env["DBUS_SESSION_BUS_ADDRESS"] = bus(run)
     else:
         env["ZGX_OFFSCREEN"] = "1"
     os.makedirs(env["ZERON_DATA_DIR"])
@@ -73,11 +116,9 @@ def opened(binary, work, display):
                 break
             time.sleep(0.2)
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        end(process)
+        if daemon:
+            end(daemon)
     with open(log, errors="replace") as said:
         return ok, said.read()
 
@@ -122,8 +163,7 @@ def main() -> int:
         return 0
     finally:
         if screen:
-            os.killpg(screen.pid, signal.SIGTERM)
-            screen.wait()
+            end(screen)
         shutil.rmtree(work, ignore_errors=True)
 
 
