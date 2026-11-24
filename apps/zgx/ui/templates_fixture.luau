@@ -120,7 +120,11 @@ local function settle(ok: boolean, value: any)
 	end
 end
 stub.import = function(from: any)
-	note(`import:{if type(from) == "table" then (from.url or from.path or "") else tostring(from)}`)
+	if type(from) == "table" and from.store then
+		note(`import:store:{from.store}:{from.version or ""}`)
+	else
+		note(`import:{if type(from) == "table" then (from.url or from.path or "") else tostring(from)}`)
+	end
 	return later()
 end
 stub.check_updates = function()
@@ -222,6 +226,17 @@ ui.command {
 	run = function()
 		table.insert(model, {
 			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok",
+			imported = { key = nil, author = { kind = "verified", username = "ada" }, source = { kind = "store", id = "midnight", publisher = "ada", verified = true } },
+		} :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.store_blocked",
+	title = "Midnight, from the store, is taken down",
+	run = function()
+		table.insert(model, {
+			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "blocked", blocked = { reason = "It reads your keys." },
 			imported = { key = nil, author = { kind = "verified", username = "ada" }, source = { kind = "store", id = "midnight", publisher = "ada", verified = true } },
 		} :: any)
 		publish()

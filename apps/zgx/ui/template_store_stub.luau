@@ -85,7 +85,8 @@ add("midnight", "Midnight", "Deep blues and one warm light.", "ada", 4210, true)
 add("ledger", "Ledger", "Dense rows, ledger lines, figures that line up.", "grace", 3180, false)
 add("airy", "Airy", "More room between things, and " .. string.rep("a long way of saying it ", 12), "lin", 960, true)
 add("hostile", "{count} [b](https://x) " .. string.rep("W", 60), "", string.rep("n", 39), 3, false)
-for i = 1, 30 do
+add("hot-pink", "Hot Pink", "Someone else's.", "lin", 2, false)
+for i = 1, 29 do
 	add(`made-up-{i}`, `Made up {i}`, "One of many.", "ada", 500 - i, i % 2 == 0)
 end
 
@@ -111,6 +112,60 @@ store.picture = function(id: string, version: string, path: string): any
 			error({ message = "not_a_picture" }, 0)
 		end
 		return { src = if #id % 2 == 0 then "assets/art/plate-3-sunrise.jpg" else "assets/art/plate-2-bluehour.jpg" }
+	end)
+end
+
+local function entry(id: string): any
+	for _, c in catalog do
+		if c.id == id then
+			return c
+		end
+	end
+	error({ message = "not_in_store" }, 0)
+end
+local NOW = 1795132800000
+local function versions_of(id: string): { any }
+	return {
+		{ version = "1.2.0", status = "listed", published_at = NOW, notes = "Warmer light.", verified = entry(id).verified },
+		{ version = "1.1.0", status = "listed", published_at = NOW - 1e9, notes = "First.", verified = true, verified_at = NOW - 1e8 },
+	}
+end
+store.detail = function(id: string, _for: string?): any
+	return answer(`detail:{id}`, function(): any
+		local d = table.clone(entry(id))
+		d.readme = `# {d.name}\n\nA whole interface, in one colour.`
+		d.screenshots = { "screenshots/one.png" }
+		d.versions = versions_of(id)
+		d.verified_version = if d.verified then "1.2.0" else "1.1.0"
+		d.compatible = id ~= "airy"
+		d.incompatible = if id == "airy" then "Made from Zeron 9.9.9" else nil
+		d.license = "MIT"
+		return d
+	end)
+end
+store.versions = function(id: string, _cursor: string?): any
+	return answer(`versions:{id}`, function(): any
+		return { versions = versions_of(id), total = 2 }
+	end)
+end
+store.version = function(id: string, version: string): any
+	return answer(`version:{id}:{version}`, function(): any
+		for _, v in versions_of(id) do
+			if v.version == version then
+				return v
+			end
+		end
+		error({ message = "not_found" }, 0)
+	end)
+end
+store.report = function(id: string, reason: string, _text: string): any
+	return answer(`report:{id}:{reason}`, function(): any
+		return {}
+	end)
+end
+store.set_updates = function(id: string?, prefer: string?): any
+	return answer(`updates:{id or ""}:{prefer or ""}`, function(): any
+		return {}
 	end)
 end
 

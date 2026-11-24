@@ -55,6 +55,8 @@ local C = {}
 
 function C.make(kind: kinds.Kind, browse: any)
 	local store, state, nav = kind.store, kind.state, kind.nav
+	local say = kinds.say(kind)
+	local template = kind.id == "template"
 	local plugin_settings: any = kind.settings
 	local M = {}
 
@@ -523,10 +525,11 @@ function C.make(kind: kinds.Kind, browse: any)
 		-- What the device shown has of it: this store plugin (installed from
 		-- the store); another plugin that has its id (from a file, a link)
 		-- is never taken for it.
+		-- (A template's folder may be named apart: by the store's id.)
 		local function item(): any
 			for _, p in state.shown:get() do
 				local source: any = p.source
-				if p.id == id and type(source) == "table" and source.kind == "store" then
+				if type(source) == "table" and source.kind == "store" and (source.id or p.id) == id and (template or p.id == id) then
 					return p
 				end
 			end
@@ -541,6 +544,10 @@ function C.make(kind: kinds.Kind, browse: any)
 			end
 			return false
 		end
+		-- (One from elsewhere is in a plugin's way; a template installs beside it.)
+		local function in_the_way(): boolean
+			return not template and other()
+		end
 		-- Whether it works with this Zeron, as the engine judges it (its
 		-- `engines.zeron` against the Zeron it runs), and why not in its words
 		-- (the page is built again as either changes: its key).
@@ -552,6 +559,9 @@ function C.make(kind: kinds.Kind, browse: any)
 		local function blocked(): any?
 			local it: any = item()
 			local b = if it then it.blocked else nil
+			if template then
+				return if type(b) == "table" then b else nil
+			end
 			return if type(b) == "table" and b.overridden ~= true then b else nil
 		end
 
@@ -565,8 +575,10 @@ function C.make(kind: kinds.Kind, browse: any)
 					return "away"
 				elseif type(it.update) == "table" and it.update.refused == nil then
 					return "update"
-				elseif it.status == "pending" or it.status == "tampered" or (it.status == "off" and #(it.ask or {}) > 0) then
+				elseif not template and it.status == "pending" or it.status == "tampered" or (it.status == "off" and #(it.ask or {}) > 0) then
 					return "review"
+				elseif template then
+					return if it.active then "installed" else "use"
 				elseif it.status == "off" then
 					return "off"
 				elseif it.status == "on" and here.device() == nil and plugin_settings.has(id) then
@@ -574,9 +586,11 @@ function C.make(kind: kinds.Kind, browse: any)
 				end
 				return "installed"
 			end
-			if here.away() then
+			if template and state.awaits(id) then
+				return "review"
+			elseif here.away() then
 				return "away"
-			elseif other() then
+			elseif in_the_way() then
 				return "other"
 			elseif not compatible() then
 				return "incompatible"
@@ -603,7 +617,7 @@ function C.make(kind: kinds.Kind, browse: any)
 				here.settled("plugins.page.installed_toast", "plugins.page.installed_toast_version")(done)
 			end, function(err: any)
 				busy:set(false)
-				here.failed(ui.t("plugins.page.couldnt_install"))(err)
+				here.failed(say("plugins.page.couldnt_install"))(err)
 				-- (Refused: what the store says of it now, read again.)
 				reread(id)
 			end)
@@ -624,7 +638,7 @@ function C.make(kind: kinds.Kind, browse: any)
 				here.settled("plugins.page.updated_toast", "plugins.page.updated_toast_version")(done)
 			end, function(err: any)
 				updating:set(false)
-				here.failed(ui.t("plugins.page.couldnt_update", { name = name }))(err)
+				here.failed(say("plugins.page.couldnt_update", { name = name }))(err)
 			end)
 		end
 		local function turn_on()
@@ -728,6 +742,18 @@ function C.make(kind: kinds.Kind, browse: any)
 					end,
 					ui.t("plugins.page.review"),
 				}
+			elseif kind == "use" then
+				return primary {
+					id = "store-use",
+					on_click = function()
+						local it: any = item()
+						local p: any = if it then state.use(it.id) else nil
+						if p ~= nil then
+							p:after(function(_: any) end, here.failed(say("plugins.page.couldnt_switch", { name = d().name or id })))
+						end
+					end,
+					ui.t("templates.page.use"),
+				}
 			elseif kind == "off" then
 				return primary { id = "store-turn-on", on_click = turn_on, ui.t("plugins.store.turn_on") }
 			elseif kind == "settings" then
@@ -753,7 +779,7 @@ function C.make(kind: kinds.Kind, browse: any)
 			end
 		end
 		local function state_words(kind: string): (() -> string)?
-			if kind == "installed" or kind == "settings" then
+			if kind == "installed" or kind == "settings" or kind == "use" then
 				return said_here("plugins.store.installed", "plugins.store.installed_on")
 			elseif kind == "update" then
 				return function(): string
@@ -783,7 +809,7 @@ function C.make(kind: kinds.Kind, browse: any)
 			if not said then
 				return nil
 			end
-			local there = kind == "installed" or kind == "settings"
+			local there = kind == "installed" or kind == "settings" or kind == "use"
 			return ui.row {
 				id = "store-state",
 				min_w = 0,
@@ -872,7 +898,7 @@ function C.make(kind: kinds.Kind, browse: any)
 		local function cannot(): Node
 			local function kind(): string
 				local k = standing()
-				return if k == "incompatible" or k == "other" then k else ""
+				return if k == "incompatible" or k == "other" then k elseif template and item() == nil and other() then "other" else ""
 			end
 			return ui.show(function(): boolean
 				return kind() ~= ""
@@ -887,8 +913,8 @@ function C.make(kind: kinds.Kind, browse: any)
 					},
 					other = ds.Callout {
 						tone = "warning",
-						title = ui.t("plugins.store.other_title"),
-						body = ui.t("plugins.store.other_body"),
+						title = say("plugins.store.other_title"),
+						body = say("plugins.store.other_body"),
 						action = {
 							label = ui.t("plugins.store.show_installed"),
 							on_click = function()
@@ -955,7 +981,7 @@ function C.make(kind: kinds.Kind, browse: any)
 						local v = verified_version()
 						return if v
 							then ui.t("plugins.store.not_verified_line", { version = head_version(), verified = v }):get()
-							else ui.t("plugins.store.none_verified"):get()
+							else say("plugins.store.none_verified"):get()
 					end,
 					wrap = true,
 					text_size = "$font.size.sm",
@@ -965,7 +991,7 @@ function C.make(kind: kinds.Kind, browse: any)
 				ui.show(function(): boolean
 					local v = verified_version()
 					local it: any = item()
-					return v ~= nil and not here.away() and not other() and (it == nil or it.version ~= v)
+					return v ~= nil and not here.away() and not in_the_way() and (it == nil or it.version ~= v)
 				-- (The app's one look for a link ending a sentence, as a version
 				-- row's Install: doing something here, a button.)
 				end, ds.Settings.InlineLink {
@@ -984,6 +1010,26 @@ function C.make(kind: kinds.Kind, browse: any)
 					end,
 				}),
 			})
+		end
+
+		-- What installing one is (a template): said here, beside Install.
+		local function runs_as(): Node
+			return ui.row {
+				id = "store-runs-as",
+				w_full = true,
+				px = ds.Settings.inset(),
+				gap = "$space.2",
+				items = "center",
+				flex_wrap = true,
+				ds.Badge { ui.t("templates.store.runs_as_zeron"), tone = "warning", size = "sm", icon = "danger-triangle" },
+				ui.text {
+					ui.t("templates.store.runs_as_zeron_body"),
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				},
+			}
 		end
 
 		-- Its keywords: each one narrows Browse to it.
@@ -1139,6 +1185,7 @@ function C.make(kind: kinds.Kind, browse: any)
 						update = slot_under("update"),
 						review = slot_under("review"),
 						off = slot_under("off"),
+					use = slot_under("use"),
 						settings = slot_under("settings"),
 						installed = slot_under("installed"),
 						blocked = ui.div {},
@@ -1155,6 +1202,7 @@ function C.make(kind: kinds.Kind, browse: any)
 					update = slot("update"),
 					review = slot("review"),
 					off = slot("off"),
+				use = slot("use"),
 					settings = slot("settings"),
 					installed = slot("installed"),
 					blocked = slot("blocked"),
@@ -1175,6 +1223,7 @@ function C.make(kind: kinds.Kind, browse: any)
 				line_height = 20,
 				color = "$text.secondary",
 			}),
+			if kind.fact then runs_as() else nil,
 			chosen_line(),
 			verified_line(),
 			keywords(),
@@ -1195,10 +1244,10 @@ function C.make(kind: kinds.Kind, browse: any)
 					local b = blocked()
 					local why = if b and type(b.reason) == "string" and b.reason ~= "" then string.sub(b.reason, 1, 500) else nil
 					return if why
-						then ui.t("plugins.store.blocked_body_reason", { reason = why }):get()
-						else ui.t("plugins.store.blocked_body"):get()
+						then say("plugins.store.blocked_body_reason", { reason = why }):get()
+						else say("plugins.store.blocked_body"):get()
 				end,
-				action = {
+				action = if template then nil else {
 					label = ui.t("plugins.store.turn_back_on"),
 					on_click = function()
 						if not unblocking:peek() then
@@ -1258,7 +1307,7 @@ function C.make(kind: kinds.Kind, browse: any)
 		end, ds.Settings.Group {
 			ds.Settings.Row {
 				label = ui.t("plugins.store.updates_label"),
-				description = ui.t("plugins.store.updates_body"),
+				description = say("plugins.store.updates_body"),
 				-- (What's in effect, under it: following this computer, which
 				-- choice that is, named once, here. Its own choice: none.)
 				detail = function(): string?
@@ -1282,26 +1331,26 @@ function C.make(kind: kinds.Kind, browse: any)
 							local was = chosen_updates()
 							store.set_updates(id, if v == "device" then nil else v, here.device()):after(function(_: any) end, function(err: any)
 								updates:set(was)
-								here.failed(ui.t("plugins.store.couldnt_updates", { name = d().name or id }))(err)
+								here.failed(say("plugins.store.couldnt_updates", { name = d().name or id }))(err)
 							end)
 						end,
 					},
 				},
 			},
-			ds.Settings.Row {
-				label = ui.t("plugins.store.prereleases"),
-				description = ui.t("plugins.store.prereleases_body"),
-				control = ds.Switch {
-					value = pre_on,
+			(if template then nil else ds.Settings.Row {
 					label = ui.t("plugins.store.prereleases"),
-					on_change = function(v: boolean)
-						store.prereleases(id, v, here.device()):after(function(_: any) end, function(err: any)
-							pre_on:set(not v)
-							here.failed(ui.t("plugins.store.couldnt_prereleases", { name = d().name or id }))(err)
-						end)
-					end,
-				},
-			},
+					description = ui.t("plugins.store.prereleases_body"),
+					control = ds.Switch {
+						value = pre_on,
+						label = ui.t("plugins.store.prereleases"),
+						on_change = function(v: boolean)
+							store.prereleases(id, v, here.device()):after(function(_: any) end, function(err: any)
+								pre_on:set(not v)
+								here.failed(ui.t("plugins.store.couldnt_prereleases", { name = d().name or id }))(err)
+							end)
+						end,
+					},
+				}) :: any,
 		})
 
 		-- The facts: who, which version, how many, where from, what it needs.
@@ -1465,6 +1514,9 @@ function C.make(kind: kinds.Kind, browse: any)
 		-- more.
 		local function shots(): Node
 			local list: { string } = {}
+			if kind.cards and type(first.cover) == "string" and package_path(first.cover) then
+				table.insert(list, package_path(first.cover) :: string)
+			end
 			for _, s in (if type(first.screenshots) == "table" then first.screenshots else {}) :: { any } do
 				if type(s) == "string" and package_path(s) and #list < 8 then
 					table.insert(list, package_path(s) :: string)
@@ -1632,10 +1684,10 @@ function C.make(kind: kinds.Kind, browse: any)
 		-- this device has), "install" (one it can take here), else "none".
 		local function version_action(v: any): string
 			local it: any = item()
-			if it ~= nil and not other() and it.version == v.version then
+			if it ~= nil and not in_the_way() and it.version == v.version then
 				return "installed"
 			end
-			return if browse.version_state(v) == "listed" and not here.away() and not other() and compatible() then "install" else "none"
+			return if browse.version_state(v) == "listed" and not here.away() and not in_the_way() and compatible() then "install" else "none"
 		end
 		local function version_row(first_v: client.Version, _i: number, now: State<client.Version>): Node
 			local latest = (versions:peek()[1] or {}).version == first_v.version
@@ -1780,7 +1832,7 @@ function C.make(kind: kinds.Kind, browse: any)
 						then ui.t("plugins.store.update_title", { name = d().name or id, version = v }):get()
 						else ui.t("plugins.store.update_title_plain", { name = d().name or id }):get()
 				end,
-				body = ui.t("plugins.store.update_body"),
+				body = say("plugins.store.update_body"),
 				confirm = {
 					label = ui.t("plugins.store.update"),
 					on_click = update,
@@ -1851,7 +1903,7 @@ function C.make(kind: kinds.Kind, browse: any)
 										-- (What follows Update, said before it: the consent
 										-- window asks, as the sheet's other callouts say.)
 										body = function(): string
-											local asks = ui.t("plugins.store.update_asks_first"):get()
+											local asks = say("plugins.store.update_asks_first"):get()
 											return if had and had ~= ""
 												then ui.t("plugins.store.installed_was_verified", { installed = had }):get() .. " " .. asks
 												else asks
@@ -1880,28 +1932,38 @@ function C.make(kind: kinds.Kind, browse: any)
 								return untrusted.View { text = text, what = "notes", small = true, auto = true }
 							end, { w_full = true }),
 						}),
-						ui.presence(function(): string
-							local a, r = changed("added"), changed("removed")
-							local key = {}
-							for _, l in a do
-								table.insert(key, "+" .. l.title)
-							end
-							for _, l in r do
-								table.insert(key, "-" .. l.title)
-							end
-							return table.concat(key, "\n")
-						end, function(_: string): Node
-							local a, r = changed("added"), changed("removed")
-							return ui.column {
+						(if template
+							then ui.column {
 								w_full = true,
-								gap = "$space.4",
-								if #a > 0 then asks_view.section(ui.t("plugins.store.asks_more"), a) else nil,
-								if #r > 0 then asks_view.section(ui.t("plugins.store.asks_less"), r) else nil,
-								if #a == 0 and #r == 0
-									then ui.text { ui.t("plugins.store.asks_same"), text_size = "$font.size.sm", color = "$text.secondary", wrap = true }
-									else nil,
+								gap = "$space.2",
+								ds.Callout { tone = "warning", title = ui.t("templates.store.runs_as_zeron"), body = ui.t("templates.store.runs_as_zeron_body") },
+								ui.show(function(): boolean
+									local it: any = item()
+									return it ~= nil and type(it.source) == "table" and (it.edited == true or it.source.edited == true)
+								end, ds.Callout { id = "store-update-edits", tone = "warning", title = ui.t("templates.store.update_replaces_edits") }),
 							}
-						end),
+							else ui.presence(function(): string
+								local a, r = changed("added"), changed("removed")
+								local key = {}
+								for _, l in a do
+									table.insert(key, "+" .. l.title)
+								end
+								for _, l in r do
+									table.insert(key, "-" .. l.title)
+								end
+								return table.concat(key, "\n")
+							end, function(_: string): Node
+								local a, r = changed("added"), changed("removed")
+								return ui.column {
+									w_full = true,
+									gap = "$space.4",
+									if #a > 0 then asks_view.section(ui.t("plugins.store.asks_more"), a) else nil,
+									if #r > 0 then asks_view.section(ui.t("plugins.store.asks_less"), r) else nil,
+									if #a == 0 and #r == 0
+										then ui.text { ui.t("plugins.store.asks_same"), text_size = "$font.size.sm", color = "$text.secondary", wrap = true }
+										else nil,
+								}
+							end)) :: any,
 					},
 				},
 			}
@@ -1915,9 +1977,9 @@ function C.make(kind: kinds.Kind, browse: any)
 			return ds.Dialog {
 				open = report_open,
 				title = function(): string
-					return ui.t("plugins.store.report.title", { name = d().name or id }):get()
+					return say("plugins.store.report.title", { name = d().name or id }):get()
 				end,
-				body = ui.t("plugins.store.report.body"),
+				body = say("plugins.store.report.body"),
 				size = "sm",
 				confirm = {
 					label = ui.t("plugins.store.report.send"),
@@ -1951,7 +2013,7 @@ function C.make(kind: kinds.Kind, browse: any)
 				shots(),
 				-- (What it asks for before its author's own words: what a person
 				-- weighs first, never pushed down by a README.)
-				asks(),
+				if template then nil else asks(),
 				readme(),
 				facts(),
 				prerelease,
@@ -1960,7 +2022,7 @@ function C.make(kind: kinds.Kind, browse: any)
 					w_full = true,
 					px = ds.Settings.inset(),
 					ds.Link {
-						ui.t("plugins.store.report.link"),
+						say("plugins.store.report.link"),
 						size = "sm",
 						tone = "quiet",
 						on_click = function()
@@ -2103,11 +2165,11 @@ function C.make(kind: kinds.Kind, browse: any)
 			elseif kind == "not_found" then
 				return said(ds.EmptyState {
 					icon = "search",
-					title = ui.t("plugins.store.not_found_title"),
-					body = ui.t("plugins.store.not_found_body"),
+					title = say("plugins.store.not_found_title"),
+					body = say("plugins.store.not_found_body"),
 					size = "sm",
 					action = {
-						label = ui.t("plugins.store.browse_all"),
+						label = say("plugins.store.browse_all"),
 						on_click = function()
 							nav.back()
 						end,
@@ -2117,8 +2179,8 @@ function C.make(kind: kinds.Kind, browse: any)
 			return ds.Callout {
 				tone = if kind == "offline" then "neutral" else "danger",
 				icon = if kind == "offline" then "wifi-off" else nil,
-				title = if kind == "offline" then ui.t("plugins.store.offline_title") else ui.t("plugins.store.failed_title"),
-				body = if kind == "offline" then ui.t("plugins.store.offline_body") else ui.t("plugins.store.failed_body"),
+				title = if kind == "offline" then say("plugins.store.offline_title") else say("plugins.store.failed_title"),
+				body = if kind == "offline" then say("plugins.store.offline_body") else say("plugins.store.failed_body"),
 				action = {
 					label = ui.t("plugins.store.try_again"),
 					on_click = function()
@@ -2130,7 +2192,7 @@ function C.make(kind: kinds.Kind, browse: any)
 		end
 		return ds.Settings.SubPage {
 			where = ds.Settings.Back {
-				label = ui.t("plugins.page.title"),
+				label = ui.t(if template then "templates.page.title" else "plugins.page.title"),
 				on_click = function()
 					nav.back()
 				end,

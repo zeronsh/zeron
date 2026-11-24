@@ -4357,7 +4357,26 @@
       "empty_body": "大家发布的模板会出现在这里。",
       "count": "{n, plural, other {# 个模板}}",
       "list_title": "模板",
-      "runs_as_zeron_list": "模板以 Zeron 自身的身份运行：它可以做 Zeron 能做的一切。"
+      "runs_as_zeron_list": "模板以 Zeron 自身的身份运行：它可以做 Zeron 能做的一切。",
+      "not_found_title": "商店里没有这个模板",
+      "not_found_body": "它可能已被下架，或者链接有误。",
+      "browse_all": "浏览模板",
+      "report": {
+        "link": "举报这个模板",
+        "title": "举报{name}",
+        "body": "Zeron 的审核人员会阅读每一份举报。"
+      },
+      "other_title": "你已经有一个使用此 ID 的模板",
+      "other_body": "它来自别处。这个会安装在它旁边。",
+      "updates_body": "接受这个模板的每个新版本，或只接受 Zeron 已验证的版本。",
+      "update_body": "新内容。含有新代码的版本会先询问你。",
+      "update_asks_first": "更新前 Zeron 会先请你允许。",
+      "blocked_body": "这个版本已从商店下架，无法使用。",
+      "blocked_body_reason": "这个版本已从商店下架，无法使用：{reason}",
+      "couldnt_updates": "无法更改 {name} 的更新设置",
+      "runs_as_zeron": "以 Zeron 自身的身份运行",
+      "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
+      "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。"
     }
   },
   "themes": {

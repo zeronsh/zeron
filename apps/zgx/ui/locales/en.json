@@ -4357,7 +4357,26 @@
       "empty_body": "Templates people publish appear here.",
       "count": "{n, plural, one {# template} other {# templates}}",
       "list_title": "Templates",
-      "runs_as_zeron_list": "A template runs as Zeron itself: it can do anything Zeron can."
+      "runs_as_zeron_list": "A template runs as Zeron itself: it can do anything Zeron can.",
+      "not_found_title": "This template isn't in the store",
+      "not_found_body": "It may have been taken down, or the link is wrong.",
+      "browse_all": "Browse templates",
+      "report": {
+        "link": "Report this template",
+        "title": "Report {name}",
+        "body": "Zeron's reviewers read every report."
+      },
+      "other_title": "You already have a template with this id",
+      "other_body": "It came from somewhere else. This one installs beside it.",
+      "updates_body": "Take every new version of this template, or only the ones Zeron has verified.",
+      "update_body": "What's new. A version with new code asks you first.",
+      "update_asks_first": "Zeron asks you to allow it before it updates.",
+      "blocked_body": "This version was taken down from the store, so it can't be used.",
+      "blocked_body_reason": "This version was taken down from the store, so it can't be used: {reason}",
+      "couldnt_updates": "Couldn't change {name}'s updates",
+      "runs_as_zeron": "Runs as Zeron itself",
+      "runs_as_zeron_body": "It can do anything Zeron can.",
+      "update_replaces_edits": "You changed this template on this device. Updating replaces your changes."
     }
   },
   "themes": {

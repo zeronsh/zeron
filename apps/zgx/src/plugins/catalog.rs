@@ -670,7 +670,7 @@ async fn file(e: &Engine, arg: &Value, kind: Kind) -> Result<Json, String> {
 }
 
 /// A version as the store names them: SemVer's characters, at most 128.
-fn version_ok(v: &str) -> bool {
+pub(crate) fn version_ok(v: &str) -> bool {
     !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
 }
 

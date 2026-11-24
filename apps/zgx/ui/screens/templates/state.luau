@@ -17,7 +17,8 @@
 --                            yours, as one .zeron-template file
 --   state.import(from)       from a file (`path`, or `{ path }`) or a link
 --                            (`{ url }`: a .zeron-template's, or a GitHub
---                            repository or release with one): a promise of
+--                            repository or release with one) or the store
+--                            (`{ store, version? }`: it always waits): a promise of
 --                            `{ installed = id, name }` (yours), or
 --                            `{ pending = name }` (someone else's: the host
 --                            opens Zeron's consent window for it)
@@ -168,7 +169,7 @@ function M.export(id: string, path: string): any
 	return ui.call("templates.export", { id = id, path = path })
 end
 
-function M.import(from: string | { path: string?, url: string? }): any
+function M.import(from: string | { path: string?, url: string?, store: string?, version: string? }): any
 	return ui.call("templates.import", from)
 end
 

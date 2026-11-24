@@ -34,6 +34,7 @@ local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
 local nav = require("@app/screens/templates/nav")
 local browse = require("@app/screens/templates/browse")
+local listing = require("@app/screens/templates/listing")
 local words = require("@app/screens/plugins/words")
 local ThemeSwatch = require("@ds/theme_swatch")
 
@@ -596,15 +597,32 @@ local function dialogs(): { Node }
 	}
 end
 
-function M.View(): Node
-	-- As it opens: each one from a package checked where it came from.
-	if os.time() - checked_at:peek() > 600 then
-		checked_at:set(os.time())
-		local p: any = state.check_updates()
-		if p ~= nil then
-			p:after(function(_: any) end, function(_: any) end)
+-- What a store template's page needs of this one: it's this device's, always
+-- here, and its outcomes.
+local here = {
+	device = function(): string?
+		return nil
+	end,
+	device_name = function(): string
+		return ""
+	end,
+	away = function(): boolean
+		return false
+	end,
+	-- (Someone's waits in Zeron's consent window, opened as it came: nothing
+	-- to say of it here.)
+	settled = function(_plain: string, _versioned: string): (done: any) -> ()
+		return function(done: any)
+			if type(done) == "table" and done.updated then
+				ds.toast.show { title = ui.t("templates.page.updated_toast", { name = tostring(done.name or "") }), tone = "success" }
+			end
 		end
-	end
+	end,
+	failed = failed,
+}
+
+-- The page's tabs.
+local function catalog(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("templates.page.title"),
 		description = ui.t("templates.page.description"),
@@ -647,6 +665,28 @@ function M.View(): Node
 		end,
 		none = none,
 		overlays = dialogs(),
+	}
+end
+
+function M.View(): Node
+	-- As it opens: each one from a package checked where it came from.
+	if os.time() - checked_at:peek() > 600 then
+		checked_at:set(os.time())
+		local p: any = state.check_updates()
+		if p ~= nil then
+			p:after(function(_: any) end, function(_: any) end)
+		end
+	end
+	nav.arrive()
+	return ui.column {
+		w_full = true,
+		items = "center",
+		ui.presence(function(): string
+			return nav.view:get()
+		end, function(v: string): Node
+			local id = string.match(v, "^store:(.+)$")
+			return ui.column { w_full = true, items = "center", if id then listing.Page { plugin = id, here = here } else catalog() }
+		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 	}
 end
 

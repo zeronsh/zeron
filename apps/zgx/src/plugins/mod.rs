@@ -3871,15 +3871,25 @@ impl Bridge {
         });
         host.async_action("templates.import", {
             let me = me.clone();
-            // A file (`path`, or `{ path }`) or a link (`{ url }`).
+            // A file (`path`, or `{ path }`), a link (`{ url }`) or the store's
+            // (`{ store, version? }`).
             move |arg| {
                 let me = me.clone();
                 async move {
                     preview::refuse("templates.import")?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                    let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url")) {
-                        (Some(path), None) => json!({ "path": path }),
-                        (None, Some(url)) => json!({ "url": url }),
+                    // (From the store, one of its versions: it always waits.)
+                    let store = given("store").map(|id| catalog::store_id(&id).ok_or("not_in_store")).transpose()?;
+                    let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url"), store) {
+                        (Some(path), None, None) => json!({ "path": path }),
+                        (None, Some(url), None) => json!({ "url": url }),
+                        (None, None, Some(store)) => {
+                            let mut params = json!({ "store": store });
+                            if let Some(version) = given("version").filter(|v| catalog::version_ok(v)) {
+                                params["version"] = json!(version);
+                            }
+                            params
+                        }
                         _ => return Err("Choose a template file or paste a link".into()),
                     };
                     let reply = template_call("ImportTemplate", params).await?;
