@@ -2,9 +2,9 @@
  * Zeron's own template files, as each release had them (contract
  * "Templates: as the edge built them"): `stock/<zeron_version>.json` =
  * `{version, files: {rel: sha256}}` in PLUGIN_STORE, written per release by
- * the generator, never by an author. A template under review with no verified
- * version to read it against is read against the ones of the Zeron it says it
- * was made from, so staff read what its author wrote rather than all of Zeron. A Zeron whose files aren't there (or
+ * the generator, never by an author. Each version of a template under review
+ * is read against the ones of the Zeron it says it was made from, so staff
+ * read what its author wrote rather than all of Zeron. A Zeron whose files aren't there (or
  * can't be read) is unknown, and then nothing is marked: every file is shown.
  */
 import { fold } from "./paths";
