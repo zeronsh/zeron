@@ -93,14 +93,7 @@ impl TitleGenerator {
         tracing::debug!(target: "first_word", chat = %chat_id, "title: start");
         let generated = self.run_title_model(harness_id, prompt, cwd).await;
         // Fallback so a chat is always named even if the model run produced nothing.
-        let fallback: String = prompt
-            .split_whitespace()
-            .take(7)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(48)
-            .collect();
+        let fallback = fallback_title(prompt);
         let title = generated.unwrap_or(fallback);
         if title.is_empty() {
             return Ok(());
@@ -302,6 +295,37 @@ impl Drop for TitleAfterFirstOutput {
     }
 }
 
+/// The prompt as title words, without its markup: an image chip is no words
+/// at all, an attached file's name its label, a file mention its basename —
+/// then the first seven words of 48 chars at most (#1396).
+fn fallback_title(prompt: &str) -> String {
+    let mut clean = String::with_capacity(prompt.len());
+    let mut at = 0;
+    for mention in zeron_proto::attachment_mentions::attachment_mentions(prompt) {
+        clean.push_str(&prompt[at..mention.range.start]);
+        if !mention.is_image {
+            clean.push_str(&mention.label);
+        }
+        at = mention.range.end;
+    }
+    clean.push_str(&prompt[at..]);
+    let mut text = String::with_capacity(clean.len());
+    let mut at = 0;
+    for link in zeron_proto::file_mentions::file_mention_links(&clean) {
+        text.push_str(&clean[at..link.range.start]);
+        text.push_str(&link.basename);
+        at = link.range.end;
+    }
+    text.push_str(&clean[at..]);
+    text.split_whitespace()
+        .take(7)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(48)
+        .collect()
+}
+
 /// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
 /// prefer a small-tier name (haiku/mini/nano/flash/small/lite), else the last
 /// listed model; `None` when the catalog is empty (harness picks its default).
@@ -416,6 +440,23 @@ mod tests {
         let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
         assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
         assert_eq!(cheapest_model(&[]), None);
+    }
+
+    #[test]
+    fn fallback_title_drops_the_markup_an_attachment_leaves_in_a_prompt() {
+        // An image chip is no word at all (#1396): "1" would name the chat.
+        assert_eq!(
+            fallback_title("[Image 1](zeron-image:1) fix the parser"),
+            "fix the parser"
+        );
+        // A file keeps its name; a mention its basename.
+        assert_eq!(
+            fallback_title(
+                "[notes.txt](zeron-attachment:2) read [lib.rs](zeron-file:crates/lib.rs) and"
+            ),
+            "notes.txt read lib.rs and"
+        );
+        assert_eq!(fallback_title(""), "");
     }
 
     #[tokio::test]

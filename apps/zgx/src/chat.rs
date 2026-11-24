@@ -2234,6 +2234,12 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
         harnesses.push(Value::record([
             ("id", Value::from(id)),
             ("label", Value::from(h["name"].as_str().unwrap_or(id))),
+            // It can run title generation (absent on engines predating the
+            // flag: offer it, as the pickers did then).
+            (
+                "titles",
+                Value::Bool(h["supportsTitles"].as_bool() != Some(false)),
+            ),
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),

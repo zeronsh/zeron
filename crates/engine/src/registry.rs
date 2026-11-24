@@ -46,6 +46,11 @@ pub struct HarnessDescriptor {
     /// Whether this harness honors plan mode.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_plan: bool,
+    /// Whether this harness can run title generation. Defaults true so
+    /// catalogs from engines predating the field offer what they offered
+    /// before it — pickers filter, and SetTitleSettings still checks.
+    #[serde(default = "default_installed")]
+    pub supports_titles: bool,
     /// An agent added from the ACP registry: its one-ink SVG icon, for the
     /// pickers (built-in agents have marks of their own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +100,7 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         enabled: None,
         access_modes: harness.access_modes().to_vec(),
         supports_plan: harness.supports_plan(),
+        supports_titles: zeron_harness::supports_titles(harness.id()),
         icon: None,
     }
 }
@@ -1026,6 +1032,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: AccessMode::WITH_AUTO.to_vec(),
             supports_plan: true,
+            supports_titles: zeron_harness::supports_titles(HarnessId::ClaudeCode),
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
@@ -1057,6 +1064,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: AccessMode::WITH_AUTO.to_vec(),
             supports_plan: true,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Codex),
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -1077,6 +1085,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Cursor),
         },
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
@@ -1098,6 +1107,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Devin),
         },
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
@@ -1123,6 +1133,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::Auto, AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Grok),
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
@@ -1144,6 +1155,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Hermes),
         },
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
@@ -1161,6 +1173,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Fx),
         },
         Box::new(|| zeron_harness::AcpHarness::fx().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::fx()) as Arc<dyn Harness>)),
@@ -1179,6 +1192,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Pi),
         },
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
@@ -1207,6 +1221,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: AccessMode::ALL.to_vec(),
             supports_plan: true,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Opencode),
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
@@ -1228,6 +1243,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: AccessMode::ALL.to_vec(),
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Antigravity),
         },
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
@@ -1247,6 +1263,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Muse),
         },
         Box::new(|| zeron_harness::MuseHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::MuseHarness::new()) as Arc<dyn Harness>)),
@@ -1272,6 +1289,7 @@ mod tests {
             enabled: Some(true),
             access_modes: Vec::new(),
             supports_plan: false,
+            supports_titles: true,
         };
         assert!(descriptor.steers_mid_turn());
 
@@ -1302,6 +1320,7 @@ mod tests {
                 enabled: None,
                 access_modes: Vec::new(),
                 supports_plan: false,
+                supports_titles: true,
             },
             Box::new(|| false),
             Box::new(move || {
@@ -1475,6 +1494,7 @@ mod tests {
                 enabled: None,
                 access_modes: Vec::new(),
                 supports_plan: false,
+                supports_titles: zeron_harness::supports_titles(id),
             },
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -1561,6 +1581,7 @@ mod tests {
                 enabled: None,
                 access_modes: Vec::new(),
                 supports_plan: false,
+                supports_titles: zeron_harness::supports_titles(HarnessId::Grok),
             },
             Box::new(move || probe.load(Ordering::SeqCst)),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),

@@ -171,11 +171,17 @@ local function naming(): Node
 			return out
 		end
 		local names: { [string]: string } = {}
+		local titles: { [string]: boolean } = {}
 		for _, h in catalog.harnesses do
 			names[h.id] = h.label
+			-- Only harnesses that can run title generation: the engine
+			-- refuses the rest (a model that can't title is no title model).
+			titles[h.id] = h.titles ~= false
 		end
 		for _, m in catalog.models do
-			table.insert(out, { value = m.value, label = m.label, description = names[m.harness] })
+			if titles[m.harness] ~= false then
+				table.insert(out, { value = m.value, label = m.label, description = names[m.harness] })
+			end
 		end
 		return out
 	end
