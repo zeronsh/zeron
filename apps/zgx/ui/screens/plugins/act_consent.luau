@@ -120,6 +120,12 @@ local function scope_of(it: any): Node
 	end
 	group(ui.t("plugins.page.title"), plugins)
 	group(ui.t("templates.page.title"), templates)
+	-- (What a template can do, right under how many: before any id.)
+	if #templates > 0 then
+		table.insert(nodes, 2, line(ui.t("plugins.store.key.scope.all_both_hint"), true))
+	elseif not known then
+		table.insert(nodes, 2, line(ui.t("plugins.store.act.maybe_templates"), true))
+	end
 	return ui.column { grow = 1, basis = 0, min_w = 0, gap = if both then "$space.2" else "$space.1", table.unpack(nodes) }
 end
 
@@ -142,12 +148,14 @@ local function facts(it: any): Node
 		return ui.column { grow = 1, basis = 0, min_w = 0, line(words_of) }
 	end
 	if it.act == "token" then
-		table.insert(rows, row(ui.t("plugins.store.key.name"), one(function(): string
-			return plain(it.name)
-		end)))
-		table.insert(rows, row(ui.t("plugins.store.key.scope.label"), scope_of(it)))
+		-- (What's decided comes over the name, which is the page's own words;
+		-- when it ends, over a scope that may be a long list.)
 		table.insert(rows, row(ui.t("plugins.store.key.expiry_label"), one(function(): string
 			return if type(it.expires) == "number" then locale.date(it.expires / 1000) else ui.t("plugins.store.key.expiry.never"):get()
+		end)))
+		table.insert(rows, row(ui.t("plugins.store.key.scope.label"), scope_of(it)))
+		table.insert(rows, row(ui.t("plugins.store.key.name"), one(function(): string
+			return plain(it.name)
 		end)))
 	else
 		-- (Its name and version are the title's.)

@@ -1814,7 +1814,13 @@ impl Bridge {
             let ui = crate::ui_dir();
             let survey = {
                 let root = root.clone();
-                off_thread(move || live::survey(&ui, &root, (!last.is_empty()).then_some(last.as_str()))).await
+                off_thread(move || {
+                    if let Some(approvals) = preview::approvals_path() {
+                        blocks::forget_taken_down(&root, &approvals);
+                    }
+                    live::survey(&ui, &root, (!last.is_empty()).then_some(last.as_str()))
+                })
+                .await
             };
             let Some(b) = me.upgrade() else { return };
             if let Some(survey) = survey {
@@ -4251,8 +4257,8 @@ mod tests {
     fn one_taken_down_is_never_laid_down() {
         let ui = crate::ui_dir();
         for (folder, file, says) in [
-            ("midnight-2", ".imported.json", r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight"}}}"#),
-            ("my-copy", ".lineage.json", r#"[{"id":"first","version":"0.1.0","hash":"h"},{"id":"midnight","version":"1.2.0","hash":"h"}]"#),
+            ("midnight-2", ".imported.json", r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"}}}"#),
+            ("my-copy", ".lineage.json", r#"[{"id":"first","version":"0.1.0","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"},{"id":"midnight","version":"1.2.0","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"}]"#),
         ] {
             let root = std::env::temp_dir().join(format!("zgx-down-{folder}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);

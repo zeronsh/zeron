@@ -225,6 +225,17 @@ pub fn take_rows(templates: &Path, said: &Json) -> bool {
     true
 }
 
+/// A store version as a record names one: the store's id, a version and its
+/// content hash, each as it's written; else it's no record (the engine's rule
+/// too).
+fn of_store(id: &Json, version: &Json, hash: &Json) -> Option<(String, String)> {
+    let (id, version, hash) = (id.as_str()?, version.as_str()?, hash.as_str()?);
+    let named = (2..=40).contains(&id.len())
+        && id.bytes().enumerate().all(|(i, b)| b.is_ascii_lowercase() || b.is_ascii_digit() || (b == b'-' && i > 0));
+    let hashed = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (named && hashed && (1..=128).contains(&version.len())).then(|| (id.to_owned(), version.to_owned()))
+}
+
 /// The store versions a folder is or came from. `None`: it can't be told.
 fn came_from(dir: &Path) -> Option<Vec<(String, String)>> {
     let mut out = Vec::new();
@@ -235,8 +246,13 @@ fn came_from(dir: &Path) -> Option<Vec<(String, String)>> {
             if !v.is_object() {
                 return None;
             }
-            if v["source"]["kind"] == "store" {
-                out.push((words(&v["source"]["store"]["id"])?, words(&v["version"])?));
+            let source = &v["source"];
+            // (A source there with no kind is no word of where it's from.)
+            match source["kind"].as_str() {
+                None if source.is_null() => {}
+                None => return None,
+                Some("store") => out.push(of_store(&source["store"]["id"], &v["version"], &source["store"]["hash"])?),
+                Some(_) => {}
             }
         }
     }
@@ -245,7 +261,7 @@ fn came_from(dir: &Path) -> Option<Vec<(String, String)>> {
         Read::Bad => return None,
         Read::Says(v) => {
             for entry in v.as_array()? {
-                out.push((words(&entry["id"])?, words(&entry["version"])?));
+                out.push(of_store(&entry["id"], &entry["version"], &entry["hash"])?);
             }
         }
     }
@@ -309,11 +325,26 @@ pub fn refuse(templates: &Path, id: &str) -> Result<(), String> {
     }
 }
 
+/// What you allowed of every template taken down, forgotten: not only of the
+/// one that runs, or a restore would give the others Zeron's powers back with
+/// nothing asked. (One that can't be checked keeps its: it comes back.)
+pub fn forget_taken_down(templates: &Path, approvals: &Path) {
+    for id in preview::allowed_at(approvals) {
+        if let Some(Why::TakenDown { .. }) = blocked(templates, &id) {
+            eprintln!("zeron-zgx: templates: {id} was taken down: what was allowed of it is forgotten");
+            preview::forget_at(approvals, &id);
+        }
+    }
+}
+
 /// What runs (`running`; at a launch, what's chosen) can't be used: its id and
 /// why, if it can't, whatever is chosen since. One taken down is let go of for good (what you allowed of it forgotten, Zeron's
 /// own chosen by safe mode's path), so a restore brings nothing back by
 /// itself; one that can't be checked stays chosen, and comes back once it is.
 pub fn stop(templates: &Path, approvals: Option<&Path>, running: Option<&str>) -> Option<(String, Why)> {
+    if let Some(approvals) = approvals {
+        forget_taken_down(templates, approvals);
+    }
     let id = running.map_or_else(|| live::chosen(templates), str::to_owned);
     let why = blocked(templates, &id)?;
     if let Why::TakenDown { .. } = why {
@@ -348,6 +379,8 @@ mod tests {
         copy: PathBuf,
     }
 
+    const HASH: &str = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
+
     impl Rig {
         fn new(name: &str) -> Self {
             let root = std::env::temp_dir().join(format!("zgx-blocks-{name}-{}", std::process::id()));
@@ -365,7 +398,7 @@ mod tests {
 
         fn store(&self, folder: &str, id: &str, version: &str) {
             self.template(folder);
-            self.write(&format!("{folder}/{IMPORTED}"), &json!({ "key": null, "version": version, "source": { "kind": "store", "store": { "id": id } } }).to_string());
+            self.write(&format!("{folder}/{IMPORTED}"), &json!({ "key": null, "version": version, "source": { "kind": "store", "store": { "id": id, "hash": HASH } } }).to_string());
         }
 
         fn write(&self, rel: &str, text: &str) {
@@ -407,7 +440,7 @@ mod tests {
         r.store("other", "other", "1.2.0");
         // Its folder named for another, its manifest saying another version.
         r.template("copy");
-        r.write("copy/.lineage.json", r#"[{"id":"first","version":"1.0.0","hash":"h"},{"id":"midnight","version":"1.2.0","hash":"h"}]"#);
+        r.write("copy/.lineage.json", &json!([{ "id": "first", "version": "1.0.0", "hash": HASH }, { "id": "midnight", "version": "1.2.0", "hash": HASH }]).to_string());
         r.template("mine");
         r.template("from-a-file");
         r.write("from-a-file/.imported.json", r#"{"key":"k","version":"1.2.0","source":{"kind":"file"}}"#);
@@ -449,7 +482,7 @@ mod tests {
         let r = Rig::new("closed");
         r.store("midnight", "midnight", "1.2.0");
         r.template("copy");
-        r.write("copy/.lineage.json", r#"[{"id":"other","version":"1.0.0"}]"#);
+        r.write("copy/.lineage.json", &json!([{ "id": "other", "version": "1.0.0", "hash": HASH }]).to_string());
         r.template("torn");
         r.write("torn/.imported.json", "{");
         r.template("mine");
@@ -490,16 +523,62 @@ mod tests {
         r.template("torn");
         r.template("mine");
         r.midnight();
-        for (file, bad) in [(IMPORTED, "{"), (IMPORTED, "[]"), (IMPORTED, r#"{"source":{"kind":"store"}}"#), (IMPORTED, r#"{"version":"1.0.0","source":{"kind":"store","store":{}}}"#), (LINEAGE, "{"), (LINEAGE, "{}"), (LINEAGE, r#"[{"id":"x"}]"#)] {
+        for (file, bad) in [(IMPORTED, "{"), (IMPORTED, "[]"), (IMPORTED, r#"{"source":{"kind":"store"}}"#), (IMPORTED, r#"{"source":{"store":{}}}"#), (IMPORTED, r#"{"source":"store"}"#), (IMPORTED, r#"{"source":{"kind":5}}"#), (IMPORTED, r#"{"version":"1.0.0","source":{"kind":"store","store":{}}}"#), (LINEAGE, "{"), (LINEAGE, "{}"), (LINEAGE, r#"[{"id":"x"}]"#)] {
             r.write(&format!("torn/{file}"), bad);
             assert_eq!(r.why("torn"), Some(Why::Unchecked), "{file} {bad}");
             std::fs::remove_file(r.templates.join("torn").join(file)).unwrap();
             assert_eq!(r.why("torn"), None);
         }
+        // One that isn't a store id, a version and a content hash is no record.
+        let long = "9".repeat(129);
+        for (id, version, hash) in [("Midnight", "1.0.0", HASH), ("-x", "1.0.0", HASH), ("x", "1.0.0", HASH), ("midnight ", "1.0.0", HASH), ("dusk", "", HASH), ("dusk", &long, HASH), ("dusk", "1.0.0", ""), ("dusk", "1.0.0", &HASH.to_uppercase()), ("dusk", "1.0.0", &HASH[1..])] {
+            let entry = json!({ "id": id, "version": version, "hash": hash });
+            r.write(&format!("torn/{LINEAGE}"), &json!([entry]).to_string());
+            assert_eq!(r.why("torn"), Some(Why::Unchecked), "{entry}");
+            std::fs::remove_file(r.templates.join("torn").join(LINEAGE)).unwrap();
+            r.write(&format!("torn/{IMPORTED}"), &json!({ "version": version, "source": { "kind": "store", "store": { "id": id, "hash": hash } } }).to_string());
+            assert_eq!(r.why("torn"), Some(Why::Unchecked), "{entry}");
+            std::fs::remove_file(r.templates.join("torn").join(IMPORTED)).unwrap();
+        }
+        r.store("torn", "dusk", "1.0.0");
+        assert_eq!(r.why("torn"), None);
+        std::fs::remove_file(r.templates.join("torn").join(IMPORTED)).unwrap();
         // Not a plain file.
         std::fs::create_dir(r.templates.join("torn").join(IMPORTED)).unwrap();
         assert_eq!(r.why("torn"), Some(Why::Unchecked));
         assert_eq!(r.why("mine"), None);
+    }
+
+    /// Taken down while something else runs: what was allowed of it (and of a
+    /// copy of it) is forgotten too, so a restore gives nothing back unasked.
+    #[test]
+    fn what_was_allowed_of_every_one_taken_down_is_forgotten() {
+        let r = Rig::new("forget");
+        let approvals = r.root.join("trust/approvals.json");
+        r.store("midnight", "midnight", "1.2.0");
+        r.store("dusk", "dusk", "1.0.0");
+        r.template("copy");
+        r.write(&format!("copy/{LINEAGE}"), &json!([{ "id": "midnight", "version": "1.2.0", "hash": HASH }]).to_string());
+        r.template("mine");
+        r.blocks(json!([]));
+        let all = ["midnight", "dusk", "copy", "mine"];
+        let digests: Vec<String> = all.iter().map(|id| preview::digest(&r.templates.join(id))).collect();
+        let allowed = || -> Vec<bool> { all.iter().zip(&digests).map(|(id, d)| preview::approved_at(&approvals, id, d)).collect() };
+        for (id, digest) in all.iter().zip(&digests) {
+            preview::approve_at(&approvals, id, digest).unwrap();
+        }
+        assert_eq!(stop(&r.templates, Some(&approvals), Some("mine")), None);
+        assert_eq!(allowed(), [true; 4]);
+        // Not to be checked: kept.
+        std::fs::remove_file(&r.copy).unwrap();
+        r.write(FILE, "{");
+        assert_eq!(stop(&r.templates, Some(&approvals), Some("mine")), None);
+        assert_eq!(allowed(), [true; 4]);
+        r.midnight();
+        assert_eq!(stop(&r.templates, Some(&approvals), Some("mine")), None);
+        assert_eq!(allowed(), [false, true, false, true]);
+        r.blocks(json!([]));
+        assert_eq!((r.why("midnight"), allowed()), (None, vec![false, true, false, true]));
     }
 
     /// One taken down never runs, and is let go of: what you allowed of it is
@@ -553,7 +632,7 @@ mod tests {
         let r = Rig::new("rows");
         r.store("midnight-2", "midnight", "1.2.0");
         r.template("copy");
-        r.write("copy/.lineage.json", r#"[{"id":"midnight","version":"1.2.0"}]"#);
+        r.write("copy/.lineage.json", &json!([{ "id": "midnight", "version": "1.2.0", "hash": HASH }]).to_string());
         r.store("other", "other", "1.0.0");
         r.blocks(json!([]));
         let row = |blocked: Json| json!({ "templates": [{ "id": "midnight-2", "blocked": blocked }, { "id": "other" }] });

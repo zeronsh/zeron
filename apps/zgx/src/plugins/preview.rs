@@ -379,6 +379,11 @@ fn recount_at(path: &Path, id: &str, before: &str, now: &str) -> bool {
 
 /// Forgotten (a template deleted, so one made later under its id starts
 /// anew).
+/// The templates anything was allowed of.
+pub fn allowed_at(path: &Path) -> Vec<String> {
+    read_approvals(path).into_keys().collect()
+}
+
 pub fn forget_at(path: &Path, id: &str) {
     let _held = changing();
     let mut all = read_approvals(path);

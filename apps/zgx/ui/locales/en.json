@@ -4426,7 +4426,8 @@
           "body": "Anyone with it can publish new versions of what it's for, as you. Zeron will ask you to sign in again first, and shows the token in this window.",
           "allow": "Create token"
         },
-        "chosen": "{n, plural, one {# chosen} other {# chosen}}"
+        "chosen": "{n, plural, one {# chosen} other {# chosen}}",
+        "maybe_templates": "Any template among them can do anything Zeron can."
       }
     }
   },

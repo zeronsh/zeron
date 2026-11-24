@@ -529,6 +529,15 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned }, templates: 
 						},
 					},
 					ui.show(function(): boolean
+						if scope_kind:get() == "chosen" then
+							-- (One of them a template: what that can do.)
+							local ticked = chosen:get()
+							for _, t in templates() do
+								if ticked[t.id] then
+									return true
+								end
+							end
+						end
 						return scope_kind:get() == "both"
 					end, ui.text {
 						id = "key-scope-hint",

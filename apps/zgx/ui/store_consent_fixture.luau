@@ -13,7 +13,8 @@ local shown = ui.shared("store_consent", { busy = true } :: any)
 local ACTS: { [string]: any } = {
 	publish = { act = "publish", kind = "plugin", id = "focus-timer", name = "Focus timer", version = "1.3.0" },
 	unyank = { act = "unyank", kind = "plugin", id = "focus-timer", name = "Focus timer", version = "1.2.0" },
-	token = { act = "token", name = "GitHub Actions", scope = { plugins = { "focus-timer", "tidy" } }, expires = 1795132800000 },
+	token = { act = "token", name = "GitHub Actions", scope = { plugins = { "focus-timer", "tidy" } }, templates = {}, expires = 1795132800000 },
+	unknown = { act = "token", name = "GitHub Actions", scope = { plugins = { "focus-timer", "tidy" } }, expires = 1795132800000 },
 	many = {
 		act = "token",
 		name = "Release everything",

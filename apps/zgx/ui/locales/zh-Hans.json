@@ -4426,7 +4426,8 @@
           "body": "任何拿到它的人都能以你的身份发布它所对应内容的新版本。Zeron 会先请你重新登录，并在这个窗口中显示令牌。",
           "allow": "创建令牌"
         },
-        "chosen": "{n, plural, other {已选 # 个}}"
+        "chosen": "{n, plural, other {已选 # 个}}",
+        "maybe_templates": "其中若有模板，它可以做 Zeron 能做的一切。"
       }
     }
   },

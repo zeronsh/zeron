@@ -118,6 +118,12 @@ test("a token's ids are under their own headings, and all of them is said where 
 	local app = open("mixed")
 	local facts = app:tree("#store-consent-facts")
 	expect(facts).to_contain("2 plugins, 1 template")
+	expect(facts).to_contain("A template can do anything Zeron can.")
+	-- (What's decided, over the name the page gave it.)
+	local function at(said: string): number
+		return (facts:find(said, 1, true) :: number)
+	end
+	expect(at('"Ends"') < at('"Can publish"') and at('"Can publish"') < at('"Name"')).to_be(true)
 	expect(facts).to_contain('"Plugins"')
 	expect(facts).to_contain('"Templates"')
 	expect((facts:find("tidy", 1, true) :: number) < (facts:find("midnight", 1, true) :: number)).to_be(true)
@@ -125,9 +131,10 @@ test("a token's ids are under their own headings, and all of them is said where 
 	app:frames(20)
 	expect(app:tree("#store-consent-facts")).to_contain("All your plugins")
 	-- Which are templates isn't known: how many, no kind said.
-	app:command("token")
+	app:command("unknown")
 	app:frames(20)
 	expect(app:tree("#store-consent-facts")).to_contain("2 chosen")
+	expect(app:tree("#store-consent-facts")).to_contain("Any template among them can do anything Zeron can.")
 end)
 
 -- Each label is on its value's first line, and what's plain to read is said
