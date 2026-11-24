@@ -88,7 +88,7 @@ const WORKFLOW = `- uses: actions/checkout@v4
             <li class="step">
               <span class="step-n" aria-hidden="true">02</span>
               <h3 class="step-title">Publish it</h3>
-              <p>From a terminal, with Zeron running and signed in (<code>--dry-run</code> checks it without sending it). Or in Zeron: Settings › Plugins › Yours › Publish…</p>
+              <p>In Zeron: Settings › Plugins › Yours › Publish…, or from a terminal with Zeron running and signed in. Add <code>--dry-run</code> to check it without sending it.</p>
               <CodeBlock label="Terminal" code="zeron plugin publish <id>" id="cb-publish" />
             </li>
             <li class="step">
@@ -101,7 +101,7 @@ const WORKFLOW = `- uses: actions/checkout@v4
 
         <section aria-labelledby="needs">
           <h2 id="needs">{label("needs")}<a class="anchor" href="#needs" aria-label={`Link to ${label("needs")}`}>#</a></h2>
-          <p>Anyone can share a Zeron plugin as a file or a link. The store is for the ones you want people to find: a version that passes the store's automatic checks is listed and installable the moment you send it, and Zeron verifies it once a reviewer has read it. Zeron says which versions are verified wherever it offers one.</p>
+          <p>Anyone can share a Zeron plugin as a file or a link; the store is for the ones you want people to find.</p>
           <p>A plugin is a folder with its <code>zeron-plugin.json</code>. For the store, it also needs:</p>
           <div class="table-wrap">
             <table class="gtable">
