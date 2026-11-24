@@ -68,18 +68,28 @@ pub fn never_templated(rel: &str) -> bool {
     })
 }
 
-/// A template's own files that aren't part of its interface: its manifest,
-/// its listing (the engine's `listing::template_listing_file`: those three
-/// and the pictures under `screenshots/`), and anything else under
-/// `screenshots/`, as a disk that folds names has it (the engine's
-/// `template_stray_screenshot`). None is ever loaded: the engine takes a
-/// change to the listing as no change of code, so such an update asks
-/// nothing, and what isn't a picture there has no business being read.
+/// A template's own files that aren't part of its interface: its manifest
+/// and its listing. None is ever loaded: the engine takes a change to the
+/// listing as no change of code, so such an update asks nothing.
 pub fn template_meta(rel: &str) -> bool {
-    matches!(rel, "zeron-template.json" | "preview.png" | "README.md" | "CHANGELOG.md") || {
-        let rel = zeron_plugin_guard::path::fold(rel);
-        rel.strip_prefix("screenshots").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    rel == "zeron-template.json" || listing_file(rel)
+}
+
+/// Whether `rel` is one of a template's listing files: the engine's
+/// `listing::template_listing_file`, exactly.
+fn listing_file(rel: &str) -> bool {
+    match rel.strip_prefix("screenshots/") {
+        Some(rest) => rest.rsplit_once('.').is_some_and(|(_, ext)| ["png", "jpg", "jpeg"].contains(&ext.to_ascii_lowercase().as_str())),
+        None => matches!(rel, "README.md" | "CHANGELOG.md" | "preview.png"),
     }
+}
+
+/// Whether `rel` is under `screenshots/`, as a disk that folds names has it,
+/// and isn't a listing file (the engine's `template_stray_screenshot`): it
+/// counts as the template's code, so a change to it asks, and is never laid
+/// down or run.
+fn stray_screenshot(rel: &str) -> bool {
+    !listing_file(rel) && zeron_plugin_guard::path::fold(rel).strip_prefix("screenshots").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 pub fn hash(bytes: &[u8]) -> String {
@@ -306,7 +316,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
         for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
-            if never_templated(&rel) || failed.contains(&rel) {
+            if never_templated(&rel) || stray_screenshot(&rel) || failed.contains(&rel) {
                 continue;
             }
             if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
@@ -912,33 +922,37 @@ mod tests {
     }
 
     /// The engine installs a change to a template's listing without asking,
-    /// so nothing of it is ever laid down, kept by digest or counted; in any
-    /// other spelling a file is the template's code, there as here.
+    /// so nothing of it is ever laid down, kept by digest or counted. Anything
+    /// else under `screenshots/`, however it's spelled, is code a change to
+    /// asks about, there as here, and is never laid down either.
     #[test]
     fn a_template_s_listing_is_never_loaded() {
+        use super::super::preview::digest;
         let t = setup("listing");
-        let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/app.luau", "screenshots/deep/run.luau"];
-        // (On a disk that folds names, one folder by another spelling.)
-        let spelled = ["Screenshots/shot.png", "SCREENSHOTS/app.luau", "\u{17f}creenshots/app.luau", "screenshots./app.luau"];
-        let digest = super::super::preview::digest(&t.join("t"));
+        let dir = t.join("t");
+        let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/shot.JPG", "screenshots/deep/shot.jpeg"];
+        let before = digest(&dir);
         for rel in listing {
-            write(&t.join("t"), rel, "return 1");
+            assert!(template_meta(rel) && !stray_screenshot(rel), "{rel}");
+            write(&dir, rel, "return 1");
         }
-        assert_eq!(super::super::preview::digest(&t.join("t")), digest, "no part of what's kept");
+        assert_eq!(digest(&dir), before, "no part of what's kept");
+        let strays = ["screenshots/app.luau", "screenshots/deep/run.luau", "screenshots/png", "screenshots", "Screenshots/shot.png", "SCREENSHOTS/app.luau", "\u{17f}creenshots/app.luau", "screenshots./app.luau"];
+        for rel in strays {
+            assert!(!template_meta(rel) && stray_screenshot(rel), "{rel}");
+        }
+        write(&dir, "screenshots/app.luau", "return 1");
+        write(&dir, "screenshots/deep/run.luau", "return 1");
+        assert_ne!(digest(&dir), before, "a stray is code");
         let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
-        for rel in listing {
-            assert!(template_meta(rel), "{rel}");
+        for rel in listing.iter().chain(&["screenshots/app.luau", "screenshots/deep/run.luau"]) {
             assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
-            assert!(!overlay.from_template.contains(rel), "{rel}");
-        }
-        for rel in spelled {
-            assert!(template_meta(rel), "{rel}");
+            assert!(!overlay.from_template.contains(*rel), "{rel}");
         }
         for rel in ["screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
-            assert!(!template_meta(rel), "{rel}");
+            assert!(!template_meta(rel) && !stray_screenshot(rel), "{rel}");
         }
-        write(&t.join("t"), "screenshots.luau", "return 2");
-        assert_ne!(super::super::preview::digest(&t.join("t")), digest, "code");
+        write(&dir, "screenshots.luau", "return 2");
         compose(&t, "t", &BTreeSet::new(), false).unwrap();
         assert!(t.join(LIVE).join("screenshots.luau").is_file());
     }
