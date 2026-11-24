@@ -34,6 +34,7 @@ use super::listing::{self, CATEGORIES};
 use super::manifest::{self, Manifest};
 use super::package::{self, MAX_PACKAGE_BYTES};
 use super::signing::{self, FileHashes, PAYLOAD_PREFIX, SigCheck, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
+use super::store::client::Kind;
 use super::store::deploy_token::{self, DeployToken};
 use super::template_packages;
 use super::version::{self, Range, Version};
@@ -1296,8 +1297,19 @@ fn deploy_token_cases() -> Value {
             }
         })
         .collect();
+    // All of yours, of the kinds it says (none: plugins).
+    let all_scopes: Vec<Value> = [None, Some(&["plugin"][..]), Some(&["plugin", "template"]), Some(&["template"]), Some(&["template", "plugin"]), Some(&["plugin", "plugin"]), Some(&["plugin", "theme"]), Some(&[])]
+        .into_iter()
+        .map(|kinds| {
+            let kinds: Option<Vec<String>> = kinds.map(|k| k.iter().map(|w| (*w).to_owned()).collect());
+            match deploy_token::Scope::all(kinds.as_deref()) {
+                Ok(scope) => json!({ "all_kinds": kinds, "ok": true, "scope": scope.to_value(), "covers": { "plugin": scope.covers("any", Kind::Plugin), "template": scope.covers("any", Kind::Template) } }),
+                Err(_) => json!({ "all_kinds": kinds, "ok": false }),
+            }
+        })
+        .collect();
     json!({
-        "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`.",
+        "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`. Scopes: scopes are the ids named, of either kind (a plugin's and a template's alike), sorted by code unit after trimming, each once. all_scopes are {all: true, all_kinds?}: all_kinds null (absent) is [\"plugin\"]; as the store answers it, all_kinds is always there.",
         "prefix": deploy_token::PREFIX,
         "alphabet": std::str::from_utf8(deploy_token::ALPHABET).unwrap(),
         "body_len": deploy_token::BODY_LEN,
@@ -1307,6 +1319,7 @@ fn deploy_token_cases() -> Value {
         "tokens": tokens,
         "reads": reads,
         "scopes": scopes,
+        "all_scopes": all_scopes,
     })
 }
 
@@ -1683,6 +1696,7 @@ fn data() -> Value {
             "len": deploy_token::LEN,
             "short_len": deploy_token::SHORT_LEN,
             "max_scope_plugins": deploy_token::MAX_SCOPE_PLUGINS,
+            "all_kinds": [["plugin"], ["plugin", "template"]],
             "env": deploy_token::ENV,
         },
         "limits": {
