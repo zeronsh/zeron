@@ -2400,12 +2400,19 @@
         "signin": "Not signed in",
         "expired": "Signed out. Sign in again to use it.",
         "client": "Needs an OAuth app to sign in",
-        "off": "Off · {where}",
         "this_device": "{line} · This device only",
         "command": "Runs {command}",
         "sign_in": "Sign in",
-        "settings_of": "{name} settings",
-        "needs_attention": "Needs attention"
+        "needs_attention": "Needs attention",
+        "connected": "Connected",
+        "off_short": "Off",
+        "unnamed": "Unnamed account",
+        "your_account": "Your account",
+        "agent_name_tip": "The name your agents use for this account",
+        "account_actions": "{name} actions",
+        "server_actions": "{name} actions",
+        "where_accounts": "{where} · {n} accounts",
+        "add_account": "Add account"
       },
       "connect": {
         "title": "Connect {name}",
@@ -2480,23 +2487,12 @@
         "error_command": "Enter the command to run.",
         "error_token": "Paste the API key or token.",
         "error_header_line": "\"{line}\" isn't a header. Write it as Name: value.",
-        "error_env_line": "\"{line}\" isn't a variable. Write it as NAME=value.",
-        "account": "Account name",
-        "account_placeholder": "Work, Personal…",
-        "account_hint": "Your agents see this server as {agent}.",
-        "account_hint_none": "Tells this account apart from others for the same service."
-      },
-      "manage": {
-        "signed_in": "Signed in",
-        "sign_out": "Sign out",
-        "remove": "Remove server",
-        "remove_description": "Your agents stop seeing its tools, on every device.",
-        "add_account": "Add another account",
-        "add_account_description": "Connect a second {name} account, like work and personal. Your agents can use both."
+        "error_env_line": "\"{line}\" isn't a variable. Write it as NAME=value."
       },
       "remove": {
         "title": "Remove {name}?",
-        "body": "Its sign-in is deleted from Zeron Vault and this device. You can connect it again any time."
+        "body": "Its sign-in is deleted from Zeron Vault and this device. You can connect it again any time.",
+        "body_all": "Removes all {n} accounts and their sign-ins from Zeron Vault and this device. You can connect them again any time."
       },
       "toast": {
         "added": "{name} added",
@@ -2511,17 +2507,29 @@
       "account": {
         "full_name": "{name} · {account}",
         "title": "Add another {name} account",
-        "body": "Each account is its own server, so your agents can use both. Name them so you, and your agents, can tell them apart.",
-        "current": "Your current account",
-        "current_placeholder": "Work",
-        "new": "New account",
-        "new_placeholder": "Personal",
+        "body": "Sign in with another account in your browser. Your agents can use all of them, each by its own name.",
         "new_key": "API key or token for the new account",
-        "agents_see": "Your agents will see {names}.",
         "switch_hint": "Sign in with your other account. If your browser signs you straight back in as the first one, switch accounts on {name}'s page.",
-        "error_same": "Give the two accounts different names.",
         "error_taken": "You already have a {name} account called “{account}”.",
-        "add": "Add account"
+        "add": "Add account",
+        "name": "Account name",
+        "name_placeholder": "Personal, Work…",
+        "name_optional": "Optional. You can rename it any time.",
+        "agents_see_one": "Your agents will see it as {agent}."
+      },
+      "menu": {
+        "rename": "Rename…",
+        "sign_in_again": "Sign in again",
+        "sign_out": "Sign out",
+        "remove_account": "Remove account",
+        "edit": "Edit server…",
+        "remove_server": "Remove {name}"
+      },
+      "rename": {
+        "title": "Rename account",
+        "body": "Name this {name} account so you and your agents can tell it apart.",
+        "save": "Save",
+        "unnamed_hint": "Left empty, your agents tell it apart by a number."
       }
     }
   },

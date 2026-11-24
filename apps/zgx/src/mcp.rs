@@ -754,21 +754,33 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Context7"), "missing preset Context7: {texts:?}");
         // No storage banner: the page's line under its title says it.
         assert!(!texts.iter().any(|t| t == "Zeron Vault"), "storage banner is back: {texts:?}");
-        // Linear is added (twice), so it's not offered again.
-        assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 2, "{texts:?}");
+        // Linear is added (one card, two accounts), so it's not offered again.
+        assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
+        assert!(texts.iter().any(|t| t == "mcp.linear.app · 2 accounts"), "{texts:?}");
 
-        // An account's settings: its name, what agents see it as, and adding another.
-        app.click("#settings-page >> role:button \"Linear · Work settings\"");
+        // Each account its own row in Linear's card, with what agents call it.
+        assert!(texts.iter().any(|t| t == "linear_work"), "missing agent name: {texts:?}");
+        assert!(texts.iter().any(|t| t == "linear_personal"), "missing agent name: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Add account"), "missing Add account: {texts:?}");
+
+        // An account's ⋯: renaming it, in a dialog of its own.
+        app.click("#settings-page >> role:button \"Linear · Work actions\"");
         app.frames(20);
         assert_eq!(app.error(), None);
-        let manage_texts = app.texts();
-        assert!(manage_texts.iter().any(|t| t == "Account name"), "missing account name field: {manage_texts:?}");
+        app.click("role:button \"Rename…\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let rename_texts = app.texts();
+        assert!(rename_texts.iter().any(|t| t == "Rename account"), "missing rename dialog: {rename_texts:?}");
         assert!(
-            manage_texts.iter().any(|t| t == "Your agents see this server as linear_work."),
-            "missing agent name: {manage_texts:?}"
+            rename_texts.iter().any(|t| t == "Your agents will see it as linear_work."),
+            "missing agent name preview: {rename_texts:?}"
         );
-        assert!(manage_texts.iter().any(|t| t == "Add another account"), "missing add account: {manage_texts:?}");
-        app.click("role:button \"Add account\"");
+        app.keys("Escape");
+        app.frames(20);
+
+        // Add account: a name (optional), then the browser.
+        app.click("#settings-page >> role:button \"Add account\"");
         app.frames(20);
         assert_eq!(app.error(), None);
         let account_texts = app.texts();
@@ -776,9 +788,7 @@ mod tests {
             account_texts.iter().any(|t| t == "Add another Linear account"),
             "missing add-account step: {account_texts:?}"
         );
-        assert!(account_texts.iter().any(|t| t == "New account"), "missing new account field: {account_texts:?}");
-        // Both accounts named already: only the new one's name is asked.
-        assert!(!account_texts.iter().any(|t| t == "Your current account"), "{account_texts:?}");
+        assert!(account_texts.iter().any(|t| t == "Account name"), "missing account name field: {account_texts:?}");
         app.keys("Escape");
         app.frames(20);
 

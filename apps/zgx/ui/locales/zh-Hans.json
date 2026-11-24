@@ -2400,12 +2400,19 @@
         "signin": "未登录",
         "expired": "已退出登录。请重新登录后使用。",
         "client": "需要 OAuth 应用才能登录",
-        "off": "已关闭 · {where}",
         "this_device": "{line} · 仅限此设备",
         "command": "运行 {command}",
         "sign_in": "登录",
-        "settings_of": "{name} 设置",
-        "needs_attention": "需要处理"
+        "needs_attention": "需要处理",
+        "connected": "已连接",
+        "off_short": "已关闭",
+        "unnamed": "未命名账号",
+        "your_account": "你的账号",
+        "agent_name_tip": "你的智能体对此账号使用的名称",
+        "account_actions": "{name} 操作",
+        "server_actions": "{name} 操作",
+        "where_accounts": "{where} · {n} 个账号",
+        "add_account": "添加账号"
       },
       "connect": {
         "title": "连接 {name}",
@@ -2480,23 +2487,12 @@
         "error_command": "请输入要运行的命令。",
         "error_token": "请粘贴 API 密钥或令牌。",
         "error_header_line": "“{line}”不是请求头。请写成 名称: 值。",
-        "error_env_line": "“{line}”不是变量。请写成 NAME=值。",
-        "account": "账号名称",
-        "account_placeholder": "工作、个人…",
-        "account_hint": "你的智能体会以 {agent} 看到此服务器。",
-        "account_hint_none": "用于区分同一服务的其他账号。"
-      },
-      "manage": {
-        "signed_in": "已登录",
-        "sign_out": "退出登录",
-        "remove": "移除服务器",
-        "remove_description": "你的智能体将在所有设备上不再看到它的工具。",
-        "add_account": "添加另一个账号",
-        "add_account_description": "连接第二个 {name} 账号，例如工作和个人。你的智能体可以同时使用。"
+        "error_env_line": "“{line}”不是变量。请写成 NAME=值。"
       },
       "remove": {
         "title": "移除 {name}？",
-        "body": "它的登录信息将从 Zeron Vault 和此设备中删除。你可以随时重新连接。"
+        "body": "它的登录信息将从 Zeron Vault 和此设备中删除。你可以随时重新连接。",
+        "body_all": "将从 Zeron Vault 和此设备中移除全部 {n} 个账号及其登录信息。你可以随时重新连接。"
       },
       "toast": {
         "added": "已添加 {name}",
@@ -2511,17 +2507,29 @@
       "account": {
         "full_name": "{name} · {account}",
         "title": "添加另一个 {name} 账号",
-        "body": "每个账号都是独立的服务器，你的智能体可以同时使用它们。为它们命名，方便你和智能体区分。",
-        "current": "当前账号",
-        "current_placeholder": "工作",
-        "new": "新账号",
-        "new_placeholder": "个人",
+        "body": "在浏览器中用另一个账号登录。你的智能体可以使用所有账号，每个账号都有自己的名称。",
         "new_key": "新账号的 API 密钥或令牌",
-        "agents_see": "你的智能体将看到 {names}。",
         "switch_hint": "请用另一个账号登录。如果浏览器直接以第一个账号登录，请在 {name} 的页面上切换账号。",
-        "error_same": "请为两个账号取不同的名称。",
         "error_taken": "你已有一个名为“{account}”的 {name} 账号。",
-        "add": "添加账号"
+        "add": "添加账号",
+        "name": "账号名称",
+        "name_placeholder": "个人、工作…",
+        "name_optional": "可选。你可以随时重命名。",
+        "agents_see_one": "你的智能体将以 {agent} 看到它。"
+      },
+      "menu": {
+        "rename": "重命名…",
+        "sign_in_again": "重新登录",
+        "sign_out": "退出登录",
+        "remove_account": "移除账号",
+        "edit": "编辑服务器…",
+        "remove_server": "移除 {name}"
+      },
+      "rename": {
+        "title": "重命名账号",
+        "body": "为此 {name} 账号命名，方便你和智能体区分。",
+        "save": "保存",
+        "unnamed_hint": "留空时，你的智能体会用编号区分它。"
       }
     }
   },

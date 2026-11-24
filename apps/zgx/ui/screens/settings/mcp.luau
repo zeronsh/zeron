@@ -15,6 +15,7 @@
 local ds = require("@ds")
 local ds_select = require("@ds/select")
 local material = require("@ds/material")
+local Menu = require("@ds/menu")
 local progress = require("@ds/progress")
 local toast = require("@ds/toast")
 local mcp = require("@account/mcp")
@@ -338,7 +339,6 @@ local key_value = ui.state("settings_mcp_key_value", "")
 -- the sign-in under way is a further account's (its browser may still be
 -- signed in as the first).
 local connect_source = ui.state("settings_mcp_connect_source", nil :: string?)
-local account_current = ui.state("settings_mcp_account_current", "")
 local account_new = ui.state("settings_mcp_account_new", "")
 local connect_another = ui.state("settings_mcp_connect_another", false)
 -- Whether this sign-in has been seen under way: a flow's last outcome
@@ -494,8 +494,8 @@ local function connect(p: mcp.Preset)
 	end)
 end
 
--- Another account of `s`'s service: named first (the one there is too,
--- if it has no name yet), then signed in.
+-- Another account of `s`'s service: a name for it (or none), then its
+-- sign-in, as Providers' Add account.
 local function add_account(s: mcp.Server)
 	connect_server:set(nil)
 	connect_preset:set(s.preset)
@@ -503,46 +503,23 @@ local function add_account(s: mcp.Server)
 	connect_another:set(true)
 	connect_error:set("")
 	connect_busy:set(false)
-	account_current:set("")
 	account_new:set("")
 	key_value:set("")
 	connect_step:set("account")
 	connect_open:set(true)
 end
 
--- The account being added to's first unnamed account, which is named with
--- the new one (two accounts, one name between them, tell agents nothing).
-local function unnamed_account(): mcp.Server?
-	local source = server_by_id(connect_source:get())
-	if not source then
-		return nil
-	end
-	for _, s in accounts_of(source) do
-		if not s.accountLabel or s.accountLabel == "" then
-			return s
-		end
-	end
-	return nil
-end
-
--- What's wrong with the names typed, if anything ("" for nothing typed yet).
+-- What's wrong with the name typed, if anything: nil when it can be used,
+-- "" when there's nothing to say yet (a key still to paste).
 local function account_problem(): string?
 	local source = server_by_id(connect_source:get())
 	if not source then
 		return ""
 	end
-	local unnamed = unnamed_account()
-	local new = trim(account_new:get())
-	local current = trim(account_current:get())
-	if new == "" or (unnamed and current == "") then
-		return ""
-	end
-	if unnamed and string.lower(new) == string.lower(current) then
-		return ui.t("settings.mcp.account.error_same"):get()
-	end
+	local new = string.lower(trim(account_new:get()))
 	for _, other in accounts_of(source) do
 		local label = other.accountLabel
-		if label and label ~= "" and string.lower(label) == string.lower(new) then
+		if new ~= "" and label and string.lower(label) == new then
 			return ui.t("settings.mcp.account.error_taken", { name = source.name, account = label }):get()
 		end
 	end
@@ -552,57 +529,41 @@ local function account_problem(): string?
 	return nil
 end
 
--- The new account: the unnamed one named, the new one made like the one
--- it's another of (its address, its kind of sign-in, where it's kept), and
--- its sign-in started.
+-- The new account, made like the one it's another of (its address, its
+-- kind of sign-in, where it's kept), and its sign-in started.
 local function create_account()
 	local source = server_by_id(connect_source:peek())
 	if not source or account_problem() ~= nil then
 		return
 	end
-	local unnamed = unnamed_account()
-	local new_label = trim(account_new:peek())
-	local function same_as(s: mcp.Server, extra: { [string]: any }): { [string]: any }
-		local req: { [string]: any } = {
-			name = s.name,
-			preset = s.preset,
-			transport = s.transport,
-			url = s.url,
-			authKind = s.authKind,
-			localOnly = s.storage == "local",
-		}
-		for k, v in extra do
-			req[k] = v
-		end
-		return req
+	local req: { [string]: any } = {
+		name = source.name,
+		preset = source.preset,
+		transport = source.transport,
+		url = source.url,
+		authKind = source.authKind,
+		localOnly = source.storage == "local",
+		accountLabel = trim(account_new:peek()),
+		enabled = true,
+	}
+	if source.authKind == "bearer" then
+		req.bearerToken = trim(key_value:peek())
 	end
-	local function make_new()
-		local before = ids_now()
-		local extra: { [string]: any } = { accountLabel = new_label, enabled = true }
-		if source.authKind == "bearer" then
-			extra.bearerToken = trim(key_value:peek())
-		end
-		mcp.upsert(same_as(source, extra) :: any):after(function(reply: any)
-			connect_busy:set(false)
-			local made = saved_server(reply, nil, nil, before)
-			if not made then
-				return
-			end
-			if made.authKind == "oauth" then
-				sign_in(made.id, nil, true)
-			else
-				connect_open:set(false)
-				toast.show { title = ui.t("settings.mcp.toast.connected", { name = full_name(made) }), tone = "success" }
-			end
-		end, settle_error)
-	end
+	local before = ids_now()
 	connect_busy:set(true)
-	if unnamed then
-		mcp.upsert(same_as(unnamed, { id = unnamed.id, accountLabel = trim(account_current:peek()) }) :: any)
-			:after(make_new, settle_error)
-	else
-		make_new()
-	end
+	mcp.upsert(req :: any):after(function(reply: any)
+		connect_busy:set(false)
+		local made = saved_server(reply, nil, nil, before)
+		if not made then
+			return
+		end
+		if made.authKind == "oauth" then
+			sign_in(made.id, nil, true)
+		else
+			connect_open:set(false)
+			toast.show { title = ui.t("settings.mcp.toast.connected", { name = full_name(made) }), tone = "success" }
+		end
+	end, settle_error)
 end
 
 -- The dialog's way on, by its step.
@@ -799,21 +760,23 @@ local function connect_body(step: string): Node
 		return ui.column {
 			w_full = true,
 			gap = "$space.3",
-			ui.show(function(): boolean
-				return unnamed_account() ~= nil
-			end, ds.TextField {
-				value = account_current,
-				label = ui.t("settings.mcp.account.current"),
-				placeholder = ui.t("settings.mcp.account.current_placeholder"),
-				autofocus = true,
-				w_full = true,
-			}),
 			ds.TextField {
 				value = account_new,
-				label = ui.t("settings.mcp.account.new"),
-				placeholder = ui.t("settings.mcp.account.new_placeholder"),
-				-- (Built as the step shows: the first field to fill takes the focus.)
-				autofocus = unnamed_account() == nil,
+				label = ui.t("settings.mcp.account.name"),
+				placeholder = ui.t("settings.mcp.account.name_placeholder"),
+				autofocus = true,
+				hint = function(): string
+					local s = source()
+					if not s then
+						return ""
+					end
+					-- (What agents will see it by, once it has a name.)
+					local typed = trim(account_new:get())
+					if typed == "" then
+						return ui.t("settings.mcp.account.name_optional"):get()
+					end
+					return ui.t("settings.mcp.account.agents_see_one", { agent = agent_preview(s, typed) }):get()
+				end,
 				error = function(): string?
 					local problem = account_problem()
 					return if problem and problem ~= "" then problem else nil
@@ -828,44 +791,6 @@ local function connect_body(step: string): Node
 				label = ui.t("settings.mcp.account.new_key"),
 				password = true,
 				w_full = true,
-			}),
-			-- What agents will see each by, as it's typed.
-			-- (Once there's a name, and while the names can be used.)
-			ui.show(function(): boolean
-				return trim(account_new:get()) ~= "" and account_problem() == nil
-			end, ui.row {
-				w_full = true,
-				gap = "$space.2",
-				items = "start",
-				color = "$text.tertiary",
-				ui.div { pt = 1, shrink = 0, ds.Icon { name = "bot", size = 14 } },
-				ui.text {
-					function(): string
-						local s = source()
-						if not s then
-							return ""
-						end
-						local new = agent_preview(s, trim(account_new:get()))
-						local unnamed = unnamed_account()
-						local names: { string } = {}
-						for _, other in accounts_of(s) do
-							if (not unnamed or other.id ~= unnamed.id) and other.accountLabel and other.accountLabel ~= "" then
-								table.insert(names, agent_preview(other, other.accountLabel))
-							end
-						end
-						if unnamed then
-							table.insert(names, agent_preview(unnamed, trim(account_current:get())))
-						end
-						table.insert(names, new)
-						return ui.t("settings.mcp.account.agents_see", { names = table.concat(names, ", ") }):get()
-					end,
-					grow = 1,
-					min_w = 0,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-					wrap = true,
-				},
 			}),
 		}
 	elseif step == "key" then
@@ -1023,7 +948,6 @@ local form_open = ui.state("settings_mcp_form_open", false)
 local editing = ui.state("settings_mcp_editing", nil :: string?)
 local form_kind = ui.state("settings_mcp_form_kind", "remote")
 local form_name = ui.state("settings_mcp_form_name", "")
-local form_account = ui.state("settings_mcp_form_account", "")
 local form_url = ui.state("settings_mcp_form_url", "")
 local form_auth = ui.state("settings_mcp_form_auth", "oauth")
 local form_bearer = ui.state("settings_mcp_form_bearer", "")
@@ -1040,7 +964,9 @@ local form_error = ui.state("settings_mcp_form_error", "")
 local form_busy = ui.state("settings_mcp_form_busy", false)
 
 local remove_open = ui.state("settings_mcp_remove_open", false)
-local remove_target = ui.state("settings_mcp_remove_target", nil :: { id: string, name: string }?)
+-- What Remove asks about: one account, or a whole service's (`ids`), and
+-- what it's called.
+local remove_target = ui.state("settings_mcp_remove_target", nil :: { ids: { string }, name: string }?)
 
 local function editing_server(): mcp.Server?
 	return server_by_id(editing:get())
@@ -1056,7 +982,6 @@ local function open_add()
 	editing:set(nil)
 	form_kind:set("remote")
 	form_name:set("")
-	form_account:set("")
 	form_url:set("")
 	form_auth:set("oauth")
 	form_bearer:set("")
@@ -1079,7 +1004,6 @@ local function open_manage(s: mcp.Server)
 	editing:set(s.id)
 	form_kind:set(if s.transport == "stdio" then "local" else "remote")
 	form_name:set(s.name or "")
-	form_account:set(s.accountLabel or "")
 	form_url:set(s.url or "")
 	form_auth:set(s.authKind or "none")
 	form_sync:set(s.storage ~= "local")
@@ -1181,21 +1105,7 @@ local function submit_form()
 			sign_in_after = current == nil
 		end
 	end
-	-- (A server's account name, where it has accounts: unlike its others'.)
-	if current and current.transport ~= "stdio" then
-		local label = trim(form_account:peek())
-		for _, other in accounts_of(current) do
-			local theirs = other.accountLabel
-			if other.id ~= current.id and label ~= "" and theirs and string.lower(theirs) == string.lower(label) then
-				form_error:set(ui.t("settings.mcp.account.error_taken", { name = current.name, account = theirs }):get())
-				return
-			end
-		end
-		req.accountLabel = label
-	end
-	local saved_name = if current and req.accountLabel and req.accountLabel ~= ""
-		then ui.t("settings.mcp.account.full_name", { name = name, account = req.accountLabel }):get()
-		else name
+	local saved_name = if current then full_name(current) else name
 	local before = ids_now()
 	form_busy:set(true)
 	mcp.upsert(req :: any):after(function(reply: any)
@@ -1232,10 +1142,6 @@ local function form_dialog(): Node
 	end
 	local function remote(): boolean
 		return custom() and form_kind:get() == "remote"
-	end
-	local function signed_in(): boolean
-		local s = editing_server()
-		return s ~= nil and s.authKind == "oauth" and s.status == "connected"
 	end
 	-- Kept in the vault or here: a choice while there's a vault, for what
 	-- isn't a command on this computer.
@@ -1280,32 +1186,6 @@ local function form_dialog(): Node
 			placeholder = ui.t("settings.mcp.form.name_placeholder"),
 			w_full = true,
 		},
-		-- A server of yours that signs in: which account it is, and what
-		-- agents see it by.
-		ui.show(function(): boolean
-			local s = editing_server()
-			return s ~= nil and s.transport ~= "stdio"
-		end, ds.TextField {
-			value = form_account,
-			label = ui.t("settings.mcp.form.account"),
-			placeholder = ui.t("settings.mcp.form.account_placeholder"),
-			hint = function(): string
-				local s = editing_server()
-				if not s then
-					return ""
-				end
-				local typed = trim(form_account:get())
-				-- (Saved: the engine's own name. Being changed, and one of several:
-				-- what it will be.)
-				local agent = if typed == (s.accountLabel or "") or #accounts_of(s) < 2
-					then s.agentName or ""
-					else agent_preview(s, typed)
-				return if agent ~= ""
-					then ui.t("settings.mcp.form.account_hint", { agent = agent }):get()
-					else ui.t("settings.mcp.form.account_hint_none"):get()
-			end,
-			w_full = true,
-		}),
 		ui.show(function(): boolean
 			return custom() and editing:get() == nil
 		end, ds.Segmented {
@@ -1441,105 +1321,14 @@ local function form_dialog(): Node
 			},
 			label_text(ui.t("settings.mcp.form.local_note")),
 		}),
-		-- Where it's kept, and (a server of yours) signing out and removing:
-		-- a card of the rows that apply, each bringing the rule over it (a
-		-- Group's rules would stand between rows that aren't there).
-		ui.show(function(): boolean
-			return syncable() or signed_in() or editing:get() ~= nil
-		end, ui.column {
-			w_full = true,
-			rounded = "$radius.xl",
-			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-			border = 1,
-			border_color = "$zeron.settings.edge",
-			overflow = "hidden",
-			ui.show(syncable, ds.Settings.Row {
+		-- Where it's kept (signing in, more accounts and removing are the
+		-- server's card's, on the page).
+		ui.show(syncable, ds.Settings.Group {
+			ds.Settings.Row {
 				label = ui.t("settings.mcp.form.sync"),
 				description = ui.t("settings.mcp.form.sync_description"),
 				control = ds.Switch { value = form_sync, label = ui.t("settings.mcp.form.sync") },
-			}),
-			ui.show(signed_in, ui.column {
-				w_full = true,
-				ui.show(syncable, ds.Settings.Rule()),
-				ds.Settings.Row {
-					label = ui.t("settings.mcp.manage.signed_in"),
-					description = function(): string
-						-- (Which account it is stands in the dialog's title.)
-						local s = editing_server()
-						return host_of(if s then s.url else nil)
-					end,
-					control = ds.Button {
-						ui.t("settings.mcp.manage.sign_out"),
-						tone = "secondary",
-						size = "sm",
-						on_click = function()
-							local s = editing_server()
-							if s then
-								mcp.disconnect_auth(s.id):after(function()
-									toast.show { title = ui.t("settings.mcp.toast.signed_out", { name = full_name(s) }), tone = "neutral" }
-								end, function(err: any)
-									form_error:set(friendly(message_of(err)))
-								end)
-							end
-						end,
-					},
-				},
-			}),
-			ui.show(function(): boolean
-				local s = editing_server()
-				return s ~= nil and takes_accounts(s)
-			end, ui.column {
-				w_full = true,
-				ui.show(function(): boolean
-					return syncable() or signed_in()
-				end, ds.Settings.Rule()),
-				ds.Settings.Row {
-					label = ui.t("settings.mcp.manage.add_account"),
-					description = function(): string
-						local s = editing_server()
-						return ui.t("settings.mcp.manage.add_account_description", { name = if s then s.name else "" }):get()
-					end,
-					control = ds.Button {
-						ui.t("settings.mcp.account.add"),
-						tone = "secondary",
-						size = "sm",
-						on_click = function()
-							local s = editing_server()
-							if s then
-								form_open:set(false)
-								add_account(s)
-							end
-						end,
-					},
-				},
-			}),
-			ui.show(function(): boolean
-				return editing:get() ~= nil
-			end, ui.column {
-				w_full = true,
-				ui.show(function(): boolean
-					local s = editing_server()
-					return syncable() or signed_in() or (s ~= nil and takes_accounts(s))
-				end, ds.Settings.Rule()),
-				ds.Settings.Row {
-					label = ui.t("settings.mcp.manage.remove"),
-					description = ui.t("settings.mcp.manage.remove_description"),
-					danger = true,
-					control = ds.Button {
-						ui.t("common.remove"),
-						tone = "danger",
-						size = "sm",
-						on_click = function()
-							local s = editing_server()
-							if s then
-								remove_target:set({ id = s.id, name = full_name(s) })
-								form_open:set(false)
-								remove_open:set(true)
-							end
-						end,
-					},
-				},
-			}),
+			},
 		}),
 		ui.show(function(): boolean
 			return form_error:get() ~= ""
@@ -1563,7 +1352,13 @@ local function remove_dialog(): Node
 			local t = remove_target:get()
 			return ui.t("settings.mcp.remove.title", { name = if t then t.name else "" }):get()
 		end,
-		body = ui.t("settings.mcp.remove.body"),
+		body = function(): string
+			local t = remove_target:get()
+			local n = if t then #t.ids else 1
+			return if n > 1
+				then ui.t("settings.mcp.remove.body_all", { n = n }):get()
+				else ui.t("settings.mcp.remove.body"):get()
+		end,
 		confirm = {
 			label = ui.t("common.remove"),
 			on_click = function()
@@ -1571,13 +1366,136 @@ local function remove_dialog(): Node
 				if not t then
 					return
 				end
-				mcp.delete(t.id):after(function()
-					toast.show { title = ui.t("settings.mcp.toast.removed", { name = t.name }), tone = "neutral" }
-				end, function(err: any)
-					toast.show { title = ui.t("settings.mcp.toast.couldnt_remove", { name = t.name }), body = friendly(message_of(err)), tone = "danger" }
-				end)
+				-- (One after another: each answer is the list as it then stands.)
+				local function next(i: number)
+					local id = t.ids[i]
+					if not id then
+						toast.show { title = ui.t("settings.mcp.toast.removed", { name = t.name }), tone = "neutral" }
+						return
+					end
+					mcp.delete(id):after(function()
+						next(i + 1)
+					end, function(err: any)
+						toast.show { title = ui.t("settings.mcp.toast.couldnt_remove", { name = t.name }), body = friendly(message_of(err)), tone = "danger" }
+					end)
+				end
+				next(1)
 			end,
 		},
+	}
+end
+
+-- Renaming an account: what it's called, here and (slugged) to agents.
+local rename_open = ui.state("settings_mcp_rename_open", false)
+local rename_id = ui.state("settings_mcp_rename_id", nil :: string?)
+local rename_value = ui.state("settings_mcp_rename_value", "")
+local rename_busy = ui.state("settings_mcp_rename_busy", false)
+local rename_error = ui.state("settings_mcp_rename_error", "")
+
+local function rename(s: mcp.Server)
+	rename_id:set(s.id)
+	rename_value:set(s.accountLabel or "")
+	rename_error:set("")
+	rename_busy:set(false)
+	rename_open:set(true)
+end
+
+local function rename_problem(): string?
+	local s = server_by_id(rename_id:get())
+	if not s then
+		return nil
+	end
+	local typed = string.lower(trim(rename_value:get()))
+	for _, other in accounts_of(s) do
+		local label = other.accountLabel
+		if other.id ~= s.id and typed ~= "" and label and string.lower(label) == typed then
+			return ui.t("settings.mcp.account.error_taken", { name = s.name, account = label }):get()
+		end
+	end
+	return nil
+end
+
+local function save_rename()
+	local s = server_by_id(rename_id:peek())
+	if not s or rename_busy:peek() or rename_problem() then
+		return
+	end
+	rename_busy:set(true)
+	rename_error:set("")
+	mcp.upsert({
+		id = s.id,
+		name = s.name,
+		preset = s.preset,
+		transport = s.transport,
+		url = s.url,
+		command = s.command,
+		args = s.args,
+		authKind = s.authKind,
+		localOnly = s.storage == "local",
+		accountLabel = trim(rename_value:peek()),
+	} :: any):after(function()
+		rename_busy:set(false)
+		rename_open:set(false)
+	end, function(err: any)
+		rename_busy:set(false)
+		rename_error:set(friendly(message_of(err)))
+	end)
+end
+
+local function rename_dialog(): Node
+	return ds.Dialog {
+		open = rename_open,
+		size = "sm",
+		title = ui.t("settings.mcp.rename.title"),
+		body = function(): string
+			local s = server_by_id(rename_id:get())
+			return if s then ui.t("settings.mcp.rename.body", { name = s.name }):get() else ""
+		end,
+		hold = function(): boolean
+			return rename_busy:get()
+		end,
+		confirm = {
+			label = ui.t("settings.mcp.rename.save"),
+			keep_open = true,
+			busy = function(): boolean
+				return rename_busy:get()
+			end,
+			disabled = function(): boolean
+				return rename_problem() ~= nil
+			end,
+			on_click = save_rename,
+		},
+		build = function(): Node
+			return ds.TextField {
+				value = rename_value,
+				label = ui.t("settings.mcp.account.name"),
+				placeholder = ui.t("settings.mcp.account.name_placeholder"),
+				autofocus = true,
+				select_on_focus = true,
+				hint = function(): string
+					local s = server_by_id(rename_id:get())
+					local typed = trim(rename_value:get())
+					if not s then
+						return ""
+					end
+					-- (What it'll be: alone, a service keeps its own name.)
+					local agent = if #accounts_of(s) < 2 then (s.agentName or "") else agent_preview(s, typed)
+					return if typed == "" and #accounts_of(s) > 1
+						then ui.t("settings.mcp.rename.unnamed_hint"):get()
+						elseif agent ~= "" then ui.t("settings.mcp.account.agents_see_one", { agent = agent }):get()
+						else ""
+				end,
+				error = function(): string?
+					local problem = rename_problem()
+					if problem then
+						return problem
+					end
+					local e = rename_error:get()
+					return if e ~= "" then e else nil
+				end,
+				w_full = true,
+			}
+		end,
 	}
 end
 
@@ -1618,12 +1536,12 @@ local function where_of(s: mcp.Server): string
 	return host_of(s.url)
 end
 
+-- An account's line: how it stands (the service's address is its card's).
 local function describe(s: mcp.Server): string
 	local st = state_of(s)
 	local line: string
-	if st == "connected" then
-		-- (Which account it is stands beside its name.)
-		line = where_of(s)
+	if st == "connected" or st == "ready" then
+		line = ui.t("settings.mcp.row.connected"):get()
 	elseif st == "waiting" then
 		line = ui.t("settings.mcp.row.waiting"):get()
 	elseif st == "signin" then
@@ -1635,10 +1553,8 @@ local function describe(s: mcp.Server): string
 	elseif st == "error" then
 		local flow = mcp.auth_flows:get()[s.id]
 		line = friendly(if flow and flow.error then flow.error else s.lastError)
-	elseif st == "off" then
-		line = ui.t("settings.mcp.row.off", { where = where_of(s) }):get()
 	else
-		line = where_of(s)
+		line = ui.t("settings.mcp.row.off_short"):get()
 	end
 	if s.storage == "local" and snapshot().vaultAvailable then
 		line = ui.t("settings.mcp.row.this_device", { line = line }):get()
@@ -1646,93 +1562,105 @@ local function describe(s: mcp.Server): string
 	return line
 end
 
-local Control = ui.component(function(props: { now: State<mcp.Server> }): Node
-	local now = props.now
-	local on = ui.use_state(now:peek().enabled)
-	ui.effect(function()
-		local want = now:get().enabled
-		if on:peek() ~= want then
-			on:set(want)
-		end
-	end)
+-- An account's name on its row: the one it was given, else what it is.
+local function account_title(s: mcp.Server): string
+	local label = s.accountLabel
+	if label and label ~= "" then
+		return label
+	end
+	return if #accounts_of(s) > 1 then ui.t("settings.mcp.row.unnamed"):get() else ui.t("settings.mcp.row.your_account"):get()
+end
+
+-- The ⋯ at a row's end and its menu, as Providers' accounts have.
+local MenuButton = ui.component(function(props: { label: () -> string, items: (close: () -> ()) -> { Node } }): Node
+	local open = ui.use_state(false)
+	local function close()
+		open:set(false)
+	end
+	local trigger = ds.IconButton {
+		icon = "more-horizontal",
+		label = props.label,
+		size = "md",
+		tone = "quiet",
+		on_click = function()
+			open:set(not open:peek())
+		end,
+	}
 	return ui.row {
-		gap = "$space.2",
-		items = "center",
-		ui.switch(function(): string
-			local st = state_of(now:get())
-			if st == "waiting" then
-				return "waiting"
-			elseif st == "signin" or st == "expired" or st == "client" or (st == "error" and now:get().authKind == "oauth") then
-				return "sign_in"
-			end
-			return "none"
-		end, {
-			waiting = ui.div { px = "$space.2", progress.ProgressRing { size = 14, tone = "neutral", label = ui.t("settings.mcp.row.waiting"):get() } },
-			sign_in = ds.Button {
-				ui.t("settings.mcp.row.sign_in"),
-				tone = "secondary",
-				size = "sm",
-				on_click = function()
-					sign_in(now:peek().id)
-				end,
+		shrink = 0,
+		ui.menu(Menu.panel {
+			open = open,
+			anchor = trigger,
+			placement = { side = "bottom", align = "end", offset = 4 },
+			w = 232,
+			ui.column {
+				w_full = true,
+				p = "$space.1",
+				gap = "$zeron.list.gap",
+				table.unpack(props.items(close)),
 			},
-			none = ui.div {},
 		}),
-		ds.IconButton {
-			icon = "settings-minimalistic",
-			label = function(): string
-				return ui.t("settings.mcp.row.settings_of", { name = full_name(now:get()) }):get()
-			end,
-			size = "sm",
-			tone = "quiet",
-			on_click = function()
-				open_manage(now:peek())
-			end,
-		},
-		ds.Switch {
-			value = on,
-			label = function(): string
-				return full_name(now:get())
-			end,
-			on_change = function(value: boolean)
-				local s = now:peek()
-				mcp.set_enabled(s.id, value):after(function() end, function(err: any)
-					on:set(not value)
-					toast.show { title = ui.t("settings.mcp.toast.couldnt_switch", { name = full_name(s) }), body = friendly(message_of(err)), tone = "danger" }
-				end)
-			end,
-		},
 	}
 end)
 
-local function server_row(first: mcp.Server, _: number, now: State<mcp.Server>): Node
+-- Sign in where it's wanted; the spinner while it's under way.
+local function sign_in_control(now: State<mcp.Server>): Node
+	return ui.switch(function(): string
+		local s = now:get()
+		local st = state_of(s)
+		if st == "waiting" then
+			return "waiting"
+		elseif s.authKind == "oauth" and (st == "signin" or st == "expired" or st == "client" or st == "error") then
+			return "sign_in"
+		end
+		return "none"
+	end, {
+		waiting = ui.div { px = "$space.2", progress.ProgressRing { size = 14, tone = "neutral", label = ui.t("settings.mcp.row.waiting"):get() } },
+		sign_in = ds.Button {
+			ui.t("settings.mcp.row.sign_in"),
+			tone = "secondary",
+			size = "sm",
+			on_click = function()
+				local s = now:peek()
+				sign_in(s.id, nil, #accounts_of(s) > 1)
+			end,
+		},
+		none = ui.div {},
+	})
+end
+
+local AccountRow = ui.component(function(props: { now: State<mcp.Server> }): Node
+	local now = props.now
 	return ds.Settings.Row {
 		label = function(): string
-			return now:get().name
+			return account_title(now:get())
 		end,
 		description = function(): string
 			return describe(now:get())
 		end,
-		lead = ui.presence(function(): string
-			local s = now:get()
-			return `{s.preset or ""}\0{s.name}`
-		end, function(): Node
-			return server_logo(now:peek(), 32)
-		end),
-		-- Right after the name: which account it is, then what needs you.
+		lead = ds.Avatar {
+			seed = now:peek().id,
+			size = 32,
+			label = function(): string
+				return account_title(now:get())
+			end :: any,
+		},
+		-- Right after its name: what agents call it, and what needs you.
 		badge = ui.row {
 			gap = "$space.1",
 			items = "center",
 			shrink = 0,
 			ui.show(function(): boolean
-				local label = now:get().accountLabel
-				return label ~= nil and label ~= ""
+				local agent = now:get().agentName
+				return agent ~= nil and agent ~= ""
 			end, ds.Badge {
 				function(): string
-					return now:get().accountLabel or ""
+					return now:get().agentName or ""
 				end,
 				tone = "neutral",
-				class = "mcp-account",
+				mono = true,
+				class = "mcp-agent-name",
+				tooltip = ui.t("settings.mcp.row.agent_name_tip"):get(),
 			}),
 			ui.show(function(): boolean
 				local st = state_of(now:get())
@@ -1740,8 +1668,241 @@ local function server_row(first: mcp.Server, _: number, now: State<mcp.Server>):
 			end, ds.Badge { ui.t("settings.mcp.row.needs_attention"), tone = "danger" }),
 		},
 		truncate = true,
-		control = Control { now = now },
+		control = ui.row {
+			gap = "$space.2",
+			items = "center",
+			sign_in_control(now),
+			MenuButton {
+				label = function(): string
+					return ui.t("settings.mcp.row.account_actions", { name = full_name(now:get()) }):get()
+				end,
+				items = function(close: () -> ()): { Node }
+					local function signed_in(): boolean
+						local s = now:get()
+						return s.authKind == "oauth" and s.status == "connected"
+					end
+					return {
+						Menu.Row {
+							icon = "pen",
+							label = ui.t("settings.mcp.menu.rename"),
+							on_click = function()
+								close()
+								rename(now:peek())
+							end,
+						},
+						ui.show(signed_in, Menu.Row {
+							icon = "refresh",
+							label = ui.t("settings.mcp.menu.sign_in_again"),
+							on_click = function()
+								close()
+								local s = now:peek()
+								sign_in(s.id, nil, #accounts_of(s) > 1)
+							end,
+						}),
+						ui.show(signed_in, Menu.Row {
+							icon = "close-circle",
+							label = ui.t("settings.mcp.menu.sign_out"),
+							on_click = function()
+								close()
+								local s = now:peek()
+								mcp.disconnect_auth(s.id):after(function()
+									toast.show { title = ui.t("settings.mcp.toast.signed_out", { name = full_name(s) }), tone = "neutral" }
+								end, function(err: any)
+									toast.show { title = friendly(message_of(err)), tone = "danger" }
+								end)
+							end,
+						}),
+						Menu.Rule(),
+						Menu.Row {
+							icon = "trash-bin-minimalistic",
+							label = ui.t("settings.mcp.menu.remove_account"),
+							danger = true,
+							on_click = function()
+								close()
+								local s = now:peek()
+								remove_target:set({ ids = { s.id }, name = full_name(s) })
+								remove_open:set(true)
+							end,
+						},
+					}
+				end,
+			},
+		},
 	}
+end)
+
+-- A service: its card, as Providers' agents are. Its head names it, says
+-- where it is, and turns it on or off for agents (all its accounts); its
+-- accounts follow, each its own row; then Add account, for a service that
+-- signs in. One that doesn't (Context7, a command here) is its head alone.
+type Service = { key: string, servers: { mcp.Server } }
+
+local ServiceCard = ui.component(function(props: { now: State<Service> }): Node
+	local now = props.now
+	local function head(): mcp.Server
+		return now:get().servers[1]
+	end
+	local function signs_in(): boolean
+		local s = head()
+		return s ~= nil and takes_accounts(s)
+	end
+	local on = ui.use_state(false)
+	ui.effect(function()
+		local any = false
+		for _, s in now:get().servers do
+			any = any or s.enabled
+		end
+		if on:peek() ~= any then
+			on:set(any)
+		end
+	end)
+	local accounts = ui.computed(function(): { mcp.Server }
+		return if signs_in() then now:get().servers else {}
+	end)
+	local first = now:peek().servers[1]
+	return ui.column {
+		w_full = true,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		overflow = "hidden",
+		class = "mcp-service",
+		ds.Settings.Row {
+			label = function(): string
+				local s = head()
+				return if s then s.name else ""
+			end,
+			description = function(): string
+				local s = head()
+				if not s then
+					return ""
+				end
+				if not signs_in() then
+					-- (No accounts below to say how it stands: said here.)
+					local st = state_of(s)
+					if st == "connected" or st == "ready" then
+						return where_of(s)
+					end
+					return describe(s)
+				end
+				local n = #now:get().servers
+				return if n > 1
+					then ui.t("settings.mcp.row.where_accounts", { where = where_of(s), n = n }):get()
+					else where_of(s)
+			end,
+			lead = server_logo(first, 32),
+			truncate = true,
+			control = ui.row {
+				gap = "$space.2",
+				items = "center",
+				ds.Switch {
+					value = on,
+					label = function(): string
+						local s = head()
+						return if s then s.name else ""
+					end,
+					on_change = function(value: boolean)
+						for _, s in now:peek().servers do
+							if s.enabled ~= value then
+								mcp.set_enabled(s.id, value):after(function() end, function(err: any)
+									on:set(not value)
+									toast.show { title = ui.t("settings.mcp.toast.couldnt_switch", { name = s.name }), body = friendly(message_of(err)), tone = "danger" }
+								end)
+							end
+						end
+					end,
+				},
+				MenuButton {
+					label = function(): string
+						local s = head()
+						return ui.t("settings.mcp.row.server_actions", { name = if s then s.name else "" }):get()
+					end,
+					items = function(close: () -> ()): { Node }
+						local function custom(): boolean
+							local s = head()
+							return s ~= nil and (s.preset == nil or s.preset == "")
+						end
+						return {
+							ui.show(custom, Menu.Row {
+								icon = "settings-minimalistic",
+								label = ui.t("settings.mcp.menu.edit"),
+								on_click = function()
+									close()
+									local s = head()
+									if s then
+										open_manage(s)
+									end
+								end,
+							}),
+							ui.show(custom, Menu.Rule()),
+							Menu.Row {
+								icon = "trash-bin-minimalistic",
+								label = function(): string
+									local s = head()
+									return ui.t("settings.mcp.menu.remove_server", { name = if s then s.name else "" }):get()
+								end,
+								danger = true,
+								on_click = function()
+									close()
+									local ids: { string } = {}
+									for _, s in now:peek().servers do
+										table.insert(ids, s.id)
+									end
+									local s = head()
+									remove_target:set({ ids = ids, name = if s then s.name else "" })
+									remove_open:set(true)
+								end,
+							},
+						}
+					end,
+				},
+			},
+		},
+		ui.each(accounts, function(_s: mcp.Server, _i: number, row: State<mcp.Server>): Node
+			return ui.column {
+				w_full = true,
+				ds.Settings.Rule(),
+				AccountRow { now = row },
+			}
+		end, {
+			key = function(s: mcp.Server): string
+				return s.id
+			end,
+			w_full = true,
+		}),
+		ui.show(signs_in, ui.column {
+			w_full = true,
+			ds.Settings.Rule(),
+			ds.Settings.Row {
+				label = ui.t("settings.mcp.row.add_account"),
+				lead = ds.ProviderCard.disc(ds.Icon { name = "plus", size = 16 }),
+				on_click = function()
+					local s = head()
+					if s then
+						add_account(s)
+					end
+				end,
+			},
+		}),
+	}
+end)
+
+-- The servers, a service's accounts together (the engine's order).
+local function services(): { Service }
+	local out: { Service } = {}
+	local at: { [string]: Service } = {}
+	for _, s in snapshot().servers or {} do
+		local key = service_of(s)
+		local svc = at[key]
+		if not svc then
+			svc = { key = key, servers = {} }
+			at[key] = svc
+			table.insert(out, svc)
+		end
+		table.insert(svc.servers, s)
+	end
+	return out
 end
 
 local function preset_row(p: mcp.Preset): Node
@@ -1792,12 +1953,19 @@ function M.view(): Node
 			return #servers:get() > 0
 		end, ds.Settings.Section {
 			title = ui.t("settings.mcp.servers.title"),
-			ds.Settings.Each(servers, server_row, {
-				key = function(s: mcp.Server): string
-					return s.id
-				end,
-				wash = true,
-			}),
+			-- A card a service, as Providers has an agent's.
+			ui.column {
+				w_full = true,
+				gap = "$space.3",
+				ui.each(ui.computed(services), function(_svc: Service, _i: number, row: State<Service>): Node
+					return ServiceCard { now = row }
+				end, {
+					key = function(svc: Service): string
+						return svc.key
+					end,
+					w_full = true,
+				}),
+			},
 		})
 	)
 
@@ -1849,6 +2017,7 @@ function M.view(): Node
 		connect_dialog(),
 		form_dialog(),
 		remove_dialog(),
+		rename_dialog(),
 	}
 end
 
