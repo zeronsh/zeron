@@ -2213,23 +2213,3 @@ fn a_pasted_split_draft_survives_copy_focus_without_stale_geometry() {
     assert_eq!(app.error(), None);
 }
 
-#[test]
-fn probe_paste_growth() {
-    let mut app = mount(&scratch("probe2"));
-    open(&mut app, "Fix the build");
-    split_right(&mut app, "Tidy the tests");
-    let field = "#chat-composer-dock >> role:textbox \"Message\"";
-    app.click(field);
-    app.frames(5);
-    println!("BEFORE {:?}", app.bounds("#chat-composer"));
-    let text: String = std::iter::repeat("a paragraph of wrapped words to paste in\n\n").take(30).collect();
-    let editor = app.ui.focused_editor().unwrap();
-    app.ui.paste_into(&editor, Some(&text));
-    for n in [1, 3, 10] {
-        app.frames(n);
-        let e = app.ui.focused_editor().unwrap();
-        let (_, at) = e.selection();
-        println!("AFTER+{n} composer={:?} caret={:?} place={:?} sel={at}", app.bounds("#chat-composer"), e.input_method_area(), e.text_area(at..at));
-    }
-    panic!("probe2");
-}
