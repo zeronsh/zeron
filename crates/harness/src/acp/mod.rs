@@ -2220,8 +2220,8 @@ struct WarmAgent {
 
 /// Active `antigravity acp --login` paste-code sign-in process.
 pub struct AntigravityPasteLogin {
-    child: tokio::process::Child,
-    stdin: Option<tokio::process::ChildStdin>,
+    child: crate::process::Child,
+    stdin: Option<ChildStdin>,
     url: String,
     stderr_tail: crate::StderrTail,
     kill_grace: Duration,
@@ -2410,7 +2410,7 @@ impl AcpHarness {
             .args(["--app-data-dir", "antigravity-acp"]);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::executable::home_dir() {
             cmd.current_dir(home);
         }
         cmd.env("GEMINI_HOME", gemini_home)
