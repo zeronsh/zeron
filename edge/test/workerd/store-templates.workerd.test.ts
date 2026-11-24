@@ -508,11 +508,17 @@ describe("templates: staff", () => {
     expect(unknown.files.every((f) => f.zeron === null)).toBe(true);
     const sha = (path: string) => unknown.files.find((f) => f.path === path)!.sha256;
     const put = (doc: unknown, key = zeron) => env.PLUGIN_STORE.put(`stock/${key}.json`, typeof doc === "string" ? doc : JSON.stringify(doc));
-    const files = { "ds/same.luau": sha("ds/same.luau"), "ds/changed.luau": "0".repeat(64), "ds/spelt.luau": sha("DS/Spelt.luau"), "ds/left-out.luau": "1".repeat(64) };
+    const files = {
+      // (As one of its official templates has it: a match with any is the same.)
+      "ds/same.luau": ["2".repeat(64), sha("ds/same.luau")],
+      "ds/changed.luau": ["0".repeat(64), "2".repeat(64)],
+      "ds/spelt.luau": [sha("DS/Spelt.luau")],
+      "ds/left-out.luau": ["1".repeat(64)]
+    };
     // Another version's, or not as the generator writes it: not known.
     await put({ version: zeron, files }, "0.3.0");
     expect((await view(temp)).zeron_base).toEqual({ version: zeron, known: false });
-    for (const bad of ["{", "null", { version: "0.3.0", files }, { version: zeron }, { version: zeron, files: {} }, { version: zeron, files: [] }, { version: zeron, files: { x: "y" } }]) {
+    for (const bad of ["{", "null", { version: "0.3.0", files }, { version: zeron }, { version: zeron, files: {} }, { version: zeron, files: [] }, { version: zeron, files: { x: ["y"] } }, { version: zeron, files: { x: [] } }, { version: zeron, files: { ...files, x: "0".repeat(64) } }, { version: zeron, files: { x: ["0".repeat(64), 7] } }]) {
       await put(bad);
       expect((await view(temp)).zeron_base, JSON.stringify(bad)).toEqual({ version: zeron, known: false });
     }
@@ -542,7 +548,7 @@ describe("templates: staff", () => {
         return Reflect.get(target, prop, target).bind(target);
       }
     }) as R2Bucket;
-    const put = (hash: string) => env.PLUGIN_STORE.put(`stock/${zeron}.json`, JSON.stringify({ version: zeron, files: { "app.luau": hash.repeat(64) } }));
+    const put = (hash: string) => env.PLUGIN_STORE.put(`stock/${zeron}.json`, JSON.stringify({ version: zeron, files: { "app.luau": [hash.repeat(64)] } }));
     const mark = async (now: number) => (await stockOf(bucket, zeron, now))?.("app.luau", "a".repeat(64));
     // Not there: asked each time.
     expect([await mark(0), await mark(0), reads]).toEqual([undefined, undefined, 2]);
@@ -557,7 +563,7 @@ describe("templates: staff", () => {
     // Eight at most: the oldest goes.
     for (let i = 0; i < 8; i++) {
       const other = `0.3.${i}-${randomLetters(8)}`;
-      await env.PLUGIN_STORE.put(`stock/${other}.json`, JSON.stringify({ version: other, files: { x: "0".repeat(64) } }));
+      await env.PLUGIN_STORE.put(`stock/${other}.json`, JSON.stringify({ version: other, files: { x: ["0".repeat(64)] } }));
       expect(await stockOf(bucket, other, 600_000)).toBeDefined();
     }
     reads = 0;

@@ -1,8 +1,9 @@
 /**
  * Zeron's own template files, as each release had them (contract
  * "Templates: as the edge built them"): `stock/<zeron_version>.json` =
- * `{version, files: {rel: sha256}}` in PLUGIN_STORE, written per release by
- * the generator, never by an author. Each version of a template under review
+ * `{version, files: {rel: [sha256, …]}}` in PLUGIN_STORE, written per release by
+ * the generator, never by an author: the file as Zeron's default look has it,
+ * and as each of its official templates does. A match with any is the same. Each version of a template under review
  * is read against the ones of the Zeron it says it was made from, so staff
  * read what its author wrote rather than all of Zeron. A Zeron whose files aren't there (or
  * can't be read) is unknown, and then nothing is marked: every file is shown.
@@ -22,13 +23,23 @@ export type StockMark = "same" | "changed" | "new";
 /** The mark of a file by its path and sha256. */
 export type Stock = (path: string, sha256: string) => StockMark;
 
+/** Each file's hashes, by its path. */
+type StockFiles = ReadonlyMap<string, ReadonlySet<string>>;
+
+const isHashes = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every((hash) => typeof hash === "string" && SHA256_RE.test(hash));
+
 /** `raw` as `zeronVersion`'s files, or undefined when it isn't. */
-const readStock = (raw: unknown, zeronVersion: string): ReadonlyMap<string, string> | undefined => {
+const readStock = (raw: unknown, zeronVersion: string): StockFiles | undefined => {
   const doc = raw as { version?: unknown; files?: unknown } | null;
   if (!doc || typeof doc !== "object" || doc.version !== zeronVersion) return undefined;
   if (!doc.files || typeof doc.files !== "object" || Array.isArray(doc.files)) return undefined;
   const files = Object.entries(doc.files as Record<string, unknown>);
-  return files.length > 0 && files.every(([, hash]) => typeof hash === "string" && SHA256_RE.test(hash)) ? new Map(files as [string, string][]) : undefined;
+  const known = new Map<string, ReadonlySet<string>>();
+  for (const [path, hashes] of files) {
+    if (!isHashes(hashes)) return undefined;
+    known.set(path, new Set(hashes));
+  }
+  return known.size > 0 ? known : undefined;
 };
 
 /** Releases' files as this isolate last read them: a release's are written
@@ -52,7 +63,7 @@ export const stockOf = async (bucket: R2Bucket, zeronVersion: string, now = Date
 };
 
 const readStockOf = async (bucket: R2Bucket, zeronVersion: string): Promise<Stock | undefined> => {
-  let files: ReadonlyMap<string, string> | undefined;
+  let files: StockFiles | undefined;
   try {
     const object = await bucket.get(stockKey(zeronVersion));
     if (!object) return undefined;
@@ -71,7 +82,7 @@ const readStockOf = async (bucket: R2Bucket, zeronVersion: string): Promise<Stoc
   const folded = new Set([...known.keys()].map(fold));
   return (path, sha256) => {
     const own = known.get(path);
-    if (own !== undefined) return own === sha256 ? "same" : "changed";
+    if (own !== undefined) return own.has(sha256) ? "same" : "changed";
     return folded.has(fold(path)) ? "changed" : "new";
   };
 };
