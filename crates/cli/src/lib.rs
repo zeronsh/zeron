@@ -195,8 +195,9 @@ pub enum PluginCommand {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy tokens: what a CI job publishes with. Each is your account's,
-    /// for the plugins you name or all of yours, fixed when it's made. Made,
+    /// Deploy tokens: what a CI job publishes plugins and templates with.
+    /// Each is your account's, for those you name (an id is a plugin's or a
+    /// template's) or all of yours, fixed when it's made. Made,
     /// listed and revoked through the running Zeron, with your session
     /// (never with a deploy token); a plugin's first version comes from your
     /// machine.
@@ -272,6 +273,27 @@ pub enum TemplateCommand {
     Status { id: String },
     /// Delete a template (it's set aside in the templates folder's .removed).
     Delete { id: String },
+    /// Check a template against the store's rules (README, preview, listing,
+    /// version, files): every problem, before anything is sent. Needs no
+    /// Zeron running and no sign-in. Exits 1 when it doesn't meet them.
+    Check {
+        /// The template's folder, or the id of one in Zeron's templates
+        /// folder.
+        target: String,
+    },
+    /// Publish a template to the store: it's live at once, for anyone to
+    /// install, and marked verified once a reviewer has read it. With
+    /// ZERON_DEPLOY_TOKEN set to a deploy token (never pass it as an
+    /// argument): the folder is checked, packed and sent with the token, with
+    /// no Zeron running and no sign-in. Exits as `zeron plugin publish` does.
+    Publish {
+        /// The template's folder, or the id of one in Zeron's templates
+        /// folder.
+        target: String,
+        /// Check and pack it, but don't send it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// A subcommand that runs the engine's own code in this process: what the

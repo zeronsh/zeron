@@ -34,6 +34,10 @@ pub async fn run_template(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     use zeron_engine::plugins::{TEMPLATES_DIR, templates};
+    // `check` needs no running Zeron; nor does the store with a deploy token.
+    let Some(command) = crate::store_cli::standalone_template(command, data_dir).await? else {
+        return Ok(());
+    };
     // The escape hatch: putting Zeron's own back needs no running Zeron and
     // nothing set up; the app picks up `.active` when it next starts.
     let client = match connect(ipc_port, data_dir).await {
@@ -109,6 +113,7 @@ pub async fn run_template(
                 );
             }
         }
+        TemplateCommand::Check { .. } | TemplateCommand::Publish { .. } => unreachable!("the store's commands are run above"),
         TemplateCommand::Delete { id } => {
             let reply = call(&client, methods::DELETE_TEMPLATE, json!({ "id": id })).await?;
             println!("Deleted {}.", str_of(&reply, "deleted"));

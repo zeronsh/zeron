@@ -1,5 +1,6 @@
 //! `zeron plugin check|publish|status|token|yank|unyank`: the plugin
-//! store from the command line.
+//! store from the command line; and `zeron template check|publish`, a
+//! template's, with a deploy token.
 //!
 //! Two ways, one model (the plan's "Who may publish"):
 //! - **In CI**, with a deploy token in `ZERON_DEPLOY_TOKEN` (never an
@@ -18,12 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use zeron_cli::{PluginCommand, TokenCommand};
+use zeron_cli::{PluginCommand, TemplateCommand, TokenCommand};
 use zeron_engine::plugins::install;
-use zeron_engine::plugins::store::client::{Caller, StoreClient};
+use zeron_engine::plugins::listing::Problem;
+use zeron_engine::plugins::store::client::{Caller, Kind, StoreClient};
 use zeron_engine::plugins::store::deploy_token::{self, DeployToken};
-use zeron_engine::plugins::store::publish::{self, Prepared};
-use zeron_engine::plugins::{PLUGINS_DIR, listing, manifest};
+use zeron_engine::plugins::store::publish::{self, Prepared, PreparedTemplate};
+use zeron_engine::plugins::{PLUGINS_DIR, TEMPLATES_DIR, listing, manifest};
 use zeron_rpc::methods;
 
 /// `println!`, the line [`listing::escaped`]: words from a plugin or the
@@ -70,7 +72,7 @@ fn exit(code: i32, message: impl Into<String>) -> anyhow::Error {
 /// The exit code for a failure's word (`"<word>: <words>"`).
 pub fn code(word: &str) -> i32 {
     match word {
-        "not_semver" | "version_exists" | "not_newer" | "missing_readme" | "missing_listing" | "bad_listing" | "bad_package" | "bad_manifest"
+        "not_semver" | "version_exists" | "not_newer" | "missing_readme" | "missing_listing" | "bad_listing" | "bad_package" | "bad_manifest" | "protected_file"
         | "too_large" | "too_big" | "id_reserved" | "id_too_similar" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
         "store_unreachable" | "rate_limited" | "store_error" | "unavailable" => UNREACHABLE,
         "no_manifest" | "invalid" | "not_a_token" | "damaged" => SETUP,
@@ -80,9 +82,10 @@ pub fn code(word: &str) -> i32 {
 
 /// What to do about each word the store answers a deploy token's request
 /// with, in one plain line (the store's own words are for its logs).
-fn plain_line(word: &str) -> Option<&'static str> {
+fn plain_line(word: &str, kind: Kind) -> Option<&'static str> {
     Some(match word {
         "invalid_token" => "The deploy token is wrong, revoked or expired: make a new one (`zeron plugin token create`) and put it in ZERON_DEPLOY_TOKEN.",
+        "token_not_allowed" if kind == Kind::Template => "This deploy token may not publish this template (a template's first version is published from your computer).",
         "token_not_allowed" => "This deploy token may not publish this plugin (a plugin's first version is published from your computer).",
         "session_required" => "A deploy token only publishes: this needs you signed in, with Zeron running on your computer.",
         "unauthenticated" => "The store didn't accept who's asking (a 401 that said no more): check ZERON_DEPLOY_TOKEN, or sign in again.",
@@ -93,8 +96,13 @@ fn plain_line(word: &str) -> Option<&'static str> {
 
 /// A failure from the store or the engine, as an exit.
 fn failed(error: &str) -> anyhow::Error {
+    failed_for(error, Kind::Plugin)
+}
+
+/// [`failed`], publishing an item of `kind`.
+fn failed_for(error: &str, kind: Kind) -> anyhow::Error {
     let word = install::reason_of(error).unwrap_or("");
-    let message = plain_line(word).map_or_else(|| error.to_owned(), |line| format!("{word}: {line}"));
+    let message = plain_line(word, kind).map_or_else(|| error.to_owned(), |line| format!("{word}: {line}"));
     exit(if word.is_empty() { REFUSED } else { code(word) }, message)
 }
 
@@ -120,55 +128,100 @@ fn deploy_token() -> anyhow::Result<Option<DeployToken>> {
 /// hands it back for the running Zeron and its signed-in session.
 pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Result<Option<PluginCommand>> {
     if let PluginCommand::Check { target } = &command {
-        let prepared = read(&folder(target, data_dir)?)?;
-        say(&prepared);
-        if !prepared.ok() {
-            return Err(exit(RULES, problems_line(&prepared)));
+        let checked = Checked::from(&read(&folder(target, data_dir)?)?);
+        say(&checked);
+        if !checked.problems.is_empty() {
+            return Err(exit(RULES, problems_line(&checked)));
         }
-        out!("{} {} meets the store's rules.", prepared.manifest.id, prepared.manifest.version);
+        out!("{} {} meets the store's rules.", checked.id, checked.version);
         return Ok(None);
     }
     if !matches!(command, PluginCommand::Publish { .. }) {
         return Ok(Some(command));
     }
     let Some(token) = deploy_token()? else { return Ok(Some(command)) };
+    let PluginCommand::Publish { target, dry_run } = command else { unreachable!("only publish gets here") };
+    let prepared = read(&folder(&target, data_dir)?)?;
+    publish_with(token, Kind::Plugin, Checked::from(&prepared), || prepared.pack_unsigned(), dry_run).await?;
+    Ok(None)
+}
+
+/// [`standalone`] for templates: `check`, and `publish` with
+/// `ZERON_DEPLOY_TOKEN` set. `Ok(Some(command))` hands it back.
+pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> anyhow::Result<Option<TemplateCommand>> {
+    match command {
+        TemplateCommand::Check { target } => {
+            let prepared = read_template(&template_folder(&target, data_dir)?)?;
+            let checked = Checked::from(&prepared);
+            say(&checked);
+            if !checked.problems.is_empty() {
+                return Err(exit(RULES, problems_line(&checked)));
+            }
+            out!("{} {} meets the store's rules.", checked.id, checked.version);
+            Ok(None)
+        }
+        TemplateCommand::Publish { target, dry_run } => {
+            let Some(token) = deploy_token()? else {
+                return Err(exit(SETUP, format!("Set {} to a deploy token to publish a template (`zeron plugin token create`).", deploy_token::ENV)));
+            };
+            let prepared = read_template(&template_folder(&target, data_dir)?)?;
+            publish_with(token, Kind::Template, Checked::from(&prepared), || prepared.pack(None), dry_run).await?;
+            Ok(None)
+        }
+        other => Ok(Some(other)),
+    }
+}
+
+/// What's said of an item checked for the store: a plugin or a template.
+struct Checked {
+    id: String,
+    version: String,
+    files: usize,
+    problems: Vec<Problem>,
+    warnings: Vec<Problem>,
+}
+
+impl From<&Prepared> for Checked {
+    fn from(p: &Prepared) -> Self {
+        Checked { id: p.manifest.id.clone(), version: p.manifest.version.clone(), files: p.files.len(), problems: p.problems.clone(), warnings: p.warnings.clone() }
+    }
+}
+
+impl From<&PreparedTemplate> for Checked {
+    fn from(p: &PreparedTemplate) -> Self {
+        Checked { id: p.id().to_owned(), version: p.version().to_owned(), files: p.files.len(), problems: p.problems.clone(), warnings: p.warnings.clone() }
+    }
+}
+
+/// An item of `kind`, checked, packed (`pack`) and sent with `token`.
+async fn publish_with(token: DeployToken, kind: Kind, mut checked: Checked, pack: impl FnOnce() -> Result<Vec<u8>, String>, dry_run: bool) -> anyhow::Result<()> {
     let token = Arc::new(token);
     let edge = zeron_engine::plugins::store::client::edge_base(&zeron_cli::edge_url_from_env()).map_err(|why| exit(SETUP, why))?;
-    let store = StoreClient::new(&edge);
+    let store = StoreClient::new(&edge).of(kind);
     let caller = Caller::DeployToken(token.clone());
-    match command {
-        PluginCommand::Publish { target, dry_run } => {
-            let mut prepared = read(&folder(&target, data_dir)?)?;
-            // Newer than what the store lists of it (its public versions:
-            // a token reads nothing of the account's), asked only of a
-            // plugin that meets the rules here. The store has the last word:
-            // on what it doesn't list, and if it can't be asked.
-            if prepared.ok() {
-                match public_versions(&store, &prepared.manifest.id).await {
-                    Ok(versions) => {
-                        if let Some(problem) = publish::newer_problem(&prepared.manifest.version, &versions) {
-                            prepared.problems.push(problem);
-                        }
-                    }
-                    Err(_) => eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer"),
-                }
-            }
-            say(&prepared);
-            if !prepared.ok() {
-                return Err(exit(RULES, problems_line(&prepared)));
-            }
-            let raw = prepared.pack_unsigned().map_err(|e| failed(&e))?;
-            let what = format!("{} {}", prepared.manifest.id, prepared.manifest.version);
-            if dry_run {
-                out!("{what} is ready: {} files, {}, to publish with deploy token {}. Not sent (--dry-run).", prepared.files.len(), size(raw.len() as u64), token.short());
-                return Ok(None);
-            }
-            let reply = store.publish(&prepared.manifest.id, raw, &caller).await.map_err(|(e, _)| failed(&e))?;
-            submitted(&what, &reply, &store.page_url(&prepared.manifest.id));
+    // Newer than what the store lists of it (its public versions: a token
+    // reads nothing of the account's), asked only of one that meets the
+    // rules here. The store has the last word: on what it doesn't list, and
+    // if it can't be asked.
+    if checked.problems.is_empty() {
+        match public_versions(&store, &checked.id).await {
+            Ok(versions) => checked.problems.extend(publish::newer_problem(&checked.version, &versions)),
+            Err(_) => eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer"),
         }
-        _ => unreachable!("only publish gets here"),
     }
-    Ok(None)
+    say(&checked);
+    if !checked.problems.is_empty() {
+        return Err(exit(RULES, problems_line(&checked)));
+    }
+    let raw = pack().map_err(|e| failed_for(&e, kind))?;
+    let what = format!("{} {}", checked.id, checked.version);
+    if dry_run {
+        out!("{what} is ready: {} files, {}, to publish with deploy token {}. Not sent (--dry-run).", checked.files, size(raw.len() as u64), token.short());
+        return Ok(());
+    }
+    let reply = store.publish(&checked.id, raw, &caller).await.map_err(|(e, _)| failed_for(&e, kind))?;
+    submitted(&what, &reply, &store.page_url(&checked.id));
+    Ok(())
 }
 
 /// Every version of `id` the store lists publicly (listed and yanked, the
@@ -245,22 +298,42 @@ fn read(dir: &Path) -> anyhow::Result<Prepared> {
     publish::read(dir).map_err(|e| exit(if install::reason_of(&e) == Some("no_manifest") { SETUP } else { RULES }, e))
 }
 
+/// The template's folder: `target` as a path, or the id of a folder in
+/// Zeron's templates folder.
+fn template_folder(target: &str, data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let path = Path::new(target);
+    if path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    if manifest::check_id(target).is_ok() {
+        let own = data_dir.join(TEMPLATES_DIR).join(target);
+        if own.is_dir() {
+            return Ok(own);
+        }
+    }
+    Err(exit(SETUP, format!("{target}: there's no template folder there")))
+}
+
+fn read_template(dir: &Path) -> anyhow::Result<PreparedTemplate> {
+    publish::read_template(dir).map_err(|e| exit(if install::reason_of(&e) == Some("no_manifest") { SETUP } else { RULES }, e))
+}
+
 /// Every problem and warning, one line each, on stderr.
-fn say(prepared: &Prepared) {
-    for line in publish::lines(&prepared.warnings) {
+fn say(checked: &Checked) {
+    for line in publish::lines(&checked.warnings) {
         note!("warning: {line}");
     }
-    for line in publish::lines(&prepared.problems) {
+    for line in publish::lines(&checked.problems) {
         note!("error: {line}");
     }
 }
 
-fn problems_line(prepared: &Prepared) -> String {
-    let n = prepared.problems.len();
+fn problems_line(checked: &Checked) -> String {
+    let n = checked.problems.len();
     format!(
         "{} {} doesn't meet the store's rules ({n} problem{}): fix {} and try again",
-        prepared.manifest.id,
-        prepared.manifest.version,
+        checked.id,
+        checked.version,
         if n == 1 { "" } else { "s" },
         if n == 1 { "it" } else { "them" }
     )
@@ -535,7 +608,7 @@ mod tests {
         std::fs::write(dir.path().join("zeron-plugin.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::write(dir.path().join("init.luau"), "return {}").unwrap();
         let prepared = read(dir.path()).unwrap();
-        let line = exit(RULES, problems_line(&prepared)).to_string();
+        let line = exit(RULES, problems_line(&Checked::from(&prepared))).to_string();
         assert!(raw_free(&line) && line.contains("\\u{a}") && line.contains("\\u{1b}"), "{line}");
         for line in publish::lines(&prepared.problems).iter().map(|l| listing::escaped(l)) {
             assert!(raw_free(&line), "{line}");

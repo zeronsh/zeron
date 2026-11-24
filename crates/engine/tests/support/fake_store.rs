@@ -94,6 +94,10 @@ pub struct State {
     pub offer_anyway: Vec<Value>,
     /// Packages submitted: `(id, raw, via)`.
     pub submitted: Vec<(String, Vec<u8>, String)>,
+    /// Templates: each one's owner and versions, as published.
+    pub templates: BTreeMap<String, (String, Vec<String>)>,
+    /// Templates submitted: `(id, package)`.
+    pub submitted_templates: Vec<(String, Vec<u8>)>,
     /// Updates asks, as sent.
     pub asks: Vec<Value>,
     /// Reports: `(id, body)`.
@@ -429,7 +433,7 @@ impl FakeStore {
         drop(state);
         let bare = path.split('?').next().unwrap_or(path);
         let bare_parts: Vec<&str> = bare.trim_start_matches('/').split('/').collect();
-        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]));
+        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins" | "templates", _, "versions"]));
         if !allowed {
             return Err((401, json!({ "error": "session_required", "message": "A deploy token only publishes." })));
         }
@@ -701,6 +705,36 @@ impl FakeStore {
                 let superseded: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some() && !before.contains(&v.version)).map(|v| v.version.clone()).collect();
                 state.submitted.push(((*id).to_owned(), body.to_vec(), via.to_owned()));
                 json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [], "superseded": superseded }))
+            }
+            // Templates, under their own prefix: what a deploy token does.
+            ("GET", ["store", "v1", "templates", id, "versions"]) => {
+                let state = self.state.lock().unwrap();
+                let Some((_, versions)) = state.templates.get(*id) else { return not_found() };
+                let versions: Vec<Value> = versions.iter().rev().map(|v| json!({ "version": v, "status": "listed", "verified": false })).collect();
+                json_reply(200, json!({ "total": versions.len(), "versions": versions }))
+            }
+            ("POST", ["store", "v1", "templates", id, "versions"]) => {
+                let Some((owner, scope)) = who else { return unauthorized() };
+                let mut state = self.state.lock().unwrap();
+                let refused = |status: u16, word: &str, words: &str| json_reply(status, json!({ "error": word, "message": words }));
+                if let Some((scope, _)) = &scope
+                    && (!scope.covers(id) || state.templates.get(*id).is_none_or(|(o, versions)| *o != owner || versions.is_empty()))
+                {
+                    return refused(403, "token_not_allowed", "This deploy token may not publish this template.");
+                }
+                let package = match zeron_engine::plugins::template_packages::parse_from_store(body.to_vec(), scope.is_none()) {
+                    Ok(p) if p.id() == *id => p,
+                    Ok(_) => return refused(400, "bad_package", "Its id isn't this template's."),
+                    Err(e) => return refused(400, "bad_package", &e),
+                };
+                let version = package.version();
+                let stored = state.templates.entry((*id).to_owned()).or_insert_with(|| (owner.clone(), Vec::new()));
+                if stored.1.contains(&version) {
+                    return refused(409, "version_exists", "That version was published already.");
+                }
+                stored.1.push(version.clone());
+                state.submitted_templates.push(((*id).to_owned(), body.to_vec()));
+                json_reply(201, json!({ "id": id, "version": version, "kind": "template", "status": "listed", "verified": false, "checks": [], "superseded": [] }))
             }
             ("GET", ["store", "v1", "me", "plugins"]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };
