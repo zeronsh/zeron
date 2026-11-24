@@ -71,14 +71,17 @@ fn draw(fixture: &str, height: f32, command: &str) -> Drawn {
         let pair = |s: &str, by: char| s.split_once(by).and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?)));
         let (Some((x, y)), Some((w, h))) = (pair(at, ','), pair(size, 'x')) else { continue };
         if head.contains(" scroll") {
-            view = y + h - 12.;
+            view = y + h;
         }
         if let Some((_, words)) = head.split_once(" text \"") {
             texts.push((words.trim_end_matches('"').to_owned(), Rect::new(x, y, w, h)));
         }
     }
-    // (What's in view, whole: under the scroll's fade nothing need be.)
-    texts.retain(|(_, r)| r.y + r.height <= view);
+    // (What's in view, whole: under the scroll's fade nothing need be. It
+    // fades only while there's more below.)
+    let more = texts.iter().any(|(_, r)| r.y + r.height > view && r.y < height - 80.);
+    let end = if more { view - 12. } else { view };
+    texts.retain(|(_, r)| r.y + r.height <= end);
     Drawn { height, texts, rgba }
 }
 
