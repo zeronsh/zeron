@@ -49,7 +49,7 @@ const pluginName = (r: Report) => unbidi(r.plugin.name ?? r.plugin.id);
 
 <Store title="Reports · Review · Zeron" description="Reports about plugins." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Reports" count={result.ok ? result.data.total : null} lead="What people reported about listed plugins, the newest first." tabs={staffTabs("reports", counts)}>
+    <StaffHead title="Review" lead="What people reported about listed plugins, the newest first." tabs={staffTabs("reports", counts)}>
       <nav class="chips" aria-label="Reports by state">
         {(Object.keys(STATES) as State[]).map((s) => <a class="chip" href={stateHref(s)} aria-current={s === status ? "page" : undefined}>{STATES[s]}</a>)}
       </nav>

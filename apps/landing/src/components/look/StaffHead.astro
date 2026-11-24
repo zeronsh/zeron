@@ -4,7 +4,6 @@
 // the staff pages beside them, each with how many it holds where that's
 // known. On a phone the tabs scroll sideways, under one another's edge.
 import { lsb } from "../../lib/store/bearing.ts";
-import { count as formatCount } from "../../lib/store/format.ts";
 
 interface Tab {
   label: string;
@@ -14,18 +13,17 @@ interface Tab {
   current?: boolean;
 }
 interface Props {
+  /** "Review", on every one of its tabs (the tab says which, and how many it holds). */
   title: string;
-  /** How many the page holds, said after its title ("Reserved ids · 2"). */
-  count?: number | null;
   lead?: string;
   tabs: Tab[];
 }
-const { title, count = null, lead, tabs } = Astro.props;
+const { title, lead, tabs } = Astro.props;
 ---
 
 <div class="hd">
   <div class="hd-row">
-    <h1 class={lsb(title)}>{title}{count !== null && <span class="title-count"> · {formatCount(count)}</span>}</h1>
+    <h1 class={lsb(title)}>{title}</h1>
   </div>
   {lead && <p class="lead">{lead}</p>}
 </div>

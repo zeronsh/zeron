@@ -97,5 +97,31 @@ export function highlighted(text: string, language: string | null, budget?: High
   }
 }
 
+/**
+ * A file's highlighted HTML (only spans and escaped text: highlightedHtml,
+ * asText) as its lines, each whole: a span a line break cuts is closed at the
+ * line's end and opened again on the next. So each line can wrap on its own
+ * beside its number (CodeView). A last line break ends the file, not a line.
+ */
+export function htmlLines(html: string): string[] {
+  const lines: string[] = [];
+  const open: string[] = [];
+  let line = "";
+  for (const [token] of html.matchAll(/<span[^>]*>|<\/span>|\n|[^<\n]+/g)) {
+    if (token === "\n") {
+      lines.push(line + "</span>".repeat(open.length));
+      line = open.join("");
+    } else {
+      if (token.startsWith("<span")) open.push(token);
+      else if (token === "</span>") open.pop();
+      line += token;
+    }
+  }
+  const last = line + "</span>".repeat(open.length);
+  // (Ended by its line break: nothing after it but the spans it closes.)
+  if (last.replace(/<[^>]+>/g, "") !== "" || lines.length === 0) lines.push(last);
+  return lines;
+}
+
 /** The HTML alone. */
 export const highlight = (text: string, language: string | null): string => highlighted(text, language).html;

@@ -1,8 +1,10 @@
 ---
 // A file's text with its line numbers, highlighted on the server. One the
 // highlighter can't take (nested past its bound) is shown plain, and the
-// reviewer is told: a file built to break the tool is worth a look.
-import { highlighted } from "../../lib/store/highlight.ts";
+// reviewer is told: a file built to break the tool is worth a look. A line
+// a row of its own beside its number, so a long one wraps and none is ever
+// hidden past the edge: what a reviewer reads, they read whole.
+import { highlighted, htmlLines } from "../../lib/store/highlight.ts";
 
 interface Props {
   text: string;
@@ -10,21 +12,19 @@ interface Props {
   label: string;
 }
 const { text, language, label } = Astro.props;
-const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n").length : text.split("\n").length;
 const code = highlighted(text, language);
+const lines = htmlLines(code.html);
 ---
 
 {code.plain && <p class="notice bad" role="note"><b>This file couldn't be highlighted.</b> It nests deeper than real code does, so it's shown as plain text. It's worth a look.</p>}
 
-<div class="code" role="region" aria-label={label} tabindex="0">
-  <pre class="numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
-  <pre class="text"><code class="hljs" set:html={code.html} /></pre>
+<div class="code hljs" role="region" aria-label={label} tabindex="0">
+  {lines.map((line, i) => <><span class="n" aria-hidden="true">{i + 1}</span><code set:html={line} /></>)}
 </div>
 
 <style>
-  .code { display: grid; grid-template-columns: auto minmax(0, 1fr); overflow-x: auto; font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
+  .code { display: grid; grid-template-columns: max-content minmax(0, 1fr); padding-block: 12px; font-family: var(--mono); font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
   .code:focus-visible { outline-offset: 2px; }
-  pre { margin: 0; padding: 12px 0; font-family: var(--mono); }
-  .numbers { padding-inline: 14px 12px; text-align: right; color: var(--text-3); user-select: none; border-right: 1px solid var(--line); }
-  .text { padding-inline: 14px; tab-size: 2; }
+  .n { padding-inline: 14px 12px; text-align: right; color: var(--text-3); user-select: none; box-shadow: inset -1px 0 0 var(--line); }
+  code { min-height: 20px; padding-inline: 14px; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
 </style>

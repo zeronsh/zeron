@@ -45,7 +45,7 @@ const dialogId = (id: string) => `free-${id}`;
 
 <Store title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Reserved ids" count={result.ok ? reservations.length : null} lead="Plugin ids held back from first-come claims, for an account or for nobody." tabs={staffTabs("reservations", counts)}>
+    <StaffHead title="Review" lead="Plugin ids held back from first-come claims, for an account or for nobody." tabs={staffTabs("reservations", { ...counts, reservations: result.ok ? reservations.length : null })}>
       <Flash flash={flash} />
       {
         !result.ok ? (

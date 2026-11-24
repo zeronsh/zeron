@@ -21,6 +21,7 @@ const plain = lines.some((l) => l?.plain);
 
 <div class="diff" role="region" aria-label="Changes" tabindex="0">
   <table>
+    <colgroup><col class="cn" /><col class="cn" /><col /></colgroup>
     <tbody>
       {
         rows.map((row, i) =>
@@ -48,18 +49,21 @@ const plain = lines.some((l) => l?.plain);
 </div>
 
 <style>
-  .diff { overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
-  table { min-width: 100%; border-collapse: collapse; }
-  td { padding: 0; vertical-align: top; white-space: pre; }
-  .n { width: 1%; min-width: 44px; padding: 0 10px; text-align: right; color: var(--text-3); user-select: none; }
+  /* (A long line wraps in its own row, beside its numbers: nothing a reviewer reads is ever past the edge.) */
+  .diff { font-family: var(--mono); font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
+  table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  td { padding: 0; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cn { width: 56px; }
+  .n { padding: 0 10px; text-align: right; color: var(--text-3); user-select: none; overflow-wrap: normal; }
   .n + .n { border-right: 1px solid var(--line); }
-  .line { padding: 0 14px 0 0; }
-  .sign { display: inline-block; width: 22px; text-align: center; color: var(--text-3); user-select: none; }
+  /* (A wrapped line goes on under its code, past its sign.) */
+  .line { padding: 0 14px 0 22px; text-indent: -22px; }
+  .sign { display: inline-block; width: 22px; text-indent: 0; text-align: center; color: var(--text-3); user-select: none; }
   .line code { font-size: inherit; }
   .added { background: var(--diff-added-wash); }
   .added .sign { color: var(--diff-added); }
   .removed { background: var(--diff-removed-wash); }
   .removed .sign { color: var(--diff-removed); }
-  .hunk td { padding: 4px 14px; color: var(--tone-accent); background: var(--tone-accent-wash); white-space: pre; }
+  .hunk td { padding: 4px 14px; color: var(--tone-accent); background: var(--tone-accent-wash); }
   tr:first-child.hunk td { padding-top: 6px; }
 </style>

@@ -67,7 +67,7 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
 
 <Store title="Audit log · Review · Zeron" description="What was done to the store's plugins." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Audit log" count={result.ok ? result.data.total : null} lead="What reviewers and authors did to the store's plugins, the newest first." tabs={staffTabs("audit", counts)}>
+    <StaffHead title="Review" lead="What reviewers and authors did to the store's plugins, the newest first." tabs={staffTabs("audit", { ...counts, audit: result.ok ? result.data.total : null })}>
       {
         pluginFilter && (
           <p class="tools-line">

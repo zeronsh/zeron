@@ -3,7 +3,6 @@
 /* The tabs: the queue's lists and the staff pages beside them; on a phone, sideways. */
 .staff-tabs { overflow-x: auto; scrollbar-width: none; }
 .staff-tabs a { flex: none; }
-.acct h1 .title-count { color: var(--text-3); font-weight: inherit; }
 
 /* ---- The staff's lists: the queue, Reports, Reserved ids, the Log, as your own pages' table (account.css .tbl) ---- */
 /* (A cell of two lines: its first, then a quiet second, each one line, cut to fit.) */
@@ -191,6 +190,8 @@
 /* (Before and after side by side, each a block of code, as wide as the other; under one another on a phone.) */
 .before-after { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s12); margin: var(--s12) calc(-1 * var(--s16)) 0; }
 .before-after .codeblock { margin: 0; }
+/* (On Review nothing a reviewer reads is cut or hidden past an edge: a long line of code wraps.) */
+.rv :is(.codeblock, .prose) pre { overflow-x: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
 .before-after .cb-head { height: 36px; padding-right: var(--pad); }
 .before-after pre { padding-block: var(--s12); font-size: 12.5px; line-height: 20px; }
 .before-after .cb-none { padding: var(--s12) var(--pad); font-size: 13px; line-height: 20px; color: var(--text-3); }
