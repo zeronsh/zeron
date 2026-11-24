@@ -209,6 +209,41 @@ a.trow:focus-visible { outline-offset: -2px; }
 .askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .askcard p { margin-top: var(--s8); color: var(--text-2); }
 .askcard .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s24); }
+/* Report a plugin: one centred column, no box round it; whom it's about, why (each reason a card to choose),
+   what you saw, send. */
+.wrap.rpt { max-width: calc(560px + 2 * var(--gutter)); padding-top: var(--s48); padding-bottom: var(--sections); }
+.rpt .crumbs { padding-top: 0; }
+.rpt-form, .rpt-done { margin-top: var(--s24); }
+.rpt-who { display: flex; align-items: center; gap: var(--s12); }
+.rpt-who > div { min-width: 0; }
+.rpt-who h1, .rpt-done h1 { font-size: 24px; line-height: 32px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.rpt-who p { font-size: 14px; line-height: 20px; color: var(--text-3); }
+.rpt-why { min-width: 0; margin: var(--s32) 0 0; padding: 0; border: 0; }
+.rpt-why legend { padding: 0; }
+.rcard + .rcard { margin-top: var(--s8); }
+/* (A reason: a full-width row with a faint line round it; its words, its radio at the right. Chosen, a ring in the
+   text's colour and the surface's fill. It hangs by its padding, its words on the column.) */
+.rcard { display: flex; align-items: center; gap: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: var(--s16); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: box-shadow 0.12s var(--ease), background-color 0.12s var(--ease); }
+.rcard:hover { box-shadow: inset 0 0 0 1px var(--line-2); }
+.rcard:has(input:checked) { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--text); }
+.rcard:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.rc-words { flex: 1; min-width: 0; }
+.rc-words b { display: block; font-size: 15px; line-height: 22px; font-weight: 550; }
+.rc-words small { display: block; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.rcard input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
+.rcard input:focus-visible { outline: none; }
+.rpt-more { margin-top: var(--s32); }
+/* (The field hangs as the reasons' cards do, its words on the column with theirs.) */
+.rpt-form .field textarea { --pad: var(--s16); padding: var(--s12) var(--s16); }
+.rpt-form .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s32); }
+/* (Sent: a check, the thanks, and the way back.) */
+.rpt-ok { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: var(--s16); border-radius: 50%; color: var(--verified); background: var(--verified-wash); }
+.rpt-ok svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rpt-done p { margin-top: var(--s8); color: var(--text-2); }
+.back-link { display: inline-flex; align-items: center; gap: var(--s8); margin-top: var(--s24); font-size: 14px; line-height: 20px; font-weight: 500; color: var(--text-2); border-radius: 4px; }
+.back-link:hover { color: var(--text); }
+.back-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
 /* A report: whom it's about, then why. */
 .askcard.report { max-width: 560px; }
 .report-who { display: flex; align-items: flex-start; gap: var(--s16); }
@@ -292,4 +327,6 @@ a.trow:focus-visible { outline-offset: -2px; }
   .please, .askcard { margin-inline: calc(-1 * var(--gutter)); padding: var(--s24) var(--gutter); border-radius: 0; max-width: none; }
   .askcard .answers { flex-direction: column-reverse; }
   .askcard .answers .btn { width: 100%; }
+  .wrap.rpt { padding-top: var(--s32); }
+  .rcard { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
 }

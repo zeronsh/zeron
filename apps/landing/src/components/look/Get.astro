@@ -2,12 +2,13 @@
 // Getting it: Install in Zeron, the one primary button, its own width (it
 // opens Zeron at this plugin; it never installs by itself); under it, at its
 // right, one line: the version it offers, whether Zeron verified it (in
-// its state's ink, the check with Verified, as the store's pills), and when; and, when that version
+// its state's ink, the check with Verified, as the store's pills), and when
+// it was published (format.ts publishedWhen: one fact, said alike on every page); and, when that version
 // isn't verified, the amber note: the newest verified one, to install
 // instead (the app's sentences, the contract's link that names a version).
 // "Nothing happened?" opens how to get Zeron, and opens by itself when the
 // page sees the link went nowhere (scripts/store.ts).
-import { compatibility, day, since } from "../../lib/store/format.ts";
+import { compatibility, day, publishedWhen } from "../../lib/store/format.ts";
 import { appUrl, linkable } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
 import Seal from "./Seal.astro";
@@ -21,8 +22,6 @@ interface Props {
   /** It's the plugin's newest: the plain link (the app's page decides); else a link that names it. */
   newest: boolean;
   verified: boolean;
-  /** When it was verified, or else published. */
-  verifiedAt: number | null;
   publishedAt: number;
   /** The plugin's newest verified version (not this one), and when Zeron verified it, if known. */
   verifiedVersion: string | null;
@@ -30,7 +29,7 @@ interface Props {
   /** No Zeron released can install it: the button stays, off, and says why. */
   off?: { needs: string | undefined; latest: string } | null;
 }
-const { id, name, version, newest, verified, verifiedAt, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
+const { id, name, version, newest, verified, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
 // (A version the link can't name isn't named on the button either: Zeron's page chooses.)
 const named = !newest && linkable(version) ? version : undefined;
 const label = newest ? "Install in Zeron" : named ? store("plugins.store.install_version", { version: named }) : "Open in Zeron";
@@ -54,7 +53,7 @@ const now = Date.now();
   <p class="ver">
     <b class="mono">{version}</b><i aria-hidden="true"></i>
     {verified ? <span class="said ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
-    {verified && verifiedAt !== null ? <time datetime={new Date(verifiedAt).toISOString()}>{day(verifiedAt, now)}</time> : <time datetime={new Date(publishedAt).toISOString()}>{since(publishedAt, now, true)}</time>}
+    <time datetime={new Date(publishedAt).toISOString()}><span class="sr-only">Published </span>{publishedWhen(publishedAt, now)}</time>
   </p>
   {
     off ? (

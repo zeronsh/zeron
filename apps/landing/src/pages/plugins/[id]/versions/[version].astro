@@ -1,10 +1,11 @@
 ---
 // One version of a plugin, its own page (any listed or stopped version can
-// be seen; amendment 45): which it is and whether Zeron verified it,
-// Install for that very version (the link that names it; the newest's is
-// the plain one), its notes set to be read, and its facts. One that takes
-// no new installs says why, and can't be installed. A version not in the
-// store (never published, taken down or removed) says only that.
+// be seen; amendment 45), as GitHub sets a release: the plugin page's head
+// with the version a pill and where it stands, Install for that very
+// version (the link that names it; the newest's is the plain one), its notes
+// set to be read, then the version before it and after it, and its facts.
+// One that takes no new installs says why, and can't be installed. A version
+// not in the store (never published, taken down or removed) says only that.
 import Get from "../../../../components/look/Get.astro";
 import Icon from "../../../../components/look/Icon.astro";
 import NotHere from "../../../../components/look/NotHere.astro";
@@ -16,6 +17,7 @@ import { bytes, compatibility, date, day } from "../../../../lib/store/format.ts
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
 import { isPluginId, isPrerelease, isVersion, versionParam } from "../../../../lib/store/names.ts";
+import { neighbours } from "../../../../lib/store/plugin-page.ts";
 import { drawn, keepable } from "../../../../lib/store/rendered.ts";
 import { satisfies } from "../../../../lib/store/semver.ts";
 import { stoppedWhy } from "../../../../lib/store/states.ts";
@@ -51,6 +53,9 @@ const newest = p && v ? p.version === v.version : false;
 const engines = v?.engines ?? p?.engines ?? null;
 const off = v && latestZeron && satisfies(latestZeron, engines?.zeron) === false ? { needs: engines?.zeron, latest: latestZeron } : null;
 const base = pluginUrl(id);
+/** The versions either side of it, in the store's order: the stepper at the notes' foot. */
+const near = p && v ? await neighbours(edge, p, v.version) : null;
+const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
 ---
 
 {
@@ -60,10 +65,13 @@ const base = pluginUrl(id);
         <nav class="crumbs" aria-label="Where this is">
           <a href="/plugins">Plugins</a><Icon name="chev" /><a href={base}>{p.name}</a><Icon name="chev" /><a href={`${base}/versions`}>Versions</a>
         </nav>
-        <header class="head one">
-          <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="l" />
+        <header class="head vhead">
+          <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xl" />
           <div class="txt">
-            <h1 class={lsb(p.name)}><span class="name">{p.name}</span> <b class="vnum mono">{v.version}</b></h1>
+            <h1 class={lsb(p.name)}>
+              <span class="name">{p.name}</span> <b class="vnum mono">{v.version}</b>{" "}
+              {v.yanked ? <span class="state quiet">{statusWords("yanked")}</span> : v.verified ? <span class="state ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="state no">{store("plugins.store.review.waiting")}</span>}
+            </h1>
             <p class="by">
               <span>{newest ? "Its newest version" : `Published ${date(v.published_at)}`}</span>
               {newest && <><i aria-hidden="true"></i><span>Published {date(v.published_at)}</span></>}
@@ -77,31 +85,38 @@ const base = pluginUrl(id);
               <p class="note quiet">{stoppedWhy(v)}</p>
             </div>
           ) : (
-            <Get id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} verifiedAt={v.verified_at} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
+            <Get id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
           )}
         </header>
         <div class="cols2 after-head">
-          <div>
+          <div class="vbody">
             <h2 class="sec-title">What changed in {v.version}</h2>
-            {notes.trim() ? <article class="prose" set:html={notes} /> : <p class="prose t2">Its author wrote no notes for this version.</p>}
-            <p class="back"><a class="more" href={`${base}/versions`}><Icon name="left" /><span class="name">Every version of {p.name}</span></a></p>
+            {notes.trim() ? <article class="prose" set:html={notes} /> : <p class="prose t3">This version has no notes.</p>}
+            {/* (Its neighbours, older at the left and newer at the right; All versions between them. One at an end, one side.) */}
+            <nav class="stepper" aria-label="Its other versions">
+              {near?.older ? <a class="step older" href={versionHref(near.older)} rel="prev"><span class="dir"><Icon name="chev" />Older</span><b class="mono">{near.older}</b></a> : <span class="step none"></span>}
+              <a class="all" href={`${base}/versions`}>All versions</a>
+              {near?.newer ? <a class="step newer" href={versionHref(near.newer)} rel="next"><span class="dir">Newer<Icon name="chev" /></span><b class="mono">{near.newer}</b></a> : <span class="step none"></span>}
+            </nav>
           </div>
           <aside class="rail" aria-label="About this version">
             <section aria-labelledby="rail-version">
               <h2 class="rail-h" id="rail-version">This version</h2>
               <dl class="facts">
                 <dt>Verified</dt>
-                <dd>{v.verified ? <span class="okline"><Seal size="s" quiet />{v.verified_at !== null ? `On ${day(v.verified_at, now)}` : store("plugins.store.verified")}</span> : store("plugins.store.review.waiting")}</dd>
+                <dd>{v.verified ? <span class="okline"><Seal size="s" quiet />{v.verified_at !== null ? `On ${day(v.verified_at, now)}` : store("plugins.store.verified")}</span> : <span class="waitline">{store("plugins.store.review.waiting")}</span>}</dd>
                 <dt>Published</dt><dd>{date(v.published_at)}</dd>
                 <dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(engines?.zeron)}</dd>
                 {v.bytes !== undefined && <><dt>Size</dt><dd class="num">{bytes(v.bytes)}</dd></>}
               </dl>
             </section>
-            <div class="rule" aria-hidden="true"></div>
-            <ul class="links">
-              <li><a href={base}><Icon name="arrow" /><span>{p.name}'s page</span></a></li>
-              <li><a href={`${base}/report`}><Icon name="flag" />Report this plugin</a></li>
-            </ul>
+            <section aria-labelledby="rail-links">
+              <h2 class="rail-h" id="rail-links">Links</h2>
+              <ul class="links">
+                <li><a href={base}><Icon name="arrow" /><span>{p.name}'s page</span></a></li>
+                <li><a href={`${base}/report`}><Icon name="flag" />Report this plugin</a></li>
+              </ul>
+            </section>
           </aside>
         </div>
       </div>
