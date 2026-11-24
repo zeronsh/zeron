@@ -34,6 +34,10 @@ export const EXCEPTIONS: [string, string][] = [
   [".stage", "a screenshot set into its card's coloured stage: a picture, placed by the stage"],
   ["p code, li > code:not(:first-child)", "code inside a sentence that wraps to a line's start keeps its chip's 5 px"],
   ["pre > code", "a code block's lines start where the code puts them: its indentation is the code's"],
+  [".guide :not(pre) > code", "in the guide a literal is a word in its chip wherever it falls, a table's field and a line's start too"],
+  [".step-n", "a step's number hangs in the gutter, left of its title (Tailwind's steps)"],
+  [".anchor", "a heading's # hangs in the gutter, left of its words"],
+  [".cb-label", "a code block's file name as typed: `.github/…` begins with a dot, its ink mid-cell"],
 ];
 
 /** The columns of the look: the page's, the store's two (its sidebar, its list), a plugin's rail and its Get, Files' two, a dialog's. */

@@ -87,7 +87,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 button { background: none; border: 0; padding: 0; cursor: pointer; }
 .mono { font-family: var(--mono); font-feature-settings: "zero" 0; }
 .num { font-variant-numeric: tabular-nums; }
-pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
+/* Code as typed, never as ligatures (Geist Mono draws `---`, `######` and `~~` as one glyph each). Important: every
+   `font` shorthand resets the ligatures, so a later `.prose code { font: … }` would bring them back. */
+pre, pre *, code, .mono, .fn { font-variant-ligatures: none !important; }
 /* (Its sides alone: a page's own top and bottom, in a stylesheet that may load before this one, stay its own.) */
 .wrap { max-width: 1184px; margin-inline: auto; padding-inline: var(--gutter); }
 
@@ -129,7 +131,7 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
 .skip:focus-visible { top: 10px; }
 
 /* ---- top bar ---- */
-.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: saturate(1.4) blur(16px); -webkit-backdrop-filter: saturate(1.4) blur(16px); box-shadow: 0 1px 0 var(--line); }
+.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: saturate(1.4) blur(16px); backdrop-filter: saturate(1.4) blur(16px); box-shadow: 0 1px 0 var(--line); }
 .top .wrap { display: flex; align-items: center; height: 60px; gap: var(--s32); }
 .brand { display: flex; align-items: center; gap: var(--s12); font-weight: 600; font-size: 15px; letter-spacing: -0.01em; border-radius: 6px; }
 /* (Its own size, on whole pixels: components/look/ZeronMark.astro.) */

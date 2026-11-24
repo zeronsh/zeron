@@ -220,6 +220,46 @@ describe("the store's list (/plugins)", () => {
   });
 });
 
+describe("the Publishing guide", () => {
+  /** The page's words, as read: no markup, entities as their characters, runs of space one. */
+  const words = (body: string) =>
+    body.slice(body.indexOf("<main"), body.indexOf("</main>")).replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
+
+  test("every fact and number it gives stays, however it's laid out", async () => {
+    const { DECLINE_REASONS } = await import("../src/lib/store/admin.ts");
+    const { CATEGORIES } = await import("../src/lib/store/nav.ts");
+    const text = words((await html("/plugins/publishing")).body);
+    for (const fact of [
+      "512 KB", "300 characters", "at most 64", "32 KB", "up to 5 new ids in any 7 days", "strict semver", "No v , no leading zeros",
+      "up to 8, lowercase, at most 32 characters each", "up to 8 PNG or JPEG pictures", "## 1.2.0", "up to 64 columns", "nested up to 32 deep", "at most 20 MB",
+      "vérifie la syntaxe", "数学公式", "官方", "an emoji's own variation selector", "bad_listing", "opens the official Rust docs",
+      "zeron plugin check <folder>", "zeron plugin publish <id>", "--dry-run", "Settings › Plugins › Yours › Publish…", "zeron plugin yank|unyank <id> <version>",
+      'zeron plugin token create --name "GitHub Actions" --plugins focus-timer,focus-board', 'zeron plugin token create --name "All my plugins" --all',
+      "--expires-in-days 90", "zeron plugin token list", "zeron plugin token revoke <id>", "ZERON_DEPLOY_TOKEN=zdt_… zeron plugin publish <folder>",
+      "zeronsh/zeron/actions/publish-plugin@v0.4.0", "token: ${{ secrets.ZERON_DEPLOY_TOKEN }}", "up to 50", "at most 20 live tokens, and makes at most 10 a day",
+      "It exits 0 when published, 1 when the plugin doesn't meet the store's rules, 2 for a set-up problem", "4 when the store couldn't be reached",
+      "Pin it to a Zeron release tag or a commit, never a branch",
+      ...DECLINE_REASONS.map((r) => r.label),
+      ...CATEGORIES.map((c) => c.id),
+    ])
+      // (Case aside: a fact that begins a table's cell begins with a capital.)
+      expect(text.toLowerCase(), fact).toContain(fact.toLowerCase());
+  });
+
+  test("On this page lists its sections and their parts, in order, each to its own heading; folded, the same", async () => {
+    const { body } = await html("/plugins/publishing");
+    const ids = (part: string) => [...part.matchAll(/<a\b[^>]*\bhref="#([^"]+)"/g)].map((m) => m[1]);
+    const rail = body.match(/<aside class="toc"[^>]*>([\s\S]*?)<\/aside>/)?.[1] ?? "";
+    const folded = body.match(/<details class="toc-inline"[^>]*>([\s\S]*?)<\/details>/)?.[1] ?? "";
+    // (Every h2 and h3 with an address, in the page's order; a step's title has none, it's one of its list's items.)
+    const headings = [...body.matchAll(/<h([23])\b[^>]*\bid="([^"]+)"/g)].map((m) => m[2]);
+    expect(headings.length).toBeGreaterThan(5);
+    expect(ids(rail)).toEqual(headings);
+    expect(ids(folded)).toEqual(headings);
+    expect(body).not.toMatch(/<h3 class="step-title"[^>]*\bid=/);
+  });
+});
+
 describe("a plugin's page", () => {
   test("its README, what it asks for, Install in Zeron", async () => {
     const { response, body } = await html("/plugins/pr-radar");
