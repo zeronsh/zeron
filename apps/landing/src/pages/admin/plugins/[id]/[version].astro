@@ -225,7 +225,7 @@ const versions = record.ok ? record.data.versions : null;
         <>
           {/* (As a plugin's page heads it: its tile; the name, the version a mono pill and where it stands right after it,
                on its line; who, when and from where, how many have it, under them.) */}
-          <header class="head rv-head">
+          <header class="head vhead rv-head">
             <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b>{standing && <> <span class:list={["state", standing.tone]}>{standing.seal && <Seal quiet />}{standing.label}</span></>}</h1>

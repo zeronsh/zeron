@@ -59,47 +59,49 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
 ---
 
 <Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current="browse" session={session}>
-  <div class="wrap acct">
+  {/* (One centred column, no box round it, as GitHub's report flow: whom it's about, why, what you saw, send.) */}
+  <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is">
       <a href="/plugins">All plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
     </nav>
     <Flash flash={sent ? null : flash} />
     {
       sent ? (
-        <section class="card askcard report" role="status">
-          <h1 class={lsb("Thanks for telling us")}>Thanks for telling us</h1>
-          <p>Your report reached the people who review plugins. If it needs to go, it goes from the store and from people's devices.</p>
-          <div class="answers"><a class="btn sec" href={pluginUrl(id)}>Back to {unbidi(plugin?.name ?? "the plugin")}</a></div>
+        <section class="rpt-done" role="status">
+          <span class="rpt-ok" aria-hidden="true"><Icon name="check" /></span>
+          <h1>Thanks — the reviewers will read it.</h1>
+          <p>If it needs to go, it goes from the store and from people's devices.</p>
+          <a class="back-link" href={pluginUrl(id)}><Icon name="left" />Back to {unbidi(plugin?.name ?? "the plugin")}</a>
         </section>
       ) : (
-        <form method="post" action={here} class="card askcard report">
+        <form method="post" action={here} class="rpt-form">
           <input type="hidden" name="csrf" value={session.csrf} />
-          <div class="report-who">
-            {plugin && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="s" />}
+          <div class="rpt-who">
+            {plugin && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="ms" />}
             <div>
               <h1 class={lsb(store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) }))}>{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
               {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
             </div>
           </div>
-          <div class="body">
-            <fieldset class="choices">
-              <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
-              {REPORT_REASONS.map((r) => (
-                <label class="opt">
-                  <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
-                  <span><b>{reportReasonWords(r)}</b><small>{ABOUT[r]}</small></span>
-                </label>
-              ))}
-            </fieldset>
-            <div>
-              <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
-              <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
-              <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
-            </div>
+          <fieldset class="rpt-why">
+            <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
+            {/* (Each reason a card to choose: its words, then its radio at the right; the chosen one ringed.) */}
+            {REPORT_REASONS.map((r) => (
+              <label class="rcard">
+                <span class="rc-words"><b>{reportReasonWords(r)}</b><small>{ABOUT[r]}</small></span>
+                <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
+              </label>
+            ))}
+          </fieldset>
+          <div class="rpt-more">
+            <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
+            <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
+            <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
           </div>
+          {/* (Sending a report destroys nothing: the store's primary button, not the danger's.) */}
           <div class="answers">
             <a class="btn sec" href={pluginUrl(id)}>Cancel</a>
-            <button class="btn danger" type="submit">{store("plugins.store.report.send")}</button>
+            <button class="btn pri" type="submit">{store("plugins.store.report.send")}</button>
           </div>
         </form>
       )

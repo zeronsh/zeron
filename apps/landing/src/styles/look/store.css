@@ -325,19 +325,19 @@ a.card:focus-visible { outline-offset: 3px; }
 /* Someone's words, quoted: a reviewer's note, why staff stopped a version. */
 .said-was { margin: 0 calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
 .said-was footer { margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); }
-/* A form's fields, in a question's dialog or its card as a page (AskCard, a report): each a box that holds text,
+/* A form's fields, in a question's dialog, its card as a page (AskCard), or a report's page: each a box that holds text,
    so it hangs by its padding, its words on the form's column. */
 :is(.question, .askcard) .body { display: grid; gap: var(--s16); margin-top: var(--s16); }
-:is(.question, .askcard) .field-label { display: block; padding: 0; margin-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
-:is(.question, .askcard) .field { position: relative; }
-:is(.question, .askcard) .field :is(select, textarea, input) { --pad: var(--s12); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); padding: var(--s8) var(--s12); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
-:is(.question, .askcard) .field select { appearance: none; padding-right: var(--s32); height: 40px; }
-:is(.question, .askcard) .field textarea { resize: vertical; min-height: 96px; }
-:is(.question, .askcard) .field :is(select, textarea, input):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-:is(.question, .askcard) .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
-:is(.question, .askcard) .field-hint { margin-top: var(--s8); font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+:is(.question, .askcard, .rpt-form) .field-label { display: block; padding: 0; margin-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+:is(.question, .askcard, .rpt-form) .field { position: relative; }
+:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input) { --pad: var(--s12); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); padding: var(--s8) var(--s12); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+:is(.question, .askcard, .rpt-form) .field select { appearance: none; padding-right: var(--s32); height: 40px; }
+:is(.question, .askcard, .rpt-form) .field textarea { resize: vertical; min-height: 96px; }
+:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+:is(.question, .askcard, .rpt-form) .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
+:is(.question, .askcard, .rpt-form) .field-hint { margin-top: var(--s8); font-size: 12.5px; line-height: 18px; color: var(--text-3); }
 .askcard .field input { height: 40px; }
-.askcard .field input::placeholder, .askcard .field textarea::placeholder { color: var(--text-3); }
+:is(.askcard, .rpt-form) .field input::placeholder, :is(.askcard, .rpt-form) .field textarea::placeholder { color: var(--text-3); }
 .askcard .body { margin-top: var(--s24); }
 /* Choices, one of which: its mark hung on the column's edge, its words beside it. */
 .choices { margin: 0; padding: 0; border: 0; min-width: 0; }

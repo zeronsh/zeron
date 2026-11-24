@@ -160,14 +160,8 @@
 .rv { padding-bottom: var(--s24); }
 /* (The crumbs' last, the version here, cut as the plugin pages' crumbs are: the head below says it whole.) */
 .rv .crumbs > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* (Its head, as a plugin's page's: the name, then the version a mono pill and where it stands, in the line's flow,
-   right after the name: never at the head's far end.) */
+/* (Its head, as a plugin's page's, with a version's: plugin.css .vhead. Nothing at its right: no Get here.) */
 .rv-head { grid-template-columns: auto minmax(0, 1fr); }
-.rv-head h1 { display: block; }
-.rv-head h1 .name { overflow-wrap: anywhere; }
-.rv-head h1 :is(.vnum, .state) { display: inline-flex; vertical-align: 0.3em; margin-left: var(--s8); }
-.rv-head h1 .vnum { align-items: center; height: 24px; padding: 0 var(--s8); border-radius: 12px; font: 550 13px/1 var(--mono); letter-spacing: -0.01em; color: var(--text-2); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); }
-.rv-head h1 .state { letter-spacing: 0.005em; }
 /* (Review's rail keeps its own width, wider than a plugin page's: a reviewer's actions, written out.) */
 .rv-cols { --rail: 340px; margin-top: var(--s32); }
 .rv-main > .tabs { margin-bottom: var(--s32); }
