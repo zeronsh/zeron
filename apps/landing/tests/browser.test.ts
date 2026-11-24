@@ -34,14 +34,14 @@ async function violations(page: Page) {
 
 const PAGES: [string, string | undefined][] = [
   ["/plugins", undefined],
-  ["/plugins/all", undefined],
-  ["/plugins/all?q=zzzzqqq", undefined],
-  ["/plugins/all?category=git", undefined],
+  ["/plugins?sort=new", undefined],
+  ["/plugins?q=zzzzqqq", undefined],
+  ["/plugins?category=git", undefined],
   ["/plugins/focus-timer", undefined],
   ["/plugins/pr-radar", undefined],
   ["/plugins/xss-probe", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12", undefined],
-  ["/plugins/all?q=git", undefined],
+  ["/plugins?q=git", undefined],
   ["/plugins/theme-sync/report", "user_kai"],
   ["/plugins/publishing", undefined],
   ["/plugins/no-such-plugin", undefined],
@@ -58,7 +58,7 @@ const PAGES: [string, string | undefined][] = [
   ["/account", "user_noor"],
   ["/account", undefined],
   ["/account/tokens/tok_0OZtGptZyNgbeUuc", "user_ada"],
-  ["/plugins/all?verified=1", undefined],
+  ["/plugins?verified=1", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/asks", undefined],
@@ -244,7 +244,7 @@ describe("a package's pictures can't run", () => {
 
 describe("the bar is drawn once: nothing in it changes after the page loads", () => {
   test("signed in as an author or staff, or signed out, on public and private pages alike", async () => {
-    const pages = ["/plugins", "/plugins/all", "/plugins/focus-timer", "/plugins/publishing", "/account", "/account/tokens"];
+    const pages = ["/plugins", "/plugins?sort=new", "/plugins/focus-timer", "/plugins/publishing", "/account", "/account/tokens"];
     for (const as of [undefined, "user_ada", "user_grace"] as const) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
       const page = await context.newPage();
@@ -450,23 +450,23 @@ describe("by keyboard", () => {
     }
   });
 
-  test("Browse: each order, filter and page is a link, the list's whole state its address", async () => {
-    const { page, context } = await open("/plugins/all");
+  test("the store: each order, filter and page is a link, the list's whole state its address", async () => {
+    const { page, context } = await open("/plugins");
     try {
       await page.locator(".sort").getByRole("link", { name: "Newest" }).click();
-      await page.waitForURL(/\/plugins\/all\?sort=new$/);
+      await page.waitForURL(/\/plugins\?sort=new$/);
       await page.locator(".facets").getByRole("link", { name: /^Git/ }).click();
-      await page.waitForURL(/\/plugins\/all\?category=git&sort=new$/);
+      await page.waitForURL(/\/plugins\?category=git&sort=new$/);
       expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Git");
       await page.locator(".facets").getByRole("link", { name: "Verified only" }).click();
-      await page.waitForURL(/\/plugins\/all\?category=git&verified=1&sort=new$/);
+      await page.waitForURL(/\/plugins\?category=git&verified=1&sort=new$/);
     } finally {
       await context.close();
     }
   });
 
   test("on a phone, the order and the filters open without a script, and Escape closes one with it", async () => {
-    const { page, context } = await open("/plugins/all?category=productivity", { width: 390 });
+    const { page, context } = await open("/plugins?category=productivity", { width: 390 });
     try {
       const filters = page.locator("details.drop", { hasText: "Filters" });
       await filters.locator("summary").click();
@@ -484,18 +484,18 @@ describe("by keyboard", () => {
     }
   });
 
-  test("the search field: / puts you in the list's, Escape empties it, Enter searches within the category", async () => {
-    const { page, context } = await open("/plugins/all?category=git");
+  test("the search, the bar's: / puts you in it, Escape empties it, Enter searches within the category", async () => {
+    const { page, context } = await open("/plugins?category=git");
     try {
       await page.keyboard.press("/");
-      const field = page.getByRole("searchbox", { name: "Search in Git" });
+      const field = page.locator(".top").getByRole("searchbox", { name: "Search plugins" });
       await expect.poll(() => field.evaluate((el) => el === document.activeElement)).toBe(true);
       await page.keyboard.type("timer");
       await page.keyboard.press("Escape");
       expect(await field.inputValue()).toBe("");
       await page.keyboard.type("pr");
       await page.keyboard.press("Enter");
-      await page.waitForURL(/\/plugins\/all\?q=pr&category=git$/);
+      await page.waitForURL(/\/plugins\?q=pr&category=git$/);
       expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Results for “pr”");
     } finally {
       await context.close();

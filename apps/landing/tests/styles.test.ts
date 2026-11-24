@@ -20,8 +20,8 @@ afterAll(() => site?.dispose());
 /** Every kind of page, each as the one who sees it. */
 const PAGES: [string, string | undefined][] = [
   ["/plugins", undefined],
-  ["/plugins/all", undefined],
-  ["/plugins/all?q=zzzzqqq", undefined],
+  ["/plugins?sort=new", undefined],
+  ["/plugins?q=zzzzqqq", undefined],
   ["/plugins/focus-timer", undefined],
   ["/plugins/xss-probe", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12", undefined],

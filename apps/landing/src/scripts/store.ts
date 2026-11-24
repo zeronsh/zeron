@@ -7,7 +7,7 @@ export {};
 document.documentElement.classList.add("js");
 
 // A form whose fields are all at their defaults sends no empty values, so
-// the address it opens stays short ("/plugins/all?sort=new", not "q=&sort=new").
+// the address it opens stays short ("/plugins?sort=new", not "q=&sort=new").
 for (const form of document.querySelectorAll<HTMLFormElement>("form[data-tidy]")) {
   form.addEventListener("formdata", (event) => {
     for (const [name, value] of [...event.formData.entries()]) if (value === "") event.formData.delete(name);
@@ -15,9 +15,8 @@ for (const form of document.querySelectorAll<HTMLFormElement>("form[data-tidy]")
 }
 
 // ── The search ─────────────────────────────────────────────────────────
-// "/" puts you in the page's own search when it has one (Discover's, a
-// list's), else the bar's; on a phone, where the bar has only its icon, it
-// leads to the list's search (/plugins/all#q, focused here on arrival).
+// "/" puts you in the bar's search, the store's one; on a phone, where the
+// bar has only its icon, it opens the search from it, focused.
 const visible = (el: HTMLElement) => el.offsetParent !== null && getComputedStyle(el).visibility !== "hidden";
 const searches = () => [...document.querySelectorAll<HTMLInputElement>("input[data-search]")].filter(visible);
 const typing = (target: EventTarget | null) =>
@@ -25,10 +24,10 @@ const typing = (target: EventTarget | null) =>
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey || typing(event.target)) return;
-  const [first] = searches().sort((a, b) => Number(b.hasAttribute("data-page-search")) - Number(a.hasAttribute("data-page-search")));
+  const [first] = searches();
   event.preventDefault();
   if (first) first.focus();
-  else location.href = "/plugins/all#q";
+  else openFind();
 });
 for (const field of document.querySelectorAll<HTMLInputElement>("input[data-search]")) {
   field.addEventListener("keydown", (event) => {
@@ -38,7 +37,16 @@ for (const field of document.querySelectorAll<HTMLInputElement>("input[data-sear
     else field.blur();
   });
 }
-if (location.hash === "#q") document.getElementById("q")?.focus();
+/** The phone's search: the bar's, from its icon, focused. */
+function openFind() {
+  const menu = document.getElementById("find-menu");
+  if (!menu || typeof menu.showPopover !== "function") return;
+  if (!menu.matches(":popover-open")) menu.showPopover();
+  menu.querySelector<HTMLInputElement>("input[data-search]")?.focus();
+}
+document.getElementById("find-menu")?.addEventListener("toggle", (event) => {
+  if ((event as ToggleEvent).newState === "open") document.querySelector<HTMLInputElement>("#find-menu input[data-search]")?.focus();
+});
 
 // ── Copy ───────────────────────────────────────────────────────────────
 // A command's copy button: its words to the clipboard, and it says so. (A
