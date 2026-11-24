@@ -1,0 +1,21 @@
+---
+// Take down or remove a version (amendment 45): why, which its author reads.
+// Taken down is for a harmful version, and turns it off on the devices that
+// have it (anyone whose device does reads the reason too); removed is for
+// one that shouldn't be in the store but isn't harmful, and leaves it be.
+interface Props {
+  id: string;
+  /** Take down (harmful) rather than remove. */
+  harmful: boolean;
+  reason?: string;
+}
+const { id, harmful, reason = "" } = Astro.props;
+---
+
+<div class="body">
+  <div>
+    <label class="field-label" for={`${id}-reason`}>Why</label>
+    <div class="field area"><textarea id={`${id}-reason`} name="reason" required maxlength="2000" rows="3">{reason}</textarea></div>
+    <p class="field-hint">{harmful ? "Its author reads this, and so does anyone whose device turns it off." : "Its author reads this."}</p>
+  </div>
+</div>

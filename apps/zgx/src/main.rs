@@ -55,6 +55,7 @@ mod intro_handoff;
 mod links;
 mod pasted;
 mod math;
+mod mcp;
 mod menu_bar;
 mod mermaid;
 mod plugins;
@@ -62,6 +63,7 @@ mod previews;
 mod projects;
 mod quit_prompt;
 mod relaunch;
+mod secrets;
 mod session_home;
 mod sessions;
 mod settings;
@@ -831,6 +833,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if entry != "intro.luau" {
         auth::install(cx, &host);
         agents::install(&host);
+        mcp::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's
@@ -1029,6 +1032,9 @@ fn serve_with(
     editor_menu::install(&host, cx.ui.downgrade(), platform.clone());
     // A picture copied or shown in Finder (the lightbox's).
     images::install(&host, platform.clone());
+    // A secret copied (a deploy token): kept by no clipboard history, and
+    // let go of in a minute.
+    secrets::install(&host, platform.clone());
     // A picture pasted into the composer, written out to send.
     pasted::install(&host, platform.clone());
     // A page's icon, for the panel's browser tab.

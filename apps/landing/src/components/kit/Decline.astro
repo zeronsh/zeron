@@ -1,0 +1,51 @@
+---
+// Don't verify: the reason, from the list, and the reviewer's words for
+// the author, both required; and under them, the author's own view of it as
+// they'll read it, their Versions row (pages/account/plugins/[id].astro):
+// the version, Not verified, the words in quotes, and the reason's label
+// with the day. scripts/store.ts keeps the view in step as it's written;
+// without it, the view shows what came with the page.
+import { DECLINE_REASONS, reasonLabel } from "../../lib/store/admin.ts";
+import { day } from "../../lib/store/format.ts";
+import Glyph from "../ui/Glyph.astro";
+
+interface Props {
+  /** Unique on the page: the dialog's or the page's. */
+  id: string;
+  version: string;
+  author: string | null;
+  /** What was typed before signing in again. */
+  reason?: string;
+  message?: string;
+}
+const { id, version, author, reason = "", message = "" } = Astro.props;
+const known = DECLINE_REASONS.some((r) => r.value === reason);
+const EMPTY_SAID = "Your words for the author show here.";
+const EMPTY_REASON = "The reason";
+---
+
+<div class="body" data-decline>
+  <div>
+    <label class="field-label" for={`${id}-reason`}>Reason</label>
+    <div class="field select">
+      <select id={`${id}-reason`} name="reason" required>
+        <option value="" disabled selected={!known}>Choose a reason</option>
+        {DECLINE_REASONS.map((r) => <option value={r.value} selected={r.value === reason}>{r.label}</option>)}
+      </select>
+      <Glyph name="alt-arrow-down" size={14} class="chevron" />
+    </div>
+  </div>
+  <div>
+    <label class="field-label" for={`${id}-message`}>For the author</label>
+    <div class="field area"><textarea id={`${id}-message`} name="message" required maxlength="2000" rows="4" placeholder="Say what to change, plainly.">{message}</textarea></div>
+    <p class="field-hint">They read it as you write it, under the reason.</p>
+  </div>
+  <div class="author-view">
+    <p class="field-label">What {author ? `@${author}` : "its author"} reads</p>
+    <div class="panel preview">
+      <p class="line"><span class="t-mono">{version}</span><span class="badge sm warn">Not verified</span></p>
+      <p class:list={["said", { "is-empty": !message }]} data-said data-empty={EMPTY_SAID}>{message ? `“${message}”` : EMPTY_SAID}</p>
+      <p class="who"><span data-reason-label data-empty={EMPTY_REASON}>{known ? reasonLabel(reason) : EMPTY_REASON}</span> · reviewed {day(Date.now())}</p>
+    </div>
+  </div>
+</div>

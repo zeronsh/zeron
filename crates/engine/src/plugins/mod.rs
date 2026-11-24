@@ -351,6 +351,31 @@ struct NewParams {
     description: Option<String>,
     #[serde(default)]
     permissions: Vec<String>,
+    /// Start it with a settings page of its own (`zeron.settings_page`).
+    #[serde(default)]
+    settings_page: bool,
+}
+
+/// What `PluginStatus` asks of the window (its `@status` / `@snapshot` call's
+/// args), as the MCP tool checks it: `page` is `"settings"` or none, and
+/// `open` goes with it alone; else why not.
+fn status_args(page: Option<&str>, open: bool) -> Result<serde_json::Value, String> {
+    match (page, open) {
+        (None, false) => Ok(serde_json::json!({})),
+        (None, true) => Err("open goes with page: \"settings\"".into()),
+        (Some("settings"), open) => Ok(serde_json::json!({ "page": "settings", "open": open })),
+        (Some(_), _) => Err("page is \"settings\" (its settings page), or left out".into()),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn plugin_status_asks_the_window_no_more_than_the_tool_does() {
+    assert_eq!(status_args(None, false), Ok(serde_json::json!({})));
+    assert_eq!(status_args(Some("settings"), false), Ok(serde_json::json!({ "page": "settings", "open": false })));
+    assert_eq!(status_args(Some("settings"), true), Ok(serde_json::json!({ "page": "settings", "open": true })));
+    assert!(status_args(None, true).is_err(), "open alone moves nothing");
+    assert!(status_args(Some("sidebar"), false).is_err());
 }
 
 #[derive(Deserialize)]
@@ -1957,6 +1982,7 @@ impl Plugins {
                         p.name.trim(),
                         p.description.as_deref().unwrap_or(""),
                         &p.permissions,
+                        p.settings_page,
                     )?;
                     // Its README, linking the guide (signed with the rest).
                     let (guide, _) = guides::ensure(&this.inner.data_dir);
@@ -2378,8 +2404,18 @@ impl Plugins {
                     id: String,
                     #[serde(default)]
                     snapshot: bool,
+                    /// `"settings"`: its settings page, as Settings shows it.
+                    #[serde(default)]
+                    page: Option<String>,
+                    /// Open Settings on that page to picture it (else the
+                    /// window is never moved).
+                    #[serde(default)]
+                    open: bool,
                 }
                 let p: StatusParams = parse_params(params)?;
+                // As the MCP tool checks it: a page is "settings" or none, and
+                // `open` (Settings opened in the person's window) goes with it.
+                let window = status_args(p.page.as_deref(), p.open).map_err(failed)?;
                 self.rescan().await;
                 let entry = self
                     .entry(&p.id)
@@ -2408,7 +2444,7 @@ impl Plugins {
                 match self
                     .inner
                     .tools
-                    .call(&entry.item.id, tool, serde_json::json!({}), None, STATUS_TIMEOUT)
+                    .call(&entry.item.id, tool, window, None, STATUS_TIMEOUT)
                     .await
                 {
                     Ok(window) => {

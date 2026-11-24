@@ -93,6 +93,11 @@ ZERON_ZGX_ENGINE_HOME=/tmp/zgx-home \
 (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so the agents' logins it reads
 and writes are that folder's, not this machine's. `ZERON_ZGX_ENGINE_BIN` picks
 another engine; `ZERON_ZGX_ENGINE_SPAWN=0` only uses one that's running.
+With no engine answering and no session kept, a launch says signed out
+after 20 seconds (`RESTORE_WAIT`, src/auth.rs) and opens setup's window
+(`app.onboard`, src/main.rs), which takes a `fixture=` window's place:
+`settings_stub.sign_in` signs in the scripts alone, so a capture pass on
+a fixture finishes inside those 20 seconds or stands in for the engine.
 `ZERON_ZGX_NO_BROWSER=1` opens no browser for a sign-in (a path instead
 writes the page there, for a test rig). See `src/engine/manager.rs`.
 `ZERON_ZGX_MOCK=1` offers the engine's mock agent in the model picker
@@ -351,6 +356,8 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 **Plugins layer on whatever template is in use.** One that aims at an element the template dropped (its id or class) says "Not shown in this template" on the Plugins page. That check is static: only literal selectors are seen. A placed node that needs what its place doesn't give draws nothing, and its row says why.
 
 **When a plugin fails** (at load, at build, or later), Zeron goes on without it, with the window's state kept (`src/plugins/recovery.rs`).
+
+**The plugin store** is Settings → Plugins → Browse (`ui/screens/plugins/browse.luau`), a plugin's page (`listing.luau`), and publishing yours from Yours (`publish.luau`, `keys.luau`). The engine is the store's one client; `src/plugins/catalog.rs` only carries its `Store*` calls, and `ui/screens/plugins/store.luau` names each one (`ui/store_stub.luau` answers them in `ui/plugins_store_fixture.luau`). A store install is `InstallPlugin { store }`, then the same consent window as any plugin. `zeron://open/plugin/<id>` opens that plugin's page and never installs (`src/links.rs`).
 
 **Examples and how to write one:** `plugins-dev/README.md`. A staging rig of three engines is in `plugins-dev/rig/`.
 

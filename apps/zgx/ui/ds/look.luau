@@ -7,6 +7,8 @@
 local material = require("@self/material")
 local locale = require("@self/locale")
 
+local preference = require("@self/preference")
+
 local M = {}
 
 export type Accent = { value: string, label: string, preset: boolean? }
@@ -37,7 +39,7 @@ M.ACCENTS = {
 	accent("pink", true),
 } :: { Accent }
 
-M.accent = ui.persist("accent", "default")
+M.accent = preference.kept(ui.persist("accent", "default"), "accent")
 
 function M.find(value: string): Accent
 	for _, a in M.ACCENTS do
@@ -71,7 +73,7 @@ end
 -- scaled with it, the conversation's too (`zeron.prose.*`). Code has its
 -- own (Settings → Appearance). Kept across launches, for the main window.
 M.TEXT_SIZES = { 12, 13, 14, 15, 16 }
-M.text_size = ui.persist("text_size", 13)
+M.text_size = preference.kept(ui.persist("text_size", 13), "text_size")
 
 -- The tokens text is sized by, each with its line height beside it.
 local SIZED = {
@@ -110,8 +112,8 @@ end
 -- by its name, or "" for the theme's own (Geist, Geist Mono). Code's sets
 -- code blocks, the editor, diffs, tool output and terminals. Kept across
 -- launches, for the main window.
-M.interface_font = ui.persist("interface_font", "")
-M.code_font = ui.persist("code_font", "")
+M.interface_font = preference.kept(ui.persist("interface_font", ""), "interface_font")
+M.code_font = preference.kept(ui.persist("code_font", ""), "code_font")
 
 -- The font tokens a window overrides for the families chosen (each a
 -- family's name, "" for the theme's own; the chosen ones by default).
@@ -149,7 +151,7 @@ end
 -- a find's matches, @file tokens in the composer, and the conversation's
 -- list markers, quote rail and inline code. Off, each is the neutral it
 -- was. On by default; kept across launches.
-M.accented = ui.persist("accent_throughout", true)
+M.accented = preference.kept(ui.persist("accent_throughout", true), "accent_throughout")
 
 -- What a window overrides while it's on (ds/tokens' `zeron.accented.*`,
 -- each following the accent worn); nothing while it's off. (Links and

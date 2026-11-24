@@ -78,6 +78,10 @@ pub struct Notice {
 /// Interface").
 const USE_DEFAULT: Action = Action { label: "Use default interface", command: super::USE_ZERON_TEMPLATE };
 
+/// Settings → Plugins → Yours, where the account's deploy tokens are.
+const DEPLOY_TOKENS: Action = Action { label: "Deploy tokens", command: super::OPEN_DEPLOY_TOKENS };
+const DEPLOY_TOKENS_ZH: Action = Action { label: "部署令牌", command: super::OPEN_DEPLOY_TOKENS };
+
 impl Notice {
     /// The template changed without you choosing it here: to `name`, or
     /// to the default (`to_default`); by a chat or otherwise. One in
@@ -113,9 +117,38 @@ impl Notice {
                 "Signing key revoked".to_owned(),
                 format!("{here} key was revoked on another device. Sign in again for a new one, then allow your plugins again."),
             ),
+            // (A store plugin's version Zeron took down: the engine says
+            // which and why, and that it can be turned back on.)
+            "plugin_blocked" => ("Plugin turned off".to_owned(), words.to_owned()),
             _ => ("Signing keys".to_owned(), words.to_owned()),
         };
         Notice { title, body, tone: Tone::Warning, action: None, stays: true }
+    }
+
+    /// A version of one of your plugins published somewhere other than
+    /// this device (`via`: "deploy_token", with the token's name, or
+    /// "device", another of yours), in the host's words; one it doesn't
+    /// know, in the engine's (`words`). Its name and the token's are words
+    /// someone chose: plain, one line, short. One by a deploy token has a
+    /// button to the tokens, to revoke it there.
+    pub fn published(name: &str, version: &str, via: &str, token_name: Option<&str>, words: &str) -> Self {
+        let plain = |text: &str, most: usize| -> String {
+            text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
+        };
+        let (name, version) = (plain(name, 64), plain(version, 32));
+        let token = token_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
+        let chinese = CHINESE.with(std::cell::Cell::get);
+        let title = if chinese { format!("{name} {version} 已发布") } else { format!("{name} {version} was published") };
+        let by_token = via == "deploy_token" && token.is_some();
+        let body = match (via, token) {
+            ("deploy_token", Some(token)) if chinese => format!("使用你的部署令牌“{token}”。如果不是你，请吊销它。"),
+            ("deploy_token", Some(token)) => format!("With your deploy token \u{201c}{token}\u{201d}. If it wasn't you, revoke the token."),
+            ("device", _) if chinese => "来自你的另一台设备。".to_owned(),
+            ("device", _) => "From another of your devices.".to_owned(),
+            _ => plain(words, 300),
+        };
+        let action = by_token.then_some(if chinese { DEPLOY_TOKENS_ZH } else { DEPLOY_TOKENS });
+        Notice { title, body, tone: Tone::Neutral, action, stays: true }
     }
 
     /// Zeron opened with the default interface (safe mode): ⌥ (Alt) held, or
@@ -693,6 +726,33 @@ mod tests {
         preview::Preview { id: "sleek".into(), name: "Sleek".into() }
     }
 
+    /// A version published somewhere other than here says where it came
+    /// from, in the host's words; the names in it are plain, one line,
+    /// short; a `via` the host doesn't know says the engine's sentence.
+    #[test]
+    fn a_publish_from_elsewhere_says_where_it_came_from() {
+        CHINESE.with(|c| c.set(false));
+        let token = Notice::published("Focus timer", "1.3.0", "deploy_token", Some("ci"), "");
+        assert_eq!(token.title, "Focus timer 1.3.0 was published");
+        assert_eq!(token.body, "With your deploy token \u{201c}ci\u{201d}. If it wasn't you, revoke the token.");
+        assert_eq!(token.action, Some(DEPLOY_TOKENS));
+        assert!(token.stays);
+        let device = Notice::published("Focus timer", "1.3.0", "device", None, "");
+        assert_eq!(device.body, "From another of your devices.");
+        assert_eq!(device.action, None);
+        let odd = Notice::published("Focus\ntimer\u{7}", "1.3.0", "somewhere", None, "Published from somewhere.");
+        assert_eq!(odd.title, "Focus timer 1.3.0 was published");
+        assert_eq!(odd.body, "Published from somewhere.");
+        assert_eq!(odd.action, None);
+        let long = Notice::published(&"x".repeat(500), "1.3.0", "device", None, "");
+        assert!(long.title.chars().count() <= 64 + " 1.3.0 was published".len());
+        CHINESE.with(|c| c.set(true));
+        assert_eq!(Notice::published("Focus timer", "1.3.0", "device", None, "").title, "Focus timer 1.3.0 已发布");
+        let zh = Notice::published("Focus timer", "1.3.0", "deploy_token", Some("ci"), "");
+        assert_eq!((zh.body.as_str(), zh.action), ("使用你的部署令牌“ci”。如果不是你，请吊销它。", Some(DEPLOY_TOKENS_ZH)));
+        CHINESE.with(|c| c.set(false));
+    }
+
     /// The scripts' root fills the window whatever the host shows: its
     /// toasts are a layer over it, taking no room.
     #[test]
@@ -843,6 +903,10 @@ mod tests {
         assert!(app.find("role:alert \"Signing key revoked\"").is_some(), "a warning is an alert");
         assert_eq!(Notice::key("key_added", None, "").body, "Added to your account on another device. If it wasn't you, revoke it in Settings → Account.");
         assert_eq!(Notice::key("other", None, "The engine's words.").body, "The engine's words.");
+        // A store plugin taken down: its own title, the engine's words.
+        let blocked = Notice::key("plugin_blocked", None, "Focus 1.2.0 was taken down from the store and turned off.");
+        assert_eq!(blocked.title, "Plugin turned off");
+        assert_eq!(blocked.body, "Focus 1.2.0 was taken down from the store and turned off.");
 
         // Three at most, the newest: the switch has gone.
         notice(Notice::safe_at_launch(preview::SafeReason::Crashed));

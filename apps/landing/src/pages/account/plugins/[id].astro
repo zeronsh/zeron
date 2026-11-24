@@ -1,0 +1,167 @@
+---
+// One of your plugins: a plugin page's head (its tile, name, its id and where
+// it stands, See it in the store), then every version you've published as
+// your own pages' table: a row each, where it stands and whether Zeron
+// verified it (amendment 45: each is listed at once; the pills say what that
+// means), when it was published ("via token" when a deploy token sent it),
+// and the one thing you can do with it (stop new installs, or allow them
+// again). A second line only for what the pills can't say: why a newer
+// version stopped it, a reviewer's note, why it was taken down.
+// Its deploy tokens are your account's (contract a315eef5a): Deploy tokens.
+// Yours only: anyone else's id is the 404 page. Signed out, it says so and
+// offers sign-in.
+import AccountHead from "../../../components/look/AccountHead.astro";
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
+import Flash from "../../../components/look/Flash.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Question from "../../../components/look/Question.astro";
+import Seal from "../../../components/look/Seal.astro";
+import SignInPlease from "../../../components/look/SignInPlease.astro";
+import Tile from "../../../components/look/Tile.astro";
+import Words from "../../../components/look/Words.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import { AUTHOR_ACTIONS, type AuthorAction } from "../../../lib/store/actions.ts";
+import { reasonLabel } from "../../../lib/store/admin.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { day, unbidi } from "../../../lib/store/format.ts";
+import { hueClass } from "../../../lib/store/hue.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { everListed, listingState, PILL_TONE, versionState } from "../../../lib/store/states.ts";
+import type { VersionInfo } from "../../../lib/store/types.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+import { statusWords, store } from "../../../lib/store/words.ts";
+import { lsb } from "../../../lib/store/bearing.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const edge = Astro.locals.edge;
+// (Signed in, signed out, or not known: an edge that doesn't answer is never "signed out".)
+const who = await edge.who();
+const session = who.state === "in" ? who.session : null;
+const mine = session ? await edge.myPlugins() : null;
+const plugin = mine?.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine?.ok && !plugin) return new Response(null, { status: 404 });
+privatePage(Astro);
+if (who.state === "down") Astro.response.status = 503;
+const flash = takeFlash(Astro.cookies);
+const here = `/account/plugins/${id}`;
+const name = unbidi(plugin?.name ?? id);
+const now = Date.now();
+
+/** The one thing that can be done with a version now. */
+// (A superseded version is the store's to stop: its author can't allow installs again; verifying it does.)
+const actionOf = (v: VersionInfo): AuthorAction | null => (v.status === "listed" ? "yank" : v.status === "yanked" && v.yanked_by !== "superseded" ? "unyank" : null);
+const dialogId = (action: string, version: string) => `${action}-${version.replace(/[^\w-]/g, "_")}`;
+/** A state's tone, as the look's pills say it. */
+const TONE = PILL_TONE;
+/** Whether Zeron verified it, for a version people can have: verified, not verified (a reviewer read it), or not yet. */
+function verifiedPill(v: VersionInfo): { tone: string; label: string; seal?: boolean } {
+  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), seal: true };
+  if (v.review?.decision === "declined") return { tone: "bad", label: store("plugins.store.not_verified") };
+  return { tone: "no", label: store("plugins.store.review.waiting") };
+}
+/** Where it stands, when that isn't simply listed: no new installs, taken down, removed. */
+function statusPill(v: VersionInfo): { tone: string; label: string } | null {
+  if (v.status === "listed") return null;
+  return { tone: v.status === "yanked" ? "quiet" : "bad", label: statusWords(v.status) };
+}
+
+/** Nothing of it can be installed: every version was taken down or removed. */
+const idle = plugin && plugin.versions.length > 0 && !plugin.versions.some((v) => v.status === "listed" || v.status === "yanked");
+const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions)) : null;
+---
+
+<Store title={`${name} · Your plugins · Zeron`} description="One of your plugins." noindex current="publish" session={session} class={hueClass(id)}>
+  <div class="wrap acct">
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
+    <Flash flash={flash} />
+    {
+      who.state === "down" ? (
+        <Failed href={here} level={1} />
+      ) : !session ? (
+        <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} tokens={null}>
+          <SignInPlease what="the plugins you publish" />
+        </AccountHead>
+      ) : !plugin ? (
+        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} level={1} />
+      ) : (
+        <>
+          <header class="ohead">
+            <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="xl" />
+            <div class="txt">
+              <h1 class={lsb(name)}><Words text={name} /></h1>
+              <p class="by">
+                <span class="mono">{plugin.id}</span>
+                {listing && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
+              </p>
+            </div>
+            {plugin.listing === "listed" && <div class="head-act"><a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a></div>}
+          </header>
+
+          {idle && <p class="flash info">No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</p>}
+
+          <section class="mvers" aria-labelledby="versions-h">
+            <h2 id="versions-h">Versions{plugin.versions.length > 0 && <span class="num">{plugin.versions.length}</span>}</h2>
+            {plugin.versions.length === 0 ? (
+              <Empty icon="file" title="Nothing published yet" line="Versions you publish show here, each saying whether Zeron verified it." />
+            ) : (
+              <div class="tbl vers">
+                <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>
+                <ul aria-label={store("plugins.store.your_versions")}>
+                  {plugin.versions.map((v) => {
+                    const verified = verifiedPill(v);
+                    const status = statusPill(v);
+                    const action = actionOf(v);
+                    const ask = action ? AUTHOR_ACTIONS[action].ask(name, v.version) : null;
+                    const live = v.status === "listed" || v.status === "yanked";
+                    // (What only words can say: why a newer one stopped it, the reviewer's note, why it was taken down, that
+                    // it was turned off.)
+                    const notes = [
+                      v.yanked_by === "superseded" && versionState(v).about,
+                      v.review?.message && `The reviewer's note: “${v.review.message}”${[v.review.reason ? ` · ${reasonLabel(v.review.reason)}` : "", v.review.decided_at ? ` · ${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "read"} ${day(v.review.decided_at, now)}` : ""].join("")}`,
+                      v.removal?.reason && `“${v.removal.reason}” · ${v.status === "taken_down" ? "Taken down" : "Removed"} ${day(v.removal.at, now)}${v.status === "taken_down" ? ", and turned off on the devices that had it." : ""}`,
+                      v.blocked && v.status !== "taken_down" && "It was turned off on the devices that had it.",
+                    ].filter((x): x is string => Boolean(x));
+                    return (
+                      <li class:list={["trow", { off: !live, two: notes.length > 0 }]}>
+                        <span class="c-ver">
+                          <b class="mono">{v.version}</b>
+                          {/* (Whether Zeron verified it beside the version, always first; where it stands after it.) */}
+                          {live && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}
+                          {status && <span class:list={["state", status.tone]} data-kind="status">{status.label}</span>}
+                        </span>
+                        <span class="c-pub">
+                          <span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time>
+                          {v.via === "deploy_token" && <span class="via" title={v.deploy_token?.name ? `Sent by the deploy token “${v.deploy_token.name}”` : "Sent by a deploy token"}><Icon name="key" />via token<span class="sr-only">: {v.deploy_token?.name ?? "a deploy token"}</span></span>}
+                        </span>
+                        <span class="c-act">
+                          {action && ask && (
+                            <a class="btn ghost sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
+                              {ask.confirm}<span class="sr-only"> {v.version}</span>
+                            </a>
+                          )}
+                        </span>
+                        {notes.length > 0 && <span class="c-note">{notes.join(" ")}</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            <p class="mkeys">Publishing from CI? Your account's <a href="/account/tokens">deploy tokens</a> can send new versions of it.</p>
+          </section>
+
+          {plugin.versions.map((v) => {
+            const action = actionOf(v);
+            return action ? <Question id={dialogId(action, v.version)} ask={AUTHOR_ACTIONS[action].ask(name, v.version)} action={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} csrf={session.csrf} /> : null;
+          })}
+        </>
+      )
+    }
+  </div>
+</Store>

@@ -229,6 +229,8 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 | `zeron.page { id, title, icon?, build = function(page) … end }` | a page of yours, in the sidebar (`title` may be `zeron.t("…")`, following the language) | `pages.add` |
 | `zeron.menu { kind = "session" \| "file" \| "<plugin>.<menu>", id, label, run }` | an item in a row's menu (`run` gets `{ id }` or `{ path, session }`), or in a menu another plugin offers (its context) | `ui.add` |
 | `zeron.menu_entries(name, context)` | the items others added to a menu of yours (`<id>.<name>`), as ContextMenu entries | |
+| `zeron.settings_page { build = function(page) … end, keywords? }` | a settings page you draw, after your declared rows (see [Settings pages](#settings-pages)) | (always) |
+| `zeron.setting(id):set(value)` | one of your declared settings, set from your settings page: a promise of the value kept, or why not | (always) |
 | `zeron.store(key, default)` | kept between runs (1 MB): `:get()`, `:peek()`, `:set(v)` | (always) |
 | `zeron.every(seconds, fn)` | now and then, 30 s at least; returns a stop function | (always) |
 | `zeron.window(peek?)` | `{ shown, active }`: whether the window shows (not hidden, minimised or covered) and is in front, read as states (an effect reading them runs again). Leave work no one would see for when it shows | (always) |
@@ -561,7 +563,7 @@ end)
 
 ## Settings
 
-Declare settings in the manifest; Zeron draws their page. While your plugin is on, it has a page of its own in Settings, under "Plugins", titled with its name and built from Zeron's own rows, so it looks native in every theme and template. You never draw it, and no plugin can draw into it. Settings search finds each one.
+Declare settings in the manifest; Zeron draws their rows. While your plugin is on, it has a page of its own in Settings, under "Plugins", titled with its name and built from Zeron's rows, so it looks native in every theme and template. Settings search finds each one. When rows aren't enough (a list the person edits, rows that come with a choice, an action and its result), you can draw more of the page yourself, after them: see [Settings pages](#settings-pages).
 
 ```json
 "settings": [
@@ -603,9 +605,209 @@ zeron.set_status("shortcut", nil)   -- cleared
 
 **Permission rows** (`{ "kind": "permission", "permission": "screen-recording" | "accessibility" }`) are for Zeron's own plugins only; anyone else's is left out. Zeron supplies the row's words, whether it's granted, the button to grant it and Check again.
 
-- Only the person sets them, on that page; your plugin reads them.
+- The person sets them, on that page; your plugin reads them. Your own settings page can set them too (`zeron.setting(id):set(value)`, `page.bind(id)`), checked as Zeron's rows check them; a `folder` is always the person's to choose.
 - A setting never set reads its `default`, so changing a default in an update reaches everyone who left it alone. A value that no longer fits (an option you dropped) reads the default again.
 - What the person sets is kept for your plugin alone, across restarts, and removed with the plugin.
+
+## Settings pages
+
+When declared rows aren't enough (a list the person edits, one thing chosen from it and set up under it, rows that come with a choice, an action and what came of it), draw a page of your own. It goes on your page in Settings, after your declared rows, under the header Zeron draws (your icon, your name, your `settings_description`, and Unverified when Zeron can't say who made it). It needs no permission, and it draws only while its page is open in Settings.
+
+```lua
+local Settings = require("@ds/settings")
+local Button = require("@ds/button")
+
+local accounts = zeron.store("accounts", {})   -- { { id, name, email } }, kept for your plugin
+
+zeron.settings_page {
+	keywords = { "accounts", "sync" },   -- Settings search finds the page by these and its name
+	build = function(page)
+		local list = ui.computed(function() return accounts:get() end)
+		return {                         -- a list of sections, spaced as Zeron's are
+			Settings.Section {
+				title = "Accounts",
+				description = "The accounts it reads from.",
+				trail = Button { "Add account", tone = "secondary", size = "sm", on_click = add_account },
+				Settings.Each(list, function(a)
+					return Settings.Row { label = a.name, description = a.email }
+				end, { key = function(a) return a.id end }),
+			},
+		}
+	end,
+}
+```
+
+- **It's yours alone, and as free as your pages.** Zeron draws a place for it that only your plugin fills, as it does for your pages and tabs, and what you build there runs in your plugin's sandbox. It can do what they can: a dialog over the window, the lightbox, popovers, menus, tooltips. No other plugin reaches into it, and Zeron's header and rows above it are out of every plugin's reach.
+- **One value with the row.** Keep what the person sets in your declared settings where you can: Zeron keeps it, checks it and tells you (`zeron.on_setting`), and its row and your control move together. Zeron draws a row for each declared setting already, so don't draw it again: a control of yours is for what's tied to one (a notice that turns it back on, a choice inside a list's detail). `page.bind(id)` is a setting as a state a control takes (`page.bind(id, { wait = 600 })` for a text field: kept once the typing stops). `zeron.setting(id):set(value)` sets one (a promise of the value kept, or why not). Each is checked as Zeron's row checks it: a choice is one of its options, a number is within its `min` and `max` (past them it's refused, never kept as the nearest), text is 2,000 characters at most. One that doesn't fit is refused, and so is a page setting more than 20 a second; a refusal is said in your plugin's log, and the promise fails with why. A `folder` is the person's to choose: `page.choose_folder(id)` opens Zeron's dialog. Keep the rest (a list, records) in `zeron.store` or `zeron.db`. A plugin sets only its own.
+- **It takes the page's width and grows down.** Settings scrolls it. Don't give it a height or a scroll of its own.
+- **When it fails.** A build that errors draws nothing, and Zeron says "<Name>'s settings couldn't be shown" with the error in its place; your declared rows stay, and your row in Settings → Plugins and `plugin_status` say it too. A build that runs past its time budget is stopped, and your plugin is turned off until it changes. A plugin turned off because it failed keeps its settings page, its rows and why it stopped, if it drew a page of its own. Fix it and save.
+- **Search** finds the page by your plugin's name and its `keywords` (text, or `zeron.t(…)`), and opens it. These are Settings search's alone, apart from the manifest's `keywords`, which only the store reads.
+- **Starting one:** `create_plugin { id, name, settings_page = true }` makes a plugin with a page already built this way (`settings_page.luau`, its words in `locales/en.json`): change it from there. `plugins-dev/settings-page` (Snippets) is a whole one to copy: a list you edit, the one chosen open under it, rows that come with a choice, a field's error, an action and its result, a declared setting set from the page.
+- **Checking it:** `plugin_status { id, page = "settings", snapshot = true, open = true }` pictures your page as Settings shows it, Zeron's rows over yours, while the window shows it (`open = true` opens Settings on it first; otherwise the window is never moved), and lists as `hints` what your code uses off the design system. Set the picture beside one of Zeron's pages (Settings → Notifications) and match it.
+
+### Match Zeron's pages
+
+Your page sits under Zeron's rows, so any difference shows. Zeron's settings pages are built from four parts of `@ds/settings` in Zeron's tokens. Build yours from them too, and it matches in every theme and template.
+
+| part | what it is | in Zeron's theme |
+|---|---|---|
+| the page | Zeron's column, which your sections fill | 640 wide at most (`zeron.settings.measure`), centred; sections 32 apart (`$space.6`) |
+| `Settings.Section { title, description?, trail?, … }` | related settings under a small title | the title in the label style, `$text.tertiary`; its `description` under it, a hint's quiet line; 8 from them to the card (`$space.2`); `trail` at the title's end (an action). `title` and `description` may be functions, following what they read (an item's name as it's renamed) |
+| `Settings.Group { … }` | a card of rows | corner 12 (`$radius.xl`), a 1-point edge (`$zeron.settings.edge`), `$zeron.settings.card`; a hairline between rows, edge to edge (`$zeron.settings.rule`) |
+| `Settings.Row { label, description?, control?, … }` | one setting: its name, a line under it, its control at its end | its content's height: 42 for a name alone, 60 with a line under it; 16 in across (`$space.4`) and 12 down (`$space.3`); the name 13 on 18 (`$font.size.md`), medium, `$text.primary`; the line 12 on 16 (`$font.size.sm`), `$text.tertiary`; the control 16 from the words, 240 wide at most (`zeron.settings.control`); the words keep 180 before the control goes under them. `stacked` puts the control under the words (a text area); `on_click` makes the row lead somewhere (a chevron at its end); `badge` sits after the name; `truncate` keeps each line to one |
+| `Settings.Each(list, row, { key })` | a card whose rows come and go | each row its item's (by `key`): one added or changed leaves the others as they are; with none, no card |
+
+A section's title and the words of any note you set over or under a card start 17 in from the card's outer edge, on the rows' words (`px = Settings.inset()`), so the words line up down one edge and the cards hang past it.
+
+1. **Zeron's parts first.** The page's shape is `@ds/settings`. Its controls are Zeron's: `@ds/switch`; `@ds/segmented` for two or three choices; `@ds/select` for more (168 wide, as Zeron's); `@ds/text_field` (`size = "sm"`, 220 wide); a number as Zeron's number rows draw one, a `TextField` 96 wide (`inputmode = "decimal"`) with its unit after it in a row (`ui.row { gap = "$space.2", items = "center", TextField { … }, ui.text { "minutes", text_size = "$font.size.sm", color = "$text.secondary" } }`); `@ds/text_area` in a `stacked` row; `@ds/button` (`size = "sm"`: `secondary` for an action on a row, `ghost` for a quiet one and for every action at a section title's end, as Zeron's are, `danger` to confirm what can't be undone); `@ds/icon_button` (`tone = "quiet"`); `@ds/badge`; `@ds/banner`'s `Callout`; `@ds/empty_state`. Draw your own only for what none of them is.
+2. **Tokens only.** Colours, spacing, corners and type are `$…` tokens, never numbers or hex: `$text.secondary`, `$space.3`, `$radius.lg`, `$font.size.sm`. Inside something rounded, a corner is the outer one less the inset. `plugin_status { page = "settings" }` lists what isn't, as hints.
+3. **Say it as Zeron says it.** A row's name says what the setting is in a few words, in sentence case ("Show the timer", "Sound"); the line under it says what it does, in one plain sentence ending in a period. No "Enable", no exclamation marks, no "Zeron's own". A button says what it does ("New snippet", "Try it"). A callout's title has no full stop; its body is sentences. A field's error is short, as Zeron's are ("At least 5", "At most 120", "Give it a name."). Give every control without a visible label its `name` (`label` on a switch), what a screen reader says.
+4. **Rows that hang off another** come and go with it, each bringing its hairline, in one column with the row they hang off: `ui.column { w_full = true, Settings.Row { … }, ui.show(on, ui.column { w_full = true, Settings.Rule(), Settings.Row { … } }) }`. (A `Settings.Group` draws a hairline between each of its own children, so a `ui.show` given straight to it would draw two, and one more with nothing under it while it's hidden.) Or they stay, dimmed and out of reach (`opacity = "$zeron.disabled"`, `disabled = true`), while what they hang off is off.
+5. **Every state.** Empty: an `EmptyState { size = "sm" }` in the card, with a way to add one (`Settings.Group { ui.column { w_full = true, py = "$space.6", px = "$space.4", EmptyState { … } } }`). Loading: `@ds/skeleton`'s `Row`s in the card, so nothing jumps when it comes. Something that failed: a `Callout { tone = "warning" }` in the section over its card, with a way to try again. A field that's wrong says why under it (`error = …`), and nothing is kept until it's right; but a field nobody has typed in or left says nothing yet (a new item's empty name isn't an error until the person has been there). A count under a field reads out of its real limit (``count = { of = …, max = 2000, say = function(n) return `{n}/2000`, n > 1800 end }``: `soft` alone would show the soft point as the limit). Keep what's typed as Zeron's text rows do: at once on `on_commit` (Enter, or leaving the field), and a moment (600 ms) after the typing stops. A notice about the section (a declared setting that hides what the section is for, say) is a `Callout` in that section, over its card: `tone = "info"` for something to know, `"warning"` for something that failed. A callout is a card, so it stands at the cards' edge, not the words' 17.
+6. **An action and what came of it** stay on its row: the button at its end; the result in the line under the name, or a row under it while there's one to show. What can't be undone asks first, in place: deleting the item open under a list is a `ghost` "Delete" at its section title's end, which becomes a `ghost` Cancel and a `danger` "Delete <it>" ("Delete snippet"). Or ask in a dialog (`@ds/dialog`'s `Dialog`, `tone = "danger"`): a settings page can open one over the window, as any page of yours can.
+7. **Lists.** A list you edit is a `Settings.Each` card, a row per item keyed by its id, its add action at the section title's end. Choosing one opens it in a section of its own under the list (`ui.presence(chosen, build)`: built again only as another is chosen, its fields starting from that item); mark the open row (`badge = Badge { "Editing", tone = "neutral" }`).
+8. **What belongs here** is how your plugin behaves: what it shows and where, the accounts it uses, its rules, the lists it keeps. What the person does with your plugin (a board, a viewer, a log) belongs on a page (`zeron.page`) or a tab (`zeron.tab`); your settings page can lead there.
+
+### The rest you'll need
+
+- **The pieces of zgx a page is made of**, as the model page below uses them: `ui.component(function(props) … end)` is a component (`ui.use_state(v)` a state of its own, only inside one or a build); `ui.state(key, v)` a state of the module's, kept as the page closes and opens; `ui.computed(fn)` a state following what `fn` reads; `ui.effect(fn)` runs again as what it reads changes (write states here or in handlers, never while building); `ui.show(cond, node, else?)` shows `node` while `cond()` (hidden, it takes no room and no gap; an empty node still takes the page's 32); `ui.presence(key, build)` builds again as `key()` changes. Read states with `:get()` in functions that follow them, `:peek()` once.
+- **Declared values** come to your code with their defaults filled in, before your code runs: `zeron.setting("sound"):get()` is `true` for a switch that defaults on and was never touched.
+- **Declared rows with no `section`** share one card with no title, in the manifest's order.
+- **Icons** are named as in `ui/ds/icon_svgs.luau` (`"list"`, `"clock-circle"`, `"document-add"`, `"trash-bin-minimalistic"`).
+- **Your words** can be plain strings, or in `locales/en.json` with `zeron.t`, as `create_plugin { settings_page = true }` starts them; split your plugin into modules as you like (`require("./settings_page")`).
+
+### A model page
+
+A plugin that watches some feeds: a list of them you add to and remove from, the one chosen set up under it, a field that says when it's wrong, rows that come with a switch, and a declared setting (`"settings": [{ "id": "every", "kind": "number", "label": "Check every", "min": 5, "max": 120, "unit": "minutes", "default": 15 }]`) drawn by Zeron above it all.
+
+```lua
+local zeron = require("./zeron")("feeds")
+local Settings = require("@ds/settings")
+local Button = require("@ds/button")
+local TextField = require("@ds/text_field")
+local Switch = require("@ds/switch")
+local EmptyState = require("@ds/empty_state")
+
+local feeds = zeron.store("feeds", {})            -- { { id, name, url, quiet } }
+local chosen = ui.state("feeds_chosen", "")
+
+local function save(list) feeds:set(list) end
+local function find(id)
+	for _, f in feeds:get() do
+		if f.id == id then return f end
+	end
+	return nil
+end
+local function update(id, fields)
+	local list = table.clone(feeds:peek())
+	for i, f in list do
+		if f.id == id then
+			local next = table.clone(f)
+			for k, v in fields do next[k] = v end
+			list[i] = next
+		end
+	end
+	save(list)
+end
+local function add()
+	local list = table.clone(feeds:peek())
+	local id = `feed-{#list + 1}-{math.floor(ui.now())}`
+	table.insert(list, { id = id, name = "New feed", url = "", quiet = false })
+	save(list)
+	chosen:set(id)
+end
+local function url_problem(url)
+	if url == "" then return "Paste the feed's address." end
+	if not string.match(url, "^https://") then return "It starts with https://." end
+	return nil
+end
+
+local function feed_row(item, _i, now)
+	return Settings.Row {
+		truncate = true,
+		label = function() return now:get().name end,
+		description = function() return if now:get().url == "" then "No address yet." else now:get().url end,
+		on_click = function() chosen:set(item.id) end,
+	}
+end
+
+-- The feed chosen, under the list: its own fields, built again only as another is chosen.
+local Feed = ui.component(function(props)
+	local f = find(props.id)
+	local url = ui.use_state(f.url)
+	local quiet = ui.use_state(f.quiet)
+	-- (Its address says what's wrong only once it's been typed in or left.)
+	local said = ui.use_state(false)
+	ui.effect(function()
+		local held = find(props.id)
+		if held and quiet:get() ~= held.quiet then update(props.id, { quiet = quiet:get() }) end
+	end)
+	return Settings.Section {
+		title = function() return (find(props.id) or f).name end,
+		trail = Button { "Remove", tone = "ghost", size = "sm", on_click = function()
+			local list = {}
+			for _, other in feeds:peek() do
+				if other.id ~= props.id then table.insert(list, other) end
+			end
+			save(list)
+		end },
+		Settings.Group {
+			Settings.Row {
+				label = "Address",
+				description = "The feed it reads.",
+				control = TextField {
+					value = url, name = "Address", size = "sm", w = 220,
+					error = function() return if said:get() then url_problem(url:get()) else nil end,
+					on_commit = function(text)
+						said:set(true)
+						if url_problem(text) == nil then update(props.id, { url = text }) end
+					end,
+				},
+			},
+			-- (With the row that hangs off it, in one column: one hairline each.)
+			ui.column { w_full = true,
+				Settings.Row {
+					label = "Quiet hours",
+					description = "Hold what arrives overnight until the morning.",
+					control = Switch { value = quiet, label = "Quiet hours" },
+				},
+				ui.show(function() return quiet:get() end, ui.column { w_full = true,
+					Settings.Rule(),
+					Settings.Row { label = "Overnight", description = "From 10 pm to 7 am, on this device's clock." },
+				}),
+			},
+		},
+	}
+end)
+
+zeron.settings_page {
+	keywords = { "feeds", "rss" },
+	build = function(page)
+		local list = ui.computed(function() return feeds:get() end)
+		return {
+			Settings.Section {
+				title = "Feeds",
+				description = "Choose one to set it up.",
+				trail = Button { "Add feed", tone = "ghost", size = "sm", on_click = add },
+				ui.show(function() return #list:get() > 0 end,
+					Settings.Each(list, feed_row, { key = function(f) return f.id end }),
+					Settings.Group { ui.column { w_full = true, py = "$space.6", px = "$space.4",
+						EmptyState { size = "sm", icon = "list", title = "No feeds yet",
+							body = "Add one, and what it says shows in your chats.",
+							action = { label = "Add your first feed", on_click = add } },
+					} }),
+			},
+			ui.presence(function()
+				local id = chosen:get()
+				return if find(id) then id else ""
+			end, function(id)
+				if id == "" then return ui.div {} end
+				return ui.column { id = "feed-editor", w_full = true, Feed { id = id } }
+			end, { w_full = true }),
+		}
+	end,
+}
+```
 
 ## Translations
 
@@ -644,7 +846,8 @@ zeron.toast(zeron.s("timer.done"))
    - its status (on, off, pending review, tampered, broken, and why) and what it was allowed;
    - each place it made: its selector, how many elements it matched and their boxes;
    - what its Settings row says (a need its place doesn't give, places this template lacks, an error);
-   - with `snapshot`, a PNG of the window around its nodes. Read the file at `snapshot`.
+   - with `snapshot`, a PNG of the window around its nodes. Read the file at `snapshot`;
+   - with `page = "settings"`, its settings page instead: the PNG is the page as Settings shows it (Zeron's header and rows, then what you draw), and `hints` lists what your code uses off Zeron's design system. While you build a settings page, pass `open = true` too: Settings opens on the page first (without it, the window is never moved, and the answer says how to open it). Set the picture beside one of Zeron's pages and match it.
 4. **Fix and save**, then ask again. Matched 0? Check the selector against `describe_elements`. A need? Place it inside something that provides it.
 
 `list_plugins` lists them all. Selectors that aren't stable may move; templates may rename elements. `plugin_status` and Settings show "Not shown in this template" when yours aren't there.
@@ -930,7 +1133,7 @@ end)
 - **Use them before drawing your own.** Text (`@ds/text`), buttons and icon buttons, fields, selects, tabs, badges, callouts, empty states, settings cards and rows, markdown, comments and threads (`@ds/comment`, `@ds/inline_block`), and the git pieces (`@ds/git`, `@ds/git_changes`). They hold the theme's spacing, corners, focus rings and motion, which is what makes a plugin look like part of Zeron rather than beside it. `ui/ds/*.luau` is their source, each with its usage at the top, and the gallery (`zeron-zgx gallery`) shows each one.
 - **In your plugin's own VM.** The modules load in your sandbox, with state of their own; nothing is shared with Zeron's copy or another plugin's. They lend no authority: what they do is limited by your permissions, as your own code is. Set a markdown link's destination with `require("@ds/links").opener = function(url) zeron.open_url(url) return true end` (`links.open`).
 - **Require a module, not `@ds` itself.** `@ds` loads every component Zeron has; `@ds/button` loads one.
-- **A tab or a page fills its room.** What `zeron.tab` and `zeron.page` build is given the room the panel or page has: `h_full` on it, then scroll inside (`ui.scroll`) or keep to the height and scroll in parts.
+- **A tab or a page fills its room.** What `zeron.tab` and `zeron.page` build is given the room the panel or page has: `h_full` on it, then scroll inside (`ui.scroll`) or keep to the height and scroll in parts. A settings page (`zeron.settings_page`) is the other way round: it takes the page's width, grows down with what it draws, and Settings scrolls it.
 
 - **Faces take a picture from anywhere you can reach.** A person (`{ id, name, src }`) shows `src` over their gradient, which shows until it arrives or if it never does; `src` may be a remote address with `network`.
 - **The lightbox works in a plugin.** Put one `require("@ds/lightbox").Host()` in what you build (a tab's, a page's); a markdown picture then opens whole over the window on a click, as a chat's does. (Zeron tells your plugin the window's size for it, as `ui.shared("zeron.window")`, since `ui.window` isn't a plugin's.)

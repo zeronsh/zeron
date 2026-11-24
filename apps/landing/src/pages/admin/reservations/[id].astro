@@ -1,0 +1,39 @@
+---
+// Free a reserved id. A post does it; a visit asks first.
+import AskCard from "../../../components/look/AskCard.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import "../../../styles/look/staff.css";
+import { freeAsk } from "../../../lib/store/admin.ts";
+import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+const back = "/admin/reservations";
+const ask = freeAsk(id);
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.releaseReservation(id, session.csrf);
+  return done(Astro, flashFor(result, ask.flash), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
+  <div class="wrap rpt">
+    <nav class="crumbs" aria-label="Where this is"><a href={back}>Reserved ids</a><Icon name="chev" /><span aria-current="page">{id}</span></nav>
+    <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+  </div>
+</Store>

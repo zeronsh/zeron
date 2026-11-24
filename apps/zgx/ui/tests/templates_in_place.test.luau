@@ -171,13 +171,23 @@ test("someone else's template says who signed it, and isn't yours", function()
 	app:frames(20)
 	local tree = app:tree()
 	expect(tree).to_contain("by @ada")
-	-- One Zeron can't vouch for: where it came from, and Unverified by its
+	-- One Zeron can't vouch for: where it came from, and Unknown author by its
 	-- version; never on a verified author's, yours or Zeron's own.
 	expect(tree).to_contain("From github.com/eve/mystery")
-	expect(app:has('#template-mystery >> "Unverified"')).to_be(true)
+	expect(app:has('#template-mystery >> "Unknown author"')).to_be(true)
 	for _, id in { "ledger", "mine-again", "zeron", "airy" } do
-		expect(`{id} {tostring(app:has(`#template-{id} >> "Unverified"`))}`).to_be(`{id} false`)
+		expect(`{id} {tostring(app:has(`#template-{id} >> "Unknown author"`))}`).to_be(`{id} false`)
 	end
+	-- From nowhere named: the badge says it, once; no byline saying it
+	-- again ("by an unknown author").
+	app:command("imported_stranger")
+	app:frames(20)
+	local stranger = app:tree("#template-stranger")
+	local _, n = string.gsub(stranger, "Unknown author", "")
+	expect(n).to_be(1)
+	expect(stranger).never.to_contain("unknown author")
+	-- (Mystery, from a named place, keeps its byline beside the badge.)
+	expect(app:tree("#template-mystery")).to_contain("From github.com/eve/mystery")
 	expect(row(app, "ledger") ~= nil).to_be(true)
 	-- One you signed yourself, brought from another device, is yours.
 	app:click('role:tab "Yours"')

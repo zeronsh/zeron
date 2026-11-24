@@ -39,6 +39,9 @@ local M = {}
 -- The least a row's words keep before its control drops under them, so a
 -- narrow window never squeezes them to a letter a line.
 local MIN_TEXT = 180
+-- (The same least, for a screen of its own laying its words beside a
+-- control: a store plugin's head.)
+M.MIN_TEXT = MIN_TEXT
 -- The chevron at the end of a row that leads somewhere.
 local CHEVRON = 14
 -- Where the search glyph's ink starts inside its box at a small field's
@@ -69,6 +72,10 @@ export type PageProps = {
 	-- is about). Short of room, it goes under the title either way.
 	trail: Node?,
 	trail_top: boolean?,
+	-- Its header (the title, the line under it, what's at its end) out of
+	-- plugins' reach (`hook = false`), what's under it left as it's given
+	-- (a page some of which a plugin draws: Settings, a plugin's own).
+	private_head: boolean?,
 	-- Something that stands beside the page's groups (a profile's card, a
 	-- preview of what the fields make): a column of `aside_w` at the right,
 	-- its top on the first group's; `aside_top`, over the groups instead,
@@ -82,6 +89,10 @@ export type PageProps = {
 
 -- An aside's column, by default.
 local ASIDE = 180
+
+-- The page's section step: between its sections, its aside and them, and
+-- a catalog's card and what a tab puts under it.
+local SECTION_STEP = "$space.6"
 
 function M.Page(props: PageProps): Node
 	local children: { any } = {}
@@ -97,7 +108,7 @@ function M.Page(props: PageProps): Node
 		grow = 1,
 		min_w = 0,
 		w_full = if props.aside then top else true,
-		gap = "$space.6",
+		gap = SECTION_STEP,
 		table.unpack(children),
 	}
 	local body: Node
@@ -108,7 +119,7 @@ function M.Page(props: PageProps): Node
 		-- (the aside after the groups, so over them is a reversed column).
 		body = ui.div {
 			w_full = true,
-			gap = "$space.6",
+			gap = SECTION_STEP,
 			direction = function(): Direction
 				return if top() then "column_reverse" else "row"
 			end,
@@ -137,6 +148,7 @@ function M.Page(props: PageProps): Node
 		max_w = ui.theme.get("zeron.settings.measure") :: number?,
 		gap = "$space.6",
 		ui.row {
+			hook = if props.private_head then false else nil,
 			-- Inset to the rows' text, as a section's title is: the page's
 			-- words line up down one edge, the cards hang past it.
 			px = M.inset(),
@@ -173,8 +185,10 @@ function M.Page(props: PageProps): Node
 end
 
 export type SectionProps = {
-	title: (string | Message)?,
-	description: (string | Message)?,
+	-- (A function of either follows what it reads: a title that's an
+	-- item's name as it's renamed.)
+	title: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
 	trail: Node?,
 	[number]: Child,
 }
@@ -206,8 +220,7 @@ function M.Section(props: SectionProps): Node
 end
 
 -- The hairline between a group's rows, from the card's edge to its edge
--- (a row that comes and goes brings its own: `ui.show(on, ui.column {
--- Settings.Rule(), row })`).
+-- (a row that comes and goes brings its own: `Later`).
 function M.Rule(): Node
 	return ui.div {
 		-- (What a test counts a card's hairlines by.)
@@ -218,6 +231,15 @@ function M.Rule(): Node
 		bg = "$zeron.settings.rule",
 		aria_hidden = true,
 	}
+end
+
+-- A row that comes and goes in a card, its own hairline over it, so a card's
+-- rules are between rows that are there and never under the last. In a
+-- column with the row it follows (`ui.column { w_full = true, row,
+-- Settings.Later(on, other) }`), never a Group's own child: a Group rules
+-- between its children whether or not they show.
+function M.Later(on: () -> boolean, row: Node): Node
+	return ui.show(on, ui.column { w_full = true, M.Rule(), row })
 end
 
 -- A card of rows, a hairline between each, running from the card's edge to
@@ -325,8 +347,49 @@ export type EachListOptions = {
 	text: ((item: any) -> string)?,
 }
 
-function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
+-- `EachList`'s rows alone, for a card of the caller's (a Catalog's,
+-- under its search): the same list, hairlines and building of only what
+-- shows. `wash`: each row washed edge to edge under the pointer
+-- (`CatalogRow`), as a Catalog's rows are.
+export type ListRowsOptions = EachListOptions & { wash: boolean? }
+
+function M.ListRows(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: ListRowsOptions): Node
 	local text = opts.text
+	return ui.list {
+		data = list,
+		key = opts.key,
+		heights = function(): { number }
+			local out: { number } = {}
+			for i, item in list:get() do
+				out[i] = opts.height(item) + (if i > 1 then 1 else 0)
+			end
+			return out
+		end,
+		row_text = if text
+			then function(i: number): string
+				local item = list:peek()[i]
+				return if item ~= nil then text(item) else ""
+			end
+			else nil,
+		w_full = true,
+		virtualize = "ancestor",
+		row = function(item: any, i: State<number>, now: State<any>): Node
+			local made = row(item, i, now)
+			return ui.column {
+				w_full = true,
+				ui.show(
+					function(): boolean
+						return i:get() > 1
+					end,
+					M.Rule()
+				),
+				if opts.wash then CatalogRow { row = made } else made,
+			}
+		end,
+	}
+end
+
+function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now: State<any>) -> Node, opts: EachListOptions): Node
 	return ui.show(
 		function(): boolean
 			return #list:get() > 0
@@ -338,37 +401,7 @@ function M.EachList(list: State<{ any }>, row: (item: any, i: State<number>, now
 			border = 1,
 			border_color = "$zeron.settings.edge",
 			overflow = "hidden",
-			ui.list {
-				data = list,
-				key = opts.key,
-				heights = function(): { number }
-					local out: { number } = {}
-					for i, item in list:get() do
-						out[i] = opts.height(item) + (if i > 1 then 1 else 0)
-					end
-					return out
-				end,
-				row_text = if text
-					then function(i: number): string
-						local item = list:peek()[i]
-						return if item ~= nil then text(item) else ""
-					end
-					else nil,
-				w_full = true,
-				virtualize = "ancestor",
-				row = function(item: any, i: State<number>, now: State<any>): Node
-					return ui.column {
-						w_full = true,
-						ui.show(
-							function(): boolean
-								return i:get() > 1
-							end,
-							M.Rule()
-						),
-						row(item, i, now),
-					}
-				end,
-			},
+			M.ListRows(list, row, opts),
 		}
 	)
 end
@@ -377,14 +410,272 @@ end
 -- so its height is known; a line with nothing to say still takes its height):
 -- its padding round its words or its `lead`, at the row's least. In the
 -- window's text size, which scales the lines.
-function M.truncated_row_h(lead: number?): number
+-- The way back from a page under another (an agent of the registry, a
+-- plugin of the store): the page it came from, a quiet link led by a
+-- chevron over the title. `label` names that page.
+export type BackProps = { label: string | Message, on_click: () -> () }
+
+function M.Back(props: BackProps): Node
+	local label = props.label
+	return ui.row {
+		self = "start",
+		gap = "$space.1",
+		items = "center",
+		cursor = "pointer",
+		role = "button",
+		focusable = true,
+		label = locale.t("ds.settings.back", {
+			page = function(): string
+				return if type(label) == "string" then label else (label :: any):get()
+			end,
+		}),
+		color = "$text.tertiary",
+		hover = { color = "$text.primary" },
+		-- (A link's ring, as ds.Link draws it: rounded round its words.)
+		rounded = "$radius.sm",
+		focus = control.ring,
+		on_click = props.on_click,
+		Icon { name = "alt-arrow-left", size = 14 },
+		ui.text { label, text_size = "$font.size.sm", line_height = "$font.line.sm" },
+	}
+end
+
+-- A page under another: where it stands (`Back`), over the page, at a
+-- Settings page's measure, on its parent's middle.
+function M.SubPage(props: { where: Node, [number]: Child }): Node
+	local children: { any } = {}
+	for _, c in ipairs(props :: any) do
+		table.insert(children, c)
+	end
+	return ui.column {
+		w_full = true,
+		self = "center",
+		-- (A theme number, read as it is built: max_w takes points.)
+		max_w = ui.theme.get("zeron.settings.measure") :: number?,
+		gap = "$space.4",
+		props.where,
+		table.unpack(children),
+	}
+end
+
+-- (`byline`: with a Row's byline over that line, a line more.)
+function M.truncated_row_h(lead: number?, byline: boolean?): number
 	local scaled = look.text_theme() or {}
 	local function token(name: string, default: number): number
 		return scaled[name] or (ui.theme.get(name) :: number?) or default
 	end
 	local words = token("font.line.md", 18) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	if byline then
+		words += token("zeron.space.hair", 2) + token("font.line.sm", 16)
+	end
 	return math.max(token("zeron.settings.row", 52), 2 * token("space.3", 12) + math.max(words, lead or 0))
 end
+
+-- One thing set apart, a card of its own that opens it (the plugin store's
+-- featured plugins): its tile beside its name over who made it and its
+-- `badge` (a small one, its line's height), then two lines of what it is, on the card's text edge. One
+-- height whatever it says (the two lines held for it); its width a shelf's
+-- (ds/shelf, `M.FEATURE_MIN` its least: the tile, and a name and its two
+-- lines a readable measure beside and under it). The whole card is one
+-- target; under the pointer it takes the rows' wash, edge to edge inside
+-- its edge, its corner the card's less that edge.
+M.FEATURE_MIN = 180
+export type FeatureProps = {
+	label: string | Message | () -> string,
+	byline: (string | Message | () -> string)?,
+	description: (string | Message | () -> string)?,
+	lead: Node?,
+	badge: Node?,
+	on_click: () -> (),
+}
+
+-- (The card round a Feature and its skeleton.)
+local function feature_card(props: { [any]: any }): Node
+	props.w_full = true
+	props.rounded = "$radius.xl"
+	props.bg = material.pick("$zeron.settings.tint", "$zeron.settings.card")
+	props.border = 1
+	props.border_color = "$zeron.settings.edge"
+	props.overflow = "hidden"
+	return ui.column(props)
+end
+
+function M.Feature(props: FeatureProps): Node
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
+	return feature_card {
+		class = "settings-feature",
+		ui.column {
+			role = "button",
+			label = props.label,
+			focusable = true,
+			cursor = "pointer",
+			w_full = true,
+			p = "$space.4",
+			gap = "$space.3",
+			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
+			on_click = props.on_click,
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				items = "center",
+				props.lead,
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					gap = "$zeron.space.hair",
+					FadeText {
+						props.label,
+						min_w = 0,
+						text_size = "$font.size.md",
+						line_height = "$font.line.md",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					-- (Who made it, and its badge after: the name's line its
+					-- own at every card width. The small badge is the line's
+					-- height, so the card's stays one.)
+					ui.row {
+						gap = "$space.2",
+						items = "center",
+						min_w = 0,
+						FadeText { props.byline or "", shrink = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+						if props.badge then ui.div { shrink = 0, props.badge } else nil,
+					},
+				},
+			},
+			-- (Two lines held whatever it says: one height for every card.)
+			ui.text {
+				props.description or "",
+				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
+				wrap = true,
+				lines = 2,
+				-- (Cut at its second line's end, said so: "…".)
+				truncate = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+		},
+	}
+end
+
+-- A `Feature` still on its way: its card and shape, its tile, name, who
+-- made it and two lines held in the skeleton's wash, in the very boxes the
+-- card has, so it is the card's height and nothing under it moves when the
+-- card comes. `still`: at rest, not breathing (it has waited long enough).
+function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
+	local still = props and props.still
+	local lead = (props and props.lead) or 32
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
+	local function line(w: any, h: string, bar: number?): Node
+		return ui.div { h = h, w_full = true, justify = "center", skeleton.Bar { w = w, h = bar, still = still } }
+	end
+	return feature_card {
+		class = "settings-feature-skeleton",
+		aria_hidden = true,
+		ui.column {
+			w_full = true,
+			p = "$space.4",
+			gap = "$space.3",
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				items = "center",
+				skeleton.Bar { w = lead, h = lead, rounded = "$radius.md", still = still },
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					gap = "$zeron.space.hair",
+					line(96, "$font.line.md", nil),
+					line(72, "$font.line.sm", 8),
+				},
+			},
+			ui.column {
+				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
+				line("90%", "$font.line.sm", 8),
+				line("60%", "$font.line.sm", 8),
+			},
+		},
+	}
+end
+
+
+-- A row's inline link (a sentence's own Publish…, a plugin's Update): its
+-- words in the small type, medium, the text's ink and the accent under the
+-- pointer (the row's own, as Installed's Update has always had it),
+-- underlined, with the app's focus ring for the keys. The one look every
+-- row's link has (`detail_link`, and `detail_action`'s links). (The line 2
+-- under the baseline: at 4 it falls on the bottom of the text's 16 line,
+-- where zgx clips it, zgx-asks/text-underline.)
+-- `role`: "link" to go somewhere (the default), "button" to do something.
+export type InlineLinkProps = {
+	label: string | Message | () -> string,
+	on_click: () -> (),
+	role: ("link" | "button")?,
+	focusable: (boolean | () -> boolean)?,
+	disabled: (boolean | () -> boolean)?,
+}
+-- (Focused, the ring says it's the control: the underline goes while it
+-- holds the focus, back as focus leaves, the words where they were. Its
+-- words are one of two texts, the same type and box, by whether it's
+-- focused: `.inline-link-underlined`, `.inline-link-plain`.)
+M.InlineLink = ui.component(function(props: InlineLinkProps): Node
+	local focused = ui.use_state(false)
+	local function words(underlined: boolean): Node
+		return ui.text {
+			props.label,
+			class = if underlined then "inline-link-underlined" else "inline-link-plain",
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = underlined,
+			underline_offset = if underlined then 2 else nil,
+		}
+	end
+	return ui.row {
+		class = "settings-inline-link",
+		role = props.role or "link",
+		label = props.label,
+		focusable = if props.focusable == nil then true else props.focusable,
+		disabled = props.disabled,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
+		focus = control.ring,
+		on_focus = function()
+			focused:set(true)
+		end,
+		on_blur = function()
+			focused:set(false)
+		end,
+		on_click = props.on_click,
+		ui.show(function(): boolean
+			return not focused:get()
+		end, words(true)),
+		ui.show(function(): boolean
+			return focused:get()
+		end, words(false)),
+	}
+end)
+
+export type RowBadges = { keys: () -> { string }, badge: (key: string) -> Node }
+
+-- Where a giving row's part that stays is drawn: beside the text or
+-- under it (`under`: it may then leave out what it keeps beside the text
+-- only to line up with other rows); `hidden` while it's in its other
+-- place, out of layout and input, keeping its state; `on_resize`, where
+-- its width beside the text goes.
+export type GiveWayPlace = {
+	under: boolean,
+	hidden: () -> boolean,
+	on_resize: ((size: { w: number, h: number }) -> ())?,
+}
 
 export type RowProps = {
 	label: string | Message | () -> string,
@@ -394,7 +685,37 @@ export type RowProps = {
 	lead: Node?,
 	-- Right after the name, on its line ("You", "In use").
 	badge: Node?,
+	-- After the name, on its line, each whole or absent, never cut (the
+	-- store's "Verified", then an account's badges): `keys`, the ones it
+	-- has, in order; `badge`, the one a key names. As many show as fit
+	-- while the name keeps `NAME_LEAST`, so the last go first. A key names
+	-- the same words on every row that has it: its width, measured once, is
+	-- known to the next row as it comes.
+	badges: RowBadges?,
 	control: Node?,
+	-- In a truncating row, in `control`'s place: its controls in two parts
+	-- that give way, each only when the one before isn't enough, so the
+	-- name keeps `NAME_LEAST` and shows and every control stays whole: the
+	-- part that `gives` first (a version badge) moves under the text; then
+	-- the detail's action wraps under its sentence; then the part that
+	-- `stays` (a switch, Remove) moves under the text too, after it, in
+	-- their own order and gaps. Each is drawn in both places, the one it
+	-- isn't in out of layout, so a move builds nothing: builders.
+	-- Where they fit, the row is the row it always was, its controls one
+	-- row of `gives`' nodes then `stays`.
+	-- (`gives(hidden)`: its nodes, out of layout while `hidden` says so.
+	-- `stays(place)`: drawn where `place` says, GiveWayPlace.
+	-- `action`: the detail's action
+	-- as a giving row draws it, its box reporting its width, and whether
+	-- it shows.)
+	give_way: {
+		gives: (hidden: (() -> boolean)?) -> { Node },
+		stays: (place: GiveWayPlace) -> Node,
+		-- What the row kept between the text and its badges beside it past
+		-- its own gap (a row of badges with one absent kept that one's gap).
+		room: (() -> number)?,
+		action: { build: (on_resize: (size: { w: number, h: number }) -> ()) -> Node, shows: () -> boolean }?,
+	}?,
 	-- The control under the text, full width.
 	stacked: boolean?,
 	-- The row leads somewhere: the whole row takes the click, a chevron
@@ -408,6 +729,12 @@ export type RowProps = {
 	disabled: Props_disabled,
 	-- The name in the danger's ink (Sign out, Delete account).
 	danger: boolean?,
+	-- The name in the secondary ink and the regular weight: a note among
+	-- rows (a store check's advice), not a thing of its own.
+	quiet: boolean?,
+	-- The description's ink, where not the tertiary (a key about to end,
+	-- in the warning's).
+	description_ink: (string | () -> string)?,
 	-- The name and its line under it each on one line, fading at the end
 	-- where they don't fit, and the control kept beside them (an address, a
 	-- path, a list of repositories): never wrapped under.
@@ -417,7 +744,8 @@ export type RowProps = {
 	private_label: boolean?,
 	private_description: boolean?,
 	-- Who made it, on a line of its own under the name, over the
-	-- description, in the same quiet ink (a plugin's, a template's).
+	-- description, in the same quiet ink (a plugin's, a template's). As a
+	-- function, the line shows only while it says something.
 	byline: (string | Message | () -> string)?,
 	-- A second line under the description, in its tertiary ink, wrapped
 	-- whole even in a truncating row (what a built-in plugin is allowed).
@@ -425,55 +753,223 @@ export type RowProps = {
 	-- At the detail line's end, while it shows: a small action of its own
 	-- (a plugin's Update), so the row's control stays the same on every row.
 	detail_action: Node?,
+	-- Whether `detail_action` shows: the line then shows for it, with the
+	-- detail's words or none (a version's Install, on a row with nothing
+	-- else to say). Without it, the line shows only with words.
+	detail_action_shows: (() -> boolean)?,
+	-- The sentence's own link, right after the detail's last word and
+	-- wrapping with it as one sentence does (Publish… after where a plugin
+	-- stands in the store): a link in the text's own ink, underlined.
+	-- (`role`: "button" for one that acts in place, as a list shown whole.)
+	detail_link: { label: string | Message | () -> string, on_click: () -> (), role: ("link" | "button")? }?,
 }
 
-function M.Row(props: RowProps): Node
-	local text = ui.column {
+-- The least a row's name keeps beside its badges: past it, the last badge
+-- goes, then the one before (ds/settings `badges`).
+local NAME_LEAST = 96
+-- Each badge's width (without its gap), by its key: as last measured on
+-- any row.
+local badge_w: { [string]: number } = {}
+
+-- A row's name and its badges, each whole or absent (`RowProps.badges`).
+-- Each is measured in a box of its own, its gap before it; the box is that
+-- wide while it fits and none while it doesn't (its badge invisible, kept
+-- only to be measured). Until its width is known it is absent.
+local BadgedName = ui.component(function(props: { name: Node, badges: RowBadges }): Node
+	local line_w = ui.use_state(0)
+	-- (Moves when a width does: what's shown reads it.)
+	local measured = ui.use_state(0)
+	local keys = ui.computed(function(): { string }
+		return props.badges.keys()
+	end)
+	-- The gap before a badge: the name's step before the first, a
+	-- badge's between the next (as `badge`'s and a row of badges').
+	local function gap(first: boolean): number
+		return (ui.theme.get(if first then "space.2" else "space.1") :: number?) or (if first then 8 else 4)
+	end
+	-- Its box's width shown: the badge and its gap; nil while unmeasured.
+	local function width(key: string, first: boolean): number?
+		measured:get()
+		local w = badge_w[key]
+		return if w then w + gap(first) else nil
+	end
+	local function shown(key: string): boolean
+		local room = line_w:get() - NAME_LEAST
+		local used = 0
+		for j, k in keys:get() do
+			local w = width(k, j == 1)
+			if w == nil then
+				return false
+			end
+			used += w
+			if k == key then
+				return used <= room
+			end
+		end
+		return false
+	end
+	local function first(key: string): boolean
+		return keys:get()[1] == key
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		min_w = 0,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - line_w:peek()) >= 0.5 then
+				line_w:set(size.w)
+			end
+		end,
+		props.name,
+		ui.each(keys, function(key: string): Node
+			return ui.row {
+				shrink = 0,
+				overflow = "hidden",
+				-- (The badge at the box's end: its gap before it.)
+				justify = "end",
+				w = function(): number
+					return if shown(key) then width(key, first(key)) or 0 else 0
+				end,
+				ui.div {
+					shrink = 0,
+					-- (Unshown, it keeps its size, to be measured, and is
+					-- neither drawn, hit nor read.)
+					invisible = function(): boolean
+						return not shown(key)
+					end,
+					on_resize = function(size: { w: number, h: number })
+						if size.w > 0 and math.abs(size.w - (badge_w[key] or -1)) >= 0.5 then
+							badge_w[key] = size.w
+							measured:set(measured:peek() + 1)
+						end
+					end,
+					props.badges.badge(key),
+				},
+			}
+		end, {
+			key = function(key: string): string
+				return key
+			end,
+		}),
+	}
+end)
+
+-- A row's byline, on a line of its own; one given as a function shows
+-- only while it has words (nothing to say of who made it: no line).
+local function byline_line(props: RowProps): Node
+	local line = if props.truncate
+		then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+		else ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+	local byline = props.byline
+	if type(byline) ~= "function" then
+		return line
+	end
+	return ui.show(function(): boolean
+		local words = (byline :: () -> string)()
+		return type(words) == "string" and words ~= ""
+	end, line)
+end
+
+-- A giving row's step and what it lays out with (`RowProps.give_way`):
+-- 0 as it always was; 1 its badges under the text; 2 its detail's action
+-- under its sentence too; 3 its controls all under the text, on a line
+-- of their own under the badges.
+type GiveWayRun = {
+	-- The step laid out now.
+	step: () -> number,
+	-- Where a width reported goes: `text`, `box` (its controls' beside
+	-- the text), `act` (the detail's action).
+	measure: (what: string) -> ((size: { w: number, h: number }) -> ())?,
+	-- Its controls beside the text, and the line of them under it.
+	trail: Node,
+	under: Node,
+	-- The width of its controls' box, where not their own (zgx sizes a
+	-- box by its children's widths, hidden ones too).
+	box_w: () -> number?,
+}
+
+-- Whether a row's detail line shows: with words, or for its action.
+local function detail_shows(props: RowProps): boolean
+	local d = control.value(props.detail)
+	return (type(d) == "string" and d ~= "") or (props.detail_action_shows ~= nil and props.detail_action_shows())
+end
+
+-- A row's detail line as it always was: its words, and its action at the
+-- line's end.
+local function detail_line(props: RowProps, action: Node?): Node
+	return ui.row {
+		w_full = true,
+		gap = "$space.3",
+		items = "start",
+		ui.text {
+			function(): string
+				return control.value(props.detail) or ""
+			end,
+			grow = 1,
+			min_w = 0,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$text.tertiary",
+			wrap = true,
+		},
+		action,
+	}
+end
+
+local function row_body(props: RowProps, gw: GiveWayRun?): Node
+	-- (A giving row's detail action reports its width.)
+	local detail_action: Node? = props.detail_action
+	if gw and props.give_way and props.give_way.action then
+		local on_resize = gw.measure("act")
+		if on_resize then
+			detail_action = props.give_way.action.build(on_resize)
+		end
+	end
+	local name = if props.private_label
+		then PrivateText {
+			props.label,
+			truncate = props.truncate,
+			grow = if props.truncate then 1 else nil,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		elseif props.truncate
+		then FadeText {
+			props.label,
+			-- (With a badge, only as wide as the name, so the badge sits
+			-- right after it; it still shrinks to fade.)
+			grow = if props.badge or props.badges then nil else 1,
+			shrink = 1,
+			min_w = 0,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
+		}
+		else ui.text {
+			props.label,
+			text_size = "$font.size.md",
+			line_height = "$font.line.md",
+			weight = if props.quiet then "$font.weight.regular" else "$font.weight.medium",
+			color = if props.danger then "$zeron.tone.danger.ink" elseif props.quiet then "$text.secondary" else "$text.primary",
+			wrap = true,
+		}
+	local text: { [any]: any } = {
 		grow = 1,
 		min_w = 0,
 		gap = "$zeron.space.hair",
-		ui.row {
-			gap = "$space.2",
-			items = "center",
-			min_w = 0,
-			if props.private_label
-				then PrivateText {
-					props.label,
-					truncate = props.truncate,
-					grow = if props.truncate then 1 else nil,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				elseif props.truncate
-				then FadeText {
-					props.label,
-					-- (With a badge, only as wide as the name, so the badge sits
-					-- right after it; it still shrinks to fade.)
-					grow = if props.badge then nil else 1,
-					shrink = 1,
-					min_w = 0,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-				}
-				else ui.text {
-					props.label,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
-					weight = "$font.weight.medium",
-					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
-					wrap = true,
-				},
-			props.badge,
-		},
-		if props.byline and props.truncate
-			then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
-			elseif props.byline
-			then ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
-			else nil,
+		if props.badges
+			then BadgedName { name = name, badges = props.badges }
+			else ui.row {
+				gap = "$space.2",
+				items = "center",
+				min_w = 0,
+				name,
+				props.badge,
+			},
+		if props.byline then byline_line(props) else nil,
 		if props.description and props.private_description
 			then PrivateText {
 				props.description,
@@ -485,31 +981,78 @@ function M.Row(props: RowProps): Node
 			elseif props.description and props.truncate
 			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 			elseif props.description
-			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = props.description_ink or "$text.tertiary", wrap = true }
 			else nil,
 		if props.detail
 			then ui.show(function(): boolean
-				local d = control.value(props.detail)
-				return type(d) == "string" and d ~= ""
-			end, ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "start",
-				ui.text {
-					function(): string
-						return control.value(props.detail) or ""
+				return detail_shows(props)
+			end, if props.detail_link
+				-- (One rich paragraph, the link its last span, is the drawing
+				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
+				-- sentence and its link are two boxes: the link a word's space
+				-- after the sentence when it fits there, else on the next line
+				-- at the sentence's start, as a word that doesn't fit goes.
+				-- The break is headless-only, zgx's fallback layout wrapping by
+				-- grapheme; once the pin carries its word wrap this may become
+				-- the one rich paragraph.)
+				then ui.row {
+					w_full = true,
+					flex_wrap = true,
+					-- (A word's space between them, none between lines: the
+					-- theme's number, as `gap_x` drops a token,
+					-- zgx-asks/gap-axis-tokens.)
+					gap_x = ui.raw(ui.theme.get("space.1") :: number, "gap_x drops a token (zgx-asks/gap-axis-tokens): $space.1 read as its number"),
+					gap_y = 0,
+					items = "end",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						class = "settings-detail",
+						shrink = 1,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click, role = props.detail_link.role },
+				}
+				-- (A giving row's line wraps its action under its words at step 2,
+				-- by the words taking the whole line: the same nodes.)
+				elseif gw
+				then ui.row {
+					w_full = true,
+					flex_wrap = true,
+					gap_x = ui.raw((ui.theme.get("space.3") :: number?) or 12, "gap_x drops a token (zgx-asks/gap-axis-tokens): $space.3 read as its number"),
+					gap_y = function(): any
+						return if gw.step() >= 2 then ui.raw((ui.theme.get("zeron.space.hair") :: number?) or 2, "gap_y drops a token: the hair read as its number") else 0
 					end,
-					grow = 1,
-					min_w = 0,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-					wrap = true,
-				},
-				props.detail_action,
-			})
+					items = "start",
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						grow = 1,
+						min_w = 0,
+						basis = function(): any
+							return if gw.step() >= 2 then "100%" else 0
+						end,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					detail_action,
+				}
+				else detail_line(props, detail_action))
 			else nil,
 	}
+	if gw then
+		text.on_resize = gw.measure("text")
+		table.insert(text, gw.under)
+	end
+	local text_node: Node = ui.column(text)
 	local lead: Node? = props.lead
 	if not lead and props.icon then
 		lead = ui.row {
@@ -524,7 +1067,7 @@ function M.Row(props: RowProps): Node
 			Icon { name = props.icon, size = 16 },
 		}
 	end
-	local trail: Node? = props.control
+	local trail: Node? = if gw then gw.trail else props.control
 	if props.on_click then
 		trail = ui.row {
 			gap = "$space.1",
@@ -555,6 +1098,9 @@ function M.Row(props: RowProps): Node
 				return if disabled() then "$zeron.disabled" else nil
 			end
 			else nil,
+		-- (A giving row is its container's width, never widened by what it
+		-- holds: that width decides its step.)
+		min_w = if gw then 0 else nil,
 	}
 	if props.on_click then
 		row.role = "button"
@@ -578,7 +1124,7 @@ function M.Row(props: RowProps): Node
 	if props.stacked then
 		row.direction = "column"
 		row.items = "stretch"
-		table.insert(row, ui.row { gap = "$space.3", items = "center", lead or text, if lead then text else nil })
+		table.insert(row, ui.row { gap = "$space.3", items = "center", lead or text_node, if lead then text_node else nil })
 		if trail then
 			table.insert(row, trail)
 		end
@@ -602,14 +1148,209 @@ function M.Row(props: RowProps): Node
 			gap = "$space.3",
 			items = "center",
 			lead,
-			text,
+			text_node,
 		})
 		if trail then
 			-- (A theme number, read as it is built: max_w takes points.)
-			table.insert(row, ui.row { shrink = 0, max_w = ui.theme.get("zeron.settings.control") :: number?, items = "center", justify = "end", trail })
+			table.insert(row, ui.row {
+				shrink = 0,
+				max_w = ui.theme.get("zeron.settings.control") :: number?,
+				items = "center",
+				justify = "end",
+				-- (A giving row's, out of the row once its controls are all
+				-- under the text.)
+				hidden = if gw
+					then function(): boolean
+						return gw.step() >= 3
+					end
+					else nil,
+				on_resize = if gw then gw.measure("box") else nil,
+				w = if gw then gw.box_w else nil,
+				trail,
+			})
 		end
 	end
 	return ui.row(row)
+end
+
+-- A truncating row whose controls give way (`RowProps.give_way`): the
+-- first step that leaves the name `NAME_LEAST` is the one shown. Past
+-- step 0 its badges and the part that stays are drawn in both their
+-- places, beside the text as the row always had them and on a line under
+-- it, the one they aren't in out of layout and input (`hidden`, keeping
+-- its state): a step among those sets only which, and the detail's line
+-- its wrap (its words taking the whole line put its action under them),
+-- so nothing is built again: only layout runs. At step 0 it is the row
+-- it always was, the line under it not built (built as a row leaves step
+-- 0, let go as it comes back). The step is
+-- worked out from widths it already has: the text's, at the step laid
+-- out, and the controls' box beside it at step 0 and at steps 1 and 2
+-- (the part that stays), and the detail's action. What the text would get
+-- at another step is the same row less that step's box: room = text + box
+-- (+ the gap before it), text at a step = room - its box - the gap. A
+-- width moving within a step moves nothing: only one that crosses what
+-- decides a step is read again.
+local GivingRow = ui.component(function(p: { props: RowProps }): Node
+	local props = p.props
+	local give_way = props.give_way :: any
+	-- The widths as last reported (-1: not yet; `at`, the step the text's
+	-- was laid out at; `gives`, the badges' row under the text), and a
+	-- count that moves when the step they decide may have.
+	local m = { text = -1, at = 0, box0 = -1, stays = -1, gives = -1, act = -1 }
+	local moved = ui.use_state(0)
+	-- (The step laid out now.)
+	local last = 0
+	-- (The part that stays, beside the text: its box's width at steps 1
+	-- and 2.)
+	local stays_w = ui.use_state(0)
+	local function n(token: string, fallback: number): number
+		return (ui.theme.get(token) :: number?) or fallback
+	end
+	local gap = n("space.3", 12)
+	local beside = n("space.4", 16)
+	local cap = ui.theme.get("zeron.settings.control") :: number?
+	local function room(): number
+		return if give_way.room then give_way.room() else 0
+	end
+	local function act(): number
+		local action = give_way.action
+		if not action or m.act <= 0 or not detail_shows(props) or not action.shows() then
+			return 0
+		end
+		return m.act + gap
+	end
+	-- The box beside the text at step 0: as laid out there, else its parts
+	-- as laid out under the text, with the room the row keeps before them.
+	local function box0(): number
+		if m.box0 >= 0 then
+			return m.box0
+		end
+		if m.gives < 0 or m.stays < 0 then
+			return -1
+		end
+		return math.min(room() + m.gives + gap + m.stays, cap or math.huge)
+	end
+	local function decide(): number?
+		local b0, b1 = box0(), if m.stays >= 0 then math.min(m.stays, cap or math.huge) else -1
+		if m.text < 0 or b0 < 0 or b1 < 0 then
+			return nil
+		end
+		local full = if m.at >= 3 then m.text else m.text + (if m.at == 0 then b0 else b1) + beside
+		local t0, t1 = full - b0 - beside, full - b1 - beside
+		local a = act()
+		local function fits(w: number): boolean
+			return w >= NAME_LEAST and w - a >= NAME_LEAST
+		end
+		return if fits(t0) then 0 elseif fits(t1) then 1 elseif t1 >= NAME_LEAST then 2 else 3
+	end
+	local function put(key: string, w: number)
+		if math.abs(m[key] - w) < 0.5 and not (key == "text" and m.at ~= last) then
+			return
+		end
+		local before = decide()
+		m[key] = w
+		if key == "text" then
+			m.at = last
+		elseif key == "gives" then
+			-- (What the badges say moved: the box at step 0 is theirs again.)
+			m.box0 = -1
+		end
+		if decide() ~= before then
+			moved:set(moved:peek() + 1)
+		end
+	end
+	local step = ui.computed(function(): number
+		moved:get()
+		-- (A detail line or its action shown or hidden moves its part, as
+		-- the room before the badges does.)
+		act()
+		room()
+		last = decide() or last
+		return last
+	end)
+	local function at(): number
+		return step:get()
+	end
+	-- Beside the text: its badges then the part that stays, one row, as
+	-- the row always had them.
+	local nodes = table.clone(give_way.gives(function(): boolean
+		return at() >= 1
+	end))
+	table.insert(nodes, give_way.stays({
+		under = false,
+		hidden = function(): boolean
+			return at() >= 3
+		end,
+		on_resize = function(size: { w: number, h: number })
+			if size.w > 0 then
+				if math.abs(stays_w:peek() - size.w) >= 0.5 then
+					stays_w:set(size.w)
+				end
+				put("stays", size.w)
+			end
+		end,
+	}))
+	local trail = ui.row { gap = "$space.3", items = "center", table.unpack(nodes) }
+	-- Under the text, from step 1: its badges, then from step 3 the part
+	-- that stays on a line of its own under them, on the text's start.
+	-- (There only past step 0: a row whose controls fit beside its name is
+	-- the row it always was, this line not built.)
+	local under = ui.show(function(): boolean
+		return at() >= 1
+	end, ui.column {
+		pt = "$zeron.space.snug",
+		gap = "$space.3",
+		items = "start",
+		ui.row {
+			shrink = 0,
+			gap = "$space.3",
+			items = "center",
+			on_resize = function(size: { w: number, h: number })
+				if size.w > 0 then
+					put("gives", size.w)
+				end
+			end,
+			table.unpack(give_way.gives(nil)),
+		},
+		give_way.stays({
+			under = true,
+			hidden = function(): boolean
+				return at() < 3
+			end,
+		}),
+	})
+	return row_body(props, {
+		step = at,
+		trail = trail,
+		under = under,
+		box_w = function(): number?
+			-- (At step 0 its own, as it always was; at 1 and 2 the part that
+			-- stays alone, though the badges beside it are kept, hidden.)
+			local s = at()
+			return if s >= 1 and s <= 2 and stays_w:get() > 0 then math.min(stays_w:get(), cap or math.huge) else nil
+		end,
+		measure = function(what: string): ((size: { w: number, h: number }) -> ())?
+			if what == "text" or what == "act" then
+				return function(size: { w: number, h: number })
+					put(what, size.w)
+				end
+			elseif what == "box" then
+				return function(size: { w: number, h: number })
+					if last == 0 and size.w > 0 then
+						put("box0", size.w)
+					end
+				end
+			end
+			return nil
+		end,
+	})
+end)
+
+function M.Row(props: RowProps): Node
+	if props.give_way and props.truncate and not props.stacked and not props.on_click then
+		return GivingRow { props = props }
+	end
+	return row_body(props, nil)
 end
 
 -- A settings window's own list of pages, down its side: an icon and a name
@@ -904,7 +1645,67 @@ export type CatalogProps = {
 	none: (tab: string) -> Node,
 	hint: { id: string?, text: string | Message }?,
 	overlays: { Node }?,
+	-- Tabs the page draws itself under the tabs, by value, in place of the
+	-- card and of `states` (a catalog from elsewhere, searched on its own
+	-- terms: Plugins' Browse). Each is built as its tab is chosen; it has
+	-- the same card to hand, `Settings.CatalogCard`.
+	views: { [string]: () -> Node }?,
+	-- What a tab adds under its card, by value, a section's step below it
+	-- (Plugins' Yours: the account's deploy keys).
+	below: { [string]: () -> Node }?,
 }
+
+-- A Catalog's card: its search heading it (a quiet field inset evenly,
+-- its corner the card's less its edge and that inset, for its focus
+-- ring, as the board's), then, under a hairline, its `body` (the rows, or
+-- what it says instead).
+export type CatalogCardProps = {
+	id: string?,
+	search: { value: State<string>, placeholder: string | Message },
+	-- At the search's end, on its line: what narrows it besides its words
+	-- (an active keyword's token).
+	search_trail: Node?,
+	body: Node,
+}
+
+function M.CatalogCard(props: CatalogCardProps): Node
+	local search = ui.row {
+		w_full = true,
+		shrink = 0,
+		p = "$space.1",
+		gap = "$space.2",
+		items = "center",
+		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
+		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
+		-- less the card's edge, this inset and the glyph's own side bearing.)
+		SearchField {
+			value = props.search.value,
+			placeholder = props.search.placeholder,
+			name = props.search.placeholder,
+			size = "sm",
+			quiet = true,
+			w_full = props.search_trail == nil,
+			grow = if props.search_trail then 1 else nil,
+			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
+		},
+		-- (What else narrows it, ending on the rows' controls' edge.)
+		if props.search_trail
+			then ui.row { shrink = 0, items = "center", pr = ui.raw(M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4), "the rows' 16 inset, less this bar's own"), props.search_trail }
+			else nil,
+	}
+	return ui.column {
+		id = props.id,
+		w_full = true,
+		rounded = "$radius.xl",
+		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+		border = 1,
+		border_color = "$zeron.settings.edge",
+		overflow = "hidden",
+		search,
+		M.Rule(),
+		props.body,
+	}
+end
 
 -- The tabs' far end: New, and Import… before it when the page has one.
 local function trail(props: CatalogProps): Node?
@@ -927,6 +1728,116 @@ local function trail(props: CatalogProps): Node?
 		new,
 	}
 end
+
+-- A catalog's step: between its head, the line its action moves to, its
+-- card and what's under it.
+local CATALOG_STEP = "$space.4"
+
+-- A catalog's head: its tabs, their action (New…, Install…) at the rule's
+-- far end; where the tabs and it don't fit beside each other (a narrow
+-- pane, more tabs), the action on a line of its own under the rule, the
+-- catalog's step below it, ending on the same edge, never past the page.
+-- Measured as Browse's head is: beside the tabs, the action's box gives
+-- way when the line runs short, and by how much says the head's width it
+-- needs; under the rule until the head is that wide again.
+local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: State<any> }): Node
+	local catalog, tab = props.catalog, props.tab
+	local inset = M.inset(ui.theme.get("space.1") :: number?)
+	local head_w = ui.use_state(0)
+	-- The head's width the action needs beside the tabs (0: it fits).
+	local needed = ui.use_state(0)
+	-- (Each box once laid out, nil until then: the action's own width, the
+	-- room its box got and where that box starts, and where the head does.)
+	local inner_w: number?, outer_w: number?, outer_x: number?, head_x: number? = nil, nil, nil, nil
+	-- The line's inset at its end (the card's words' edge), in points.
+	local end_inset = M.TEXT_INSET - ((ui.theme.get("space.1") :: number?) or 4)
+	local function action_fits(): boolean
+		local n = needed:get()
+		return n <= 0 or head_w:get() >= n
+	end
+	-- (Beside the tabs and short of its own width: the head it needs, from
+	-- where its box starts (after the tabs, however wide they run) to its
+	-- own end and the line's inset: exact even while the tabs themselves
+	-- overflow, so it comes back beside them only once it truly fits.)
+	local function check()
+		if inner_w and outer_w and outer_x and head_x and action_fits() and inner_w - outer_w > 0.5 then
+			needed:set((outer_x - head_x) + inner_w + end_inset)
+		end
+	end
+	local function action(beside: boolean): Node?
+		local node = trail(catalog)
+		if not node then
+			return nil
+		end
+		if not beside then
+			return node
+		end
+		-- (Kept in its place while under the rule, collapsed to none and
+		-- unseen: measured all the while, never built again. A row, so the
+		-- action inside keeps its own width however little room the box
+		-- has.)
+		return ui.row {
+			shrink = 1,
+			min_w = 0,
+			overflow = "hidden",
+			w = function(): number?
+				return if action_fits() then nil else 0
+			end,
+			on_resize = function(size: { w: number, h: number }, el: any)
+				outer_w = size.w
+				outer_x = el.x
+				check()
+			end,
+			ui.div {
+				shrink = 0,
+				invisible = function(): boolean
+					return not action_fits()
+				end,
+				on_resize = function(size: { w: number, h: number })
+					inner_w = size.w
+					check()
+				end,
+				node,
+			},
+		}
+	end
+	local beside = action(true)
+	local under = if beside then action(false) else nil
+	return ui.column {
+		w_full = true,
+		gap = CATALOG_STEP,
+		on_resize = function(size: { w: number, h: number }, el: any)
+			head_x = el.x
+			if math.abs(size.w - head_w:peek()) >= 0.5 then
+				head_w:set(size.w)
+			end
+			-- (A shortfall seen before the head was laid out is read now.)
+			check()
+		end,
+		ui.row {
+			w_full = true,
+			items = "end",
+			gap = "$space.2",
+			-- In to the rows' words, as the title is: the tab's label (its
+			-- space.1 inside the tab) on that edge, its underline hanging
+			-- past it as a wash does.
+			Tabs {
+				value = tab,
+				label = catalog.tabs.label,
+				rule = true,
+				-- (The rule runs the card's width, as the board's does.)
+				inset = inset,
+				options = catalog.tabs.options,
+				trail = beside,
+			},
+		},
+		if under
+			then ui.show(function(): boolean
+				return not action_fits()
+			end, ui.row { w_full = true, px = inset, justify = "end", under })
+			else nil,
+	}
+end)
 
 function M.Catalog(props: CatalogProps): Node
 	local query, tab = props.search.value, props.tabs.value
@@ -986,39 +1897,13 @@ function M.Catalog(props: CatalogProps): Node
 		end
 		return rows()
 	end
-	-- The search heading the card: a quiet field inset evenly, its corner the
-	-- card's less its edge and that inset (for its focus ring), as the board's.
-	local search = ui.div {
-		w_full = true,
-		shrink = 0,
-		p = "$space.1",
-		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
-		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
-		-- less the card's edge, this inset and the glyph's own side bearing.)
-		SearchField {
-			value = query,
-			placeholder = props.search.placeholder,
-			name = props.search.placeholder,
-			size = "sm",
-			quiet = true,
-			w_full = true,
-			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
-		},
-	}
 	local function card(): Node
-		return ui.column {
+		return M.CatalogCard {
 			id = "catalog-card",
-			w_full = true,
-			rounded = "$radius.xl",
-			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-			border = 1,
-			border_color = "$zeron.settings.edge",
-			overflow = "hidden",
-			search,
-			M.Rule(),
+			search = props.search,
 			-- One swap for what's under it: a tab is a page of its own; within
 			-- it, found or not. (Asked again with rows showing, they stay.)
-			ui.presence(function(): string
+			body = ui.presence(function(): string
 				local s = props.status()
 				if #props.found:get() > 0 then
 					return `list:{tab:get()}`
@@ -1030,32 +1915,37 @@ function M.Catalog(props: CatalogProps): Node
 		}
 	end
 	local function body(key: string): Node
+		local view = string.match(key, "^view:(.+)$")
+		if view and props.views and props.views[view] then
+			return props.views[view]()
+		end
 		local own = props.states and props.states[key]
 		if own then
 			return own()
 		end
-		return card()
+		if not props.below then
+			return card()
+		end
+		local below = props.below
+		return ui.column {
+			w_full = true,
+			gap = SECTION_STEP,
+			card(),
+			-- (Only a tab with something under it: nothing, no gap.)
+			ui.show(function(): boolean
+				return below[tab:get()] ~= nil
+			end, ui.presence(function(): string
+				local t = tab:get()
+				return if below[t] then t else ""
+			end, function(t: string): Node
+				return if t ~= "" then below[t]() else ui.div {}
+			end, { w_full = true })),
+		}
 	end
 	local column: { any } = {
 		w_full = true,
-		gap = "$space.4",
-		ui.row {
-			w_full = true,
-			items = "end",
-			gap = "$space.2",
-			-- In to the rows' words, as the title is: the tab's label (its
-			-- space.1 inside the tab) on that edge, its underline hanging
-			-- past it as a wash does.
-			Tabs {
-				value = tab,
-				label = props.tabs.label,
-				rule = true,
-				-- (The rule runs the card's width, as the board's does.)
-				inset = M.inset(ui.theme.get("space.1") :: number?),
-				options = props.tabs.options,
-				trail = trail(props),
-			},
-		},
+		gap = CATALOG_STEP,
+		CatalogHead { catalog = props, tab = tab },
 		if props.notice and props.notice_when
 			then ui.show(props.notice_when, ui.column { w_full = true, (props.notice :: () -> Node)() })
 			elseif props.notice then props.notice()
@@ -1063,6 +1953,10 @@ function M.Catalog(props: CatalogProps): Node
 		-- The card (searched, loading or not), or a state of the page's own
 		-- in its place.
 		ui.presence(function(): string
+			local t = tab:get()
+			if props.views and props.views[t] then
+				return `view:{t}`
+			end
 			local s = props.status()
 			return if props.states and props.states[s] then s else "card"
 		end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

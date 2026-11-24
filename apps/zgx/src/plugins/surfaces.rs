@@ -116,6 +116,89 @@ pub fn cost_words(cost: &Json) -> Option<String> {
     (frame > BUDGET_PER_FRAME_MS).then(|| format!("Slow: {} ms in one frame (keep it under {} ms)", ms(frame), ms(BUDGET_PER_FRAME_MS)))
 }
 
+/// The most style hints `plugin_status` gives.
+pub const MAX_HINTS: usize = 20;
+
+/// What a plugin's Luau uses that's off Zeron's design system, as hints for
+/// an agent (`plugin_status { page = "settings" }`), never a block: a raw
+/// colour, text size, corner or spacing where a token goes, and a settings
+/// page not built from `@ds/settings`. Read from its files as written (its
+/// own, not the SDK's copy), comments left out; each `{ file, line, text,
+/// hint }`, [`MAX_HINTS`] at most, and how many more there were.
+pub fn style_hints(dir: &Path) -> (Vec<Json>, usize) {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if name.ends_with(".luau") && !(name == "zeron.luau" && d == dir) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let (mut hints, mut more) = (Vec::new(), 0);
+    let mut draws_page = false;
+    let mut uses_settings = false;
+    for path in &files {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let rel = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+        draws_page |= text.contains("settings_page");
+        uses_settings |= text.contains("@ds/settings") || text.contains("ds.Settings");
+        for (at, line) in text.lines().enumerate() {
+            let code = line.split("--").next().unwrap_or("");
+            if let Some(hint) = style_hint(code) {
+                if hints.len() < MAX_HINTS {
+                    hints.push(json!({ "file": rel, "line": at + 1, "text": line.trim(), "hint": hint }));
+                } else {
+                    more += 1;
+                }
+            }
+        }
+    }
+    if draws_page && !uses_settings {
+        hints.insert(0, json!({ "hint": "Its settings page doesn't use @ds/settings: build it from Settings.Section, Settings.Group and Settings.Row, as Zeron's pages are." }));
+    }
+    (hints, more)
+}
+
+/// What one line of Luau sets off the system, if anything.
+fn style_hint(code: &str) -> Option<&'static str> {
+    // `name = <value>`: each assignment on the line, by its name.
+    let mut rest = code;
+    while let Some(eq) = rest.find('=') {
+        let (before, after) = (&rest[..eq], &rest[eq + 1..]);
+        rest = after;
+        // (Not `==`, `~=`, `<=`, `>=`.)
+        if after.starts_with('=') || before.ends_with(['=', '~', '<', '>']) {
+            continue;
+        }
+        let name = before.trim_end().rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap_or("");
+        let value = after.trim_start();
+        let raw_colour = value.starts_with("\"#") || value.starts_with("'#") || value.starts_with("\"rgb") || value.starts_with("'rgb");
+        let number = value.chars().next().is_some_and(|c| c.is_ascii_digit()) && !value.starts_with('0');
+        match name {
+            "color" | "bg" | "border_color" | "outline_color" | "fill" | "stroke" | "tint" | "caret_color" | "selection_color" if raw_colour => {
+                return Some("A raw colour: use a token ($text.primary, $text.secondary, $text.tertiary, $accent, $border, $zeron.settings.card, $zeron.tone.<tone>.ink), so it follows the theme.");
+            }
+            "text_size" if number => return Some("A raw text size: use $font.size.sm (a row's description), $font.size.md (a row's name) or another $font.size token."),
+            "line_height" if number => return Some("A raw line height: use the $font.line token of its size ($font.line.sm, $font.line.md)."),
+            "rounded" if number => return Some("A raw corner: use $radius.sm…$radius.xl; inside something rounded, its corner less the inset."),
+            "p" | "px" | "py" | "pt" | "pb" | "pl" | "pr" | "gap" | "m" | "mx" | "my" | "mt" | "mb" | "ml" | "mr" if number => {
+                return Some("Raw spacing: use $space.1…$space.8 (a row's own is $space.4 across, $space.3 down).");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A box in the window, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
@@ -126,7 +209,9 @@ pub struct Region {
 }
 
 /// Each region a plugin's placements report (`{ placements = { { regions =
-/// { { x, y, w, h } } } } }`), those with a size.
+/// { { x, y, w, h } } } } }`), those with a size: its own account, shown to
+/// the agent as it said it and never what a picture is cut to (`measured`).
+#[cfg(test)]
 pub fn regions(placements: &Json) -> Vec<Region> {
     let mut out = Vec::new();
     for p in placements.as_array().into_iter().flatten() {
@@ -155,6 +240,112 @@ pub fn around(regions: &[Region], pad: f32, width: f32, height: f32) -> Option<R
     let (x0, y0) = ((x0 - pad).max(0.), (y0 - pad).max(0.));
     let (x1, y1) = ((x1 + pad).min(width), (y1 + pad).min(height));
     (x1 > x0 && y1 > y0).then_some(Region { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// The boxes the host measured of a plugin's own nodes
+/// (`ScriptHost::contribution_bounds`), as regions: what a picture of it is
+/// cut around, never the boxes the plugin reports of itself.
+pub fn measured(bounds: &[zgx::scene::Rect]) -> Vec<Region> {
+    bounds.iter().filter(|b| b.width > 0. && b.height > 0.).map(|b| Region { x: b.x, y: b.y, w: b.width, h: b.height }).collect()
+}
+
+/// A cut's pixels (`width` × `height`, of `cut` at `scale` pixels a point)
+/// with every `private` box in it made blank: what the app marks private
+/// (a deploy token shown once) never leaves in a picture.
+pub fn blank(rgba: &mut [u8], width: u32, height: u32, cut: Region, private: &[Region], scale: f32) {
+    for p in private {
+        let x0 = ((p.x - cut.x) * scale).floor().max(0.) as u32;
+        let y0 = ((p.y - cut.y) * scale).floor().max(0.) as u32;
+        let x1 = (((p.x + p.w - cut.x) * scale).ceil().max(0.) as u32).min(width);
+        let y1 = (((p.y + p.h - cut.y) * scale).ceil().max(0.) as u32).min(height);
+        for row in y0..y1 {
+            let start = ((row * width + x0) * 4) as usize;
+            let end = ((row * width + x1.max(x0)) * 4) as usize;
+            if let Some(line) = rgba.get_mut(start..end) {
+                line.fill(0);
+            }
+        }
+    }
+}
+
+/// How far the margin round a plugin's own nodes is blurred, in points, and
+/// how much of its light is kept: where it sits reads, nothing beside it.
+const VEIL_BLUR: f32 = 6.;
+const VEIL_KEEP: f32 = 0.45;
+
+/// A cut's pixels (`width` × `height`, of `cut` at `scale` pixels a point)
+/// with everything outside `own` (a plugin's own nodes, as the host
+/// measured them) blurred and dimmed: the margin round them shows where
+/// they sit, and nothing in it can be read.
+pub fn veil(rgba: &mut [u8], width: u32, height: u32, cut: Region, own: &[Region], scale: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    let radius = ((VEIL_BLUR * scale).round() as usize).max(1);
+    let blurred = box_blur(&rgba[..w * h * 4], w, h, radius);
+    // Each own box, in the cut's pixels.
+    let boxes: Vec<(usize, usize, usize, usize)> = own
+        .iter()
+        .map(|r| {
+            let x0 = ((r.x - cut.x) * scale).floor().max(0.) as usize;
+            let y0 = ((r.y - cut.y) * scale).floor().max(0.) as usize;
+            let x1 = (((r.x + r.w - cut.x) * scale).ceil().max(0.) as usize).min(w);
+            let y1 = (((r.y + r.h - cut.y) * scale).ceil().max(0.) as usize).min(h);
+            (x0, y0, x1, y1)
+        })
+        .collect();
+    for y in 0..h {
+        for x in 0..w {
+            if boxes.iter().any(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1) {
+                continue;
+            }
+            let i = (y * w + x) * 4;
+            for c in 0..3 {
+                rgba[i + c] = (blurred[i + c] as f32 * VEIL_KEEP).round() as u8;
+            }
+            rgba[i + 3] = blurred[i + 3];
+        }
+    }
+}
+
+/// `rgba` blurred by a box `radius` pixels each way, twice over (near a
+/// Gaussian's look, at a box's cost).
+fn box_blur(rgba: &[u8], w: usize, h: usize, radius: usize) -> Vec<u8> {
+    let mut a = rgba.to_vec();
+    let mut b = vec![0u8; a.len()];
+    for _ in 0..2 {
+        blur_pass(&a, &mut b, w, h, radius, true);
+        blur_pass(&b, &mut a, w, h, radius, false);
+    }
+    a
+}
+
+/// One box pass along rows (`across`) or columns, edges held.
+fn blur_pass(from: &[u8], to: &mut [u8], w: usize, h: usize, radius: usize, across: bool) {
+    let (lines, len) = if across { (h, w) } else { (w, h) };
+    let at = |line: usize, k: usize| if across { (line * w + k) * 4 } else { (k * w + line) * 4 };
+    let span = (2 * radius + 1) as u32;
+    for line in 0..lines {
+        let mut sum = [0u32; 4];
+        for k in 0..=2 * radius {
+            let j = at(line, k.saturating_sub(radius).min(len - 1));
+            for c in 0..4 {
+                sum[c] += from[j + c] as u32;
+            }
+        }
+        for k in 0..len {
+            let i = at(line, k);
+            for c in 0..4 {
+                to[i + c] = (sum[c] / span) as u8;
+            }
+            let out = at(line, k.saturating_sub(radius).min(len - 1));
+            let inn = at(line, (k + radius + 1).min(len - 1));
+            for c in 0..4 {
+                sum[c] = sum[c] + from[inn + c] as u32 - from[out + c] as u32;
+            }
+        }
+    }
 }
 
 /// `rgba` (`width` × `height` pixels) cut to `region`, in points at `scale`
@@ -232,9 +423,102 @@ mod tests {
     }
 
     #[test]
+    fn what_a_plugin_draws_off_the_system_is_said_as_hints() {
+        let dir = std::env::temp_dir().join(format!("zgx-style-hints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("parts")).unwrap();
+        std::fs::write(dir.join("zeron.luau"), "local x = ui.div { bg = \"#ff0000\" }\n").unwrap();
+        std::fs::write(
+            dir.join("init.luau"),
+            "zeron.settings_page { build = function()\n\treturn ui.column {\n\t\tbg = \"#1f1f1f\", -- a card\n\t\tp = 12,\n\t\tgap = \"$space.2\",\n\t\trounded = 0,\n\t\tui.text { \"Hi\", text_size = 13, color = \"$text.secondary\" },\n\t\t-- color = \"#000\" in a comment\n\t\tif n == 3 then nil else nil,\n\t}\nend }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("parts/row.luau"), "return ui.div { border_color = 'rgb(1,2,3)', w = 220 }\n").unwrap();
+        let (hints, more) = style_hints(&dir);
+        let at: Vec<(String, u64)> = hints.iter().filter(|h| h.get("line").is_some()).map(|h| (h["file"].as_str().unwrap().to_string(), h["line"].as_u64().unwrap())).collect();
+        assert_eq!(at, [("init.luau".into(), 3), ("init.luau".into(), 4), ("init.luau".into(), 7), ("parts/row.luau".into(), 1)], "{hints:#?}");
+        assert!(hints[0]["hint"].as_str().unwrap().contains("@ds/settings"), "a page not built from Zeron's settings parts");
+        assert!(hints[1]["hint"].as_str().unwrap().starts_with("A raw colour"));
+        assert_eq!(more, 0);
+        // Built from them: no such hint.
+        std::fs::write(dir.join("parts/page.luau"), "local Settings = require(\"@ds/settings\")\n").unwrap();
+        assert!(style_hints(&dir).0.iter().all(|h| h.get("line").is_some()));
+        // At most 20, the rest counted.
+        std::fs::write(dir.join("parts/many.luau"), "ui.div { p = 3 }\n".repeat(30)).unwrap();
+        let (hints, more) = style_hints(&dir);
+        assert_eq!((hints.len(), more), (MAX_HINTS, 34 - MAX_HINTS));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_page_is_an_id_and_a_title() {
         assert_eq!(page(&json!({ "id": "prs", "title": "Pull requests" })).unwrap(), json!({ "id": "prs", "title": "Pull requests" }));
         assert!(page(&json!({ "title": "x" })).is_err());
+    }
+
+    /// A plugin's picture is cut around its own nodes as the host measures
+    /// them: one reporting the whole window as its own gets its own nodes
+    /// (and the margin round them), and what the app marks private in the
+    /// cut is blank.
+    #[test]
+    fn a_plugin_reporting_the_whole_window_gets_only_its_own_nodes() {
+        // What it says of itself: the whole window. Never what's cut.
+        let reported = regions(&json!([{ "at": "#titlebar-actions", "regions": [{ "x": 0, "y": 0, "w": 100000, "h": 100000 }] }]));
+        assert_eq!(reported.len(), 1);
+        // What the host measured: its one node in the title bar.
+        let own = measured(&[zgx::scene::Rect { x: 900., y: 8., width: 24., height: 24. }, zgx::scene::Rect { x: 0., y: 0., width: 0., height: 10. }]);
+        assert_eq!(own, vec![Region { x: 900., y: 8., w: 24., h: 24. }], "a box with no size isn't one");
+        let cut = around(&own, 24., 1200., 800.).unwrap();
+        assert_eq!(cut, Region { x: 876., y: 0., w: 72., h: 56. });
+        // A private box (a token's) half in the cut: blank there, the rest kept.
+        let (w, h) = (72u32, 56u32);
+        let mut px = vec![255u8; (w * h * 4) as usize];
+        blank(&mut px, w, h, cut, &[Region { x: 940., y: 40., w: 200., h: 200. }], 1.);
+        let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize];
+        assert_eq!(at(64, 40), 0, "inside the private box");
+        assert_eq!(at(71, 55), 0);
+        assert_eq!(at(63, 40), 255, "beside it");
+        assert_eq!(at(64, 39), 255, "above it");
+        // One outside the cut leaves it whole.
+        let mut whole = vec![255u8; (w * h * 4) as usize];
+        blank(&mut whole, w, h, cut, &[Region { x: 0., y: 400., w: 50., h: 50. }], 1.);
+        assert!(whole.iter().all(|&b| b == 255));
+    }
+
+    /// The margin round a plugin's own nodes shows where they sit and
+    /// nothing in it can be read: blurred and dimmed, its pixels no longer
+    /// the original's; the plugin's own nodes are as they show.
+    #[test]
+    fn the_margin_round_a_plugin_s_nodes_can_t_be_read() {
+        // A 40×20 cut at 1 pixel a point: text-like stripes everywhere (one
+        // light column, one dark), the plugin's own node its middle 10×10.
+        let (w, h) = (40u32, 20u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let v = if x % 2 == 0 { 255 } else { 0 };
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let original = px.clone();
+        let cut = Region { x: 100., y: 50., w: 40., h: 20. };
+        veil(&mut px, w, h, cut, &[Region { x: 115., y: 55., w: 10., h: 10. }], 1.);
+        let at = |p: &[u8], x: u32, y: u32| p[((y * w + x) * 4) as usize];
+        // Its own node: untouched.
+        for (x, y) in [(15, 5), (16, 9), (24, 14)] {
+            assert_eq!(at(&px, x, y), at(&original, x, y), "own ({x}, {y})");
+        }
+        // The margin: not the original's, the stripes gone (no column tells
+        // light from dark), and dimmer.
+        let margin = [(0, 0), (1, 0), (5, 18), (6, 18), (34, 2), (35, 2)];
+        assert!(margin.iter().all(|&(x, y)| at(&px, x, y) != at(&original, x, y)), "the margin isn't the original's");
+        for pair in margin.chunks(2) {
+            let (a, b) = (at(&px, pair[0].0, pair[0].1) as i32, at(&px, pair[1].0, pair[1].1) as i32);
+            assert!((a - b).abs() <= 8, "stripes still tell: {a} {b}");
+            assert!(a < 128, "dimmed: {a}");
+        }
+        // Its alpha kept: where it sits still reads.
+        assert_eq!(px[3], 255);
     }
 
     #[test]

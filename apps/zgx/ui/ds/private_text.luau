@@ -21,12 +21,14 @@ local CardSeed = require("@self/card_seed")
 local FadeText = require("@self/fade_text")
 local locale = require("@self/locale")
 
+local preference = require("@self/preference")
+
 local M = {}
 
 -- Whether addresses are hidden: Settings → General's switch (kept across
 -- launches), on until it's turned off. (Its own key: a switch saved off
 -- before hiding was the default doesn't carry over.)
-M.hidden = ui.persist("private_text_hidden", true)
+M.hidden = preference.kept(ui.persist("private_text_hidden", true), "private_text_hidden")
 
 -- The letters a stand-in is made of: no look-alikes (no i, l, o, 0, 1).
 local ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
@@ -61,11 +63,13 @@ end
 local BLUR = 3
 
 -- Props that style the text (the rest of a PrivateText's are its box's).
-local TEXT = { text_size = true, line_height = true, weight = true, color = true, font = true, align = true }
+local TEXT = { text_size = true, line_height = true, weight = true, color = true, font = true, align = true, wrap = true }
 
 export type Props = {
 	[number]: any, -- the text: a string, or a function that returns one
 	truncate: boolean?,
+	-- Its lines wrapped to its box's width (a secret too long for a line).
+	wrap: boolean?,
 	-- False: a click doesn't show it (inside a row a press means something
 	-- else to, a menu's). It stays hidden until the setting is off.
 	reveal: boolean?,
@@ -76,11 +80,16 @@ export type Props = {
 	-- What it's called to assistive technology while hidden ("Email"; a
 	-- message too).
 	name: (string | Message)?,
+	font: any?,
 	-- Its box (the rest of a row's props: `grow`, `min_w`, margins…).
 	grow: number?,
 	shrink: number?,
 	min_w: any?,
 	max_w: any?,
+	w_full: boolean?,
+	pl: any?,
+	pr: any?,
+	pb: any?,
 }
 
 -- The props that make the text, from a PrivateText's, with `content` for
@@ -96,6 +105,11 @@ local function text_of(props: Props, content: () -> string): Node
 		p.grow = 1
 		p.min_w = 0
 		return FadeText(p)
+	end
+	-- (Wrapping: the width its box gives it, line after line.)
+	if props.wrap then
+		p.grow = 1
+		p.min_w = 0
 	end
 	return ui.text(p)
 end

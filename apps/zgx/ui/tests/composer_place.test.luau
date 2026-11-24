@@ -443,3 +443,27 @@ test("composer place: an edge that can't keep a reach offers no choice of it", f
 	expect(showing(app, 'role:menuitem "Reaches"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
+
+test("composer place: Work in submenus keep a slight gap from the parent dropdown", function()
+	local app = mounted()
+	app:set_state("test_place_devices", {
+		{ value = "fedora", label = "fedora", you = true },
+		{ value = "mac", label = "Mac" },
+	})
+	app:set_state("test_place_device", "fedora")
+	settle(app)
+	app:click('role:button "Branch"')
+	settle(app)
+	app:hover('role:menuitem "Device"')
+	settle(app)
+	local function rect(sel: string): (number, number, number, number)
+		local first = string.match(app:tree(sel), "[^\n]+") or ""
+		local x, y, w, h = string.match(first, " (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+		return tonumber(x) or -1, tonumber(y) or -1, tonumber(w) or -1, tonumber(h) or -1
+	end
+	local px, _, pw = rect(".dropdown-panel[1]")
+	local sx = rect(".dropdown-panel[2]")
+	local gap = sx - (px + pw)
+	expect(gap >= 1 and gap <= 4).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

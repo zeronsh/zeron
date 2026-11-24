@@ -55,6 +55,19 @@ pub const BLOCKED: &[&str] = &[
     "plugins.remove",
     "plugins.setting_set",
     "plugins.set_off",
+    // The plugin store: what sends, changes or reports anything as you, and
+    // what reads your own account (src/plugins/catalog.rs). Reading the
+    // catalog stays.
+    "plugins.store.mine",
+    "plugins.store.tokens",
+    "plugins.store.prepare",
+    "plugins.store.publish",
+    "plugins.store.version_action",
+    "plugins.store.create_token",
+    "plugins.store.revoke_token",
+    "plugins.store.prereleases",
+    "plugins.store.updates",
+    "plugins.store.report",
     "templates.use",
     "templates.create",
     "templates.duplicate",
@@ -107,6 +120,14 @@ pub const BLOCKED: &[&str] = &[
     // (What a Cloud chat reaches: the person's own choice.)
     "cloud.set_reach",
     "cloud.set_session_reach",
+    // Managed MCP servers and their OAuth/credential flows.
+    "mcp.upsert",
+    "mcp.set_enabled",
+    "mcp.delete",
+    "mcp.start_auth",
+    "mcp.cancel_auth",
+    "mcp.disconnect_auth",
+    "mcp.resolve_request",
 ];
 
 pub fn blocked(action: &str) -> bool {

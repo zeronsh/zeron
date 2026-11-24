@@ -1,0 +1,32 @@
+---
+// A plugin, as the public sees it in the store's list (the one card): its
+// tile, its name with the check when its newest version is verified, what it
+// does in at most two lines, and one quiet line: its author and how many have
+// it, or, when its newest version isn't verified yet, that in its place.
+// Always these, in this order. Nothing round it at rest; hovered or focused,
+// the whole card fills at the surface's tone.
+import Seal from "./Seal.astro";
+import Tile from "./Tile.astro";
+import { count } from "../../lib/store/format.ts";
+import { hueClass } from "../../lib/store/hue.ts";
+import type { PluginCard } from "../../lib/store/types.ts";
+import { pluginUrl } from "../../lib/store/urls.ts";
+
+interface Props {
+  plugin: PluginCard;
+}
+const { plugin: p } = Astro.props;
+---
+
+<a class:list={["pcard", hueClass(p.id)]} href={pluginUrl(p.id)}>
+  <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="ms" />
+  <div class="pc-body">
+    <div class="pc-name"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</div>
+    <p class="pc-sum">{p.summary}</p>
+    <div class="pc-meta">
+      <span class="pc-by">{p.author.username ? `@${p.author.username}` : "a former account"}</span>
+      <i aria-hidden="true"></i>
+      {p.verified ? <span class="num">{count(p.installs)} {p.installs === 1 ? "install" : "installs"}</span> : <span class="state no">{p.version} not verified yet</span>}
+    </div>
+  </div>
+</a>

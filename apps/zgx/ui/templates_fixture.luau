@@ -214,6 +214,23 @@ ui.command {
 	end,
 }
 
+-- One by someone Zeron can't vouch for, from nowhere named: its badge
+-- says who made it can't be told, its byline nothing.
+ui.command {
+	id = "imported_stranger",
+	title = "A template from an unknown author, from nowhere named",
+	run = function()
+		table.insert(model, {
+			id = "stranger",
+			name = "Stranger",
+			builtin = false,
+			active = false,
+			status = "ok",
+			imported = { key = "k-stranger", author = { kind = "unknown" } },
+		})
+		publish()
+	end,
+}
 ui.command {
 	id = "imported",
 	title = "Ada's template is installed",

@@ -23,7 +23,8 @@
 --                             link; it waits for the consent window unless it's
 --                             signed as yours
 --   state.update(id, device?)  a promise of the same: the update found for it
---   state.check_updates(device?)  a promise: every installed plugin's source
+--   state.check_updates(device?, id?)  a promise: every installed plugin's
+--                           (or plugin `id`'s alone) source
 --                             checked
 --
 -- Plugins are per device. Settings → Plugins can show another of your
@@ -94,7 +95,16 @@ M.waiting = ui.computed(function(): number
 end)
 
 -- Another device's, as the host watches it.
-M.remote = ui.shared("plugins.remote", { state = "idle", list = {} } :: { device: string?, state: string, list: { Item } })
+-- (`store_updates`: which updates that device's store plugins take, as
+-- its list says, when its engine says.)
+M.remote = ui.shared(
+	"plugins.remote",
+	{ state = "idle", list = {} } :: { device: string?, state: string, list: { Item }, store_updates: { device: string?, plugins: { [string]: string }? }? }
+)
+-- Which updates the store's plugins take on this device, as the engine
+-- keeps it: the device's ("newest", the default, or "verified") and each
+-- plugin's own, where it has one (nil: as the device).
+M.store_updates = ui.shared("plugins.store_updates", nil :: { device: string?, plugins: { [string]: string }? }?)
 
 function M.device(): string?
 	local d = M.remote:get().device
@@ -137,12 +147,17 @@ function M.install(from: { path: string?, url: string?, device: string? }): any
 	return ui.call("plugins.install", from)
 end
 
-function M.update(id: string, device: string?): any
+-- (`verified_only`: a one-click update, refused `not_verified` for an
+-- update the store hasn't verified, which asks a question of its own.)
+function M.update(id: string, device: string?, verified_only: boolean?): any
+	if verified_only then
+		return ui.call("plugins.update", { id = id, device = device, verified_only = true })
+	end
 	return ui.call("plugins.update", if device then { id = id, device = device } else id)
 end
 
-function M.check_updates(device: string?): any
-	return ui.call("plugins.check_updates", if device then { device = device } else nil)
+function M.check_updates(device: string?, id: string?): any
+	return ui.call("plugins.check_updates", if device or id then { device = device, id = id } else nil)
 end
 
 function M.open_folder(id: string?)

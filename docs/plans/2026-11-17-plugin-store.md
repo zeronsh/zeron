@@ -500,3 +500,131 @@ Agreed after the plan was first written. Newest last.
     peaks near 72 MB, 0.28 s CPU; hostile shapes stay under 72 MB). Inside a
     package the store also bounds the manifest JSON to 1 MiB and 100,000
     values. Sideloaded packages keep the engine's 50 MB.
+35. **Shapes settled when the site met the edge**:
+    - `icon` and `screenshots` are package-relative paths everywhere (cards,
+      details, submissions); a client fetches them through the files route
+      with the version. Never a URL.
+    - Every time in every store answer is ms since the epoch, account ages
+      included (`owner.created_at`, `publisher.created_at`).
+    - A submission's `plugin` is a `PluginCard`. The admin plugin view uses
+      the `/me/plugins` listing words (`listed | unlisted | suspended`) and
+      gives its reports in the same shape as `/admin/reports`.
+    - Queue items are `{ plugin { id, name }, version, status, prerelease,
+      submitted_at, publisher { id, username } | null, base?, new_asks,
+      checks { ok, warn, fail } }`.
+    - `permissions_diff` carries `tools_changed`, and descriptions in
+      `tools_added`, as the app's own diff does.
+    - Report statuses are `open | actioned | dismissed`. Audit actions are
+      `version.*`, `plugin.*`, `report.*` with `detail` an object.
+    - Pictures the store serves are PNG, JPEG and the icon SVG.
+    - A cookie-authenticated write with a bad token or Origin is `403
+      bad_csrf` on every route, reports included.
+36. **A body that is not the one that was signed is `400 body_mismatch`**,
+    not `401 invalid_signature`. The signature over the claimed hash did
+    verify; the bytes changed on the way (a proxy, a cut upload). A client
+    retries a `body_mismatch`; it treats `invalid_signature` as a refused
+    key. A request whose signature does not verify stays `401
+    invalid_signature`.
+37. **The site's own words are never plugin ids.** The generated data file
+    carries `site_ids` (36 words: `all`, `search`, `publishing`, `admin`, …)
+    beside `reserved_ids` (the three a device refuses). A device runs a
+    plugin with a site id; the store refuses to list it (`id_reserved`), and
+    no reservation lifts that: reserving one answers `400 site_id`. The list
+    is closed once anyone can publish.
+38. **Every paged list carries `total`**: the number of items the query
+    matches, beside `items`, `next_cursor` and `prev_cursor` (the catalog,
+    the admin queue per state, reports, the audit log).
+39. **A `PluginCard` carries `listed_at`**, when the plugin was first listed
+    (ms; null only on a submission's card for a plugin never listed), beside
+    `updated_at`. A list sorted Newest shows it.
+40. **A queue item carries `icon` and `asks_changed`.** `icon` is the
+    version's icon as a package path (null when it has none), as on a
+    `PluginCard`, so the queue draws the tile a reviewer will see on the
+    submission. `asks_changed` is true when, against the last approved
+    version, anything inside an existing ask differs (a host or a program
+    added or dropped) or any tool's description or input changed; false for
+    a first version. `new_asks` stays as it is. The queue flags a row on
+    either, so an update with no flag asks for exactly what the approved
+    version did.
+41. **`permissions_diff` names everything `asks_changed` counts.** A queue
+    item's `asks_changed` is also true when the MCP server (command, args,
+    env), the service, or a granting setting (kind `permission` or `folder`)
+    changed, since the engine's capability record binds them. So a
+    submission's `permissions_diff` carries those too, before and after, in
+    the engine's `digest_diff` shapes and names, so the reviewer's page and
+    a device's consent sheet say the same thing. The flag is never true
+    while the diff names nothing.
+42. **A package whose paths collide once folded is refused everywhere, by
+    one rule.** A device refuses it at parse, before writing, on every disk
+    (`paths_collide`, naming both paths): two paths that fold alike (case,
+    NFC against NFD), a file where another path needs a folder of that
+    name, and any path whose fold is the manifest's or `.source.json`'s.
+    The fold is the store's own (`listing::fold_path`). The edge's
+    `verifyPackage` refuses the same with the same word, held to the shared
+    package vectors, and the listing rule refuses a file and a folder that
+    fold alike too, so the store never approves a package a device will
+    not install. The device's re-scan after writing stays as the backstop.
+43. **A store install over an installed plugin is the person's.** From
+    anyone but the person (this device's app, or another of their devices
+    as the edge verified the link) it is refused `needs_person`, before
+    anything is fetched, and a non-person never sets the pre-release
+    opt-in. `CreateDeployKey` accepts only a step-up begun for it
+    (`StepUp {for: "deploy_key"}`), once. A store record without `bytes`
+    is refused; `bytes` is the read limit. The store client follows no
+    redirect.
+
+### Wing's redirect, Nov 19 (amendments 44 and 45 replace earlier text where they differ)
+
+44. **A deploy key belongs to an account and carries a scope.** It is no
+    longer made for one plugin.
+    - A key has a name, a public key, an expiry (or none), and a scope fixed
+      when it is made: either a list of plugin ids the account owns (one or
+      more), or **all** of the account's plugins, those it publishes later
+      included. A scope is never edited; a different scope is a new key.
+    - No key ever claims a new id: a plugin's first version comes from a
+      signed-in device. A key publishes new versions of plugins in its scope
+      that its account owns, reads `GET /store/v1/me/plugins`, and nothing
+      else. A plugin that leaves the account leaves every scope.
+    - `GET /plugin-keys/:key?plugin=<id>` still answers per plugin: verified
+      only for a plugin in the key's scope.
+    - Routes move from `/store/v1/plugins/:id/keys` to the account:
+      `GET|POST /store/v1/me/keys`, `DELETE /store/v1/me/keys/:key`. Each
+      key answers `{ key, name, scope: { all: true } | { plugins: [id…] },
+      created_at, last_used_at, last_used_plugin, expires_at }`.
+    - Making a key still needs a step-up begun for it (`for: "deploy_key"`),
+      once; the secret is still made on the device, shown once, never sent.
+    - The app lists and makes keys in one place for the account (not on each
+      plugin's Publish page); the web lists them the same way.
+45. **Publishing is immediate; review verifies.** A version that passes the
+    store's automatic checks is listed and installable by everyone at once.
+    A reviewer's decision no longer gates it: it marks the version verified.
+    - A version carries `verification`: `unverified` (no decision yet, or a
+      reviewer declined to verify it) or `verified`, with `verified_at`.
+      A declined version keeps the reviewer's reason and words for its
+      author and for staff; the public sees only that it is not verified.
+    - Version states are now: `listed`, `yanked` (its author stopped new
+      installs), `taken_down` (staff: harmful; blocked on devices as today),
+      `removed`. `pending`, `approved`, `rejected` and `withdrawn` go.
+    - A `PluginCard` gains `verified` (its newest listed version is
+      verified) and `verified_version` (the newest verified listed version,
+      or null). `version` is the newest listed version, verified or not.
+      Every version record and every update offer carries `verified`.
+    - The catalog lists every listed plugin. `verified=1` narrows it to
+      plugins whose newest version is verified. Featured plugins are staff's
+      choice and must have a verified version.
+    - Every listed version of a plugin can be seen and installed, not only
+      the newest: the detail's `versions` lists them all (paged), and the
+      package route serves any listed version.
+    - Updates are offered at once, verified or not, each saying which.
+    - The staff queue is the unverified versions no reviewer has decided,
+      oldest first: Verify, Don't verify (a reason and words to the author;
+      the version stays listed), Take down.
+    - An author's own versions need no private path any more: there is no
+      version only its author can install.
+    - Devices: the store's record says `verified`; the plugin page, the
+      consent sheet and the update sheet say plainly when a version is not
+      verified, and offer the newest verified version where there is one.
+      Installing or updating to an unverified version always asks, even
+      when it asks for nothing new.
+    - Unchanged: the automatic checks at publish, the rate limits, id
+      ownership and release, reports, blocks, the trust anchor.

@@ -1,0 +1,63 @@
+---
+// Stop new installs of, or allow installs again of, one of your versions.
+// A post does it; a visit (a link followed without a script) asks first,
+// as a page of its own. Signed out, it says so and offers sign-in.
+import AskCard from "../../../../../../components/look/AskCard.astro";
+import Failed from "../../../../../../components/look/Failed.astro";
+import Icon from "../../../../../../components/look/Icon.astro";
+import SignInPlease from "../../../../../../components/look/SignInPlease.astro";
+import Store from "../../../../../../layouts/Store.astro";
+import "../../../../../../styles/look/account.css";
+import { AUTHOR_ACTIONS, isAuthorAction } from "../../../../../../lib/store/actions.ts";
+import { done, flashFor, formOf, tokenMatches } from "../../../../../../lib/store/forms.ts";
+import { unbidi } from "../../../../../../lib/store/format.ts";
+import { privatePage, purge } from "../../../../../../lib/store/http.ts";
+import { isPluginId, isVersion, versionParam } from "../../../../../../lib/store/names.ts";
+import { requireSession } from "../../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, action } = Astro.params;
+const version = versionParam(Astro.params.version);
+if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return new Response(null, { status: 404 });
+const back = `/account/plugins/${id}`;
+
+if (Astro.request.method === "POST") {
+  // (A post without a session: off to sign in, and back to this question.)
+  const session = await requireSession(Astro);
+  if (session instanceof Response) return session;
+  const ask = AUTHOR_ACTIONS[action].ask(id, version);
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
+  if (result.ok) await purge(Astro, id);
+  return done(Astro, flashFor(result, ask.flash), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+const edge = Astro.locals.edge;
+const who = await edge.who();
+const session = who.state === "in" ? who.session : null;
+privatePage(Astro);
+if (who.state === "down") Astro.response.status = 503;
+// The question names the plugin as its page does; someone else's is the 404, as there.
+const mine = session ? await edge.myPlugins() : null;
+const plugin = mine?.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine?.ok && !plugin) return new Response(null, { status: 404 });
+const name = unbidi(plugin?.name ?? id);
+const ask = AUTHOR_ACTIONS[action].ask(name, version);
+---
+
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="publish" session={session}>
+  <div class="wrap rpt">
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>{name}</a></nav>
+    {
+      who.state === "down" ? (
+        <Failed level={1} />
+      ) : session ? (
+        <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+      ) : (
+        <SignInPlease what="the plugins you publish" />
+      )
+    }
+  </div>
+</Store>

@@ -1,0 +1,81 @@
+---
+// What a plugin asks for, all of it (its third tab): each ask in the app's
+// words and order (its consent sheet's), with its line, what it names
+// exactly as its manifest writes it, and where in Zeron it reaches; the
+// risky ones last, in the danger's ink. Public, kept as its page is.
+import AppIcon from "../../../components/look/AppIcon.astro";
+import NotHere from "../../../components/look/NotHere.astro";
+import PluginHead from "../../../components/look/PluginHead.astro";
+import PluginTabs from "../../../components/look/PluginTabs.astro";
+import Rail from "../../../components/look/Rail.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/plugin.css";
+import { pluginTag, publicPage } from "../../../lib/store/http.ts";
+import { hueClass } from "../../../lib/store/hue.ts";
+import { details, lines } from "../../../lib/store/permissions.ts";
+import { loadPlugin } from "../../../lib/store/plugin-page.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const asked = Astro.params.id ?? "";
+if (Astro.url.search) return Astro.redirect(`${pluginUrl(asked)}/asks`, 301);
+const page = await loadPlugin(Astro.locals.edge, asked, { limit: 5 });
+if (page.state === "ok") publicPage(Astro, [pluginTag(page.plugin.id)]);
+else Astro.response.status = page.state === "missing" ? 404 : 503;
+const asks = page.state === "ok" ? lines(page.plugin.permissions) : [];
+const where = page.state === "ok" ? details(page.plugin.permissions) : [];
+const risky = asks.filter((l) => l.risky).length;
+const author = page.state === "ok" ? page.plugin.author.username : null;
+---
+
+{
+  page.state === "ok" ? (
+    <Store title={`What ${page.plugin.name} asks for · Plugins · Zeron`} description={`What ${page.plugin.name}, a plugin for Zeron, asks to do, in Zeron's own words.`} canonical={`${pluginUrl(page.plugin.id)}/asks`} current="browse" class={hueClass(page.plugin.id)}>
+      <div class="wrap">
+        <PluginHead plugin={page.plugin} category={page.category} versions={page.versions?.versions ?? page.plugin.versions} latestZeron={page.latestZeron} />
+        <div class="cols2 after-head">
+          <div>
+            <PluginTabs plugin={page.plugin} current="asks" versions={page.versions?.total ?? null} />
+            <p class="vintro">Zeron asks you to allow these when you install it, and again if an update asks for more. They are the words Zeron itself shows you.</p>
+            {risky > 0 && (
+              <p class="warnline">
+                {risky === 1 ? "One thing it asks for gives it a lot of reach." : "Some of what it asks for gives it a lot of reach."} {author ? `Install it only if you trust @${author}.` : "Allow it only if you trust who made it."}
+              </p>
+            )}
+            {asks.length === 0 ? (
+              <p class="asklist-none">It asks for nothing beyond running in its own space.</p>
+            ) : (
+              <ul class="asklist">
+                {asks.map((line) => (
+                  <li class:list={["ar", { risky: line.risky }]}>
+                    <AppIcon name={line.icon} />
+                    <div>
+                      <div class="t">{line.title}{line.risky && <span class="sr-only"> (gives it a lot of reach)</span>}</div>
+                      {line.detail && <small>{line.detail}</small>}
+                      {line.literal && <ul class="literal">{line.literal.map((v) => <li><code>{v}</code></li>)}</ul>}
+                      {line.items && (
+                        <ul class="items">
+                          {line.items.map((item) => <li><code>{item.name}</code>{item.description && <span>{item.description}</span>}</li>)}
+                        </ul>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {where.map((part) => (
+              <section class="where">
+                <h2>{part.title}</h2>
+                <ul class="literal">{part.list.map((v) => <li><code>{v}</code></li>)}</ul>
+              </section>
+            ))}
+          </div>
+          <Rail plugin={page.plugin} onAsks />
+        </div>
+      </div>
+    </Store>
+  ) : (
+    <NotHere state={page.state} retry={`${pluginUrl(asked)}/asks`} />
+  )
+}

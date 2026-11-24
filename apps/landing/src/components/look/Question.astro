@@ -1,0 +1,31 @@
+---
+// A question before something that can't simply be taken back (Stop new
+// installs, Allow installs again), as a dialog: its title, what it does,
+// Cancel first and focused, and the button that does it, in the danger's
+// colour when it's one. Its opener is a link to the same question as a page
+// (AskCard.astro), so without the script nothing is lost; with it
+// (scripts/store.ts), the link opens this.
+import type { Ask } from "../../lib/store/actions.ts";
+import { unbidi } from "../../lib/store/format.ts";
+
+interface Props {
+  id: string;
+  ask: Ask;
+  /** Where the form posts. */
+  action: string;
+  csrf: string;
+}
+const { id, ask, action, csrf } = Astro.props;
+---
+
+<dialog class="question sm" id={id} aria-labelledby={`${id}-title`} closedby="any">
+  <form method="post" action={action}>
+    <input type="hidden" name="csrf" value={csrf} />
+    <h2 id={`${id}-title`}>{unbidi(ask.title)}</h2>
+    {ask.words.map((w) => <p>{w}</p>)}
+    <div class="answers">
+      <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+      <button class:list={["btn", ask.tone === "danger" ? "danger" : "pri"]} type="submit">{ask.confirm}</button>
+    </div>
+  </form>
+</dialog>

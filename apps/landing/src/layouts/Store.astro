@@ -1,0 +1,160 @@
+---
+// Zeron Plugins: the store's pages, as a site of their own (the
+// coordinator's prototype, build.py's wrapper): a top bar (the brand,
+// Discover, Browse, Publish, Review for staff, the search, you), the page,
+// and the foot. No sidebar, no shell.
+//
+// A public page is the same for everyone (kept by shared caches), so who
+// you are and Review are filled in by scripts/store.ts once the page is in;
+// asked with a session cookie, or `session` given (an account or staff page),
+// it is that person's page, never kept, and they are drawn here. On a phone
+// the bar keeps the brand, the search and a menu.
+import Head from "../components/site/Head.astro";
+import Icon from "../components/look/Icon.astro";
+import Icons from "../components/look/Icons.astro";
+import Inks from "../components/look/Inks.astro";
+import ZeronMark from "../components/look/ZeronMark.astro";
+import type { WebSession } from "../lib/store/types.ts";
+import { signInUrl } from "../lib/store/urls.ts";
+import "../styles/look/store.css";
+
+type Section = "browse" | "publish" | "review";
+
+interface Props {
+  title: string;
+  description: string;
+  noindex?: boolean;
+  canonical?: string;
+  /** The bar's place this page is in (none: a page of its own). */
+  current?: Section | null;
+  /** Undefined on a public page (the script fills in who you are); null or a session on a private one. */
+  session?: WebSession | null;
+  /** What the bar's search holds (a search's own page). */
+  query?: string;
+  /** What else the store is narrowed by, kept by the bar's search (it narrows the store in place). */
+  keep?: Record<string, string>;
+  /** The page's own class on <main> (a plugin's hue, say). */
+  class?: string;
+  /** The page has its own search, the one (the store's): the bar's, and on a phone its icon, aren't drawn. */
+  ownSearch?: boolean;
+}
+const { title, description, noindex = false, canonical, current = null, query = "", keep = {}, class: mainClass, ownSearch = false } = Astro.props;
+// A public page asked with a session cookie is drawn for that person (lib/store/http.ts publicPage: never
+// kept): the edge says who (once a request), so the bar is right from the first paint. A cookie that's no
+// one's draws the signed-out bar; an edge that doesn't answer leaves it to the script, as without a cookie.
+const given = Astro.props.session;
+const who = given === undefined && Astro.locals.edge.hasSession ? await Astro.locals.edge.who() : null;
+const session: WebSession | null | undefined = given !== undefined || who === null ? given : who.state === "in" ? who.session : who.state === "out" ? null : undefined;
+const isPublic = session === undefined;
+const staff = session?.roles.includes("admin") ?? false;
+const here = `${Astro.url.pathname}${Astro.url.search}`;
+// (As the script says it on a public page, and as the store says an author: "@ada".)
+const handle = session ? (session.username ? `@${session.username}` : (session.user.name ?? "You")) : "";
+const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
+const SECTIONS: { id: Section; label: string; href: string }[] = [
+  { id: "browse", label: "Browse", href: "/plugins" },
+  { id: "publish", label: "Publish", href: "/account" },
+  { id: "review", label: "Review", href: "/admin/plugins" },
+];
+const shown = (id: Section) => id !== "review" || staff || isPublic;
+const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
+---
+
+<!doctype html>
+<html lang="en" class:list={["store", { "own-search": ownSearch }]}>
+  <head>
+    <Head title={title} description={description} noindex={noindex} canonical={canonical} />
+    <meta name="color-scheme" content="light dark" />
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to the page</a>
+    <Icons />
+    <Inks />
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="/plugins">
+          <ZeronMark pitch={5} />
+          <span>Zeron</span><span class="sep" aria-hidden="true">/</span><span>Plugins</span>
+        </a>
+        <nav class="nav" aria-label="The store">
+          {SECTIONS.filter((s) => shown(s.id)).map((s) => (
+            <a href={s.href} aria-current={s.id === current ? "page" : undefined} hidden={hiddenUntilKnown(s.id)} data-staff={hiddenUntilKnown(s.id) ? "" : undefined}>{s.label}</a>
+          ))}
+        </nav>
+        <div class="grow"></div>
+        <form class="find" role="search" action="/plugins" method="get" data-tidy>
+          <Icon name="search" />
+          <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+          {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+          <kbd class="kbd" aria-hidden="true">/</kbd>
+        </form>
+        <button class="find-icon" type="button" popovertarget="find-menu" aria-label="Search plugins"><Icon name="search" /></button>
+        {(isPublic || !session) && <a class="signin" href={signInUrl(here)} data-signin>Sign in</a>}
+        {(isPublic || session) && (
+          <button class="me" type="button" popovertarget="me-menu" hidden={isPublic} data-me>
+            <span class="face" aria-hidden="true" data-face>{face}</span><span data-handle>{handle}</span><span class="sr-only">: your account</span>
+          </button>
+        )}
+        <button class="menubtn" type="button" popovertarget="nav-menu" aria-label="Menu"><Icon name="menu" /></button>
+      </div>
+    </header>
+
+    {/* The search, on a phone: the bar's one, opened from its icon. */}
+    <div class="menu find-menu" id="find-menu" popover>
+      <form class="find" role="search" action="/plugins" method="get" data-tidy>
+        <Icon name="search" />
+        <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+      </form>
+    </div>
+    {(isPublic || session) && (
+      <div class="menu" id="me-menu" popover>
+        <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>
+        <a href="/account">Your plugins</a>
+        <a href="/account/tokens">Deploy tokens</a>
+        <a href="/plugins/publishing">Publishing guide</a>
+        <hr />
+        <form method="post" action="/auth/web/logout" data-signout>
+          <input type="hidden" name="csrf" value={session?.csrf ?? ""} />
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+    )}
+    <nav class="menu" id="nav-menu" popover aria-label="The store, on a phone">
+      {SECTIONS.filter((s) => shown(s.id)).map((s) => (
+        <a href={s.href} aria-current={s.id === current ? "page" : undefined} hidden={hiddenUntilKnown(s.id)} data-staff={hiddenUntilKnown(s.id) ? "" : undefined}>{s.label}</a>
+      ))}
+      <hr />
+      <a href="/plugins/publishing">Publishing guide</a>
+      {(isPublic || !session) && <a href={signInUrl(here)} data-signin>Sign in</a>}
+      {(isPublic || session) && (
+        <>
+          <a href="/account/tokens" hidden={isPublic} data-signed-in>Deploy tokens</a>
+          <form method="post" action="/auth/web/logout" hidden={isPublic} data-signout>
+            <input type="hidden" name="csrf" value={session?.csrf ?? ""} />
+            <button type="submit">Sign out <span class="t3" data-handle>{handle}</span></button>
+          </form>
+        </>
+      )}
+    </nav>
+
+    <main id="main" class={mainClass}>
+      <slot />
+    </main>
+
+    <footer class="foot">
+      <div class="wrap">
+        <span>Zeron Plugins</span>
+        <a href="/">zeron.sh</a>
+        <a href="/plugins/publishing">Publishing guide</a>
+        <span class="grow"></span>
+        <a href="/privacy">Privacy</a>
+        <a href="/#downloads">Download Zeron</a>
+      </div>
+    </footer>
+    <script>
+      import "../scripts/store.ts";
+    </script>
+  </body>
+</html>

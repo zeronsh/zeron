@@ -1,0 +1,425 @@
+/*
+ * Zeron Plugins: the store's own look, one stylesheet for every page (each
+ * page adds its own beside it). From the coordinator's prototype
+ * (store.css): its tokens, type, top bar, a plugin's tile and stage, the
+ * Verified seal, state pills, buttons, chips, cards, list items, the foot
+ * and the phone rules (720 and under). Light and dark follow the person's
+ * system setting, as the site's pages always have. What the prototype had
+ * no need of, being still, is added in its language: hover, focus and
+ * pressed for everything that acts, forms, menus.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f9f9f8;
+  --surface: #ffffff;
+  --sunken: #f1f1ef;
+  --text: #17171a;
+  --text-2: #56565f;
+  /* (The prototype's #8b8b94 and #0d8a5c, darkened to 4.5:1 on every surface they sit on: bg, surface, sunken, their wash.) */
+  --text-3: #6b6b74;
+  --line: rgba(23, 23, 26, 0.08);
+  --line-2: rgba(23, 23, 26, 0.14);
+  --accent: #6a4bc4;
+  --focus: #6a4bc4;
+  --verified: #08744d;
+  --verified-wash: rgba(8, 116, 77, 0.1);
+  --warn: #8f5400;
+  --warn-wash: rgba(190, 120, 0, 0.12);
+  --danger: #c2372b;
+  --danger-wash: rgba(194, 55, 43, 0.09);
+  --shadow-1: 0 1px 2px rgba(23, 23, 26, 0.05), 0 0 0 1px var(--line);
+  --shadow-2: 0 12px 32px -12px rgba(23, 23, 26, 0.18), 0 2px 6px rgba(23, 23, 26, 0.04), 0 0 0 1px var(--line);
+  --shot: 0 24px 48px -20px rgba(20, 16, 40, 0.35), 0 0 0 1px rgba(23, 23, 26, 0.1);
+  /* A plugin's own colour, from its id (lib/store/hue.ts): l = lightness, c = chroma. */
+  --tile-l: 0.955; --tile-c: 0.035; --ink-l: 0.46; --ink-c: 0.15;
+  --stage-l1: 0.955; --stage-l2: 0.905; --stage-c: 0.05;
+  --sans: var(--font-sans, "Geist", system-ui, sans-serif);
+  --mono: var(--font-mono, "Geist Mono", ui-monospace, monospace);
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0d;
+    --surface: #141416;
+    --sunken: #18181b;
+    --text: #f3f3f4;
+    --text-2: #a8a8b2;
+    --text-3: #8a8a94;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-2: rgba(255, 255, 255, 0.15);
+    --accent: #a892f2;
+    --focus: #a892f2;
+    --verified: #46cc98;
+    --verified-wash: rgba(70, 204, 152, 0.13);
+    --warn: #e3a94b;
+    --warn-wash: rgba(227, 169, 75, 0.14);
+    --danger: #f0776b;
+    --danger-wash: rgba(240, 119, 107, 0.13);
+    --shadow-1: 0 0 0 1px var(--line);
+    --shadow-2: 0 16px 40px -16px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--line-2);
+    --shot: 0 24px 48px -20px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --tile-l: 0.27; --tile-c: 0.045; --ink-l: 0.84; --ink-c: 0.11;
+    --stage-l1: 0.24; --stage-l2: 0.19; --stage-c: 0.05;
+  }
+}
+
+/* A plugin's hue: 24 steps of 15°, one class each (lib/store/hue.ts). */
+.h0 { --h: 0; } .h1 { --h: 15; } .h2 { --h: 30; } .h3 { --h: 45; } .h4 { --h: 60; } .h5 { --h: 75; }
+.h6 { --h: 90; } .h7 { --h: 105; } .h8 { --h: 120; } .h9 { --h: 135; } .h10 { --h: 150; } .h11 { --h: 165; }
+.h12 { --h: 180; } .h13 { --h: 195; } .h14 { --h: 210; } .h15 { --h: 225; } .h16 { --h: 240; } .h17 { --h: 255; }
+.h18 { --h: 270; } .h19 { --h: 285; } .h20 { --h: 300; } .h21 { --h: 315; } .h22 { --h: 330; } .h23 { --h: 345; }
+/* (An icon's ink, by the same step: components/look/Inks.astro.) */
+.ink { flood-color: oklch(var(--ink-l) var(--ink-c) var(--h)); }
+
+* { box-sizing: border-box; margin: 0; }
+html { background: var(--bg); }
+body {
+  font-family: var(--sans); font-size: 15px; line-height: 24px; color: var(--text); background: var(--bg);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "ss01", "cv11";
+  min-height: 100vh; display: flex; flex-direction: column;
+}
+body > main { flex: 1; }
+a { color: inherit; text-decoration: none; }
+svg { display: block; }
+img { max-width: 100%; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+.mono { font-family: var(--mono); font-feature-settings: "zero" 0; }
+.num { font-variant-numeric: tabular-nums; }
+/* Code as typed, never as ligatures (Geist Mono draws `---`, `######` and `~~` as one glyph each). Important: every
+   `font` shorthand resets the ligatures, so a later `.prose code { font: … }` would bring them back. */
+pre, pre *, code, .mono, .fn { font-variant-ligatures: none !important; }
+/* (Its sides alone: a page's own top and bottom, in a stylesheet that may load before this one, stay its own.) */
+.wrap { max-width: 1184px; margin-inline: auto; padding-inline: var(--gutter); }
+
+/* Text lines up with text, not with boxes (Wing's rule). A column's text, every run of it, puts its ink on
+   the column; a box that holds text (a card, a row's wash, a note, a field, a button, a chip, a pill) hangs
+   out past the column by its own inline padding, `--pad`, so its text lands there too. A card of rows hangs
+   by the rows' inset, `--card`. On a phone a box as wide as the column is as wide as the screen: it hangs
+   the whole gutter, with the gutter for its padding (tests/align: the measure of it). */
+:root { --gutter: var(--s32); --card: var(--s24); }
+/* One spacing scale (tests/space.test.ts holds every margin, padding and gap of the look to it), and what each
+   step is for, by proximity: what belongs together sits closer than what doesn't.
+   - inside an item (a name to its byline, an icon to its word): 4 to 8
+   - a label to what it labels: 12
+   - between items (cards in a grid, rows, chips): 16
+   - a section's head to its content, a title block's line to its lead: 16
+   - between groups in a column (the sidebar's, the plugin page's side): 32
+   - a page's title block to its content: 32
+   - between a page's sections: 64
+   A border or a fill goes round one real group only (one plugin, one form, one table), never a page's section. */
+:root {
+  --s4: 4px; --s8: 8px; --s12: 12px; --s16: 16px; --s24: 24px; --s32: 32px; --s48: 48px; --s64: 64px;
+  --in: var(--s8); --label: var(--s12); --items: var(--s16); --head: var(--s16); --groups: var(--s32); --title: var(--s32); --sections: var(--s64);
+}
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: calc(-1 * var(--s4)); overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* An author's words keep their reordering to themselves: a right-to-left override in a name, a report or a note
+   turns nothing around it. */
+.store :where(a, span, b, strong, em, code, bdi, time, label, dt, dd, li, td, th, p, h1, h2, h3, small, blockquote) { unicode-bidi: isolate; }
+.icons { position: absolute; width: 0; height: 0; overflow: hidden; }
+/* (An app icon: components/look/AppIcon.astro.) */
+.glyph { display: inline-block; flex: none; width: 18px; height: 18px; }
+.glyph svg { display: block; width: 100%; height: 100%; }
+
+/* Focus, the one ring: the accent, 2 outside whatever has it, its own corner. In a group whose fills sit 2 px
+   apart, the ring is drawn inside the item, so it never meets a neighbour's hover or the chosen one. */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+:is(.nav, .sort, .catlist, .vmini, .flist, .drop .pop) a:focus-visible, .menu :is(a, button):focus-visible, .item:focus-visible { outline-offset: -2px; }
+:focus:not(:focus-visible) { outline: none; }
+.skip { position: absolute; left: 16px; top: -48px; z-index: 30; padding: var(--s8) var(--s16); border-radius: 10px; background: var(--text); color: var(--bg); font-size: 14px; font-weight: 550; }
+.skip:focus-visible { top: 10px; }
+
+/* ---- top bar ---- */
+/* (The bar is the page's top and scrolls away with it, on every page and every screen: nothing sticks over what you
+   read. What sticks beside it, a rail, the decision, sticks a group's step from the window's top.) */
+.top { position: relative; z-index: 10; background: var(--bg); box-shadow: 0 1px 0 var(--line); }
+.top .wrap { display: flex; align-items: center; height: 60px; gap: var(--s32); }
+.brand { display: flex; align-items: center; gap: var(--s12); font-weight: 600; font-size: 15px; letter-spacing: -0.01em; border-radius: 6px; }
+/* (Its own size, on whole pixels: components/look/ZeronMark.astro.) */
+.brand .mark { flex: none; fill: currentColor; }
+.brand .sep { color: var(--text-3); font-weight: 400; }
+.nav { display: flex; gap: var(--s4); margin-left: var(--s4); }
+.nav a { padding: var(--s8) var(--s12); border-radius: 8px; font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 450; transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.nav a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 60%, transparent); }
+.nav a[aria-current] { color: var(--text); background: var(--sunken); }
+.nav a[hidden] { display: none; }
+.top .grow { flex: 1; }
+.find { position: relative; display: flex; align-items: center; width: 264px; height: 36px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
+.find:hover { box-shadow: 0 0 0 1px var(--line-2); }
+.find:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
+.find > svg { position: absolute; left: 12px; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; pointer-events: none; }
+.find input { flex: 1; min-width: 0; height: 100%; padding: 0 var(--s48) 0 var(--s32); border: 0; background: none; font-size: 14px; color: var(--text); }
+.find input::placeholder { color: var(--text-3); }
+.find input:focus-visible { outline: none; }
+.find input::-webkit-search-cancel-button { display: none; }
+.find .kbd { position: absolute; right: 10px; }
+.kbd { flex: none; font: 500 11px/20px var(--mono); padding: 0 var(--s8); min-width: 20px; text-align: center; border-radius: 6px; color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line-2); }
+.find-icon { display: none; }
+/* (A page with its own search, the store's: the bar's isn't drawn, so there's one.) */
+.own-search .top .find { display: none; }
+.signin { font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: 6px; transition: color 0.12s var(--ease); }
+.signin:hover { color: var(--text); }
+.me { display: flex; align-items: center; gap: var(--s8); height: 36px; padding: 0 var(--s12) 0 var(--s4); margin-right: calc(-1 * var(--s12)); border-radius: 18px; font-size: 14px; font-weight: 500; transition: background-color 0.12s var(--ease); }
+.me:hover, .me[aria-expanded="true"] { background: var(--sunken); }
+.me[hidden] { display: none; }
+.me .face { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-size: 12px; font-weight: 600; color: #fff; background: linear-gradient(135deg, oklch(0.62 0.14 300), oklch(0.6 0.16 20)); }
+.menubtn { display: none; }
+
+/* A menu that opens over the page (the account's, and the phone's): the platform's popover. */
+.menu { position: fixed; inset: auto; margin: 0; padding: var(--s8); min-width: 220px; border: 0; border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-2); }
+.menu:popover-open { display: flex; flex-direction: column; }
+/* (The two menus of choices, yours and the phone's: 2 px between any two, so a hovered one never meets another.) */
+#me-menu:popover-open, #nav-menu:popover-open { gap: var(--s4); }
+.menu a, .menu button { display: flex; align-items: center; gap: var(--s12); width: 100%; height: 36px; padding: 0 var(--s12); border-radius: 9px; font-size: 14px; font-weight: 450; color: var(--text-2); text-align: left; }
+.menu a:hover, .menu button:hover { background: var(--sunken); color: var(--text); }
+.menu a[aria-current] { color: var(--text); font-weight: 550; }
+.menu svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.menu .who { padding: var(--s8) var(--s12) var(--s12); font-size: 13px; line-height: 18px; color: var(--text-3); }
+.menu .who b { display: block; font-size: 14px; color: var(--text); font-weight: 550; }
+.menu hr { height: 1px; margin: var(--s8) var(--s4); border: 0; background: var(--line); }
+.menu form { display: contents; }
+.menu [hidden] { display: none; }
+#me-menu { top: 56px; right: max(20px, calc((100vw - 1184px) / 2 + 22px)); }
+
+/* ---- type ---- */
+h1 { font-size: 52px; line-height: 56px; font-weight: 600; letter-spacing: -0.04em; }
+/* (A heading's first line drawn its first letter's side bearing left, in 64ths of its em: its ink on the column.
+   lib/store/bearing.ts. A first line only: a line it wraps to starts with another letter, on its own box.) */
+.lsb-n1 { text-indent: calc(1em / 64); } .lsb-1 { text-indent: calc(-1em / 64); } .lsb-2 { text-indent: calc(-2em / 64); }
+.lsb-3 { text-indent: calc(-3em / 64); } .lsb-4 { text-indent: calc(-4em / 64); } .lsb-5 { text-indent: calc(-5em / 64); }
+h2 { font-size: 21px; line-height: 28px; font-weight: 600; letter-spacing: -0.02em; }
+h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.005em; }
+.lead { font-size: 17px; line-height: 26px; color: var(--text-2); letter-spacing: -0.005em; }
+.small { font-size: 13px; line-height: 20px; }
+.micro { font-size: 12px; line-height: 16px; }
+.t2 { color: var(--text-2); } .t3 { color: var(--text-3); }
+.name { overflow-wrap: anywhere; }
+/* A word too long for any column breaks inside itself, evenly where its line is balanced (Words.astro). */
+.lw { word-break: break-all; }
+
+/* A block of code (components/look/CodeBlock.astro; the guide's, Review's before and after): a head (what it is, Copy), then the code; one line round it
+   (a shadow, so it takes no room and the words sit on the column), its body a step off the page; it hangs outside
+   the text column by its padding. */
+.codeblock { --pad: var(--s16); margin: var(--s16) calc(-1 * var(--pad)) 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; background: var(--surface); }
+.cb-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); height: 40px; padding: 0 var(--s4) 0 var(--pad); border-bottom: 1px solid var(--line); }
+.cb-label { font: 500 13px/20px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-copy { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.cb-copy:hover { color: var(--text); background: var(--sunken); }
+.cb-copy.is-done { color: var(--verified); }
+.cb-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.codeblock pre { margin: 0; padding: var(--s16) var(--pad); overflow-x: auto; font: 450 13.5px/24px var(--mono); color: var(--text); white-space: pre; }
+.codeblock pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* ---- a plugin's tile and stage ---- */
+.tile {
+  flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 27%; overflow: hidden;
+  background: oklch(var(--tile-l) var(--tile-c) var(--h)); color: oklch(var(--ink-l) var(--ink-c) var(--h));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 12%, transparent);
+  font-size: 19px; line-height: 1; font-weight: 600; letter-spacing: -0.01em; user-select: none;
+}
+.tile svg { width: 100%; height: 100%; }
+/* (In the dark, the tile is its hue mixed a little into the surface, a line of it round the tile, the glyph its
+   light step: a colour that reads as the plugin's, not as mud. In the light it stays its pale wash.) */
+@media (prefers-color-scheme: dark) {
+  .tile {
+    background: color-mix(in oklab, oklch(0.7 0.14 var(--h)) 14%, var(--surface));
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, oklch(0.7 0.14 var(--h)) 24%, var(--surface));
+  }
+}
+.tile.s { width: 32px; height: 32px; font-size: 14px; } .tile.ms { width: 40px; height: 40px; font-size: 17px; } .tile.xs { width: 22px; height: 22px; font-size: 10px; } .tile.l { width: 56px; height: 56px; font-size: 24px; } .tile.xl { width: 80px; height: 80px; font-size: 34px; }
+.tile.xxl { width: 112px; height: 112px; font-size: 48px; box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 14%, transparent), 0 18px 40px -18px color-mix(in oklch, oklch(var(--ink-l) var(--ink-c) var(--h)) 45%, transparent); }
+.stage {
+  position: relative; overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 85% 0%, oklch(var(--stage-l1) calc(var(--stage-c) * 1.5) calc(var(--h) + 38)) 0%, transparent 60%),
+    linear-gradient(160deg, oklch(var(--stage-l1) var(--stage-c) var(--h)), oklch(var(--stage-l2) calc(var(--stage-c) * 1.3) calc(var(--h) - 14)));
+}
+.stage::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 1px color-mix(in oklch, oklch(var(--ink-l) var(--ink-c) var(--h)) 10%, transparent); border-radius: inherit; pointer-events: none; }
+/* A picture the plugin ships, set on its colour as a window would be. */
+.stage .shot { position: absolute; display: block; border-radius: 12px; box-shadow: var(--shot); object-fit: cover; object-position: top left; background: var(--surface); }
+/* No pictures: its tile, large, on its colour. */
+.stage .alone { position: absolute; inset: 0; display: grid; place-items: center; }
+
+/* ---- verified ---- */
+.seal { display: inline-block; width: 18px; height: 18px; color: var(--verified); flex: none; vertical-align: -3px; }
+.seal path:first-child { fill: currentColor; }
+.seal path:last-child { fill: none; stroke: var(--surface); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.seal.s { width: 15px; height: 15px; vertical-align: -2px; } .seal.l { width: 26px; height: 26px; vertical-align: -3px; }
+.state { --pad: var(--s8); display: inline-flex; align-items: center; gap: var(--s8); height: 24px; padding: 0 var(--pad); border-radius: 12px; font-size: 12px; font-weight: 550; letter-spacing: 0.005em; white-space: nowrap; }
+.state.ok { color: var(--verified); background: var(--verified-wash); }
+.state.no { color: var(--warn); background: var(--warn-wash); }
+.state.bad { color: var(--danger); background: var(--danger-wash); }
+.state.quiet { color: var(--text-2); background: var(--sunken); }
+.state .seal { width: 14px; height: 14px; vertical-align: 0; }
+
+/* ---- buttons, chips, links ---- */
+.btn { --pad: var(--s16); display: inline-flex; align-items: center; justify-content: center; gap: var(--s8); height: 40px; padding: 0 var(--pad); border-radius: 11px; font-size: 14px; font-weight: 550; letter-spacing: -0.005em; white-space: nowrap; transition: background-color 0.12s var(--ease), box-shadow 0.12s var(--ease), color 0.12s var(--ease), transform 0.08s var(--ease); }
+.btn:active:not([aria-disabled]) { transform: translateY(0.5px) scale(0.99); }
+.btn.pri { background: var(--text); color: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.14); }
+.btn.pri:hover { background: color-mix(in srgb, var(--text) 86%, var(--bg)); }
+.btn.sec { background: var(--surface); box-shadow: var(--shadow-1); }
+.btn.sec:hover { box-shadow: var(--shadow-2); }
+.btn.ghost { --pad: var(--s12); color: var(--text-2); }
+.btn.ghost:hover { color: var(--text); background: var(--sunken); }
+.btn.lg { --pad: var(--s24); height: 46px; font-size: 15px; border-radius: 13px; }
+.btn.sm { --pad: var(--s12); height: 32px; font-size: 13px; border-radius: 9px; }
+.btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+/* Zeron's mark keeps its own whole-pixel size, filled, never stroked (an icon's stroke ran its cells together). */
+.btn svg.mark, svg.mark { width: auto; height: auto; fill: currentColor; stroke: none; }
+/* (On a 1x screen its one-pixel gaps are snapped to the pixel grid; at 2x and over, its corners keep their curve.) */
+@media (max-resolution: 1.5dppx) { svg.mark { shape-rendering: crispEdges; } }
+.btn[aria-disabled] { color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line); background: none; cursor: default; }
+.chip { --pad: var(--s12); display: inline-flex; align-items: center; gap: var(--s8); height: 32px; padding: 0 var(--pad); border-radius: 16px; font-size: 13px; font-weight: 500; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
+.chip:hover { color: var(--text); background: var(--sunken); }
+.chip:active { background: color-mix(in srgb, var(--sunken) 70%, var(--line-2)); }
+.chip[aria-current], .chip.solid { background: var(--text); color: var(--bg); box-shadow: none; }
+.chip[aria-current]:hover, .chip.solid:hover { background: color-mix(in srgb, var(--text) 86%, var(--bg)); }
+.chip b { font-weight: 500; color: var(--text-3); }
+.tag { --pad: var(--s8); display: inline-flex; align-items: center; height: 24px; padding: 0 var(--pad); border-radius: 7px; font-size: 12px; color: var(--text-2); background: var(--sunken); }
+a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 70%, var(--line-2)); }
+.link { color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); transition: box-shadow 0.12s var(--ease); }
+.link:hover { box-shadow: 0 1px 0 var(--text-3); }
+.more { display: inline-flex; align-items: center; gap: var(--s4); font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: 6px; transition: color 0.12s var(--ease); }
+.more:hover { color: var(--text); }
+.more svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease); }
+.more:hover svg { transform: translateX(2px); }
+
+/* ---- a command to copy (Discover, Your plugins, New key) ---- */
+.cmd { --pad: var(--s16); display: inline-flex; align-items: center; gap: var(--s4); height: 40px; padding: 0 var(--s4) 0 var(--pad); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-1); flex: none; }
+.cmd code { font: 500 13px/1 var(--mono); white-space: nowrap; }
+.cmd em { font-style: normal; color: var(--text-3); }
+.cmd button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.cmd button:hover { color: var(--text); background: var(--sunken); }
+.cmd button.is-done { color: var(--verified); }
+.cmd svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---- a danger button, a form's line, a page's question ---- */
+/* (Its words in the page's own ground: 4.6:1 on light's red, 7:1 on dark's.) */
+.btn.danger { background: var(--danger); color: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
+.btn.danger:hover { background: color-mix(in srgb, var(--danger) 88%, #000); }
+.flash { margin-top: var(--s24); margin-inline: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; font-size: 14px; line-height: 20px; background: var(--sunken); color: var(--text-2); }
+.flash.ok { background: var(--verified-wash); color: var(--verified); }
+.flash.bad { background: var(--danger-wash); color: var(--danger); }
+.flash.info { background: var(--warn-wash); color: var(--warn); }
+/* What to mind, beside what it's about. (A callout is as wide as its column's boxes: it hangs both sides by its
+   padding, its words on the column's two edges. tests/align.test.ts holds every callout to it.) */
+.warnline { margin-top: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; }
+
+/* ---- surfaces ---- */
+.card { background: var(--surface); border-radius: 18px; box-shadow: var(--shadow-1); overflow: hidden; }
+a.card { transition: box-shadow 0.16s var(--ease), transform 0.16s var(--ease); }
+a.card:hover { box-shadow: var(--shadow-2); }
+a.card:active { transform: translateY(0.5px); }
+a.card:focus-visible { outline-offset: 3px; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s16); margin-bottom: var(--s16); }
+.sec-head p { margin-top: var(--s4); }
+
+/* ---- a plugin as a line in a list ---- */
+.item { display: flex; align-items: center; gap: var(--s16); padding: var(--s12) var(--s16); border-radius: 14px; margin: 0 calc(-1 * var(--s16)); transition: background-color 0.12s var(--ease), box-shadow 0.12s var(--ease); }
+.item:hover { background: var(--surface); box-shadow: var(--shadow-1); }
+.item:active { box-shadow: 0 0 0 1px var(--line-2); }
+.item .txt { flex: 1; min-width: 0; }
+.item .nm { display: flex; align-items: center; gap: var(--s8); font-weight: 550; letter-spacing: -0.005em; min-width: 0; }
+.item .nm .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .sm { color: var(--text-2); font-size: 14px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .meta { flex: none; text-align: right; color: var(--text-3); font-size: 13px; line-height: 20px; }
+.rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); }
+
+/* Someone's words, quoted: a reviewer's note, why staff stopped a version. */
+.said-was { margin: 0 calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.said-was footer { margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); }
+/* A form's fields, in a question's dialog, its card as a page (AskCard), or a report's page: each a box that holds text,
+   so it hangs by its padding, its words on the form's column. */
+:is(.question, .askcard) .body { display: grid; gap: var(--s16); margin-top: var(--s16); }
+:is(.question, .askcard, .rpt-form) .field-label { display: block; padding: 0; margin-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+:is(.question, .askcard, .rpt-form) .field { position: relative; }
+:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input) { --pad: var(--s16); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); padding: var(--s8) var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+:is(.question, .askcard, .rpt-form) .field select { appearance: none; padding-right: var(--s32); height: 40px; }
+:is(.question, .askcard, .rpt-form) .field textarea { resize: vertical; min-height: 96px; }
+:is(.question, .askcard, .rpt-form) .field :is(select, textarea, input):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+:is(.question, .askcard, .rpt-form) .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
+:is(.question, .askcard, .rpt-form) .field-hint { margin-top: var(--s8); font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+.askcard .field input { height: 40px; }
+:is(.askcard, .rpt-form) .field input::placeholder, :is(.askcard, .rpt-form) .field textarea::placeholder { color: var(--text-3); }
+.askcard .body { margin-top: var(--s24); }
+/* Choices, one of which: its mark hung on the column's edge, its words beside it. */
+.choices { margin: 0; padding: 0; border: 0; min-width: 0; }
+.choices .opt { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: var(--s12); align-items: start; padding: var(--s8) 0; cursor: pointer; }
+.choices .opt input { width: 16px; height: 16px; margin: var(--s4) 0 0; accent-color: var(--text); }
+.choices .opt b { display: block; font-size: 14px; line-height: 20px; font-weight: 500; }
+.choices .opt small { display: block; font-size: 13px; line-height: 18px; color: var(--text-3); }
+/* A question before doing something (scripts/store.ts opens it; its opener is the same question as a page). */
+dialog.question { margin: auto; width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: var(--s24); border: 0; border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--line); overflow: auto; }
+dialog.question.sm { width: min(440px, calc(100vw - 32px)); }
+dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
+/* (Named in the address with no script to open it: shown over the page, in place.) */
+dialog.question:target:not([open]) { display: block; position: fixed; inset: 0; height: fit-content; z-index: 40; }
+.question h2 { font-size: 19px; line-height: 26px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.question form > p { margin-top: var(--s8); font-size: 14px; line-height: 21px; color: var(--text-2); }
+.question .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s24); }
+@media (max-width: 720px) {
+  .question .answers { flex-direction: column-reverse; }
+  .question .answers .btn { width: 100%; }
+}
+/* A list's pages: Previous, where you are, Next (Browse, Versions, the queue). */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); margin-top: var(--s32); padding-top: var(--s24); box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
+/* A page's own word when there's nothing, or the store didn't answer (components/look/Empty.astro): centred in its
+   area, a section and a half above and below; where it ends the page, the foot takes that as its own step. */
+.empty { display: flex; flex-direction: column; align-items: center; padding-block: calc(var(--s64) + var(--s32)); text-align: center; }
+.empty-i { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: var(--sunken); color: var(--text-2); }
+.empty-i svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+main .empty :is(h1, h2) { margin-top: var(--s16); font-size: 18px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.empty p { max-width: 440px; margin-top: var(--s4); color: var(--text-2); text-wrap: balance; overflow-wrap: anywhere; }
+.empty .btn { margin-top: var(--s24); }
+main:has(> .wrap > .empty:last-child) + .foot { margin-top: 0; }
+/* (A box that begins a line on the column hangs out by its padding: its words on the column. In a row of words
+   and pills that may wrap, every pill hangs and the row's gap grows by as much: the pill a line begins with
+   hangs, the rest keep their gap.) */
+.pills { --pill-gap: var(--s12); column-gap: calc(var(--pill-gap) + var(--s8)); }
+.pills > .state { margin-left: calc(-1 * var(--s8)); }
+/* (A list's pages: Previous hangs at the column's start, Next at its end.) */
+.pager > :first-child { margin-left: calc(-1 * var(--pad)); }
+.pager > :last-child { margin-right: calc(-1 * var(--pad)); }
+.hang { margin-left: calc(-1 * var(--pad)); }
+
+.foot { margin-top: var(--s64); padding: var(--s32) 0 var(--s48); box-shadow: 0 -1px 0 var(--line); color: var(--text-3); font-size: 13px; line-height: 20px; }
+.foot .wrap { display: flex; flex-wrap: wrap; gap: var(--s8) var(--s24); }
+.foot a { border-radius: 4px; transition: color 0.12s var(--ease); }
+.foot a:hover { color: var(--text); }
+.foot .grow { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; }
+}
+
+/* ---- between: a tablet's width, the bar's search narrower ---- */
+@media (max-width: 960px) and (min-width: 721px) {
+  .top .wrap { gap: var(--s24); }
+  .find { width: 176px; }
+}
+
+/* ---- phone ---- */
+.ph-only { display: none; }
+@media (max-width: 720px) {
+  :root { --gutter: var(--s24); --card: var(--gutter); }
+  /* (As wide as the column, as wide as the screen.) */
+  .flash, .warnline, .said-was { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
+  .top .wrap { height: 56px; gap: var(--s8); }
+  .nav, .signin, .find { display: none; }
+  .find-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: var(--text); }
+  .own-search .find-icon { display: none; }
+  .find-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+  .menubtn { display: grid; place-items: center; width: 40px; height: 40px; margin-right: calc(-1 * var(--s12)); border-radius: 10px; }
+  .menubtn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+  .menubtn:hover, .find-icon:hover { background: var(--sunken); }
+  .me { display: none; }
+  #nav-menu { top: 52px; right: 12px; left: 12px; min-width: 0; }
+  h1 { font-size: 36px; line-height: 40px; }
+  .lead { font-size: 16px; line-height: 24px; }
+  .foot { margin-top: var(--s64); }
+  .foot .wrap { gap: var(--s12) var(--s24); }
+  .foot .grow { flex-basis: 100%; height: 0; }
+  .ph-only { display: revert; }
+  .wide-only { display: none !important; }
+}

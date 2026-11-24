@@ -14,6 +14,7 @@
 local toast = require("@ds/toast")
 local plugins = require("@app/screens/plugins/state")
 local templates = require("@app/screens/templates/state")
+local mcp = require("@account/mcp")
 
 -- What you put away, by the notice's key (a plugin's holds its hash, so a
 -- changed one speaks again).
@@ -25,6 +26,10 @@ toast.action("plugins.review", function(id: string)
 end)
 toast.action("templates.review", function(name: string)
 	templates.review(name)
+end)
+-- (What an agent asked of the MCP servers: answered in Settings → MCP.)
+toast.action("mcp.review", function(_id: string)
+	require("@app/screens/shell/route").settings("mcp")
 end)
 
 type Kind = {
@@ -38,6 +43,8 @@ type Kind = {
 	waiting: () -> { any },
 	review: string,
 	body: Message?,
+	-- Its notice's title, when not "… is waiting for you".
+	title: ((it: any) -> Message)?,
 }
 
 local KINDS: { Kind } = {
@@ -77,6 +84,32 @@ local KINDS: { Kind } = {
 		review = "templates.review",
 		body = ui.t("plugins.init.template_waiting_body"),
 	},
+	{
+		group = "mcp-requests",
+		prefix = "mcp:",
+		ready = function(): boolean
+			return mcp.now:get().loaded == true
+		end,
+		waiting = function(): { any }
+			local out = {}
+			for _, r in mcp.now:get().requests or {} do
+				if r.status == "pending" then
+					table.insert(out, { key = `mcp:{r.id}`, name = r.title, value = r.id, action = r.action, enabled = r.enabled })
+				end
+			end
+			return out
+		end,
+		review = "mcp.review",
+		body = ui.t("settings.mcp.requests.notice_body"),
+		title = function(it: any): Message
+			if it.action == "remove" then
+				return ui.t("settings.mcp.requests.notice_remove", { name = it.name })
+			elseif it.action == "setEnabled" then
+				return ui.t(if it.enabled then "settings.mcp.requests.notice_enable" else "settings.mcp.requests.notice_disable", { name = it.name })
+			end
+			return ui.t("settings.mcp.requests.notice_add", { name = it.name })
+		end,
+	},
 }
 
 -- What each kind's notices are now, from what's waiting and not put away.
@@ -85,7 +118,7 @@ local function notices(kind: Kind, left: { any }): { toast.Toast }
 	for _, it in left do
 		table.insert(out, {
 			key = it.key,
-			title = ui.t("plugins.init.waiting", { name = it.name }),
+			title = if kind.title then kind.title(it) else ui.t("plugins.init.waiting", { name = it.name }),
 			body = kind.body,
 			tone = "info",
 			duration = 0,

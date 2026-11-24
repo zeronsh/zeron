@@ -1,0 +1,110 @@
+---
+// Report a listed plugin to the people who review them. Signed in, so a
+// report has someone behind it; the plugin's page itself stays the same
+// for everyone (and cached), so the thanks are said here.
+import { reportReasonWords, store } from "../../../lib/store/words.ts";
+import Flash from "../../../components/look/Flash.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Tile from "../../../components/look/Tile.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import { lsb } from "../../../lib/store/bearing.ts";
+import { unbidi } from "../../../lib/store/format.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { hadSession, resumed, signInAndResume } from "../../../lib/store/resume.ts";
+import { requireSession } from "../../../lib/store/session.ts";
+import { REPORT_REASONS } from "../../../lib/store/types.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const here = `${pluginUrl(id)}/report`;
+const session = await requireSession(Astro);
+if (session instanceof Response) {
+  // Signed out while writing: sign in, and come back to the report as it was.
+  if (Astro.request.method === "POST" && hadSession(Astro.request)) return signInAndResume(Astro, here, await formOf(Astro.request), ["reason", "text"]);
+  return session;
+}
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
+  const reason = field(form, "reason");
+  if (!(REPORT_REASONS as readonly string[]).includes(reason)) return done(Astro, "bad_input", here);
+  const result = await Astro.locals.edge.report(id, { reason, text: field(form, "text", 2000) }, session.csrf);
+  return done(Astro, flashFor(result, "report_sent"), here);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+const result = await Astro.locals.edge.plugin(id);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const flash = takeFlash(Astro.cookies);
+const sent = flash?.word === "report_sent";
+const plugin = result.ok ? result.data : null;
+
+/** Each reason as the app's report sheet names it, and a line on what it covers. */
+const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
+  malware: "It steals, spies, or does damage.",
+  misleading: "It asks for or does more than it tells you.",
+  broken: "It fails, or breaks part of Zeron.",
+  copyright: "It copies someone's code, art or brand without leave.",
+  other: "Tell us below.",
+};
+---
+
+<Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current="browse" session={session}>
+  {/* (One centred column, no box round it, as GitHub's report flow: whom it's about, why, what you saw, send.) */}
+  <div class="wrap rpt">
+    <nav class="crumbs" aria-label="Where this is">
+      <a href="/plugins">Plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
+    </nav>
+    <Flash flash={sent ? null : flash} />
+    {
+      sent ? (
+        <section class="rpt-done" role="status">
+          <span class="rpt-ok" aria-hidden="true"><Icon name="check" /></span>
+          <h1>Thanks — the reviewers will read it.</h1>
+          <p>If it needs to go, it goes from the store and from people's devices.</p>
+          <a class="back-link" href={pluginUrl(id)}><Icon name="left" />Back to {unbidi(plugin?.name ?? "the plugin")}</a>
+        </section>
+      ) : (
+        <form method="post" action={here} class="rpt-form">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="rpt-who">
+            {plugin && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="ms" />}
+            <div>
+              <h1 class={lsb(store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) }))}>{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
+              {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
+            </div>
+          </div>
+          <fieldset class="rpt-why">
+            <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
+            {/* (Each reason a card to choose: its words, then its radio at the right; the chosen one ringed.) */}
+            {REPORT_REASONS.map((r) => (
+              <label class="rcard">
+                <span class="rc-words"><b>{reportReasonWords(r)}</b><small>{ABOUT[r]}</small></span>
+                <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
+              </label>
+            ))}
+          </fieldset>
+          <div class="rpt-more">
+            <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
+            <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
+            <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
+          </div>
+          {/* (Sending a report destroys nothing: the store's primary button, not the danger's.) */}
+          <div class="answers">
+            <a class="btn sec" href={pluginUrl(id)}>Cancel</a>
+            <button class="btn pri" type="submit">{store("plugins.store.report.send")}</button>
+          </div>
+        </form>
+      )
+    }
+  </div>
+</Store>

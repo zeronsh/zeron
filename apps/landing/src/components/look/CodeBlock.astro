@@ -1,0 +1,24 @@
+---
+// A block of code in the guide, as Vercel's docs draw one: a head with what
+// it is (Terminal, or the file's name) and a copy button, then the code. The
+// button copies the code's own words (scripts/store.ts, data-copy-of): the
+// words are on the page once. One border round the one block.
+import Icon from "./Icon.astro";
+
+interface Props {
+  /** "Terminal", or the file's name. */
+  label: string;
+  code: string;
+  /** Unique on the page: the copy button names the code by it. */
+  id: string;
+}
+const { label, code, id } = Astro.props;
+---
+
+<figure class="codeblock">
+  <figcaption class="cb-head">
+    <span class="cb-label">{label}</span>
+    <button type="button" class="cb-copy" data-copy-of={id} aria-label={`Copy ${label === "Terminal" ? "the commands" : label}`}><Icon name="copy" /></button>
+  </figcaption>
+  <pre tabindex="0"><code id={id}>{code}</code></pre>
+</figure>

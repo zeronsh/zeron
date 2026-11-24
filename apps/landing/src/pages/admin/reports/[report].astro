@@ -1,0 +1,29 @@
+---
+// Close a report: dismissed, or acted on, with a note (not destructive: no
+// question first). A post does it. A visit is a post that came back through
+// sign-in (the middleware's admin gate sent it there with what was typed):
+// it goes on to the reports, the note filled in on that report's row.
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { report } = Astro.params;
+if (!report || !/^[\w-]{1,64}$/.test(report)) return new Response(null, { status: 404 });
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+if (Astro.request.method === "GET") {
+  const back = new URLSearchParams({ report });
+  const note = Astro.url.searchParams.get("note");
+  if (note) back.set("note", note.slice(0, 500));
+  return Astro.redirect(`/admin/reports?${back}`, 303);
+}
+if (Astro.request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+const form = await formOf(Astro.request);
+if (!form || !tokenMatches(form, session)) return done(Astro, "expired", "/admin/reports");
+const resolution = field(form, "resolution");
+if (resolution !== "dismissed" && resolution !== "actioned") return done(Astro, "bad_input", "/admin/reports");
+const result = await Astro.locals.edge.admin(`reports/${encodeURIComponent(report)}/resolve`, { resolution, note: field(form, "note", 500) }, session.csrf);
+return done(Astro, flashFor(result, "report_resolved"), "/admin/reports");
+---

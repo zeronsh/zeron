@@ -1,0 +1,71 @@
+---
+// A package's files as folders and files (folders open), each a link to it
+// in the viewer; what changed since the last approved version marked.
+import type { Change, TreeNode } from "../../lib/store/review.ts";
+import Glyph from "../ui/Glyph.astro";
+
+interface Props {
+  nodes: TreeNode[];
+  /** The file shown. */
+  current: string | null;
+  href: (path: string) => string;
+  changes?: Map<string, Change>;
+}
+const { nodes, current, href } = Astro.props;
+const changes: Map<string, Change> = Astro.props.changes ?? new Map();
+const MARK: Record<Change, string> = { added: "A", modified: "M", removed: "D" };
+const WORD: Record<Change, string> = { added: "added", modified: "changed", removed: "removed" };
+---
+
+<ul class="tree" role="list">
+  {
+    nodes.map((node) =>
+      node.path === null ? (
+        <li>
+          <details open>
+            <summary>
+              <Glyph name="alt-arrow-down" size={12} class="twist" />
+              <Glyph name="folder" size={14} />
+              <span class="name">{node.name}</span>
+            </summary>
+            <Astro.self nodes={node.children} current={current} href={href} changes={changes} />
+          </details>
+        </li>
+      ) : (
+        <li>
+          <a href={href(node.path)} aria-current={node.path === current ? "page" : undefined} class:list={["file", changes.get(node.path)]}>
+            <Glyph name={node.file?.binary ? "danger-triangle" : "document"} size={14} />
+            <span class="name">{node.name}</span>
+            {((change) =>
+              change && (
+                <span class="mark" title={WORD[change]}>
+                  {MARK[change]}
+                  <span class="sr-only"> ({WORD[change]})</span>
+                </span>
+              ))(changes.get(node.path))}
+          </a>
+        </li>
+      ),
+    )
+  }
+</ul>
+
+<style>
+  .tree { display: grid; gap: 1px; font-size: 13px; }
+  .tree .tree { margin-left: 13px; padding-left: 8px; border-left: 1px solid var(--line); }
+  summary, .file { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; color: var(--text-2); border-radius: var(--radius-md); cursor: pointer; transition: background-color 0.12s, color 0.12s; }
+  summary { list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary:hover, .file:hover { color: var(--text); background: var(--hover); }
+  details:not([open]) > summary :global(.twist) { rotate: -90deg; }
+  summary :global(.twist) { color: var(--text-3); transition: rotate 0.15s; }
+  .file { padding-left: 26px; }
+  .file[aria-current="page"] { color: var(--text); background: var(--selected); }
+  /* (A name a reviewer reads whole: a long one wraps.) */
+  .name { min-width: 0; overflow-wrap: anywhere; }
+  .mark { margin-left: auto; font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .added .mark { color: var(--diff-added); }
+  .modified .mark { color: var(--tone-warning); }
+  .removed .mark { color: var(--diff-removed); }
+  .removed .name { text-decoration: line-through; color: var(--text-3); }
+</style>

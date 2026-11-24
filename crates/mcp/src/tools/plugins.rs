@@ -174,7 +174,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,39}$", "description": "Folder and manifest id, e.g. focus." },
                     "name": { "type": "string", "description": "Display name, e.g. Focus." },
                     "description": { "type": "string" },
-                    "permissions": { "type": "array", "items": { "type": "string" } }
+                    "permissions": { "type": "array", "items": { "type": "string" } },
+                    "settings_page": { "type": "boolean", "description": "Start it with a settings page of its own (settings_page.luau, zeron.settings_page), built as Zeron's pages are: change it from there. See the guide's \"Settings pages\"." }
                 },
                 "required": ["id", "name"]
             }),
@@ -186,12 +187,14 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: PLUGIN_STATUS,
-            description: "Where a Zeron plugin's UI landed, to check your work without a person: its status (on, off, pending review, tampered, broken, and why), what it was allowed, and, from Zeron's window on this device, each zeron.place it made (its selector, how, how many elements it matched and their boxes in the window), what its row in Settings says (a node that needs what its place doesn't give, places this template doesn't have, an error that stopped it) and its pages. With snapshot: true, also a PNG of the window cut to around its nodes (the whole window when none shows): read the file at `snapshot` to look. Edit the plugin, save, and ask again.",
+            description: "Where a Zeron plugin's UI landed, to check your work without a person: its status (on, off, pending review, tampered, broken, and why), what it was allowed, and, from Zeron's window on this device, each zeron.place it made (its selector, how, how many elements it matched and their boxes in the window), what its row in Settings says (a node that needs what its place doesn't give, places this template doesn't have, an error that stopped it) and its pages. With snapshot: true, also a PNG of the window cut to around its nodes (the whole window when none shows): read the file at `snapshot` to look. With page: \"settings\", its settings page instead: the PNG is the page as Settings shows it, when the window shows it (open: true opens Settings on it first; the window is never moved otherwise) (Zeron's header and declared rows, then what zeron.settings_page draws), and `hints` lists what its code uses off Zeron's design system (raw colours, sizes, corners or spacing where a token goes), to compare with Zeron's own pages. Edit the plugin, save, and ask again.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "The plugin's id, from list_plugins." },
-                    "snapshot": { "type": "boolean", "description": "Also save a picture of where it shows." }
+                    "snapshot": { "type": "boolean", "description": "Also save a picture of where it shows." },
+                    "page": { "type": "string", "enum": ["settings"], "description": "\"settings\": its settings page (with snapshot, a picture of it as Settings shows it), and hints of what it uses off Zeron's design system." },
+                    "open": { "type": "boolean", "description": "With page: \"settings\" and snapshot: open Settings on its page in the window first, to picture it." }
                 },
                 "required": ["id"]
             }),
@@ -380,6 +383,8 @@ struct CreatePluginArgs {
     name: String,
     description: Option<String>,
     permissions: Option<Vec<String>>,
+    #[serde(default)]
+    settings_page: bool,
 }
 
 /// What a plugin listing tracks between `tools/list` and the watch.
@@ -499,6 +504,9 @@ impl Tools {
         }
         if let Some(permissions) = args.permissions {
             params["permissions"] = json!(permissions);
+        }
+        if args.settings_page {
+            params["settings_page"] = json!(true);
         }
         let item = self
             .zeron
@@ -633,10 +641,24 @@ impl Tools {
             id: String,
             #[serde(default)]
             snapshot: bool,
+            #[serde(default)]
+            page: Option<String>,
+            #[serde(default)]
+            open: bool,
         }
         let args: Args = parse(args)?;
+        if args.page.as_deref().is_some_and(|p| p != "settings") {
+            return Err("page is \"settings\" (its settings page), or left out".into());
+        }
+        let mut asked = json!({ "id": args.id, "snapshot": args.snapshot });
+        if let Some(page) = args.page {
+            asked["page"] = json!(page);
+            if args.open {
+                asked["open"] = json!(true);
+            }
+        }
         self.zeron
-            .call_rpc(methods::PLUGIN_STATUS, json!({ "id": args.id, "snapshot": args.snapshot }))
+            .call_rpc(methods::PLUGIN_STATUS, asked)
             .await
             .map_err(plain)
     }
@@ -1430,6 +1452,18 @@ mod tests {
             last_call(&engine),
             (methods::PLUGIN_STATUS.to_owned(), json!({ "id": "focus", "snapshot": true }))
         );
+        // Its settings page: asked of the engine as said; any other page refused.
+        tools.call(PLUGIN_STATUS, json!({ "id": "focus", "snapshot": true, "page": "settings" })).await.unwrap();
+        assert_eq!(
+            last_call(&engine),
+            (methods::PLUGIN_STATUS.to_owned(), json!({ "id": "focus", "snapshot": true, "page": "settings" }))
+        );
+        tools.call(PLUGIN_STATUS, json!({ "id": "focus", "snapshot": true, "page": "settings", "open": true })).await.unwrap();
+        assert_eq!(
+            last_call(&engine),
+            (methods::PLUGIN_STATUS.to_owned(), json!({ "id": "focus", "snapshot": true, "page": "settings", "open": true }))
+        );
+        assert!(tools.call(PLUGIN_STATUS, json!({ "id": "focus", "page": "sidebar" })).await.is_err());
         let map = tools.call(DESCRIBE_ELEMENTS, json!({})).await.unwrap();
         assert_eq!(map["elements"][0]["selector"], ".session-row");
         assert_eq!(

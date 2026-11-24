@@ -67,9 +67,11 @@ export type Props = {
 	track: ((block: Ref) -> () -> ())?,
 	-- A document's own (a file's preview): what a picture's `src` shows
 	-- from (a file `ui.image` loads), or nil while it can't (its alt text
-	-- shows); a picture opens in the lightbox. Without it, pictures are
-	-- their alt text (a reply's).
-	image: ((src: string) -> string?)?,
+	-- shows); a picture opens in the lightbox. `false`: never one here (a
+	-- store README's picture from the web): drawn as its link, as a
+	-- reply's picture it won't show is. Without it, pictures are their alt
+	-- text (a reply's).
+	image: ((src: string) -> (string | false)?)?,
 	-- The size a picture is asked to show at, in points (an HTML `<img>`'s
 	-- width and height, a 2x picture's half): never larger than that, the
 	-- column still the limit. Without it, a picture's own size.
@@ -125,6 +127,27 @@ export type Props = {
 	small: boolean?,
 	-- Its words' ink, where not the primary (a thought's, in the secondary).
 	ink: string?,
+	-- Words from outside Zeron (a store plugin's README, its changelog):
+	-- every link is drawn as a link, never as one of Zeron's own chips (a
+	-- chat, a file, a picture, a skill), whatever its target says.
+	foreign: boolean?,
+	-- Its code blocks open fitted to its width, long lines wrapping (a
+	-- secret shown once, read whole by eye): each block's own, its toggle
+	-- changing that block alone, never the choice kept for every block.
+	code_fit: boolean?,
+	-- A document shown under a page's own title (a store plugin's README):
+	-- its headings drawn `heading_step` levels down in size, its `#` as a
+	-- `##` is (and said so to assistive technology), so none outweighs the
+	-- page's title; the third level's size is the least. The room above
+	-- each stays its own level's, so its sections group as written.
+	heading_step: number?,
+	-- Handed the words of a top-level heading that opens the text: `true`
+	-- leaves it out (a README's `# Name`, on a page that has just said the
+	-- name). Not with a `find`, which counts the blocks as written.
+	drop_title: ((words: string) -> boolean)?,
+	-- Its pictures' corner (a token, `"$radius.lg"`): each clipped to it,
+	-- as a page's other pictures are. Square without.
+	picture_radius: string?,
 }
 export type FindAt = { key: string, block: number, k: number }
 export type Find = {
@@ -396,7 +419,7 @@ end
 type Ctx = {
 	veil: Veil?,
 	veil_seed: boolean?,
-	image: ((src: string) -> string?)?,
+	image: ((src: string) -> (string | false)?)?,
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
@@ -414,6 +437,13 @@ type Ctx = {
 	-- The whole text now: a ```mermaid fence reads its end to know whether
 	-- it's still being written (ds/mermaid).
 	source: (() -> string)?,
+	-- Props' `foreign`: links are links, never chips.
+	foreign: boolean?,
+	-- Props' `code_fit`: code blocks open fitted, each its own.
+	code_fit: boolean?,
+	-- Props' `heading_step` and `picture_radius`.
+	heading_step: number?,
+	picture_radius: string?,
 }
 
 -- A reply's pictures in the order it wrote them, by its group (each of its
@@ -866,21 +896,23 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		end
 		-- (What the page says a link is: one of the chat's files, or one of
 		-- its agent's skills.)
+		-- (Words from outside Zeron: every link a link, whatever it says.)
+		local foreign = ctx ~= nil and ctx.foreign == true
 		local pending = r.a == PENDING_LINK
-		local chip = if r.a and not pending and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
-		local named = (r :: any).attached
+		local chip = if r.a and not pending and ctx and ctx.link_chip and not opens(r.a) and not foreign then ctx.link_chip(r.a) else nil
+		local named = if foreign then nil else (r :: any).attached
 		if named and ctx and ctx.attached and ctx.attached[named] then
 			attachment_chip(span, named, ctx.attached[named])
-		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
+		elseif r.a and not foreign and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
-		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
+		elseif r.a and not foreign and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
 			-- What it carries, mentioned by its number (ds/attachment_mentions):
 			-- its chip, a picture's glyph or a file's icon, by its name.
 			local is_image = string.match(r.a, "^zeron%-image:") ~= nil
 				or AttachmentMentions.is_image_name(r.x)
 				or (ctx ~= nil and ctx.attached ~= nil and ctx.attached[r.x] ~= nil and ctx.attached[r.x].kind == "image")
 			attachment_chip(span, r.x, { kind = if is_image then "image" else "file" })
-		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
+		elseif r.a and not foreign and string.match(r.a, "^zeron%-annotation:") then
 			-- A browser pick, mentioned (its token): its chip.
 			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
 		elseif chip and chip.skill then
@@ -895,9 +927,12 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			span.hover = { underline = true, color = "$accent" }
 			if not pending then
 				if
-					string.match(r.a, "^zeron%-file:")
-					or string.match(r.a, "^zeron%-chat:")
-					or (chip and chip.file)
+					not foreign
+					and (
+						string.match(r.a, "^zeron%-file:")
+						or string.match(r.a, "^zeron%-chat:")
+						or (chip and chip.file)
+					)
 				then
 					mention_chip(span, r.a, r.x)
 				end
@@ -1249,8 +1284,11 @@ end
 -- quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil? }): Node
+-- (`fitted`: it opens fitted, its toggle its own: `Props.code_fit`.)
+local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, fitted: boolean? }): Node
 	local copied = ui.use_state(false)
+	local own_fit = ui.use_state(true)
+	local fitting = if props.fitted then own_fit else fit
 	local stop: (() -> ())? = nil
 	local text = code_shown(props.text)
 	local function copy()
@@ -1295,7 +1333,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				min_w = 0,
 			},
 			ToggleButton {
-				on = fit,
+				on = fitting,
 				label = locale.t("ds.markdown.fit_content") :: any,
 				icon = "wrap-text",
 				size = "sm",
@@ -1328,7 +1366,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 			},
 		},
 		ui.presence(function(): boolean
-			return fit:get()
+			return fitting:get()
 		end, function(fitted: boolean): Node
 			if fitted then
 				return ui.column { w_full = true, min_w = 0, code_text(text, props.lang, true, props.find, props.veil) }
@@ -1348,7 +1386,7 @@ end)
 -- size is its file's header's (`ui.image_size`); a picture from the web
 -- says it as it loads (`on_load`, a point-sized stand-in), and zgx asks
 -- for one that failed again by itself.
-local Picture = ui.component(function(props: { src: string, name: string, w: number?, h: number? }): Node
+local Picture = ui.component(function(props: { src: string, name: string, w: number?, h: number?, radius: string? }): Node
 	local ok, iw, ih = pcall(ui.image_size, props.src)
 	local header = ok and type(iw) == "number" and type(ih) == "number" and iw > 0 and ih > 0
 	local natural = ui.use_state(if header then { w = iw :: number, h = ih :: number } else { w = 0, h = 0 })
@@ -1400,6 +1438,10 @@ local Picture = ui.component(function(props: { src: string, name: string, w: num
 					local n = natural:get()
 					return if n.h > 0 then n.w / n.h else 1
 				end,
+				-- (Its corner, when it has one: the box is the picture's own
+				-- shape, so the clip is the picture's.)
+				rounded = props.radius,
+				overflow = if props.radius then "hidden" else nil,
 				cursor = "zoom_in",
 				-- (A button by the keys too, Enter or Space, and to
 				-- assistive technology: what it does, the picture's name in
@@ -1545,21 +1587,25 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 		end
 		return runs(b.s, style, ctx, veil_id)
 	elseif b.t == "h" then
-		local level = math.min(b.l, 3)
+		-- (Stepped down under a page's title: `heading_step`.)
+		local step = if ctx and ctx.heading_step then math.max(0, math.floor(ctx.heading_step)) else 0
+		local level = math.min(b.l + step, 3)
 		local key = `zeron.prose.h{level}`
 		-- (Set small, a heading keeps the prose's size: a thought's heading
 		-- is a title in the margin, not a chapter's.)
 		local small = ctx ~= nil and ctx.small == true
 		return runs(b.s, {
-			heading = b.l,
+			heading = math.min(b.l + step, 6),
 			weight = "$font.weight.semibold",
 			text_size = if small then SMALL_SIZE else `${key}.size`,
 			line_height = if small then SMALL_LINE else `${key}.line`,
 			letter_spacing = if level == 1 then -0.3 else nil,
 			color = ink,
 			-- More room above than the blocks keep, less below: a heading
-			-- belongs to what follows it.
-			pt = if level < 3 then "$space.3" else "$space.1",
+			-- belongs to what follows it. (The room is its own level's, as
+			-- written: stepped down, a section's heading still opens a
+			-- section; only its size steps.)
+			pt = if b.l < 3 then "$space.3" else "$space.1",
 			mb = ui.raw(-6, "a heading sits closer to what it heads"),
 			class = "md-heading",
 		}, ctx, veil_id)
@@ -1625,6 +1671,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 				text = b.text,
 				find = find,
 				veil = code_veil,
+				fitted = ctx ~= nil and ctx.code_fit == true,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
 			},
 		}
@@ -1744,21 +1791,27 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 		-- A document's picture: at its own size, never past the column; a
 		-- click looks at it whole.
 		local resolve, wanted = ctx.image, b.src
+		-- (What the resolver refuses: a key no file is, as its link.)
+		local REFUSED = "\0link"
 		return ui.div {
 			class = "md-image",
 			min_w = 0,
 			ui.presence(function(): string
-			return resolve(wanted) or ""
+			local got = resolve(wanted)
+			return if got == false then REFUSED else (got or "")
 		end, function(src: string): Node
 			if src == "" then
 				return alt
+			elseif src == REFUSED then
+				local words = if b.alt ~= "" then b.alt else (string.match(wanted, "([^/]+)$") or wanted)
+				return runs({ { x = words, a = wanted } :: any }, nil, ctx)
 			end
 			local name = if b.alt ~= "" then b.alt else (string.match(wanted, "([^/]+)$") or wanted)
 			local w, h = nil :: number?, nil :: number?
 			if ctx.image_size then
 				w, h = ctx.image_size(wanted)
 			end
-			return Picture { src = src, name = name, w = w, h = h }
+			return Picture { src = src, name = name, w = w, h = h, radius = ctx.picture_radius }
 		end),
 		}
 	end
@@ -1910,9 +1963,35 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.foreign or props.code_fit or props.heading_step or props.picture_radius
+		then {
+			image = props.image,
+			image_size = props.image_size,
+			open = props.open,
+			link_menu = props.link_menu,
+			link_chip = props.link_chip,
+			attached = props.attached,
+			task = props.task,
+			tasks = {},
+			pictures = props.pictures,
+			group = props.group,
+			small = props.small,
+			foreign = props.foreign,
+			code_fit = props.code_fit,
+			heading_step = props.heading_step,
+			picture_radius = props.picture_radius,
+		}
 		else nil
+	-- The text's blocks, less a title the caller has already said
+	-- (`drop_title`), and how many were left out of its start.
+	local drop_title = props.drop_title
+	local function untitled(list: { MarkdownBlock }): ({ MarkdownBlock }, number)
+		local b: any = list[1]
+		if not drop_title or not b or b.t ~= "h" or b.l ~= 1 or not drop_title(MarkdownFind.words(b.s)) then
+			return list, 0
+		end
+		return table.move(list, 2, #list, 1, table.create(#list - 1)), 1
+	end
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).
 	if type(text) == "function" then
@@ -2210,14 +2289,15 @@ return function(props: Props): Node
 				local c = find.current()
 				opts.first = if c and c.key == window.key then c.block else nil
 			end
-			local list = parse(text(), opts)
+			local parsed = parse(text(), opts)
+			local list, cut = untitled(parsed)
 			if ctx and ctx.task then
 				ctx.tasks = {}
 				number_tasks(list, ctx.tasks)
 			end
 			-- The first block that may differ from those shown: past those
 			-- the parse kept from the last (its very tables), the rest looked at.
-			local from = math.min(MarkdownFind.settled(list), #shown_blocks) + 1
+			local from = math.min(math.max(0, MarkdownFind.settled(parsed) - cut), #shown_blocks) + 1
 			if from > 1 and shown_blocks[from - 1] ~= list[from - 1] then
 				from = 1
 			end
@@ -2304,7 +2384,7 @@ return function(props: Props): Node
 		end
 	elseif track then
 		local out: { Node } = {}
-		local list = parse(text, opts)
+		local list = untitled(parse(text, opts))
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end
@@ -2313,7 +2393,7 @@ return function(props: Props): Node
 		end
 		column[1] = out
 	else
-		local list = parse(text, opts)
+		local list = untitled(parse(text, opts))
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end

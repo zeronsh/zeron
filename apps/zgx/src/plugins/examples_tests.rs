@@ -2855,6 +2855,66 @@ fn git_fixture(app: &mut TestApp, name: &str, value: zgx_script::Value) {
     app.frames(10);
 }
 
+/// The Git tab drawn by zgx's GPU renderer (1200 × 800 at 2×) over a
+/// backdrop the colour of the window behind (light or dark): each pixel
+/// asked for, in points, as `#rrggbb`.
+fn git_painted(app: &mut TestApp, light: bool, at: &[(f32, f32)]) -> Vec<String> {
+    let (w, h, scale) = (1200f32, 800f32, 2f32);
+    let mut gpu = zgx_gpu::GpuRenderer::new((w * scale) as u32, (h * scale) as u32).expect("a GPU");
+    gpu.set_scale_factor(scale);
+    for font in crate::fonts() {
+        font.unwrap().install(&mut gpu.text_system().borrow_mut());
+    }
+    gpu.install_text(&mut app.ui.scene.borrow_mut());
+    app.ui.refresh_text_geometry();
+    app.ui.scene.borrow_mut().resize(w, h);
+    app.frames(120);
+    app.ui.prepare_frame();
+    let _ = app.ui.scene.borrow_mut().flush();
+    gpu.render(&app.ui.scene.borrow(), &[zgx::scene::Rect { x: 0., y: 0., width: w, height: h }]).expect("render");
+    let rgba = gpu.readback().expect("readback");
+    let back: [u32; 3] = if light { [0xe9, 0xe9, 0xee] } else { [0x1d, 0x1d, 0x22] };
+    at.iter()
+        .map(|&(x, y)| {
+            let i = (((y * scale) as usize) * (w * scale) as usize + (x * scale) as usize) * 4;
+            let a = rgba[i + 3] as u32;
+            let c = |n: usize| (rgba[i + n] as u32 + back[n] * (255 - a) / 255).min(255);
+            format!("#{:02x}{:02x}{:02x}", c(0), c(1), c(2))
+        })
+        .collect()
+}
+
+/// A person who never changed a preference sees Zeron's Git plugin as it
+/// always drew: the diff's panel and the commit box in the fills main
+/// draws them in at the same commit, light and dark, whatever the design
+/// system lent to a plugin does with a preference the person changed.
+///
+/// The values are main's at 774dd72e6, drawn by this test's harness on
+/// main itself (on a Mac). Light's moved from c58f65e8a's (#e5e5e7,
+/// #f4f4f5) with main's one-colour light theme (#1522: light's window
+/// #eeeef0 → #f6f6f7, which the frosted fills sit over); dark's didn't.
+/// When main changes them again, draw them again there.
+#[test]
+fn git_draws_as_it_always_did_for_a_person_who_changed_no_preference() {
+    // The diff's panel (beside its lines), the commit box (at its foot).
+    let at = [(700., 500.), (1000., 700.)];
+    for (light, was) in [(true, ["#ededed", "#f9f9fa"]), (false, ["#181819", "#1b1b1d"])] {
+        let (mut app, _, _) = git_tab(git_world(), None);
+        app.host.set_state("git_fixture.light", zgx_script::Value::Bool(light)).unwrap();
+        assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{}", app.tree());
+        assert!(app.wait_until(|app| app.tree().contains("fn rows(n: usize) {}")), "{}", app.tree());
+        // (Within 2 a channel: GPUs round blending apart, a step between
+        // Metal and Linux's lavapipe.)
+        let now = git_painted(&mut app, light, &at);
+        let near = |a: &str, b: &str| (0..3).all(|n| {
+            let ch = |s: &str| i32::from_str_radix(&s[1 + n * 2..3 + n * 2], 16).unwrap();
+            (ch(a) - ch(b)).abs() <= 2
+        });
+        assert!(now.iter().zip(was).all(|(a, b)| near(a, b)), "light: {light}: {now:?}, was {was:?}");
+        assert_eq!(app.error(), None);
+    }
+}
+
 #[test]
 fn git_s_changes_show_a_session_s_work_tree_on_its_device() {
     let (mut app, heard, _) = git_tab(git_world(), None);

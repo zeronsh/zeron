@@ -1,0 +1,26 @@
+---
+// How a plugin gets into the store, in three numbered steps: the guide's
+// quick start, and Your plugins when it has none (the same words).
+import CodeBlock from "./CodeBlock.astro";
+import "../../styles/look/steps.css";
+---
+
+<ol class="steps">
+  <li class="step">
+    <span class="step-n" aria-hidden="true">01</span>
+    <h3 class="step-title">Check it</h3>
+    <p>It lists everything the store would refuse, before anything is sent. It needs no Zeron running, so a pull request's CI can run it too.</p>
+    <CodeBlock label="Terminal" code="zeron plugin check <folder>" id="cb-check" />
+  </li>
+  <li class="step">
+    <span class="step-n" aria-hidden="true">02</span>
+    <h3 class="step-title">Publish it</h3>
+    <p>In Zeron: Settings › Plugins › Yours › Publish…, or from a terminal with Zeron running and signed in. Add <code>--dry-run</code> to check it without sending it.</p>
+    <CodeBlock label="Terminal" code="zeron plugin publish <id>" id="cb-publish" />
+  </li>
+  <li class="step">
+    <span class="step-n" aria-hidden="true">03</span>
+    <h3 class="step-title">Get verified</h3>
+    <p>A reviewer reads it. Until then it's listed, saying it isn't verified yet; once they have, Zeron gives it its check mark.</p>
+  </li>
+</ol>

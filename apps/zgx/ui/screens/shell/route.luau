@@ -696,9 +696,16 @@ function M.settings(page: string?)
 end
 
 -- A `zeron://` link the system handed the app (a clicked banner, a chat's
--- link), read by the host (src/links.rs): `{ seq, chat?, settings? }`, `seq`
--- moving with each. Followed once each, never on a reload.
-local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, settings: string? })
+-- link, a store plugin's "Install in Zeron", a notice's "Deploy keys"),
+-- read by the host (src/links.rs): `{ seq, chat?, settings?, tab?, plugin? }`,
+-- `seq` moving with each. Followed once each, never on a reload. A plugin's
+-- opens its page in Settings → Plugins (screens/plugins/nav), never
+-- installing anything (a `version`, that version chosen on it); a `tab`,
+-- that tab of Settings → Plugins.
+local link = ui.shared(
+	"app.link",
+	{ seq = 0 } :: { seq: number, chat: string?, settings: string?, tab: string?, plugin: string?, version: string? }
+)
 local followed = ui.state("shell_link_followed", 0)
 ui.effect(function()
 	local l = link:get()
@@ -709,7 +716,18 @@ ui.effect(function()
 	if l.chat then
 		M.open_session(l.chat)
 	elseif l.settings then
+		if l.settings == "plugins" and type(l.tab) == "string" then
+			require("@app/screens/plugins/nav").show_tab(l.tab)
+		end
 		M.settings(l.settings)
+	elseif type(l.plugin) == "string" then
+		-- (Plugins already open: no visit begins to keep the page for.)
+		local r = at()
+		local there = r.name == "settings" and r.params.page == "plugins"
+		require("@app/screens/plugins/nav").open_listing(l.plugin, not there, true, if type(l.version) == "string" then l.version else nil)
+		M.settings("plugins")
+		-- Followed: a window made later isn't sent here again.
+		pcall(ui.invoke, "app.link_followed", l.seq)
 	end
 end)
 

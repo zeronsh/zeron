@@ -34,10 +34,17 @@ local words = require("@app/screens/plugins/words")
 local plugin_settings = require("@app/screens/plugins/settings")
 local devices_page = require("@app/screens/settings/devices")
 local visits = require("@app/screens/settings/visits")
+local nav = require("@app/screens/plugins/nav")
+local browse = require("@app/screens/plugins/browse")
+local listing = require("@app/screens/plugins/listing")
+local publish = require("@app/screens/plugins/publish")
+local store = require("@app/screens/plugins/store")
+local keys = require("@app/screens/plugins/keys")
 
 local M = {}
 
-local tab = ui.state("plugins_tab", "installed")
+-- (Kept where a link reaches it too: screens/plugins/nav.)
+local tab = nav.tab
 local query = ui.state("plugins_query", "")
 -- The plugin Remove was asked of, and its device (nil: this one), kept as
 -- the dialog opened.
@@ -179,9 +186,35 @@ local function choose_file()
 	end)
 end
 
+-- Whose rule holds a store plugin's unverified update back: its own
+-- choice, or the device's (the engine's `store_updates`: this device's,
+-- or the one shown's from its list; nil when its engine doesn't say).
+local function held_by(it: any): ("plugin" | "computer" | "device")?
+	local on = device()
+	local prefs: any = if on then state.remote:get().store_updates else state.store_updates:get()
+	if type(prefs) ~= "table" then
+		return nil
+	end
+	local store_id = if type(it.source) == "table" then it.source.id else nil
+	local own = if type(prefs.plugins) == "table" and type(store_id) == "string" then prefs.plugins[store_id] else nil
+	return if own == "verified" then "plugin" elseif on then "device" else "computer"
+end
+
 local function update(id: string, name: string)
 	updating:set(id)
-	local p: any = state.update(id, device())
+	-- (A store plugin's one click takes a verified update alone. One the
+	-- store hasn't verified is staged, and the consent window asks, with
+	-- its warning and the verified one to take instead: the one place a
+	-- person allows an unverified version.)
+	local it: any = nil
+	for _, i in (if device() then state.remote:peek().list else state.now:peek().list) or {} do
+		if i.id == id then
+			it = i
+		end
+	end
+	local from_store = it ~= nil and type(it.source) == "table" and it.source.kind == "store"
+	local unverified = from_store and type(it.update) == "table" and it.update.verified == false
+	local p: any = state.update(id, device(), from_store and not unverified)
 	if p == nil then
 		updating:set(nil)
 		return
@@ -271,8 +304,9 @@ local SETTLE_MS = 260
 
 -- (A row is built for one device: the rows are keyed by it, so a switch of
 -- device builds them again. `on` is that device, nil for this one.)
-local Control = ui.component(function(props: { now: State<any>, on: string? }): Node
+local Control = ui.component(function(props: { now: State<any>, on: string?, place: any }): Node
 	local now, on_device = props.now, props.on
+	local place = props.place
 	local on = ui.use_state(now:peek().status == "on")
 	ui.effect(function()
 		local want = now:get().status == "on"
@@ -285,31 +319,43 @@ local Control = ui.component(function(props: { now: State<any>, on: string? }): 
 		removing_on:set(on_device)
 		removing_open:set(true)
 	end
+	local function has_settings(): boolean
+		return on_device == nil and plugin_settings.has(now:get().id)
+	end
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
+		-- (In a giving row, drawn beside the text and under it, out of
+		-- layout where it isn't: ds/settings GiveWayPlace.)
+		hidden = if place then place.hidden else nil,
+		on_resize = if place then place.on_resize else nil,
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
-		-- up. Another device's plugins' settings are that device's.)
+		-- up; under the text, where nothing lines up with it, no room where
+		-- there are none. Another device's plugins' settings are that
+		-- device's.)
 		ui.div {
 			w = function(): number
 				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
 			end,
 			shrink = 0,
-			ui.show(function(): boolean
-				return on_device == nil and plugin_settings.has(now:get().id)
-			end, ds.IconButton {
-			icon = "settings-minimalistic",
-			label = function(): string
-				return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
-			end,
-			size = "sm",
-			tone = "quiet",
-			hook = false,
-			on_click = function()
-				plugin_settings.open(now:peek().id)
-			end,
-		}),
+			hidden = if place and place.under
+				then function(): boolean
+					return not has_settings()
+				end
+				else nil,
+			ui.show(has_settings, ds.IconButton {
+				icon = "settings-minimalistic",
+				label = function(): string
+					return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
+				end,
+				size = "sm",
+				tone = "quiet",
+				hook = false,
+				on_click = function()
+					plugin_settings.open(now:peek().id)
+				end,
+			}),
 		},
 		ui.switch(function(): string
 			return kind(now:get())
@@ -388,17 +434,36 @@ end)
 -- Update, at the end of the line saying what it changes: link-like (the
 -- markdown link's underline, the accent under the pointer), so the row's
 -- control and its version stay where every other row has them.
-local UpdateLink = ui.component(function(props: { now: State<any> }): Node
+-- Whether a row's Update shows: an update found, not refused, for a
+-- plugin that isn't built in or broken.
+local function update_shows(now: State<any>): boolean
+	local it: any = now:get()
+	return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
+end
+
+local UpdateLink = ui.component(function(props: { now: State<any>, on_resize: ((size: { w: number, h: number }) -> ())? }): Node
 	local now = props.now
 	local function busy(): boolean
 		return updating:get() == now:get().id
 	end
+	-- (One the store hasn't verified: "Update…", a question follows in the
+	-- consent window, as "Publish…" and "New key…" say. Verified, one
+	-- click. Drawn as it always was.)
+	local function words(): string
+		if busy() then
+			return ui.t("plugins.page.updating"):get()
+		end
+		local u: any = now:get().update
+		return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
+	end
 	return ui.show(function(): boolean
-		local it: any = now:get()
-		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
+		return update_shows(now)
 	end, ui.row {
 		role = "button",
-		label = ui.t("plugins.page.update"),
+		on_resize = props.on_resize,
+		label = function(): string
+			return words()
+		end,
 		focusable = function(): boolean
 			return not busy()
 		end,
@@ -413,9 +478,7 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 			end
 		end,
 		ui.text {
-			function(): string
-				return if busy() then ui.t("plugins.page.updating"):get() else ui.t("plugins.page.update"):get()
-			end,
+			words,
 			text_size = "$font.size.sm",
 			line_height = "$font.line.sm",
 			weight = "$font.weight.medium",
@@ -426,52 +489,113 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 end)
 
 local function row(p: state.Item, _i: number, now: State<any>): Node
-	return ds.Settings.Row {
-		label = function(): string
-			return now:get().name
-		end,
-		description = function(): string
-			local it = now:get()
-			-- (The host's words: where it was placed and couldn't show, or
-			-- what this template doesn't have.)
-			local problem = (it :: any).problem
-			if type(problem) == "string" and problem ~= "" and it.status == "on" then
-				return problem
-			end
-			return words.about(it)
-		end,
-		-- Who made it, on its own line.
-		byline = function(): string
-			return words.author(now:get())
-		end,
-		-- (Its icon from its device: the listing carries it.)
-		lead = words.tile(p, 32),
-		-- (Zeron's own: what it's allowed, wrapped on a line of its own.)
-		-- (Someone else's: a newer version found where it came from.)
-		detail = function(): string?
-			local it = now:get()
-			return words.grants(it) or words.update(it)
-		end,
-		detail_action = UpdateLink { now = now },
-		truncate = true,
-		-- Its version, centred on the row beside its controls; before it,
-		-- Unverified for one whose maker Zeron can't vouch for.
-		control = ui.row {
-			gap = "$space.3",
-			items = "center",
-			ui.show(function(): boolean
-				return words.unverified(now:get())
-			end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
-			ds.Badge {
-				function(): string
-					return now:get().version
+	-- (Rows are built for their tab: Yours' own plugins, made on this
+	-- device, say where they stand in the store.)
+	local publishing = tab:peek() == "yours" and device_now() == nil and (p.own == true or p.author.kind == "you") and not (p :: any).builtin
+	-- (`store_line`: the store's line and Publish… in the detail's place.)
+	local function build(store_line: boolean): Node
+		return ds.Settings.Row {
+			label = function(): string
+				return now:get().name
+			end,
+			description = function(): string
+				local it = now:get()
+				-- (The host's words: where it was placed and couldn't show, or
+				-- what this template doesn't have.)
+				local problem = (it :: any).problem
+				if type(problem) == "string" and problem ~= "" and it.status == "on" then
+					return problem
+				end
+				return words.about(it)
+			end,
+			-- Who made it, on its own line; for one whose author can't be told
+			-- and that came from nowhere named, none: its Unknown author badge
+			-- says it.
+			byline = function(): string
+				local it = now:get()
+				if words.unverified(it) and words.from(it.source) == nil then
+					return ""
+				end
+				return words.author(it)
+			end,
+			-- (Its icon from its device: the listing carries it.)
+			lead = words.tile(p, 32),
+			-- (Zeron's own: what it's allowed, wrapped on a line of its own.)
+			-- (Someone else's: a newer version found where it came from.)
+			detail = function(): string?
+				local it = now:get()
+				if store_line then
+					return publish.summary(it.id) or ui.t("plugins.store.summary.unknown"):get()
+				end
+				-- (And a store version running that the store hasn't verified.)
+				-- (Waiting for nothing new, its line under the name says it.)
+				return words.grants(it) or words.update(it, held_by(it), device_name())
+					or (if it.status == "pending" and it.nothing_new == true then nil else words.store_unverified(it))
+			end,
+			detail_action = if store_line then nil else UpdateLink { now = now },
+			-- (Publish… is its sentence's own link: right after its last word,
+			-- wrapping with it.)
+			detail_link = if store_line
+				then {
+					label = ui.t("plugins.store.publish_link"),
+					on_click = function()
+						nav.open_publish(now:peek().id)
+					end,
+				}
+				else nil,
+			truncate = true,
+			-- Its version, centred on the row beside its controls; before it,
+			-- Unknown author for one whose maker Zeron can't vouch for.
+			-- (Short of room, they give way so the name keeps its least and
+			-- shows: the badges under the text first, then Update under its
+			-- sentence, then the switch and Remove under it too.)
+			give_way = {
+				gives = function(hidden: (() -> boolean)?): { Node }
+					return {
+						ui.show(function(): boolean
+							return words.unverified(now:get())
+						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified", hidden = hidden }),
+						ds.Badge {
+							function(): string
+								return now:get().version
+							end,
+							tone = "neutral",
+							tabular = true,
+							hidden = hidden,
+						},
+					}
 				end,
-				tone = "neutral",
-				tabular = true,
+				stays = function(place: any): Node
+					return Control { now = now, on = device_now(), place = place }
+				end,
+				-- (Without Unknown author, the row of badges beside the text
+				-- kept its gap: zgx sizes a row with an absent child so.)
+				room = function(): number
+					return if words.unverified(now:get()) then 0 else (ui.theme.get("space.3") :: number?) or 12
+				end,
+				action = if store_line
+					then nil
+					else {
+						build = function(on_resize: (size: { w: number, h: number }) -> ()): Node
+							return UpdateLink { now = now, on_resize = on_resize }
+						end,
+						shows = function(): boolean
+							return update_shows(now)
+						end,
+					},
 			},
-			Control { now = now, on = device_now() },
-		},
-	}
+		}
+	end
+	if not publishing then
+		return build(false)
+	end
+	-- Yours' own plugins: where each stands in the store, with Publish…;
+	-- but what a row has always said comes first: an update found where it
+	-- came from (its line and Update), as on Installed.
+	return ui.switch(function(): string
+		local it = now:get()
+		return if words.grants(it) or words.update(it, held_by(it), device_name()) then "base" else "store"
+	end, { base = build(false), store = build(true) })
 end
 
 -- What a tab says with no plugins at all: here, the folder they go in;
@@ -623,37 +747,55 @@ local function dialogs(): { Node }
 	}
 end
 
+-- Under Installed's card: which updates this device's plugins from the
+-- store take (each can choose its own on its store page). This device's
+-- alone: another device's choice isn't known here.
+local device_updates = ui.state("plugins_device_updates", "newest")
+local function store_updates_section(): Node
+	ui.effect(function()
+		local prefs: any = state.store_updates:get()
+		local now = if type(prefs) == "table" and prefs.device == "verified" then "verified" else "newest"
+		if device_updates:peek() ~= now then
+			device_updates:set(now)
+		end
+	end)
+	return ui.show(function(): boolean
+		return device() == nil
+	end, ds.Settings.Section {
+		title = ui.t("plugins.store.updates_section"),
+		ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("plugins.store.updates_all_label"),
+				description = ui.t("plugins.store.updates_all_body"),
+				control = ui.div {
+					id = "plugins-store-updates",
+					ds.Select {
+						value = device_updates,
+						size = "sm",
+						w = 200,
+						name = ui.t("plugins.store.updates_all_label"),
+						options = {
+							{ value = "newest", label = ui.t("plugins.store.updates_newest") },
+							{ value = "verified", label = ui.t("plugins.store.updates_verified") },
+						},
+						on_change = function(v: any)
+							local was = if v == "verified" then "newest" else "verified"
+							store.set_updates(nil, v):after(function(_: any) end, function(err: any)
+								device_updates:set(was)
+								failed(ui.t("plugins.store.couldnt_updates_all"))(err)
+							end)
+						end,
+					},
+				},
+			},
+		},
+	})
+end
+
 -- The page: ds.Settings.Catalog's search, tabs, card and states (the
 -- Templates page is the same), with this page's device choice, rows, empty
 -- state, offline states and dialogs.
-function M.View(): Node
-	-- Once a visit: another device shown is looked at again (its list as
-	-- it is now; it may have been away).
-	visits.once("plugins", function()
-		local d = device()
-		if d then
-			state.target(d)
-		end
-	end)
-	-- As a device is shown: its plugins' sources, for a newer version.
-	local shown_id = ui.computed(function(): string
-		return device() or ""
-	end)
-	ui.effect(function()
-		shown_id:get()
-		check_updates()
-	end)
-	-- A device shown that was away coming back: looked at again.
-	local was_online: boolean? = nil
-	ui.effect(function()
-		local d = shown_device()
-		local id = device()
-		local online = d ~= nil and d.online ~= false
-		if id and online and was_online == false and state.remote:peek().state == "offline" then
-			state.target(id)
-		end
-		was_online = if id then online else nil
-	end)
+local function catalog(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("plugins.page.title"),
 		description = ui.t("plugins.page.description"),
@@ -667,6 +809,7 @@ function M.View(): Node
 			options = {
 				{ value = "installed", label = ui.t("plugins.page.installed"), count = count("installed") },
 				{ value = "yours", label = ui.t("plugins.page.yours"), count = count("yours") },
+				{ value = "browse", label = ui.t("plugins.store.browse") },
 			},
 		},
 		-- (No New for now: your own plugins arrive by an agent or the
@@ -705,6 +848,20 @@ function M.View(): Node
 			end,
 			away = away_notice,
 		},
+		-- The store, searched on its own terms (screens/plugins/browse).
+		views = {
+			browse = function(): Node
+				return browse.View {}
+			end,
+		},
+		-- Under Installed's card, which updates its store plugins take here;
+		-- under Yours', the account's deploy tokens (screens/plugins/keys).
+		below = {
+			installed = store_updates_section,
+			yours = function(): Node
+				return keys.Section { plugins = publish.owned }
+			end,
+		},
 		found = found,
 		row = row,
 		-- (By device and id: another device's rows are its own.)
@@ -713,6 +870,73 @@ function M.View(): Node
 		end,
 		none = none,
 		overlays = dialogs(),
+	}
+end
+
+-- What a store plugin's page and publishing one of yours need of this
+-- page: the device shown, its name, whether it's away, and its outcomes.
+local here = {
+	device = device,
+	device_name = device_name,
+	away = away,
+	settled = settled,
+	failed = failed,
+}
+
+function M.View(): Node
+	-- Once a visit: another device shown is looked at again (its list as
+	-- it is now; it may have been away). The page opens on its tabs, unless
+	-- a link opened a plugin's page as Settings came up.
+	visits.once("plugins", function()
+		nav.arrive()
+		local d = device()
+		if d then
+			state.target(d)
+		end
+	end)
+	-- As a device is shown: its plugins' sources, for a newer version.
+	local shown_id = ui.computed(function(): string
+		return device() or ""
+	end)
+	ui.effect(function()
+		shown_id:get()
+		check_updates()
+	end)
+	-- Yours shown: where your plugins stand in the store, read again.
+	ui.effect(function()
+		if tab:get() == "yours" and nav.view:get() == "catalog" then
+			publish.load()
+		end
+	end)
+	-- A device shown that was away coming back: looked at again.
+	local was_online: boolean? = nil
+	ui.effect(function()
+		local d = shown_device()
+		local id = device()
+		local online = d ~= nil and d.online ~= false
+		if id and online and was_online == false and state.remote:peek().state == "offline" then
+			state.target(id)
+		end
+		was_online = if id then online else nil
+	end)
+	-- Its tabs, or one plugin's page under them (a store plugin, or
+	-- publishing one of yours), each on the page's middle.
+	return ui.column {
+		w_full = true,
+		items = "center",
+		ui.presence(function(): string
+			return nav.view:get()
+		end, function(v: string): Node
+			local id = string.match(v, "^store:(.+)$")
+			if id then
+				return ui.column { w_full = true, items = "center", listing.Page { plugin = id, here = here } }
+			end
+			local own = string.match(v, "^publish:(.+)$")
+			if own then
+				return ui.column { w_full = true, items = "center", publish.Page { plugin = own, here = here } }
+			end
+			return ui.column { w_full = true, items = "center", catalog() }
+		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 	}
 end
 

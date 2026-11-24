@@ -242,6 +242,10 @@
 				"danger": { "ink": "{palette.red.600}", "wash": "alpha({palette.red.500}, 0.1)", "edge": "alpha({palette.red.600}, 0.26)" },
 				"accent": { "ink": "{accent}", "wash": "alpha({accent}, 0.1)", "edge": "alpha({accent}, 0.28)" }
 			},
+			// A risky ask: the danger's red only as much darker as 4.6:1 on
+			// the frosted window #eeeef0 takes, in the same hue (OKLCH): red
+			// 600 reads 4.16 there, this 4.63 (4.96 on the opaque #f6f6f7).
+			"asks": { "risky": "#bc3f3d" },
 			"badge": { "wash": 0.11, "ink": 1 },
 			"review": { "approved": "{palette.emerald.600}", "changes": "{palette.red.600}", "pending": "{palette.amber.600}" },
 			"checks": { "passing": "{palette.emerald.600}", "failing": "{palette.red.600}", "running": "{palette.amber.600}" },

@@ -15,11 +15,17 @@ declare module "cloudflare:test" {
     CLOUD_SLEEP: Workflow;
     CLOUD_DELETE: Workflow;
     VAULT: { calls(): Promise<{ method: string; args: unknown[] }[]> };
+    /** The web site's server, relaying a browser's request to the edge (fixture.ts SiteStub). */
+    SITE: Fetcher;
+    EDGE: Fetcher;
     BLOBS: R2Bucket;
     RELEASES: R2Bucket;
     AUTH_MODE: string;
     ADMIN_TOKEN: string;
     RUNNER_JWT_PUBLIC_KEY: string;
     RUNNER_JWT_PRIVATE_KEY: string;
+    STORE_DB: D1Database;
+    STORE_MIGRATIONS: import("cloudflare:test").D1Migration[];
+    PLUGIN_STORE: R2Bucket;
   }
 }

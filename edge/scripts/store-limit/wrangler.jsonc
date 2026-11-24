@@ -1,0 +1,8 @@
+{
+  // scripts/store-package-limit.mjs only: the store's publish pipeline alone.
+  "name": "store-limit-measure",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [{ "binding": "PLUGIN_STORE", "bucket_name": "store-limit-measure" }]
+}

@@ -194,3 +194,13 @@ test("the device choice sits at the top right, centred on the title's line; shor
 	local _, py2 = box(app, 'role:button "Device"')
 	expect(py2 >= ty2 + th2).to_be(true)
 end)
+
+-- Another device's list says which updates it takes, as this one's does:
+-- an update it holds back says whose rule that is, by the device's name.
+test("an update another computer holds back says that computer's rule, by its name", function()
+	local app = open()
+	pick(app, "devbox")
+	app:command("devbox_verified_only")
+	app:frames(20)
+	expect(app:tree()).to_contain("2.1.0 is waiting: devbox takes verified updates only.")
+end)

@@ -18,10 +18,16 @@
       { "name": "VAULT_DEVICES", "class_name": "VaultDevices" },
       // acct1/{userId}/{provider}: one encrypted credential + its refresh
       // bookkeeping. Single-threaded per id = one refresh in flight.
-      { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" }
+      { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" },
+      // conn1/{userId}: encrypted remote MCP / plugin connection configs and
+      // auth material + single-flight OAuth refresh per connection id.
+      { "name": "VAULT_CONNECTIONS", "class_name": "VaultConnections" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDevices", "VaultAccount"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["VaultDevices", "VaultAccount"] },
+    { "tag": "v2", "new_sqlite_classes": ["VaultConnections"] }
+  ],
   // Daily canary: force-refresh CANARY_USER_ID's codex + github credentials so
   // a provider changing its refresh contract alerts before users' grants fail.
   "triggers": { "crons": ["0 6 * * *"] },
@@ -41,7 +47,8 @@
       "durable_objects": {
         "bindings": [
           { "name": "VAULT_DEVICES", "class_name": "VaultDevices" },
-          { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" }
+          { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" },
+          { "name": "VAULT_CONNECTIONS", "class_name": "VaultConnections" }
         ]
       },
       "triggers": { "crons": ["0 6 * * *"] }

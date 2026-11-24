@@ -1,0 +1,15 @@
+---
+// One of the app's own icons (src/data/icons.json: the consent sheet's, so
+// an ask has the glyph Zeron gives it), in the text's colour. Sized by the
+// look's stylesheet (.glyph), never a style block of its own: the store's
+// pages carry no style but their stylesheets'.
+import icons from "../../data/icons.json";
+
+interface Props {
+  name: keyof typeof icons;
+  class?: string;
+}
+const { name, class: className } = Astro.props;
+---
+
+<span class:list={["glyph", className]} aria-hidden="true" set:html={icons[name]} />

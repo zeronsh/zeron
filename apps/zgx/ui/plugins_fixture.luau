@@ -14,6 +14,9 @@ local actions = require("@app/screens/onboarding/actions");
 (actions :: any).apply_scheme = function() end
 local state = require("@app/screens/plugins/state")
 local page = require("@app/screens/plugins/page")
+-- (The plugin store, answered with its made-up catalog: Yours asks it
+-- where your plugins stand.)
+require("./store_stub")
 
 type Extra = { permissions: { string }?, ask: { string }? }
 

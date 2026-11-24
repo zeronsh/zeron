@@ -18,6 +18,17 @@
  *   GET  /auth/orgs/:orgId/invitations — admin: pending + recently expired
  *   DELETE /auth/orgs/:orgId/invitations/:id, POST …/:id/resend — admin
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
+ *
+ * Web sign-in (web-auth-routes.ts; only on WEB_ORIGIN, routed from zeron.sh):
+ *   GET  /auth/web/login, /auth/web/callback, /auth/web/session
+ *   POST /auth/web/logout
+ *
+ * Staff roles and the store's identity routes:
+ *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
+ *   GET  /admin/deploy-tokens, POST /admin/deploy-tokens/revoke — ADMIN_TOKEN
+ *     (store/identity/deploy-tokens.ts: one plugin's, or all)
+ *   GET|POST /store/v1/me/tokens, DELETE /store/v1/me/tokens/:id — deploy tokens
+ *     (store/identity/deploy-tokens.ts; the signed-in account, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -70,8 +81,17 @@
  *   GET  /c/:username, /@:username      — pre-bearer, a card's page (also routed from zeron.sh)
  *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
  *   GET|POST /username, GET /username/check — user bearer (claim, availability)
+ *
+ * Plugin store (store/routes.ts, docs/plans/2026-11-17-plugin-store.md):
+ *   GET  /store/v1/{categories,plugins,plugins/:id,plugins/:id/versions} — public, cached
+ *   GET  /store/v1/plugins/:id/versions/:version/package, …/files/:version/*path
+ *   POST /store/v1/updates                — batched update check
+ *   POST /store/v1/plugins/:id/versions   — publish (session or deploy token)
+ *   …    /store/v1/me/plugins, …/{withdraw,yank,unyank,installed,reports}, /store/v1/admin/*
  */
-import { authenticate } from "./auth";
+import { authenticate, bearerFromRequest } from "./auth";
+import { sessionRequired } from "./store/identity/callers";
+import { looksLikeDeployToken } from "./store/identity/deploy-token";
 import { chatRoute } from "./chat-route";
 import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
@@ -107,6 +127,13 @@ import { handleOnboardingRoute } from "./onboarding-routes";
 import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
+import { handleStoreRoute } from "./store/routes";
+import { releaseUnusedIds } from "./store/release";
+import { pluginOwner } from "./store/db";
+import { handleWebAuthRoute } from "./web-auth-routes";
+import { handleRoleAdminRoute } from "./roles";
+import { handleDeployTokenAdminRoute, handleDeployTokenRoute } from "./store/identity/deploy-tokens";
+import { withSessionCookie } from "./web-session";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
@@ -157,6 +184,10 @@ export default {
     const modelList = await modelListRoute(request, env, url);
     if (modelList) return modelList;
 
+    // ── web sign-in (cookies, not bearers; web-auth-routes.ts) ─────────────
+    const webAuthRouted = await handleWebAuthRoute(request, env, url);
+    if (webAuthRouted) return webAuthRouted;
+
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
@@ -173,9 +204,25 @@ export default {
     if (runnerRouted) return runnerRouted;
     const usersRouted = await handleUserDirectoryRoute(request, env, url);
     if (usersRouted) return usersRouted;
+    const rolesRouted = await handleRoleAdminRoute(request, env, url);
+    if (rolesRouted) return rolesRouted;
+    const deployTokenAdminRouted = await handleDeployTokenAdminRoute(request, env, url, pluginOwner);
+    if (deployTokenAdminRouted) return deployTokenAdminRouted;
+    // The store's own principals (store/principal.ts): before the bearer gate.
+    const deployTokensRouted = await handleDeployTokenRoute(request, env, url, pluginOwner);
+    if (deployTokensRouted) return withSessionCookie(request, deployTokensRouted);
     const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (cardRouted) return cardRouted;
+    // ── the plugin store (store/routes.ts), after its deploy-token routes:
+    //    public reads need no sign-in; each other route asks
+    //    store/principal.ts who the caller is ──────────────────────────────
+    const storeRouted = await handleStoreRoute(request, env, url);
+    if (storeRouted) return storeRouted;
 
+    // A deploy token (store/identity/deploy-token.ts) only publishes to the
+    // store, above: anywhere else it isn't a session, in any auth mode.
+    const bearer = bearerFromRequest(request);
+    if (bearer !== undefined && looksLikeDeployToken(bearer)) return sessionRequired();
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
 
@@ -468,8 +515,10 @@ export default {
   },
 
   /** Hourly (`17 * * * *`): Cloud usage reconcile backstop, daily orphan
-   * scan, closed-month exports (cloud/billing.ts). */
+   * scan, closed-month exports (cloud/billing.ts); the plugin store's
+   * release of ids unused for 90 days (store/release.ts). */
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
     ctx.waitUntil(runCloudCron(env, controller.scheduledTime));
+    ctx.waitUntil(releaseUnusedIds(env, controller.scheduledTime).catch((e) => console.error("store: the sweep failed", String(e))));
   }
 } satisfies ExportedHandler<Env>;
