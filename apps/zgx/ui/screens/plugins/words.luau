@@ -658,6 +658,7 @@ local FAILURES: { [string]: boolean } = {
 	token_not_allowed = true,
 	template_taken_down = true,
 	template_unchecked = true,
+	asked_lately = true,
 	session_required = true,
 	not_owner = true,
 	invalid_scope = true,

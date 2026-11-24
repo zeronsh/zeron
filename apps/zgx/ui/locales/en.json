@@ -3864,7 +3864,8 @@
       "invalid_scope": "Choose at least one of your plugins for it.",
       "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
       "template_taken_down": "Zeron took this template down, so it can't be used.",
-      "template_unchecked": "Zeron couldn't check whether this template was taken down. Try again in a moment."
+      "template_unchecked": "Zeron couldn't check whether this template was taken down. Try again in a moment.",
+      "asked_lately": "You answered Not now to this a moment ago, so Zeron isn't asking again yet. Try again in a little while."
     },
     "store": {
       "browse": "Browse",
@@ -4237,7 +4238,8 @@
           "title": "Make this deploy token?",
           "body": "Anyone with it can publish new versions of what it's for, as you. Zeron will ask you to sign in again first, and shows the token in this window.",
           "allow": "Create token"
-        }
+        },
+        "chosen": "{n, plural, one {# chosen} other {# chosen}}"
       }
     }
   },

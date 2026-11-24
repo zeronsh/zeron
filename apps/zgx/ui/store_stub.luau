@@ -19,6 +19,7 @@
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
 --   store_stub.not_now     the next publish or unyank is answered Not now
+--   store_stub.asked_lately the next publish or unyank is refused: Not now was said lately
 --   store_stub.token_ended  a token that ended yesterday, still listed
 --   store_stub.tokens_full  a new token is refused: the account has 20 live
 --   store_stub.tokens_today a new token is refused: 10 made today
@@ -49,11 +50,12 @@ local claims = false
 local refuse_listing = false
 -- The next publish, or the next unyank, is answered Not now in Zeron's own
 -- window (`store_stub.not_now`).
-local not_now = false
+local not_now: string? = nil
 local function asked_first()
-	if not_now then
-		not_now = false
-		error({ message = "cancelled" }, 0)
+	local word = not_now
+	if word then
+		not_now = nil
+		error({ message = word }, 0)
 	end
 end
 -- Lists without `total`, as a store from before it counted them.
@@ -988,7 +990,14 @@ ui.command {
 	id = "store_stub.not_now",
 	title = "Store: the next publish or unyank is answered Not now",
 	run = function()
-		not_now = true
+		not_now = "cancelled"
+	end,
+}
+ui.command {
+	id = "store_stub.asked_lately",
+	title = "Store: the next publish or unyank is refused: Not now was said lately",
+	run = function()
+		not_now = "asked_lately"
 	end,
 }
 ui.command {

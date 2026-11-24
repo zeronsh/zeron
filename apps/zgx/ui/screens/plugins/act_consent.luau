@@ -15,6 +15,11 @@ local token_block = require("@screens/plugins/token_block")
 
 local M = {}
 
+-- Yes is armed a moment after the window shows, and again each time it comes
+-- forward (the host holds one sooner: src/plugins/act_consent.rs `ARMED`), so
+-- a click or an Enter meant for the main window never answers it.
+M.ARM_MS = 800
+
 local shown = ui.shared("store_consent", { busy = true } :: any)
 
 local function item(): any
@@ -22,16 +27,17 @@ local function item(): any
 	return if type(now.item) == "table" then now.item else {}
 end
 
--- What's asked is a thing's own words, drawn as they are.
-local function plain(v: any, most: number): string
-	return if type(v) == "string" then string.sub(v, 1, most) else ""
+-- What's asked is a thing's own words, drawn as they are (one line of what
+-- prints, and short: the host's).
+local function plain(v: any): string
+	return if type(v) == "string" then v else ""
 end
 
 local function title(it: any): string | Message
 	if it.act == "publish" then
-		return ui.t("plugins.store.act.publish.title", { name = plain(it.name, 64), version = plain(it.version, 32) })
+		return ui.t("plugins.store.act.publish.title", { name = plain(it.name), version = plain(it.version) })
 	elseif it.act == "unyank" then
-		return ui.t("plugins.store.act.unyank.title", { name = plain(it.name, 64), version = plain(it.version, 32) })
+		return ui.t("plugins.store.act.unyank.title", { name = plain(it.name), version = plain(it.version) })
 	end
 	return ui.t("plugins.store.act.token.title")
 end
@@ -61,11 +67,23 @@ local function scope_lines(scope: any): { () -> string }
 		function(): string
 			local ids: { string } = {}
 			for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
-				table.insert(ids, plain(id, 40))
+				table.insert(ids, plain(id))
 			end
 			return table.concat(ids, ui.t("plugins.words.list_sep"):get())
 		end,
 	}
+end
+
+-- (How many, first, where there's more than one.)
+local function chosen_lines(scope: any): { () -> string }
+	local lines = scope_lines(scope)
+	local n = if type(scope) == "table" and type(scope.plugins) == "table" then #scope.plugins else 0
+	if type(scope) == "table" and scope.all ~= true and n > 1 then
+		table.insert(lines, 1, function(): string
+			return ui.t("plugins.store.act.chosen", { n = n }):get()
+		end)
+	end
+	return lines
 end
 
 -- A fact's words, whole: on as many lines as they take, a word longer than
@@ -95,18 +113,18 @@ local function facts(it: any): Node
 	end
 	if it.act == "token" then
 		add("plugins.store.key.name", one(function(): string
-			return plain(it.name, 64)
+			return plain(it.name)
 		end))
-		add("plugins.store.key.scope.label", scope_lines(it.scope))
+		add("plugins.store.key.scope.label", chosen_lines(it.scope))
 		add("plugins.store.key.expiry_label", one(function(): string
 			return if type(it.expires) == "number" then locale.date(it.expires / 1000) else ui.t("plugins.store.key.expiry.never"):get()
 		end))
 	else
 		add("plugins.store.act.id", one(function(): string
-			return plain(it.id, 40)
+			return plain(it.id)
 		end))
 		add("plugins.store.act.version", one(function(): string
-			return plain(it.version, 32)
+			return plain(it.version)
 		end))
 	end
 	return ui.div {
@@ -122,12 +140,29 @@ local function answer(allow: boolean)
 	ui.invoke("store.decide", { allow = allow })
 end
 
-local function asking(): Node
+local Asking = ui.component(function(_props: {}): Node
 	local it = item()
 	local act = if it.act == "publish" or it.act == "unyank" then it.act else "token"
 	local function busy(): boolean
 		return shown:get().busy == true
 	end
+	local armed = ui.use_state(false)
+	local arming = 0
+	local raised = ui.computed(function(): number
+		local n = shown:get().raised
+		return if type(n) == "number" then n else 0
+	end)
+	ui.effect(function()
+		local _ = raised:get()
+		arming += 1
+		local mine = arming
+		armed:set(false)
+		ui.after(M.ARM_MS, function()
+			if mine == arming then
+				armed:set(true)
+			end
+		end)
+	end)
 	return ui.column {
 		w_full = true,
 		h_full = true,
@@ -152,7 +187,7 @@ local function asking(): Node
 					w_full = true,
 					gap = "$space.3",
 					items = "center",
-					ds.Tile { label = plain(it.name, 64), hue = words.hue(plain(it.id or it.name, 64)), size = 40 },
+					ds.Tile { label = plain(it.name), hue = words.hue(plain(it.id or it.name)), size = 40 },
 					ui.text {
 						title(it),
 						heading = 1,
@@ -207,9 +242,11 @@ local function asking(): Node
 				tone = "primary",
 				size = "md",
 				busy = busy,
-				disabled = busy,
+				disabled = function(): boolean
+					return busy() or not armed:get()
+				end,
 				on_click = function()
-					if not shown:peek().busy then
+					if armed:peek() and not shown:peek().busy then
 						answer(true)
 					end
 				end,
@@ -217,7 +254,7 @@ local function asking(): Node
 			},
 		},
 	}
-end
+end)
 
 -- The new token, until it's put away.
 local function made(): Node
@@ -288,9 +325,9 @@ function M.View(): Node
 			end
 			-- (What's asked, whole: a sheet is of one thing from start to end.)
 			local it = now.item
-			return if type(it) == "table" then `ask:{it.act}:{plain(it.id, 40)}:{plain(it.version, 32)}:{plain(it.name, 64)}` else "none"
+			return if type(it) == "table" then `ask:{it.act}:{plain(it.id)}:{plain(it.version)}:{plain(it.name)}` else "none"
 		end, function(key: string): Node
-			return if key == "made" then made() elseif key == "none" then ui.div {} else asking()
+			return if key == "made" then made() elseif key == "none" then ui.div {} else Asking {}
 		end, { w_full = true, h_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 end

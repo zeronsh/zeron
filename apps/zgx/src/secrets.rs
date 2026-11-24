@@ -37,6 +37,7 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
             if !write(service.as_ref(), &text) {
                 return Err("The clipboard didn't take it".into());
             }
+            hold(service.clone(), &text);
             // (Answered now; the clipboard let go of a minute on, if it
             // still holds this and nothing newer.)
             let later = platform.clone();
@@ -46,10 +47,41 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
                 if still_holds(service.as_ref(), &text) {
                     clear(service.as_ref());
                 }
+                let_go(&text);
             });
             Ok(Value::Bool(true))
         }
     });
+}
+
+thread_local! {
+    /// The secret the clipboard was last given, while it may hold it.
+    static HELD: RefCell<Option<(Option<PlatformService>, String)>> = const { RefCell::new(None) };
+}
+
+fn hold(service: Option<PlatformService>, text: &str) {
+    HELD.with(|h| *h.borrow_mut() = Some((service, text.to_owned())));
+}
+
+fn let_go(text: &str) {
+    HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.as_ref().is_some_and(|(_, held)| held == text) {
+            *h = None;
+        }
+    });
+}
+
+/// Whether the clipboard holds a secret now (something copied over it since
+/// is no secret).
+pub fn held() -> bool {
+    let held = HELD.with(|h| h.borrow().clone());
+    held.is_some_and(|(service, text)| still_holds(service.as_ref(), &text))
+}
+
+#[cfg(test)]
+pub fn hold_for_test(service: Option<PlatformService>, text: &str) {
+    hold(service, text);
 }
 
 fn still_holds(service: Option<&PlatformService>, text: &str) -> bool {

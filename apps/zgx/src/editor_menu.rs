@@ -112,6 +112,11 @@ pub fn install(host: &ScriptHost, ui: WeakUi, platform: Platform) {
         let (ui, platform, ready) = (ui.clone(), platform.clone(), ready.clone());
         host.action("editor_menu.paste", move |_| {
             let (Some(ui), Some(editor)) = (ui.upgrade(), ready()) else { return };
+            // (A script may ask for this paste: not a secret, where a template
+            // that isn't Zeron's may have, as `preview::guard` holds reads.)
+            if crate::plugins::preview::another_s_ran() && crate::secrets::held() {
+                return;
+            }
             let text = platform
                 .borrow()
                 .as_ref()

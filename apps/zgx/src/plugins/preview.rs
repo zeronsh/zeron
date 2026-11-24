@@ -260,6 +260,12 @@ pub fn refused(error: &str) -> bool {
 /// answer for themselves (`refuse`), with a promise that rejects.
 pub fn guard(kind: zgx_script::GuardKind, name: &str) -> Result<(), String> {
     use zgx_script::GuardKind as Kind;
+    // A secret on the clipboard (a deploy token you just copied) isn't for
+    // what a template that isn't Zeron's may have wired to read it, kept or
+    // not. (A paste you make, and a program in a terminal, read it still.)
+    if matches!(kind, Kind::Clipboard) && name.starts_with("read") && another_s_ran() && crate::secrets::held() {
+        return Err("The clipboard holds a secret Zeron copied. It can be read once it's gone.".into());
+    }
     let Some(p) = current() else { return Ok(()) };
     let refused = || Err(format!("{}{IS_A_PREVIEW}. Keep it first, or go back to Zeron v3.", p.name));
     match kind {
@@ -735,6 +741,32 @@ mod tests {
         // Zeron's own needs no keeping.
         assert!(trusted_at(&templates, live::BUILTIN, &approvals));
         set(None);
+    }
+
+    /// A secret you copied isn't read by the window while a template that
+    /// isn't Zeron's has run; with Zeron's own, and once it's copied over or
+    /// gone, reading is as ever, and writing always is.
+    #[test]
+    fn a_secret_on_the_clipboard_isn_t_another_s_to_read() {
+        use zgx_script::GuardKind::Clipboard;
+        let desktop = std::rc::Rc::new(zgx_script::testing::FakeDesktop::default());
+        let service = zgx::platform::PlatformService(desktop.clone());
+        let can_read = || ["read", "read_html", "read_type", "read_image"].map(|name| guard(Clipboard, name).is_ok());
+        set(None);
+        service.0.set_clipboard_text("zdt_secret".into());
+        crate::secrets::hold_for_test(Some(service.clone()), "zdt_secret");
+        another_s_ran_for_test(false);
+        assert_eq!(can_read(), [true; 4], "Zeron's own");
+        another_s_ran_for_test(true);
+        assert_eq!(can_read(), [false; 4]);
+        assert!(guard(Clipboard, "write").is_ok());
+        service.0.set_clipboard_text("something else".into());
+        assert_eq!(can_read(), [true; 4], "copied over");
+        service.0.set_clipboard_text("zdt_secret".into());
+        assert_eq!(can_read(), [false; 4]);
+        crate::secrets::hold_for_test(None, "");
+        assert_eq!(can_read(), [true; 4], "let go");
+        another_s_ran_for_test(false);
     }
 
     /// A template that isn't Zeron's, by what its folder holds and never by

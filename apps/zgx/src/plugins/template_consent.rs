@@ -12,7 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
 use zgx_desktop::{WindowContext, WindowHandle, WindowOptions};
@@ -43,9 +43,33 @@ type Last = Rc<RefCell<Option<Json>>>;
 
 thread_local! {
     static OPEN: RefCell<Option<Open>> = const { RefCell::new(None) };
+    static SEEN: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
+}
+
+/// The sheet shown, and since when: an Allow is taken only of what has shown
+/// a moment (`consent::ARMED`).
+fn saw(item: Option<&Json>) {
+    let key = item.map(sheet);
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.as_ref().map(|(shown, _)| shown) != key.as_ref() {
+            *s = key.map(|key| (key, Instant::now()));
+        }
+    });
+}
+
+/// Which sheet `item` is: what's asked of, and as what.
+fn sheet(item: &Json) -> String {
+    let field = |k: &str| item[k].as_str().unwrap_or_default();
+    key(field("keep"), field("pending"), field("hash"))
+}
+
+fn key(keep: &str, pending: &str, hash: &str) -> String {
+    format!("{keep}/{pending}@{hash}")
 }
 
 fn record(item: Option<&Json>, busy: bool, error: Option<&str>) -> Value {
+    saw(item);
     let mut fields = vec![("busy", Value::from(busy))];
     if let Some(item) = item {
         fields.push(("item", json_value(item)));
@@ -220,6 +244,13 @@ fn host(
     host.action("templates.decide", move |arg| {
         let allow = arg.field("allow").is_some_and(Value::truthy);
         let hash = arg.field("hash").map(text).unwrap_or_default();
+        // (Before anything: a click or an Enter meant for the main window, as
+        // this one comes up under it, allows nothing.)
+        let of = |k: &str| arg.field(k).map(text).unwrap_or_default();
+        let asked = key(&of("keep"), &of("pending"), &hash);
+        if allow && !SEEN.with(|s| super::consent::may_allow(&s.borrow(), &asked, Instant::now())) {
+            return;
+        }
         // Keeping a template in preview: recorded here, by the app alone
         // (never the engine), bound to its files as you were shown them.
         if let Some(id) = arg.field("keep").map(text).filter(|id| !id.is_empty()) {

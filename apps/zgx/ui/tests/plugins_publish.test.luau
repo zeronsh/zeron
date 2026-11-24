@@ -541,6 +541,17 @@ test("Not now, asked before a publish, says nothing went wrong, and Submit still
 	expect(app:tree()).to_contain("signed as yours")
 	app:click("#publish-submit")
 	settle(app)
+	local again = app
+	app = publishing()
+	app:command("store_stub.fixed")
+	app:click('role:button "Check again"')
+	settle(app)
+	app:command("store_stub.asked_lately")
+	app:click("#publish-submit")
+	settle(app)
+	-- Asked again too soon after a Not now: said.
+	expect(app:tree()).to_contain("You answered Not now to this a moment ago")
+	app = again
 	local sent = 0
 	for _ in string.gmatch(calls(app), "publish:pomodoro%-clock:") do
 		sent += 1

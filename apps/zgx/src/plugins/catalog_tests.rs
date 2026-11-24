@@ -393,6 +393,7 @@ fn a_token_made_as_another_s_template_starts_isn_t_shown_in_the_main_window() {
     app.frames(3);
     app.click("role:button \"go\"");
     assert!(app.wait_until(|app| !app.text("out").is_empty()));
-    let out = app.text("out");
-    assert!(out.contains("id=t") && !out.contains("zdt_"), "{out}");
+    // (And revoked: it's nobody's.)
+    assert_eq!(app.text("out"), "err:cancelled");
+    assert_eq!(asked.borrow().iter().map(|a| (a.0.clone(), a.1["id"].clone())).next_back().unwrap(), ("RevokeDeployToken".into(), json!("t")));
 }

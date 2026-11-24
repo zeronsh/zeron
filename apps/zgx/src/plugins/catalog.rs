@@ -331,7 +331,8 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
         let (e, a) = (e.clone(), a.clone());
         async move {
             crate::plugins::preview::refuse("plugins.store.create_token")?;
-            let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
+            // (As it's shown before it's made: one line of what prints.)
+            let name = super::consent::plain(&arg.field("name").map(text).unwrap_or_default(), 64);
             if name.is_empty() {
                 return Err("invalid_name".into());
             }
@@ -355,7 +356,15 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
                         });
                     }
                 };
-                let mut reply = a(Act { item, run: Box::new(move || Box::pin(async move { create_token(&e, params, &|| true).await })), stop: Box::new(stop) }).await?;
+                let undo = {
+                    let e = e.clone();
+                    move |made: Json| -> act_consent::Answer {
+                        let e = e.clone();
+                        Box::pin(async move { revoke_made(&e, &made).await })
+                    }
+                };
+                let run = Box::new(move || -> act_consent::Answer { Box::pin(async move { create_token(&e, params, &|| true).await }) });
+                let mut reply = a(Act { item, run, stop: Box::new(stop), undo: Some(Box::new(undo)) }).await?;
                 // (The window that made it shows it; this one never has it.)
                 if let Some(record) = reply.as_object_mut() {
                     record.remove("secret");
@@ -367,10 +376,13 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
             // shows a token.)
             let ours = || !preview::another_s_ran();
             let mut reply = create_token(&e, params, &ours).await?;
-            if !ours()
-                && let Some(record) = reply.as_object_mut()
-            {
-                record.remove("secret");
+            if !ours() {
+                if let Some(record) = reply.as_object_mut() {
+                    record.remove("secret");
+                }
+                if revoke_made(&e, &reply).await.is_ok() {
+                    return Err("cancelled".into());
+                }
             }
             Ok(json_value(&reply))
         }
@@ -420,7 +432,15 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
 
 /// `run` as an act asked in its window, with nothing to stop half-way.
 fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl FnOnce() -> F + 'static) -> Act {
-    Act { item, run: Box::new(move || Box::pin(run())), stop: Box::new(|| {}) }
+    Act { item, run: Box::new(move || Box::pin(run())), stop: Box::new(|| {}), undo: None }
+}
+
+/// The token `made` records, revoked: nobody saw it, or will.
+async fn revoke_made(e: &Engine, made: &Json) -> Result<Json, String> {
+    let id = made["token"]["id"].as_str().filter(|id| !id.is_empty()).ok_or("failed")?;
+    let reply = e("RevokeDeployToken", json!({ "id": id }), None).await?;
+    answered(&reply)?;
+    Ok(reply)
 }
 
 /// What the engine checked and gave a ticket for: what publishing with it

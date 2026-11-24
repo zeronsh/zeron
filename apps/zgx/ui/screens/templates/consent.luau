@@ -32,6 +32,12 @@ local M = {}
 
 local consent = ui.shared("template_consent", { busy = true } :: any)
 
+-- Allow is armed a moment after a sheet shows (the host holds one sooner:
+-- src/plugins/template_consent.rs), so a click or an Enter meant for the main
+-- window, as this one comes up under it, allows nothing.
+M.ARM_MS = 800
+local armed = ui.state("template_consent_armed", false)
+
 local function item(): any
 	return consent:get().item
 end
@@ -235,10 +241,12 @@ local function body(key: string): Node
 					tone = "primary",
 					size = "md",
 					disabled = function(): boolean
-						return consent:get().busy == true
+						return consent:get().busy == true or not armed:get()
 					end,
 					on_click = function()
-						answer(true)
+						if armed:peek() then
+							answer(true)
+						end
 					end,
 					if keep then ui.t("templates.consent.keep") else ui.t("templates.consent.install"),
 				},
@@ -247,7 +255,39 @@ local function body(key: string): Node
 	}
 end
 
+-- Which sheet shows: one package's, as what, and by whom.
+local function shown_key(): string
+	local s = consent:get()
+	local it = s.item
+	if not it then
+		return if s.busy then "loading" else "none"
+	end
+	local a = it.author or {}
+	return `{it.keep or it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}`
+end
+
+-- (A sheet's who, looked up as it shows, is the same sheet: armed as it was.)
+local function sheet_key(): string
+	local it = consent:get().item
+	return if it then `{it.keep or it.pending}@{it.hash}` else ""
+end
+
 function M.View(): Node
+	local sheet = ui.computed(sheet_key)
+	local arming = 0
+	ui.effect(function()
+		local key = sheet:get()
+		arming += 1
+		local mine = arming
+		armed:set(false)
+		if key ~= "" then
+			ui.after(M.ARM_MS, function()
+				if mine == arming then
+					armed:set(true)
+				end
+			end)
+		end
+	end)
 	return ui.column {
 		id = "template-consent",
 		w_full = true,
@@ -259,15 +299,7 @@ function M.View(): Node
 		-- which package, as what, and who signed it, so it's built again only
 		-- when there's something new to read. (The sheet is read once, as a
 		-- whole: a decision is made on what was shown.)
-		ui.presence(function(): string
-			local s = consent:get()
-			local it = s.item
-			if not it then
-				return if s.busy then "loading" else "none"
-			end
-			local a = it.author or {}
-			return `{it.keep or it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}`
-		end, body, { w_full = true, h_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+		ui.presence(shown_key, body, { w_full = true, h_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 	}
 end
 

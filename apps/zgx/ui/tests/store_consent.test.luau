@@ -20,6 +20,11 @@ local function box(app: any, target: string): { x: number, y: number, w: number,
 	return { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 }
 end
 
+local function armed(app: any)
+	app:wait("#never-there", { timeout_ms = 900 })
+	app:frames(4)
+end
+
 test("publishing says what, as whom, and why Zeron asks", function()
 	local app = open()
 	local tree = app:tree("#store-consent")
@@ -28,6 +33,26 @@ test("publishing says what, as whom, and why Zeron asks", function()
 	expect(tree).to_contain("focus-timer")
 	expect(tree).to_contain("Why Zeron asks here")
 	expect(tree).to_contain("A template that isn't Zeron's has run")
+	-- (Not at once: a click meant for the main window, as this one comes up.)
+	app:click("#store-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_be("")
+	armed(app)
+	app:click("#store-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_be("decide:true")
+end)
+
+test("brought forward again, it takes a yes only after a moment again", function()
+	local app = open()
+	armed(app)
+	app:command("raised")
+	app:frames(4)
+	expect(app:tree("#store-consent-allow")).to_contain("disabled")
+	app:click("#store-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_be("")
+	armed(app)
 	app:click("#store-consent-allow")
 	app:frames(4)
 	expect(app:state("calls")).to_be("decide:true")
@@ -61,6 +86,7 @@ end)
 test("while it's being made it can be stopped and not asked again", function()
 	local app = open("busy")
 	expect(app:has("#store-consent-signing-in")).to_be(true)
+	armed(app)
 	app:click("#store-consent-allow")
 	app:frames(4)
 	expect(app:state("calls")).to_be("")
@@ -116,6 +142,7 @@ test("every fact is whole, and the answer stays in view", function()
 			if show == "many" then
 				-- Fifty ids, on as many lines as they take.
 				expect(facts.h > 400).to_be(true)
+				expect(app:tree("#store-consent-facts")).to_contain(if where == "en" then "50 chosen" else "已选 50 个")
 			end
 			local last = app:tree("#store-consent-facts")
 			if show == "token" or show == "token_all" then

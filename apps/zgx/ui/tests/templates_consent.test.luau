@@ -27,8 +27,19 @@ test("it says what a template can do, who signed it, and what's left out", funct
 	expect(tree).never.to_contain("Unknown author")
 end)
 
+local function armed(app: any)
+	app:wait("#never-there", { timeout_ms = 900 })
+	app:frames(4)
+end
+
 test("Install and Not now answer with what was shown", function()
 	local app = open()
+	-- (Not at once: a click meant for the main window, as this one comes up.)
+	expect(app:tree("#template-consent-allow")).to_contain("disabled")
+	app:click("#template-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_be("")
+	armed(app)
 	app:click("#template-consent-allow")
 	app:frames(20)
 	expect(app:state("calls")).to_contain("decide:ledger-1700000000:true:ledger-hash-1")
@@ -78,6 +89,7 @@ test("keeping a template in preview says what keeping gives it, and answers with
 	expect(tree).to_contain("Zeron asks again")
 	expect(tree).never.to_contain("Install")
 	expect(tree).never.to_contain("signature checks out")
+	armed(app)
 	app:click("#template-consent-allow")
 	app:frames(20)
 	expect(app:state("calls")).to_contain("keep:sleek:true:sleek-digest-1")

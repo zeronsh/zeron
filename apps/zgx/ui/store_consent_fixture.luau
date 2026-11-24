@@ -66,6 +66,11 @@ for id in ACTS do
 		end,
 	}
 end
+ui.command { id = "raised", title = "Raised", run = function()
+	local now = table.clone(shown:peek())
+	now.raised = (now.raised or 0) + 1
+	shown:set(now)
+end }
 ui.command { id = "busy", title = "Busy", run = function()
 	shown:set({ busy = true, item = ACTS.token } :: any)
 end }
