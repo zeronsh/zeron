@@ -1,8 +1,10 @@
 ---
-// A plugin's head, the same on its Overview, Versions and asks (the
-// prototype's crumbs and .head): its tile, name (the seal when its newest
-// is verified), who made it, its category, how many have it, its summary;
-// and getting it (Get.astro).
+// A plugin's head, the same on its Overview, Versions and asks: one block,
+// as Raycast's extension page sets it. Its tile; beside it the name (the
+// seal when its newest is verified), the summary under it, then one line of
+// who made it (their initial before their name), its category and how many
+// have it. At the right, getting it (Get.astro), the button level with the
+// tile's middle.
 import Get from "./Get.astro";
 import Icon from "./Icon.astro";
 import Seal from "./Seal.astro";
@@ -12,6 +14,7 @@ import { count } from "../../lib/store/format.ts";
 import { satisfies } from "../../lib/store/semver.ts";
 import type { PluginDetail, VersionInfo } from "../../lib/store/types.ts";
 import { memberUrl } from "../../lib/store/urls.ts";
+import { initial } from "../../lib/store/tile.ts";
 import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
@@ -38,12 +41,18 @@ const first = plugin.categories[0] ?? null;
   <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="xl" />
   <div class="txt">
     <h1 class={lsb(plugin.name)}><span class="name">{plugin.name}</span>{plugin.verified && <Seal size="l" />}</h1>
+    <p class="sum">{plugin.summary}</p>
     <p class="by">
-      <span>by {plugin.author.username ? <a href={memberUrl(plugin.author.username)}><b>@{plugin.author.username}</b></a> : <b>a former account</b>}</span>
+      {
+        plugin.author.username ? (
+          <a class="who" href={memberUrl(plugin.author.username)}><span class="av" aria-hidden="true">{initial(plugin.author.username)}</span><span class="sr-only">by </span>@{plugin.author.username}</a>
+        ) : (
+          <span class="who"><span class="av" aria-hidden="true">?</span>by a former account</span>
+        )
+      }
       {category && <><i aria-hidden="true"></i><span>{category}</span></>}
       <i aria-hidden="true"></i><span class="num">{count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
     </p>
-    <p class="lead sum">{plugin.summary}</p>
   </div>
   <Get
     id={plugin.id}

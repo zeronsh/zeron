@@ -93,6 +93,10 @@ const PAGES: [string, string | undefined][] = [
 
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
+  ["a plugin's picture, large", "/plugins/worst-case-listing-at-every-limit-xyz12", undefined, async (page) => {
+    await page.locator("[data-shot]").first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  }],
   ["Verify, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
     await page.getByRole("link", { name: /^Mark .+ verified$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
@@ -136,9 +140,13 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: "Stop new installs" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the pictures, at the second", "/plugins/focus-timer", undefined, async (page) => {
-    await page.getByRole("button", { name: "Picture 2" }).click();
-    await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
+  ["the pictures, the row taken on", "/plugins/worst-case-listing-at-every-limit-xyz12", undefined, async (page) => {
+    // (On a phone the row is a finger's to scroll: its arrows aren't there.)
+    const next = page.getByRole("button", { name: "More pictures" });
+    if (await next.isVisible()) {
+      await next.click();
+      await expect.poll(() => page.getByRole("button", { name: "Earlier pictures" }).isVisible()).toBe(true);
+    }
   }],
   ["Install in Zeron's help", "/plugins/focus-timer", undefined, async (page) => {
     await page.evaluate(() => {
@@ -412,19 +420,77 @@ describe("by keyboard", () => {
     }
   });
 
-  test("a plugin's pictures: the strip takes focus, and an arrow brings the next one in, with no script needed", async () => {
-    const { page, context } = await open("/plugins/focus-timer");
+  test("a plugin's pictures: a thumbnail opens the picture large, the arrows go through them, Escape closes it, back on the thumbnail", async () => {
+    const { page, context } = await open("/plugins/worst-case-listing-at-every-limit-xyz12");
     try {
-      const strip = page.getByRole("group", { name: /2 pictures/ });
-      await strip.focus();
-      expect(await strip.evaluate((el) => el.scrollLeft)).toBe(0);
+      const first = page.getByRole("link", { name: /, picture 1 of 8$/ });
+      await first.focus();
+      await page.keyboard.press("Enter");
+      const box = page.getByRole("dialog", { name: /^Pictures of / });
+      await expect.poll(() => box.isVisible()).toBe(true);
+      // (Focus in it, on Close; the picture and its count.)
+      expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe("Close");
+      const count = box.locator("figcaption");
+      expect(await count.textContent()).toBe("1 / 8");
+      expect(await box.locator("img").getAttribute("alt")).toMatch(/, picture 1 of 8$/);
       await page.keyboard.press("ArrowRight");
-      await page.keyboard.press("ArrowRight");
-      await page.keyboard.press("ArrowRight");
-      await expect.poll(() => strip.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
-      // (The dots follow it.)
-      await page.keyboard.press("End");
-      await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
+      expect(await count.textContent()).toBe("2 / 8");
+      expect(await box.locator("img").getAttribute("src")).toBe(await page.getByRole("link", { name: /, picture 2 of 8$/ }).getAttribute("href"));
+      await page.keyboard.press("ArrowLeft");
+      await page.keyboard.press("ArrowLeft");
+      expect(await count.textContent()).toBe("8 / 8");
+      await page.getByRole("button", { name: "The next picture" }).click();
+      expect(await count.textContent()).toBe("1 / 8");
+      await page.keyboard.press("Escape");
+      await expect.poll(() => box.isVisible()).toBe(false);
+      expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.querySelector("img")?.alt)).toMatch(/, picture 1 of 8$/);
+      // (A click beside the picture closes it too.)
+      await first.click();
+      await expect.poll(() => box.isVisible()).toBe(true);
+      await page.mouse.click(8, 8);
+      await expect.poll(() => box.isVisible()).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a plugin's pictures: more than three, the row's arrow takes it on, and back", async () => {
+    const { page, context } = await open("/plugins/worst-case-listing-at-every-limit-xyz12");
+    try {
+      const row = page.locator("[data-row]");
+      const next = page.getByRole("button", { name: "More pictures" });
+      const prev = page.getByRole("button", { name: "Earlier pictures" });
+      expect(await next.isVisible()).toBe(true);
+      expect(await prev.isVisible()).toBe(false);
+      await next.click();
+      await expect.poll(() => row.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+      await expect.poll(() => prev.isVisible()).toBe(true);
+      // (Three or fewer: nothing to scroll to, no arrows.)
+      await page.goto(new URL("/plugins/focus-timer", site.url).href, { waitUntil: "networkidle" });
+      expect(await page.locator(".shots-arrow").count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a plugin's pictures with no script: each thumbnail is the link to its picture, the row scrolls by itself", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, javaScriptEnabled: false });
+    try {
+      const page = await context.newPage();
+      await page.goto(new URL("/plugins/worst-case-listing-at-every-limit-xyz12", site.url).href, { waitUntil: "networkidle" });
+      const thumbs = page.locator("[data-shot]");
+      expect(await thumbs.count()).toBe(8);
+      for (const thumb of await thumbs.all()) {
+        expect(await thumb.getAttribute("href")).toMatch(/\/shots\/screen-\d\.svg$/);
+        expect(await thumb.getAttribute("target")).toBe("_blank");
+      }
+      // (The lightbox is never shown; no arrows that would do nothing; the row is wider than its room, to scroll.)
+      expect(await page.getByRole("dialog").count()).toBe(0);
+      expect(await page.locator(".shots-arrow:visible").count()).toBe(0);
+      expect(await page.locator("[data-row]").evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      const [tab] = await Promise.all([context.waitForEvent("page"), thumbs.first().click()]);
+      await tab.waitForLoadState();
+      expect(tab.url()).toBe(new URL((await thumbs.first().getAttribute("href"))!, page.url()).href);
     } finally {
       await context.close();
     }

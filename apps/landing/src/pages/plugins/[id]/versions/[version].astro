@@ -72,8 +72,8 @@ const base = pluginUrl(id);
           </div>
           {v.yanked ? (
             <div class="get">
-              <span class="btn pri lg" aria-disabled="true">Can't be installed</span>
-              <div class="ver"><b class="mono">{v.version}</b><span class="state quiet">{statusWords("yanked")}</span></div>
+              <div class="get-btn"><span class="btn pri" aria-disabled="true">Can't be installed</span></div>
+              <p class="ver"><b class="mono">{v.version}</b><i aria-hidden="true"></i><span class="said">{statusWords("yanked")}</span></p>
               <p class="note quiet">{stoppedWhy(v)}</p>
             </div>
           ) : (
@@ -99,7 +99,7 @@ const base = pluginUrl(id);
             </section>
             <div class="rule" aria-hidden="true"></div>
             <ul class="links">
-              <li><a href={base}><Icon name="arrow" />{p.name}'s page</a></li>
+              <li><a href={base}><Icon name="arrow" /><span>{p.name}'s page</span></a></li>
               <li><a href={`${base}/report`}><Icon name="flag" />Report this plugin</a></li>
             </ul>
           </aside>

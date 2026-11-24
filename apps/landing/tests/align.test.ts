@@ -57,20 +57,21 @@ describe("every run of text that begins a line puts its ink on its column", () =
 });
 
 describe("the columns the rule names", () => {
-  test("a plugin's Get is its rail's column, from the button down, gallery or not", async () => {
+  test("a plugin's Get ends on the page's right edge, the rail's; its button its own width, level with the tile's middle", async () => {
     for (const path of ["/plugins/focus-timer", "/plugins/first-light", "/plugins/worst-case-listing-at-every-limit-xyz12", "/plugins/focus-timer/versions/1.2.0"])
       for (const width of [1440, 1024]) {
         const page = await open({ path }, width, "light");
         try {
           const got = await page.evaluate(() => {
-            const get = document.querySelector(".head .get")!.getBoundingClientRect();
-            const rail = document.querySelector(".rail")!.getBoundingClientRect();
-            const line = document.querySelector(".get .ver")!.getBoundingClientRect();
-            return { get: [get.left, get.width], rail: [rail.left, rail.width], line: line.left };
+            const box = (q: string) => document.querySelector(q)!.getBoundingClientRect();
+            const [get, rail, line, button, tile] = [box(".head .get"), box(".rail"), box(".get .ver"), box(".get .btn"), box(".head > .tile")];
+            return { get: get.right, rail: rail.right, line: line.right, button: [button.right, button.width, button.top + button.height / 2], tile: tile.top + tile.height / 2, railWidth: rail.width };
           });
-          expect(Math.abs(got.get[0]! - got.rail[0]!), `${path} at ${width}: Get's edge`).toBeLessThanOrEqual(1);
-          expect(Math.abs(got.get[1]! - got.rail[1]!), `${path} at ${width}: Get's width`).toBeLessThanOrEqual(1);
-          expect(Math.abs(got.line - got.rail[0]!), `${path} at ${width}: the line under the button`).toBeLessThanOrEqual(1);
+          expect(Math.abs(got.get - got.rail), `${path} at ${width}: Get's right edge`).toBeLessThanOrEqual(1);
+          expect(Math.abs(got.button[0]! - got.rail), `${path} at ${width}: the button's right edge`).toBeLessThanOrEqual(1);
+          expect(Math.abs(got.line - got.rail), `${path} at ${width}: the line under the button`).toBeLessThanOrEqual(1);
+          expect(got.button[1]!, `${path} at ${width}: the button, its own width`).toBeLessThan(got.railWidth * 0.75);
+          expect(Math.abs(got.button[2]! - got.tile), `${path} at ${width}: the button level with the tile's middle`).toBeLessThanOrEqual(1);
         } finally {
           await page.context().close();
         }

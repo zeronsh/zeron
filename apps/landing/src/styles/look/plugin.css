@@ -4,44 +4,49 @@
 .crumbs a { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; transition: color 0.12s var(--ease); }
 .crumbs a:hover { color: var(--text); }
 
-/* The rail's width and the gap before it: the page's two columns under the head, and the head's own
-   last column (Get), one column from the button down, gallery or not. */
-:root { --rail: 340px; --rail-gap: var(--s64); }
+/* The rail's width and the gap before it: the page's two columns under the head. */
+:root { --rail: 280px; --rail-gap: var(--s64); }
 
-/* ---- the head ---- */
-.head { display: grid; grid-template-columns: auto minmax(0, 1fr) calc(var(--rail) + var(--rail-gap) - var(--s24)); column-gap: var(--s24); align-items: start; padding-top: var(--s24); }
-.head .txt { min-width: 0; padding-top: var(--s4); }
-.head > .get { margin-left: calc(var(--rail-gap) - var(--s24)); }
-.head h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; display: flex; align-items: center; gap: var(--s12); min-width: 0; }
+/* ---- the head: one block; the tile, its words beside it, getting it at the right ---- */
+/* (--tile: the tile's size; Get's button row is as tall, so the button sits level with its middle.) */
+.head { --tile: 80px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: var(--s24); align-items: start; padding-top: var(--s24); }
+.head .txt { min-width: 0; }
+.head h1 { font-size: 32px; line-height: 40px; letter-spacing: -0.03em; display: flex; align-items: center; gap: var(--s12); min-width: 0; }
 .head h1 .name { min-width: 0; overflow-wrap: anywhere; }
+.head .sum { margin-top: var(--s4); max-width: 40em; font-size: 16px; line-height: 24px; color: var(--text-2); }
 .head .by { margin-top: var(--s8); color: var(--text-3); font-size: 14px; line-height: 20px; display: flex; flex-wrap: wrap; gap: var(--s4) var(--s8); align-items: center; }
-.head .by b { color: var(--text-2); font-weight: 500; }
-.head .by a { border-radius: 4px; }
-.head .by a:hover b { color: var(--text); box-shadow: 0 1px 0 var(--line-2); }
 .head .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
-.head .sum { margin-top: var(--s16); max-width: 36em; }
+/* (Who made it: their initial in a small round, then their name.) */
+.head .who { display: inline-flex; align-items: center; gap: var(--s8); border-radius: 4px; transition: color 0.12s var(--ease); }
+.head a.who:hover { color: var(--text); }
+.head .av { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2); font-size: 9px; line-height: 1; font-weight: 600; }
 /* (One version's head: its number beside its name, as staff read it.) */
-.head.one { align-items: center; }
+/* (Its words centred on its tile, as the button is: the row as tall as the tile.) */
+.head.one { --tile: 56px; }
+.head.one .txt { display: flex; flex-direction: column; justify-content: center; min-height: var(--tile); }
 .head.one h1 { font-size: 32px; line-height: 38px; letter-spacing: -0.03em; flex-wrap: wrap; gap: 0 var(--s12); }
 .head.one .vnum { font: 550 26px/38px var(--mono); letter-spacing: -0.03em; color: var(--text-2); }
 .head.one .by { margin-top: var(--s4); }
 
 /* ---- getting it ---- */
-/* (Get's boxes, the button and a note, share their edges: each hangs past the column by as much, the note's
-   words on the column, the button's centred.) */
-/* (The Install block sits inside the rail's column: the button's edges are the column's, the gallery's right
-   edge its right edge. A note under it, a box of words, hangs left by its padding, its words on the column.) */
-.get { --get-hang: var(--s16); display: flex; flex-direction: column; gap: var(--s12); padding-top: var(--s4); min-width: 0; }
-.get .btn { align-self: stretch; }
+/* (At the head's right: the button its own width, level with the tile's middle; the lines under it end on its
+   right edge, the page's right text edge. A note, a box of words, sits under them.) */
+.get { --get-hang: var(--s16); display: flex; flex-direction: column; align-items: flex-end; gap: var(--s8); min-width: 0; max-width: 320px; text-align: right; }
+.get-btn { display: flex; align-items: center; min-height: var(--tile, 40px); }
 /* (The mark at its own whole-pixel size, never scaled: components/look/ZeronMark.astro.) */
 .get .btn .mark { flex: none; fill: currentColor; }
-/* (The lines under the button on the column's text edge, as the rail's are.) */
-.get .ver { --pill-gap: var(--s8); display: flex; align-items: center; flex-wrap: wrap; row-gap: var(--s8); font-size: 13px; line-height: 20px; color: var(--text-2); }
-.get .ver b { font-weight: 550; color: var(--text); }
+.get .ver { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--s4) var(--s8); font-size: 13px; line-height: 20px; color: var(--text-3); }
+.get .ver b { font-weight: 500; color: var(--text-2); }
+.get .ver i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+/* (Its state in its pill's ink: Verified green with the check, not yet amber.) */
+.get .ver .said { display: inline-flex; align-items: center; gap: var(--s4); font-weight: 500; }
+.get .ver .said.ok { color: var(--verified); }
+.get .ver .said.no { color: var(--warn); }
+.get .ver .said .seal { width: 14px; height: 14px; }
 .get .alt { font-size: 13px; line-height: 20px; color: var(--text-3); }
 .get .alt button { color: var(--text-2); box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; font-size: inherit; line-height: inherit; transition: color 0.12s var(--ease); }
 .get .alt button:hover { color: var(--text); }
-.get .note { margin-left: calc(-1 * var(--get-hang)); padding: var(--s12) var(--get-hang); border-radius: 12px; background: var(--warn-wash); color: var(--warn); font-size: 13px; line-height: 19px; }
+.get .note { margin-top: var(--s4); padding: var(--s12) var(--get-hang); border-radius: 12px; text-align: left; background: var(--warn-wash); color: var(--warn); font-size: 13px; line-height: 19px; }
 .get .note b { font-weight: 600; }
 .get .note a { box-shadow: 0 1px 0 color-mix(in srgb, currentColor 40%, transparent); font-weight: 550; border-radius: 2px; }
 .get .note a:hover { box-shadow: 0 1px 0 currentColor; }
@@ -54,22 +59,46 @@
 .get-help a { display: inline; height: auto; padding: 0; color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; }
 .get-help a:hover { background: none; }
 
-/* ---- the plugin's pictures, on its own colour ---- */
-.gallery { margin-top: var(--s32); height: 440px; border-radius: 24px; }
-.gallery .track { position: absolute; inset: 0; display: flex; gap: var(--s48); padding: var(--s48) var(--s64) 0; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; scroll-padding: 0 72px; scrollbar-width: none; border-radius: inherit; }
-.gallery .track::-webkit-scrollbar { display: none; }
-.gallery .track:focus-visible { outline-offset: -4px; }
-.gallery .track::after { content: ""; flex: 0 0 32px; }
-.gallery .slide { flex: none; position: relative; width: min(760px, calc(100% - 72px)); height: calc(100% + 48px); scroll-snap-align: start; border-radius: 16px; box-shadow: var(--shot); overflow: hidden; background: var(--surface); }
-.gallery.one .slide { width: min(860px, 100%); }
-.gallery .slide img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
-.gallery .slide:focus-visible { outline-offset: 3px; }
-.gallery .dots { position: absolute; left: 0; right: 0; bottom: 14px; display: none; justify-content: center; gap: var(--s4); }
-.js .gallery .dots { display: flex; }
-.gallery .dots button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 11px; }
-.gallery .dots button::before { content: ""; width: 6px; height: 6px; border-radius: 3px; background: oklch(var(--ink-l) var(--ink-c) var(--h)); opacity: 0.3; transition: width 0.16s var(--ease), opacity 0.16s var(--ease); }
-.gallery .dots button:hover::before { opacity: 0.55; }
-.gallery .dots button[aria-current]::before { width: 16px; opacity: 0.85; }
+/* ---- the plugin's pictures: three across, a faint line round each; more, and the row scrolls ---- */
+.shots { position: relative; margin-top: var(--s32); }
+.shots-row { display: grid; grid-auto-flow: column; grid-auto-columns: calc((100% - 2 * var(--s16)) / 3); gap: var(--s16); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; }
+.shots-row::-webkit-scrollbar { display: none; }
+/* (One alone, the article's column's width; two, halves.) */
+.shots.one .shots-row { grid-auto-columns: calc(100% - var(--rail) - var(--rail-gap)); }
+.shots.two .shots-row { grid-auto-columns: calc((100% - var(--s16)) / 2); }
+.shot { position: relative; display: block; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; scroll-snap-align: start; }
+.shot::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--line); pointer-events: none; transition: box-shadow 0.12s var(--ease); }
+.shot:hover::after { box-shadow: inset 0 0 0 1px var(--line-2); }
+.shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+.shot:focus-visible { outline-offset: 2px; }
+/* (The row's arrows, at its ends, over its pictures' middle: a round button, the store's raised surface.) */
+.shots-arrow { position: absolute; top: 50%; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; translate: 0 -50%; background: var(--surface); color: var(--text); box-shadow: var(--shadow-2), 0 0 0 1px var(--line); transition: box-shadow 0.12s var(--ease); }
+.shots-arrow:hover { box-shadow: var(--shadow-2), 0 0 0 1px var(--line-2); }
+.shots-arrow.next { right: calc(-1 * var(--s16)); }
+.shots-arrow.prev { left: calc(-1 * var(--s16)); }
+.shots-arrow svg, .lb-step svg, .lb-close svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.shots-arrow[hidden] { display: none; }
+:is(.shots-arrow, .lb-step).prev svg { rotate: 180deg; }
+
+/* The lightbox: one picture as large as the window allows less a step round it, on a dimmed page. */
+.lightbox { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; color: #fff; }
+.lightbox[open] { display: grid; place-items: center; }
+.lightbox::backdrop { background: rgb(0 0 0 / 0.82); }
+.lightbox figure { display: flex; flex-direction: column; align-items: center; gap: var(--s12); margin: 0; pointer-events: none; }
+.lightbox img { display: block; max-width: calc(100vw - 2 * var(--s64)); max-height: calc(100dvh - 2 * var(--s64) - var(--s32)); width: auto; height: auto; border-radius: 12px; box-shadow: 0 24px 80px rgb(0 0 0 / 0.5); pointer-events: auto; }
+.lightbox figcaption { font-size: 13px; line-height: 20px; color: rgb(255 255 255 / 0.72); }
+.lb-step, .lb-close { position: absolute; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: rgb(255 255 255 / 0.1); color: #fff; transition: background-color 0.12s var(--ease); }
+.lb-step:hover, .lb-close:hover { background: rgb(255 255 255 / 0.2); }
+.lb-step { top: 50%; translate: 0 -50%; }
+.lb-step.prev { left: var(--s12); }
+.lb-step.next { right: var(--s12); }
+.lb-close { top: var(--s12); right: var(--s12); }
+.lightbox :focus-visible { outline-color: #fff; }
+/* (A fade, never a zoom; none at all for those who'd rather nothing moved.) */
+@media (prefers-reduced-motion: no-preference) {
+  .lightbox[open], .lightbox[open]::backdrop { animation: lb-in 0.16s var(--ease); }
+}
+@keyframes lb-in { from { opacity: 0; } }
 
 /* ---- the page under its head ---- */
 .cols2 { display: grid; grid-template-columns: minmax(0, 1fr) var(--rail); gap: var(--rail-gap); margin-top: var(--s48); align-items: start; }
@@ -88,7 +117,7 @@
 .back .more .name { min-width: 0; }
 
 /* ---- a README, or a version's notes, set to be read: every form the renderer draws ---- */
-.prose { padding-top: var(--s32); font-size: 16px; line-height: 27px; color: color-mix(in srgb, var(--text) 86%, var(--bg)); max-width: 44em; overflow-wrap: anywhere; }
+.prose { padding-top: var(--s32); font-size: 16px; line-height: 27px; color: color-mix(in srgb, var(--text) 86%, var(--bg)); max-width: 720px; overflow-wrap: anywhere; }
 .sec-title + .prose { padding-top: var(--s16); }
 .prose > * + * { margin-top: var(--s16); }
 .prose h1, .prose h2 { font-size: 21px; line-height: 28px; margin-top: var(--s48); color: var(--text); letter-spacing: -0.02em; }
@@ -116,8 +145,10 @@
 .prose pre:focus-visible { outline-offset: 2px; }
 .prose blockquote { margin-left: calc(-1 * var(--s16)); padding: var(--s4) 0 var(--s4) var(--s16); box-shadow: inset 2px 0 0 oklch(var(--ink-l) var(--ink-c) var(--h, 270) / 0.5); color: var(--text-2); }
 .prose hr { height: 1px; border: 0; background: var(--line); margin: var(--s32) 0; }
-/* (A picture at its own width, capped by the column's, never scaled up; the code blocks' corner.) */
-.prose img { display: block; width: auto; max-width: 100%; height: auto; border-radius: 14px; box-shadow: var(--shadow-1); }
+/* (A picture at its own width, capped by the column's, never scaled up; a small corner and a faint line round it,
+   nothing behind it. A badge in a line of them is the author's own drawing, kept as it is.) */
+.prose img { display: block; width: auto; max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 0 0 1px var(--line); }
+.prose p a img { border-radius: 0; box-shadow: none; }
 .prose p img { display: inline-block; vertical-align: middle; }
 .prose .table-scroll { overflow-x: auto; }
 .prose .table-scroll:focus-visible { outline-offset: 2px; }
@@ -214,30 +245,37 @@
 }
 @media (max-width: 860px) {
   .head { grid-template-columns: auto minmax(0, 1fr); }
-  .head > .get { grid-column: 2; max-width: 420px; margin: var(--s24) 0 0; }
+  /* (Getting it goes under the words, on their column, its lines from the left.) */
+  .head > .get { grid-column: 2; align-items: flex-start; max-width: 420px; margin-top: var(--s24); text-align: left; }
+  .head > .get .get-btn { min-height: 0; }
+  .head > .get .ver { justify-content: flex-start; }
   /* (Stacked, the rail is a section of its own: a section's distance from the page's content.) */
   .cols2 { grid-template-columns: minmax(0, 1fr); gap: var(--sections); }
   .rail { position: static; }
 }
 @media (max-width: 720px) {
   .crumbs { padding-top: var(--s24); }
-  .head { display: grid; grid-template-columns: 64px minmax(0, 1fr); column-gap: var(--s16); row-gap: 0; padding-top: var(--s16); align-items: start; }
-  .head > .tile.xl { width: 64px; height: 64px; font-size: 28px; grid-row: 1 / span 2; }
+  .head { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); row-gap: 0; padding-top: var(--s16); align-items: center; }
+  .head > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
   .head .txt { display: contents; }
-  .head h1 { font-size: 28px; line-height: 32px; letter-spacing: -0.03em; align-self: end; }
+  .head h1 { font-size: 26px; line-height: 32px; letter-spacing: -0.03em; }
   .head h1 .seal.l { width: 22px; height: 22px; }
-  .head .by { font-size: 13px; margin-top: var(--s4); }
   .head .sum { grid-column: 1 / -1; margin-top: var(--s16); }
-  .head > .get { grid-column: 1 / -1; max-width: none; margin: var(--s24) 0 0; padding: 0; }
+  .head .by { grid-column: 1 / -1; font-size: 13px; margin-top: var(--s8); }
+  .head > .get { grid-column: 1 / -1; max-width: none; margin-top: var(--s24); }
   /* (One version's head: its tile beside its title; the byline, and where it stands, the width under them.) */
   .head.one { grid-template-columns: 56px minmax(0, 1fr); align-items: center; }
   .head.one .by { grid-column: 1 / -1; margin-top: var(--s12); }
   .head.one > .state { grid-column: 1 / -1; justify-self: start; margin-top: var(--s12); margin-left: calc(-1 * var(--pad)); }
   .head.one h1 { font-size: 26px; line-height: 32px; }
   .head.one .vnum { font-size: 21px; line-height: 32px; }
-  .gallery { margin: var(--s32) calc(-1 * var(--s24)) 0; height: 248px; border-radius: 0; }
-  .gallery .track { padding: var(--s32) var(--gutter) 0; gap: var(--s16); scroll-padding: 0 var(--gutter); }
-  .gallery .slide { width: min(520px, calc(100% - 40px)); height: calc(100% + 40px); border-radius: 12px; }
+  /* (The row as wide as the screen, a picture and the next one's edge in view; a finger scrolls it.) */
+  .shots-row { grid-auto-columns: 84%; gap: var(--s12); margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
+  .shots.one .shots-row { grid-auto-columns: 100%; }
+  .shots.two .shots-row { grid-auto-columns: 84%; }
+  .shots-arrow { display: none; }
+  .lightbox img { max-width: calc(100vw - 2 * var(--gutter)); max-height: calc(100dvh - 2 * var(--s64) - var(--s32)); }
+  .lb-step { top: auto; bottom: var(--s12); translate: none; }
   .cols2, .cols2.after-head { margin-top: var(--sections); }
   .tabs { gap: var(--s24); margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); }
   /* (As wide as the column, as wide as the screen.) */

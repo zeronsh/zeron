@@ -124,7 +124,8 @@
 /* (Where it stands, at the head's far end: the rail's column holds no Get here.) */
 .rv-head > .state { justify-self: end; }
 .rv-head h1 .name { text-wrap: balance; }
-.rv-cols { margin-top: var(--s32); }
+/* (Review's rail keeps its own width, wider than a plugin page's: a reviewer's actions, written out.) */
+.rv-cols { --rail: 340px; margin-top: var(--s32); }
 .rv-main > .tabs { margin-bottom: var(--s32); }
 .rv-main > section + section { margin-top: var(--s48); }
 .rv-main h2 { font-size: 19px; line-height: 26px; }
@@ -272,6 +273,7 @@ em.mi { font-style: normal; color: var(--danger); }
 .askcard > .flash.elsewhere { margin-top: var(--s16); }
 
 @media (max-width: 1024px) {
+  .rv-cols { --rail: 280px; }
   .files-view { grid-template-columns: minmax(0, 1fr); }
   .tree-pane { position: static; max-height: none; }
 }

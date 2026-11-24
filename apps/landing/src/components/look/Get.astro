@@ -1,7 +1,8 @@
 ---
-// Getting it (the prototype's .get): Install in Zeron, the one primary
-// button (it opens Zeron at this plugin; it never installs by itself); the
-// version it offers and whether Zeron verified it; and, when that version
+// Getting it: Install in Zeron, the one primary button, its own width (it
+// opens Zeron at this plugin; it never installs by itself); under it, at its
+// right, one line: the version it offers, whether Zeron verified it (in
+// its state's ink, the check with Verified, as the store's pills), and when; and, when that version
 // isn't verified, the amber note: the newest verified one, to install
 // instead (the app's sentences, the contract's link that names a version).
 // "Nothing happened?" opens how to get Zeron, and opens by itself when the
@@ -38,21 +39,23 @@ const now = Date.now();
 ---
 
 <div class="get" data-get>
-  {
-    off ? (
-      <span class="btn pri lg" aria-disabled="true">{label}</span>
-    ) : (
-      <a class="btn pri lg" href={href} data-install>
-        <ZeronMark pitch={4} />
-        {label}
-      </a>
-    )
-  }
-  <div class="ver pills">
-    <b class="mono">{version}</b>
-    {verified ? <span class="state ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="state no">{store("plugins.store.review.waiting")}</span>}
-    {verified && verifiedAt !== null ? <time class="t3" datetime={new Date(verifiedAt).toISOString()}>{day(verifiedAt, now)}</time> : <time class="t3" datetime={new Date(publishedAt).toISOString()}>{since(publishedAt, now, true)}</time>}
+  <div class="get-btn">
+    {
+      off ? (
+        <span class="btn pri" aria-disabled="true">{label}</span>
+      ) : (
+        <a class="btn pri" href={href} data-install>
+          <ZeronMark pitch={4} />
+          {label}
+        </a>
+      )
+    }
   </div>
+  <p class="ver">
+    <b class="mono">{version}</b><i aria-hidden="true"></i>
+    {verified ? <span class="said ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
+    {verified && verifiedAt !== null ? <time datetime={new Date(verifiedAt).toISOString()}>{day(verifiedAt, now)}</time> : <time datetime={new Date(publishedAt).toISOString()}>{since(publishedAt, now, true)}</time>}
+  </p>
   {
     off ? (
       <p class="note warn">
