@@ -1,8 +1,9 @@
 --!strict
 -- The account's deploy tokens, at the end of Yours: what a CI job (a
 -- GitHub Action) publishes new versions with instead of your session, each
--- for the plugins it was made for (its scope: all of yours, those you
--- publish later too, or the ones chosen), fixed when it's made. A section
+-- for what it was made for (its scope: all your plugins, or all your plugins
+-- and templates, those you publish later too, or the ones chosen), fixed
+-- when it's made. A section
 -- with New token… at its title's end; each token a row: its name on a line
 -- of its own, when it was last used (and on which plugin) and when it ends
 -- under it (within 14 days of its end, how soon, the line in the warning's
@@ -15,8 +16,8 @@
 -- A token never publishes a plugin's first version: that comes from a
 -- signed-in device.
 --
---   keys.Section { plugins }  (`plugins`: yours in the store, { id, name },
---                             what a scope chooses from; none, no key yet)
+--   keys.Section { plugins, templates? }  (yours in the store, { id, name },
+--                             what a scope chooses from; neither, no key yet)
 
 local ds = require("@ds")
 local field = require("@ds/field")
@@ -94,12 +95,20 @@ local function scope_names(scope: any, plugins: { Owned }): { string }
 	return names
 end
 
-local function scope_words(scope: any, plugins: { Owned }, whole: boolean?): string
+-- (`all` names its kinds, `all_kinds`: plugins alone unless it says both.)
+local function both_kinds(scope: any): boolean
+	return type(scope.all_kinds) == "table" and table.find(scope.all_kinds, "template") ~= nil
+end
+
+local function scope_words(scope: any, plugins: { Owned }, templates: { Owned }, whole: boolean?): string
 	if type(scope) ~= "table" or scope.all == true then
-		return ui.t("plugins.store.key.scope.all_now", { n = #plugins }):get()
+		return if type(scope) == "table" and both_kinds(scope)
+			then ui.t("plugins.store.key.scope.all_both_now", { n = #plugins + #templates }):get()
+			else ui.t("plugins.store.key.scope.all_now", { n = #plugins }):get()
 	end
+	local owned = table.move(templates, 1, #templates, #plugins + 1, table.clone(plugins))
 	if whole then
-		local names = scope_names(scope, plugins)
+		local names = scope_names(scope, owned)
 		if #names > 2 then
 			local last = table.remove(names) :: string
 			return ui.t("plugins.store.key.scope.every", { list = table.concat(names, ui.t("plugins.words.list_sep"):get()), last = last }):get()
@@ -108,7 +117,7 @@ local function scope_words(scope: any, plugins: { Owned }, whole: boolean?): str
 	local names: { string } = {}
 	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
 		local name = id
-		for _, p in plugins do
+		for _, p in owned do
 			if p.id == id then
 				name = p.name
 			end
@@ -123,9 +132,20 @@ local function scope_words(scope: any, plugins: { Owned }, whole: boolean?): str
 	return ui.t("plugins.store.key.scope.more", { a = names[1], b = names[2], n = #names - 2 }):get()
 end
 
-M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
+M.Section = ui.component(function(props: { plugins: () -> { Owned }, templates: (() -> { Owned })? }): Node
+	local function templates(): { Owned }
+		return if props.templates then props.templates() else {}
+	end
+	-- Both kinds, plugins first.
+	local function owned(): { Owned }
+		local out = table.clone(props.plugins())
+		for _, t in templates() do
+			table.insert(out, t)
+		end
+		return out
+	end
 	local function published(): boolean
-		return #props.plugins() > 0
+		return #owned() > 0
 	end
 	-- "loading", "ready", or why not.
 	local phase = ui.use_state("loading")
@@ -135,7 +155,8 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	local making = ui.use_state(false)
 	local name = ui.use_state("")
 	local expiry = ui.use_state("90")
-	-- Its scope: "all" of yours, or "chosen", those ticked.
+	-- Its scope: "all" your plugins, "both" (all your plugins and templates),
+	-- or "chosen", those ticked.
 	local scope_kind = ui.use_state("all")
 	local chosen = ui.use_state({} :: { [string]: boolean })
 	-- Making one: "idle", "busy" (asked; perhaps signing in), or why not.
@@ -196,7 +217,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	local function chosen_ids(): { string }
 		local out: { string } = {}
 		local picked = chosen:get()
-		for _, p in props.plugins() do
+		for _, p in owned() do
 			if picked[p.id] then
 				table.insert(out, p.id)
 			end
@@ -204,7 +225,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		return out
 	end
 	local function ready_to_make(): boolean
-		return (string.match(name:get(), "%S")) ~= nil and (scope_kind:get() == "all" or #chosen_ids() > 0)
+		return (string.match(name:get(), "%S")) ~= nil and (scope_kind:get() ~= "chosen" or #chosen_ids() > 0)
 	end
 	local function create()
 		local n = string.match(name:peek(), "^%s*(.-)%s*$") or ""
@@ -219,7 +240,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		end
 		made_phase:set("busy")
 		local expires = if days then (os.time() + days * 86400) * 1000 else nil
-		local scope: store.Scope = if scope_kind:peek() == "all" then { all = true } else { plugins = chosen_ids() }
+		local scope: store.Scope = if scope_kind:peek() == "all"
+			then { all = true }
+			elseif scope_kind:peek() == "both" then { all = true, all_kinds = { "plugin", "template" } }
+			else { plugins = chosen_ids() }
 		store.create_token({ name = n, scope = scope, expires = expires }):after(function(r: any)
 			-- (`secret`: the token, `zdt_…`, this once; `token`, its record.
 			-- None when Zeron's own window made it, and shows it there: once
@@ -258,7 +282,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				local on: string? = nil
 				if type(k.last_used_plugin) == "string" and k.last_used_plugin ~= "" then
 					on = k.last_used_plugin
-					for _, p in props.plugins() do
+					for _, p in owned() do
 						if p.id == on then
 							on = p.name
 						end
@@ -288,7 +312,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 			-- the first two and how many more, and every one in place with
 			-- the line's own link (a key's plugins are fixed once it's made).
 			detail = function(): string
-				return scope_words(now:get().scope, props.plugins(), whole_scope:get()[first.id] == true)
+				return scope_words(now:get().scope, props.plugins(), templates(), whole_scope:get()[first.id] == true)
 			end,
 			detail_link = if type(first.scope) == "table" and first.scope.all ~= true and type(first.scope.plugins) == "table" and #first.scope.plugins > 2
 				then {
@@ -338,6 +362,30 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				},
 			},
 		}
+	end
+
+	-- What a scope may choose of `list`, a checkbox each.
+	local function choices(list: () -> { Owned }): Node
+		return ui.each(ui.computed(list), function(p: Owned): Node
+			local on = ui.computed(function(): boolean
+				return chosen:get()[p.id] == true
+			end)
+			return ds.Checkbox {
+				value = function(): boolean
+					return on:get()
+				end,
+				on_change = function(v: boolean)
+					local next = table.clone(chosen:peek())
+					next[p.id] = if v then true else nil
+					chosen:set(next)
+				end,
+				label = p.name,
+			}
+		end, {
+			key = function(p: Owned): string
+				return p.id
+			end,
+		})
 	end
 
 	local function body(key: string): Node
@@ -466,41 +514,49 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					id = "key-scope",
 					w_full = true,
 					gap = "$space.2",
-					ds.Segmented {
-						value = scope_kind,
-						label = ui.t("plugins.store.key.scope.label"),
-						options = {
-							{ value = "all", label = ui.t("plugins.store.key.scope.all") },
-							{ value = "chosen", label = ui.t("plugins.store.key.scope.chosen") },
+					ui.div {
+						id = "key-scope-choice",
+						w_full = true,
+						ds.Select {
+							value = scope_kind,
+							name = ui.t("plugins.store.key.scope.label"),
+							options = {
+								{ value = "all", label = ui.t("plugins.store.key.scope.all") },
+								{ value = "both", label = ui.t("plugins.store.key.scope.all_both") },
+								{ value = "chosen", label = ui.t("plugins.store.key.scope.chosen") },
+							},
+							w_full = true,
 						},
 					},
+					ui.show(function(): boolean
+						return scope_kind:get() == "both"
+					end, ui.text {
+						id = "key-scope-hint",
+						ui.t("plugins.store.key.scope.all_both_hint"),
+						w_full = true,
+						wrap = true,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+					}),
 					ui.show(function(): boolean
 						return scope_kind:get() == "chosen"
 					end, ui.column {
 						w_full = true,
 						gap = "$space.1",
-						ui.each(ui.computed(function(): { Owned }
-							return props.plugins()
-						end), function(p: Owned): Node
-							local on = ui.computed(function(): boolean
-								return chosen:get()[p.id] == true
-							end)
-							return ds.Checkbox {
-								value = function(): boolean
-									return on:get()
-								end,
-								on_change = function(v: boolean)
-									local next = table.clone(chosen:peek())
-									next[p.id] = if v then true else nil
-									chosen:set(next)
-								end,
-								label = p.name,
-							}
-						end, {
-							key = function(p: Owned): string
-								return p.id
-							end,
+						choices(props.plugins),
+						ui.show(function(): boolean
+							return #templates() > 0
+						end, ui.text {
+							id = "key-scope-templates",
+							ui.t("plugins.store.key.scope.templates"),
+							pt = "$space.2",
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							weight = "$font.weight.medium",
+							color = "$text.secondary",
 						}),
+						choices(templates),
 					}),
 				},
 			},

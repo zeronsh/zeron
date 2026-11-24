@@ -3853,7 +3853,7 @@
       "body_mismatch": "It changed on its way to the store. Send it again.",
       "too_many_tokens": "You have 20 deploy tokens, the most an account can have. Revoke one to make another.",
       "invalid_token": "The store didn't take that deploy token: it's wrong, revoked or ended.",
-      "token_not_allowed": "That deploy token can't publish this plugin. A plugin's first version is published from your computer.",
+      "token_not_allowed": "That deploy token can't publish this. The first version of a plugin or template is published from your computer.",
       "session_required": "This needs you signed in to Zeron, not a deploy token.",
       "key_taken": "That key is already in use.",
       "invalid_name": "Give the key a shorter name.",
@@ -4078,7 +4078,7 @@
         "none_verified": "nothing verified yet"
       },
       "keys": "Deploy tokens",
-      "keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each token publishes the plugins chosen when it's made.",
+      "keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins and templates without your session. Each token publishes the ones chosen when it's made.",
       "keys_none": "No tokens yet.",
       "keys_failed": "Couldn't see your tokens",
       "key": {
@@ -4100,7 +4100,7 @@
         "timed_out": "The sign-in didn't finish. Try again.",
         "made_today": "You've made 10 deploy tokens today. You can make more tomorrow.",
         "secret_title": "Copy your token now",
-        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins it's for, as you.",
+        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins and templates it's for, as you.",
         "done": "I've copied it",
         "show_token": "Show token",
         "copied": "Copied. Zeron clears it from the clipboard in a minute.",
@@ -4121,14 +4121,18 @@
         "scope": {
           "label": "Can publish",
           "all": "All your plugins",
-          "chosen": "Chosen plugins",
+          "chosen": "Chosen",
           "one": "{name}",
           "two": "{a} and {b}",
           "all_now": "All your plugins: {n} today, and any you publish later",
           "more": "{a}, {b} and {n} more",
           "every": "{list} and {last}",
           "show_all": "Show all",
-          "fewer": "Show fewer"
+          "fewer": "Show fewer",
+          "all_both": "All your plugins and templates",
+          "all_both_hint": "A template can do anything Zeron can.",
+          "templates": "Templates",
+          "all_both_now": "All your plugins and templates: {n} today, and any you publish later"
         },
         "not_used_made": "Not used yet · made {date}"
       },
@@ -4139,7 +4143,7 @@
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_new_key": "This version is signed with a different key than the one you have.",
       "update_asks_first": "Zeron asks you to allow it before it updates.",
-      "keys_publish_first": "Publish one of your plugins from this computer first.",
+      "keys_publish_first": "Publish one of your plugins or templates from this computer first.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
       "readme_more": "Show more",

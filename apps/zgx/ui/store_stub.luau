@@ -779,7 +779,7 @@ end
 -- A new token needs a fresh sign-in: the first ask waits until
 -- `store_stub.signed_in_again`, as the host's StepUp does.
 stub.create_token = function(args: any): any
-	local scope = if args.scope and args.scope.all then "all" else table.concat((args.scope and args.scope.plugins) or {}, ",")
+	local scope = if args.scope and args.scope.all then (if args.scope.all_kinds then `all:{table.concat(args.scope.all_kinds, "+")}` else "all") else table.concat((args.scope and args.scope.plugins) or {}, ",")
 	note(`create_token:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
 	local p: any = { settled = false, waiters = {} }
 	local function settle()

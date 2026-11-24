@@ -52,6 +52,9 @@ test("a new token says its name, what it can publish and when it ends", function
 	app:frames(20)
 	expect(app:tree("#store-consent")).to_contain("All your plugins")
 	expect(app:tree("#store-consent")).to_contain("Never")
+	app:command("token_both")
+	app:frames(20)
+	expect(app:tree("#store-consent")).to_contain("All your plugins and templates. A template can do anything")
 end)
 
 test("while it's being made it can be stopped and not asked again", function()

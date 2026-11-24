@@ -38,7 +38,10 @@ end
 
 local function scope_words(scope: any): string
 	if type(scope) ~= "table" or scope.all == true then
-		return ui.t("plugins.store.key.scope.all"):get()
+		local both = type(scope) == "table" and type(scope.all_kinds) == "table" and table.find(scope.all_kinds, "template") ~= nil
+		return if both
+			then `{ui.t("plugins.store.key.scope.all_both"):get()}. {ui.t("plugins.store.key.scope.all_both_hint"):get()}`
+			else ui.t("plugins.store.key.scope.all"):get()
 	end
 	local ids: { string } = {}
 	for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do

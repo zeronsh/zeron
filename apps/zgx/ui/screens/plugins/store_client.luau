@@ -47,7 +47,9 @@
 --                             tokens (never a token itself)
 --   store.create_token { name, scope, expires? }   { token = Token, secret },
 --                             `secret` the token this once: a fresh sign-in first
---                             (`scope`: { all = true } or { plugins = { ids } })
+--                             (`scope`: { all = true, all_kinds? } (plugins
+--                             alone, or { "plugin", "template" }) or
+--                             { plugins = { ids } }, of either kind)
 --   store.cancel_step_up()    stops waiting for that sign-in
 --   store.revoke_token(id)
 --
@@ -112,7 +114,7 @@ export type Query = {
 	featured: boolean?,
 }
 
-export type Scope = { all: boolean?, plugins: { string }? }
+export type Scope = { all: boolean?, all_kinds: { string }?, plugins: { string }? }
 
 local C = {}
 

@@ -599,14 +599,24 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-/// A deploy token's scope as the store takes it: `{ all: true }` (every
-/// plugin of the account's, those it publishes later too), or
+/// A deploy token's scope as the store takes it: `{ all: true, all_kinds? }`
+/// (every plugin of the account's, those it publishes later too, and its
+/// templates when `all_kinds` names them), or
 /// `{ plugins: [ids] }`, one to fifty store ids, each once (a duplicate
 /// refused, never dropped). Anything else is no scope.
 fn token_scope(scope: Option<&Value>) -> Option<Json> {
     let scope = scope?;
     if matches!(scope.field("all"), Some(Value::Bool(true))) {
-        return Some(json!({ "all": true }));
+        // (Which kinds: plugins alone unless it says both, said in that
+        // order; nothing else is a scope.)
+        return match scope.field("all_kinds") {
+            None | Some(Value::Nil) => Some(json!({ "all": true })),
+            Some(Value::List(kinds)) => {
+                let kinds: Vec<String> = kinds.iter().map(text).collect();
+                (kinds == ["plugin"] || kinds == ["plugin", "template"]).then(|| json!({ "all": true, "all_kinds": kinds }))
+            }
+            Some(_) => None,
+        };
     }
     let Some(Value::List(items)) = scope.field("plugins") else { return None };
     let mut ids: Vec<String> = Vec::new();

@@ -3853,7 +3853,7 @@
       "body_mismatch": "内容在发送途中被改动了。请重新发送。",
       "too_many_tokens": "你已有 20 个部署令牌，这是一个账户的上限。吊销一个后才能再创建。",
       "invalid_token": "商店没有接受这个部署令牌：它有误、已被吊销或已到期。",
-      "token_not_allowed": "这个部署令牌不能发布这个插件。插件的第一个版本要从你的电脑发布。",
+      "token_not_allowed": "这个部署令牌不能发布它。插件或模板的第一个版本要从你的电脑发布。",
       "session_required": "这需要你登录 Zeron，而不是使用部署令牌。",
       "key_taken": "这个密钥已被使用。",
       "invalid_name": "请给密钥一个短一点的名字。",
@@ -4078,7 +4078,7 @@
         "none_verified": "还没有已验证的版本"
       },
       "keys": "部署令牌",
-      "keys_body": "部署令牌让 CI 任务（例如 GitHub Action）无需你的会话即可发布你插件的新版本。每个令牌只发布创建时选定的插件。",
+      "keys_body": "部署令牌让 CI 任务（例如 GitHub Action）无需你的会话即可发布你的插件和模板的新版本。每个令牌只发布创建时选定的那些。",
       "keys_none": "还没有令牌。",
       "keys_failed": "无法查看你的令牌",
       "key": {
@@ -4100,7 +4100,7 @@
         "timed_out": "登录没有完成。请再试一次。",
         "made_today": "你今天已创建 10 个部署令牌。明天可以再创建。",
         "secret_title": "现在复制你的令牌",
-        "secret_body": "这是 Zeron 唯一一次显示它。请把它作为 ZERON_DEPLOY_TOKEN 放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应插件的版本。",
+        "secret_body": "这是 Zeron 唯一一次显示它。请把它作为 ZERON_DEPLOY_TOKEN 放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应的插件和模板的版本。",
         "done": "我已复制",
         "show_token": "显示令牌",
         "copied": "已复制。Zeron 会在一分钟后从剪贴板中清除它。",
@@ -4121,14 +4121,18 @@
         "scope": {
           "label": "可以发布",
           "all": "你的所有插件",
-          "chosen": "选定的插件",
+          "chosen": "选定的",
           "one": "{name}",
           "two": "{a} 和 {b}",
           "all_now": "你的所有插件：目前 {n} 个，以及以后发布的",
           "more": "{a}、{b} 等 {n} 个",
           "every": "{list} 和 {last}",
           "show_all": "全部显示",
-          "fewer": "收起"
+          "fewer": "收起",
+          "all_both": "你的所有插件和模板",
+          "all_both_hint": "模板可以做 Zeron 能做的一切。",
+          "templates": "模板",
+          "all_both_now": "你的所有插件和模板：目前 {n} 个，以及以后发布的"
         },
         "not_used_made": "尚未使用 · 创建于 {date}"
       },
@@ -4139,7 +4143,7 @@
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_new_key": "这个版本的签名密钥与你现有版本的不同。",
       "update_asks_first": "更新前 Zeron 会先请你允许。",
-      "keys_publish_first": "请先从这台电脑发布你的一个插件。",
+      "keys_publish_first": "请先从这台电脑发布你的一个插件或模板。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
       "readme_more": "显示更多",

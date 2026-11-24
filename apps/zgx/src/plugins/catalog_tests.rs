@@ -180,12 +180,17 @@ fn a_deploy_token_that_isn_t_allowed_says_so() {
 fn a_deploy_token_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
     let (_, asked) = run(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
     assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true } }));
+    let (_, asked) = run(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true, all_kinds = { "plugin", "template" } } })"#, json!({ "ok": true }));
+    assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true, "all_kinds": ["plugin", "template"] } }));
     for bad in [
         r#"{ name = "CI" }"#,
         r#"{ name = "CI", scope = { plugins = {} } }"#,
         r#"{ name = "CI", scope = { plugins = { "focus", "focus" } } }"#,
         r#"{ name = "CI", scope = { plugins = { "../etc" } } }"#,
         r#"{ name = "CI", scope = { all = false } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = { "template" } } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = { "template", "plugin" } } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = "template" } }"#,
     ] {
         let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_token", {bad})"#), json!({ "ok": true }));
         assert_eq!(out, "err:invalid_scope", "{bad}");
