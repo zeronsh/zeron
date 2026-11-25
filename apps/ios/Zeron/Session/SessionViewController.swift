@@ -48,9 +48,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self?.saveDraft()
         }
         navigationItem.largeTitleDisplayMode = .never
-        // The title and "project @ device" head the ⋯ menu instead of
-        // crowding the bar.
-        navigationItem.titleView = UIView()
+        // The title heads the bar — it's the one piece of context you must
+        // never lose — and "project @ device" heads the ⋯ menu beside it.
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
         navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
         companionsItem = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in
@@ -64,9 +63,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         self.voiceBar = voiceBar
         // A custom view reads as horizontal-only; on iPhone Duo it joins ⋯ in
         // the vertical bar.
-        #if compiler(>=6.4)
-        if #available(iOS 27.1, *) { voiceBar.item.axisBehavior = .verticalPreferred }
-        #endif
         let menu = navigationItem.rightBarButtonItem!
         let companions = companionsItem!
         let syncVoice = { [weak self, weak voiceBar] in

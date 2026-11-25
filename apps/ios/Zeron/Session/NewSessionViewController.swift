@@ -139,6 +139,31 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         hero.textAlignment = .center
         heroStack.addArrangedSubview(mark)
         heroStack.addArrangedSubview(hero)
+        // A blank box is a cold open: three quiet suggestions seed the
+        // composer when tapped, so the first session starts one tap closer.
+        for example in ["Review my latest commit for bugs", "Explain how this project is structured", "Fix the flaky test and open a PR"] {
+            let pill = UIButton(type: .system)
+            var config = UIButton.Configuration.plain()
+            config.title = example
+            config.baseForegroundColor = Palette.secondary
+            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                var out = incoming
+                out.font = Fonts.ui(.sans, TypeScale.size(15))
+                return out
+            }
+            config.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 16, bottom: 7, trailing: 16)
+            pill.configuration = config
+            pill.backgroundColor = Palette.controlFill
+            pill.layer.cornerRadius = 16
+            pill.layer.cornerCurve = .continuous
+            pill.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                self.composer.text = example
+                self.composer.textView.becomeFirstResponder()
+            }, for: .touchUpInside)
+            pill.accessibilityHint = "Fills the task description"
+            heroStack.addArrangedSubview(pill)
+        }
         heroStack.axis = .vertical
         heroStack.spacing = 14
         heroStack.alignment = .center

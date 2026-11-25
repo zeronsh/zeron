@@ -188,18 +188,23 @@ final class SessionCell: UICollectionViewListCell {
         harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
         let textX = left + mark + 14
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
-        time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
-        var trailing = time.frame.minX - 10
-        if !status.isHidden {
-            status.frame = CGRect(x: time.frame.minX - 5 - 12, y: titleY + titleH / 2 - 6, width: 12, height: 12)
-            trailing = status.frame.minX - 10
+        // A live status (word + glyph) rides the meta line's trailing edge,
+        // so the title keeps the row's full width instead of truncating
+        // mid-word against the pill; a plain timestamp stays up top.
+        if status.isHidden {
+            time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
         }
-        title.frame = CGRect(x: textX, y: titleY, width: max(0, trailing - textX), height: titleH)
+        title.frame = CGRect(x: textX, y: titleY, width: max(0, (status.isHidden ? time.frame.minX - 10 : b.width - right) - textX), height: titleH)
         let x = textX
         var metaRight = b.width - right
+        if !status.isHidden {
+            time.frame = CGRect(x: b.width - right - tw, y: metaY, width: tw, height: metaH)
+            status.frame = CGRect(x: time.frame.minX - 5 - 12, y: metaY + metaH / 2 - 6, width: 12, height: 12)
+            metaRight = status.frame.minX - 10
+        }
         if !prBadge.isHidden {
             let size = prBadge.intrinsicContentSize
-            prBadge.frame = CGRect(x: b.width - right - size.width, y: metaY + (metaH - size.height) / 2, width: size.width, height: size.height)
+            prBadge.frame = CGRect(x: metaRight - size.width, y: metaY + (metaH - size.height) / 2, width: size.width, height: size.height)
             metaRight = prBadge.frame.minX - 10
         }
         meta.frame = CGRect(x: x, y: metaY, width: max(0, metaRight - x), height: metaH)
