@@ -1443,6 +1443,19 @@ ui.command {
 		publish()
 	end,
 }
+-- Atlas taller than the list: fifty more sessions under its three, older
+-- than them, "Atlas 45" working among the last of them (far past the
+-- list's foot, idle ones before it and after).
+ui.command {
+	id = "tall_atlas",
+	title = "Fifty more sessions in Atlas, one near its foot working",
+	run = function()
+		for i = 1, 50 do
+			table.insert(model.chats, { id = `y{i}`, title = `Atlas {i}`, project = "atlas", device = "mac", status = if i == 45 then "working" else nil, updated = NOW - (3 + i) * HOUR, created = NOW - (60 + i) * HOUR, agent = "claude" })
+		end
+		publish()
+	end,
+}
 -- Answer the review moves (Borealis, on devbox, the newest).
 ui.command {
 	id = "borealis_moves",
