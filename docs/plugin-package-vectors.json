@@ -2270,6 +2270,30 @@
       "short_name": false,
       "template_protected": false,
       "unseen": false
+    },
+    {
+      "fold": "ds/tokens/init.luau",
+      "fold_path": "ds/tokens/init.luau",
+      "path": "ds/tokens/init.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens/colors.luau",
+      "fold_path": "ds/tokens/colors.luau",
+      "path": "DS/Tokens/colors.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens",
+      "fold_path": "ds/tokens",
+      "path": "ds/tokens",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
     }
   ],
   "format": "zeron-plugin-package-vectors:v1",

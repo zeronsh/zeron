@@ -114,7 +114,7 @@ pub mod rule {
     pub const LEFT_OUT: &str = "left_out";
     pub const TOO_LARGE: &str = "too_large";
     /// A template carrying one of the files no template replaces
-    /// (`template_packages::PROTECTED`); `path` says which.
+    /// (`template_packages::never_templated`); `path` says which.
     pub const PROTECTED_FILE: &str = "protected_file";
     // Warnings: shown, never blocking.
     /// A file that isn't text or a picture (a binary, bytecode): the
