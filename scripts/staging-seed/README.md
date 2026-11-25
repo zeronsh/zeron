@@ -71,8 +71,9 @@ node scripts/staging-seed/sessions.mjs up …the same…                        
 node scripts/staging-seed/sessions.mjs down --dir <folder>                      # stops the engines by their own pids
 ```
 
-The logins file lists the six accounts in the catalog's order, as
-`{username, email, user_id, password}`. Passwords are read only: never printed,
+The logins file lists the accounts in the catalogs' order (six authors of
+plugins, then two of templates), as `{username, email, user_id, password}`.
+`--only 7,8` does some authors only. Passwords are read only: never printed,
 logged or written.
 
 The folder keeps each author's home and data, `accounts.json` and `tokens.env`,
@@ -115,6 +116,38 @@ The store's limits shape the catalog:
 - it publishes at most 10 versions an hour and 50 a day, so at most 10
   versions an author;
 - it takes 30 writes a minute, so the seed waits 2.5 s between writes.
+
+## Templates (seed-templates.mjs)
+
+`templates.mjs` is eight templates by two more authors (`stg-gil`, `stg-hana`),
+eleven versions. They have accounts of their own because an account claims at
+most 5 new ids in 7 days, plugins and templates together. `pictures.mjs` draws
+each one's preview and two screenshots (1280×800) in a headless browser.
+
+- Each has a palette of its own (`theme.luau`), and some a changed copy of one
+  of Zeron's files, an unchanged one, or a new-chat page. A review then has
+  files that are the same as Zeron's, changed and new.
+- First versions come from the author's own Zeron, as the app publishes one
+  (`PrepareTemplatePublish`, `PublishTemplate` over its IPC). The CLI publishes
+  a template only with a deploy token.
+- The second versions of `nightfall-cards` and `coral-reef` come from a token
+  (`zeron plugin token create --all --templates`). `wide-margin` has a
+  pre-release, from the device.
+- For staff: never verify `green-phosphor`; take `slate-grid` down.
+
+```sh
+git archive v0.3.20 apps/zgx/ui | tar -x -C <folder>      # Zeron's own files, for the copies
+node scripts/staging-seed/sessions.mjs up --only 7,8 …as above…   # writes accounts-templates.json
+node scripts/staging-seed/seed-templates.mjs --accounts <folder>/accounts-templates.json --ui <folder>/apps/zgx/ui --playwright <folder>   # pass 1, exit 3
+node scripts/staging-seed/sessions.mjs tokens --only 7,8 --templates …
+node scripts/staging-seed/sessions.mjs up --only 7,8 …
+(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed-templates.mjs …the same…)
+node scripts/staging-seed/sessions.mjs down --only 7,8 --dir <folder>
+```
+
+`--dry-run` checks every version with `zeron template check`. The engine must
+be one that publishes templates. `local-templates.mjs` runs it all against a
+local edge first, as `local.mjs` does for the plugins.
 
 ## What's left for staff (in the browser)
 

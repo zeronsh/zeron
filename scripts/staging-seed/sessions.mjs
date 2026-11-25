@@ -13,8 +13,11 @@
 // bypassed. seed.mjs then runs with what this writes.
 //
 //   node sessions.mjs up     --zeron <bin> --edge <url> --client-id <id> --logins <file> --dir <folder> [--playwright <dir>]
-//   node sessions.mjs tokens …the same…
+//   node sessions.mjs tokens …the same… [--templates]
 //   node sessions.mjs down   --dir <folder>
+//
+// `--only 7,8` is those authors alone (every author else). `--templates` makes
+// their tokens for their templates too (`--all --templates`).
 //
 // `--logins` is a JSON list of {username, email, user_id, password}, slot n
 // being the n-th; passwords are read, never printed or written anywhere.
@@ -28,7 +31,10 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { USERNAMES } from "./catalog.mjs";
+import { USERNAMES as PLUGIN_AUTHORS } from "./catalog.mjs";
+import { USERNAMES as TEMPLATE_AUTHORS } from "./templates.mjs";
+
+const USERNAMES = { ...PLUGIN_AUTHORS, ...TEMPLATE_AUTHORS };
 
 const [command, ...rest] = process.argv.slice(2);
 const flag = (name) => {
@@ -37,6 +43,12 @@ const flag = (name) => {
 };
 const need = (name) => flag(name) ?? (console.error(`sessions: give ${name}`), process.exit(2));
 const dir = resolve(need("--dir"));
+const SLOTS = Object.keys(USERNAMES).map(Number);
+const only = flag("--only")?.split(",").map(Number) ?? SLOTS;
+if (!only.every((slot) => SLOTS.includes(slot))) {
+  console.error(`sessions: --only names authors ${SLOTS[0]} to ${SLOTS.at(-1)}`);
+  process.exit(2);
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const slotDir = (slot) => join(dir, `author-${slot}`);
 const pidFile = (slot) => join(slotDir(slot), "engine.pid");
@@ -60,7 +72,7 @@ const stop = async (slot, quiet = false) => {
 };
 
 if (command === "down") {
-  for (let slot = 1; slot <= 6; slot++) await stop(slot);
+  for (const slot of only) await stop(slot);
   process.exit(0);
 }
 if (command !== "up" && command !== "tokens") {
@@ -72,8 +84,10 @@ const zeron = resolve(need("--zeron"));
 const edge = need("--edge").replace(/\/$/, "");
 const clientId = need("--client-id");
 const logins = JSON.parse(readFileSync(need("--logins"), "utf8"));
-if (!Array.isArray(logins) || logins.length !== 6) throw new Error("sessions: the logins file lists six accounts");
-for (const [i, l] of logins.entries()) {
+if (!Array.isArray(logins)) throw new Error("sessions: the logins file is a list of accounts");
+for (const slot of only) {
+  const i = slot - 1;
+  const l = logins[i] ?? {};
   if (l.username !== USERNAMES[i + 1]) throw new Error(`sessions: account ${i + 1} is ${l.username}, the catalog's author ${i + 1} is ${USERNAMES[i + 1]}`);
 }
 const require = createRequire(join(resolve(flag("--playwright") ?? "."), "package.json"));
@@ -173,12 +187,12 @@ const hostedSignIn = async (browser, url, login, until) => {
 const browser = await chromium.launch();
 try {
   const accounts = [];
-  for (let slot = 1; slot <= 6; slot++) {
+  for (const slot of only) {
     const login = logins[slot - 1];
     // A fresh sign-in comes back to the engine's loopback callback, on the
     // one port the sign-in's redirect list names (27641, every engine's):
     // so for a token, only this author's engine runs (`up` starts the rest).
-    if (command === "tokens") for (let other = 1; other <= 6; other++) if (other !== slot) await stop(other, true);
+    if (command === "tokens") for (const other of SLOTS) if (other !== slot) await stop(other, true);
     const d = await engine(slot);
     if (command === "up") {
       let bearer = await d.call("AccessToken").then((r) => r?.token).catch(() => undefined);
@@ -229,7 +243,7 @@ try {
       }
       let signing;
       const made = await new Promise((res) => {
-        const child = spawn(zeron, ["plugin", "token", "create", "--all", "--name", "Seed CI"], { env: { ...d.env, RUST_LOG: "warn" }, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(zeron, ["plugin", "token", "create", "--all", ...(rest.includes("--templates") ? ["--templates"] : []), "--name", "Seed CI"], { env: { ...d.env, RUST_LOG: "warn" }, stdio: ["ignore", "pipe", "pipe"] });
         let out = "";
         let err = "";
         child.stdout.on("data", (x) => (out += x));
@@ -255,8 +269,10 @@ try {
     d.close();
   }
   if (command === "up") {
-    writeFileSync(join(dir, "accounts.json"), `${JSON.stringify({ edge, workos_client_id: clientId, zeron, authors: accounts }, null, 2)}\n`);
-    console.log(`accounts for seed.mjs: ${join(dir, "accounts.json")}`);
+    // (One author set's run leaves another's file: the plugins' is accounts.json.)
+    const name = only.some((slot) => PLUGIN_AUTHORS[slot]) ? "accounts.json" : "accounts-templates.json";
+    writeFileSync(join(dir, name), `${JSON.stringify({ edge, workos_client_id: clientId, zeron, authors: accounts }, null, 2)}\n`);
+    console.log(`accounts for the seed: ${join(dir, name)}`);
   }
 } finally {
   await browser.close();
