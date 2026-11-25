@@ -979,6 +979,14 @@ final class AppModel {
         return listing
     }
 
+    /// How many repositories a folder on `deviceId` holds (not being one
+    /// itself), as its host lists them for a worktree of the whole project:
+    /// for New Project's note. 0 for a repository, or a host too old to say.
+    func folderRepositories(deviceId: String, path: String) async -> Int {
+        guard let client, let listing = try? await client.listProjectRepositories(deviceId: deviceId, path: path), !listing.isRepo else { return 0 }
+        return listing.repositories.count
+    }
+
     /// The repositories last chosen for each project's worktree, by project
     /// id: the next new session there starts from them.
     private static let rememberedRepositoriesKey = "app.projectRepositories"

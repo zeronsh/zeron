@@ -2928,7 +2928,8 @@
       "private": "私有",
       "on_device": "在 {device} 上",
       "from_github": "来自 GitHub",
-      "add_cloud_project": "添加项目"
+      "add_cloud_project": "添加项目",
+      "holds_repositories": "{n, plural, other {包含 # 个仓库}}"
     },
     "updates": {
       "available": "有可用更新",

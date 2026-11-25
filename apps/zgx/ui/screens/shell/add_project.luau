@@ -59,6 +59,29 @@ end
 type Item = any
 type Page = any
 
+-- How many repositories each folder browsed holds, by `device|path`, as
+-- its host lists them for a worktree of the whole project (`chat.repositories`).
+local holds = ui.state("shell_add_project_holds", {} :: { [string]: number })
+local function ask_repositories(device: string, path: string)
+	local key = `{device}|{path}`
+	if holds:peek()[key] ~= nil then
+		return
+	end
+	local store = require("@app/screens/chat/store")
+	local here = sessions.now:peek().here
+	local ok, answer = pcall(store.repositories, path, if device ~= here then device else nil)
+	if not ok or answer == nil then
+		return
+	end
+	answer:after(function(found: any)
+		local n = 0
+		if type(found) == "table" and not found.repo then
+			n = #(found.list or {})
+		end
+		holds:set_key({ key }, n)
+	end, function() end)
+end
+
 -- The engine's refusal, as the flow says it (production's own words).
 local function says(err: any, path: string?): string
 	local text = if type(err) == "string" then err elseif type(err) == "table" and err.message then tostring(err.message) else locale.s("shell.add_project.something_went_wrong")
@@ -407,12 +430,23 @@ folder_page = function(device: string, path: string?, title: string, git: boolea
 			local out: { Item } = {}
 			if here then
 				local at = here :: string
+				-- A folder holding several repositories (and not one itself): a
+				-- project whose worktrees can check them out together, said as
+				-- it's added — as its host finds them, the composer's count
+				-- (docs/reference/project-worktrees.md). A host too old to say,
+				-- or a folder of fewer than two: its path, as before.
+				if not git then
+					ask_repositories(device, at)
+				end
 				table.insert(out, {
 					id = "add-here",
 					label = locale.s("shell.add_project.add_this_folder"),
 					section = locale.s("shell.add_project.add"),
 					icon = "plus",
-					hint = at,
+					hint = function(): string
+						local n = if git then nil else holds:get()[`{device}|{at}`]
+						return if n and n >= 2 then locale.s("shell.add_project.holds_repositories", { n = n }) else at
+					end,
 					verb = locale.s("shell.add_project.add_project"),
 					run = function()
 						M.add(device, at, git)

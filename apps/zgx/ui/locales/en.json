@@ -2928,7 +2928,8 @@
       "private": "Private",
       "on_device": "On {device}",
       "from_github": "From GitHub",
-      "add_cloud_project": "Add project"
+      "add_cloud_project": "Add project",
+      "holds_repositories": "{n, plural, one {Holds # repository} other {Holds # repositories}}"
     },
     "updates": {
       "available": "Update available",

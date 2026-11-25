@@ -1239,6 +1239,7 @@ impl DemoHost {
         let path = path.unwrap_or_else(|| home.to_owned());
         let names: &[&str] = match path.as_str() {
             "/Users/dev" => &[
+                "acme",
                 "Documents",
                 "Downloads",
                 "Projects",
@@ -1246,6 +1247,8 @@ impl DemoHost {
                 "zeron",
                 "zeron-ios",
             ],
+            // A folder holding several repositories (no git of its own).
+            "/Users/dev/acme" => &["api", "packages", "scratch", "web"],
             "/Users/dev/Documents" => &["notes", "specs"],
             "/Users/dev/Projects" => &["blog", "dotfiles", "playground", "zeron"],
             "/Users/dev/Projects/zeron" => &["apps", "crates", "docs", "edge"],
@@ -1263,6 +1266,7 @@ impl DemoHost {
             "edge",
             "landing",
         ];
+        let in_acme = path == "/Users/dev/acme";
         Ok(FolderListing {
             path,
             entries: names
@@ -1270,7 +1274,11 @@ impl DemoHost {
                 .map(|name| FolderEntry {
                     name: (*name).into(),
                     is_dir: true,
-                    is_repo: REPOS.contains(name),
+                    is_repo: if in_acme {
+                        *name != "packages"
+                    } else {
+                        REPOS.contains(name)
+                    },
                 })
                 .collect(),
             truncated: false,

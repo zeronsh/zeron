@@ -4,6 +4,8 @@ A project folder holding several repositories, checked out whole: the composer's
 
 Rendered offscreen from `ui/chat_fixture.luau` (`fixture.acme_project`, `fixture.clones_project`) with `src/audit_shots.rs`, and the Git tab from the Git plugin with its service played (`git_shows_one_of_a_folder_s_repositories_and_switches_between_them`'s set-up), on Linux under Xvfb at 2×.
 
+- `new-project-*.png`: New project inside a folder of repositories: Add this folder says how many it holds (as its host finds them).
+- `new-project-session-*.png`: added, its first session offers a worktree of all of them.
 - `panel-*.png`: Acme, its repositories each on its branch; one with no commit can't be chosen.
 - `chosen-*.png`: one let go; the chip counts those chosen.
 - `none-dark.png`, `blocked-dark.png`: none chosen, and the composer saying why it can't start.

@@ -13,6 +13,10 @@ A project's folder doesn't have to be one git repository. A folder that holds se
     README.md                         README.md      → link
 ```
 
+## Adding such a project
+
+A folder of repositories is added like any folder (New project → a device → its folders → **Add this folder**). Inside one, the Add this folder row says how many repositories it holds ("Holds 3 repositories"), as its host finds them: the same count a worktree of it offers. iOS and Android's New Project says so too, over the folder's path ("Holds 4 repositories · New worktrees check them out together, on one branch"). A repository's own folder, or a host too old to list them, shows the path as before.
+
 ## Choosing repositories
 
 In the composer's **Work in** panel, a project folder holding repositories offers **Checkout → Worktree** as a repository does. With a worktree picked, the panel lists the repositories in place of branches: each one's path in the project and its current branch, a check on each chosen. **All** / **None** sit beside the count.

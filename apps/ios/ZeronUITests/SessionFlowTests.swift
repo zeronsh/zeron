@@ -473,6 +473,46 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "repositories-chip-worktree")
     }
 
+    /// New Project on a folder holding several repositories (the demo's
+    /// acme) says how many it holds, as its host finds them; used, the new
+    /// session offers a worktree of them.
+    func testANewProjectHoldingRepositoriesSaysSo() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let newProject = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New Project'")).firstMatch
+        XCTAssertTrue(newProject.waitForExistence(timeout: 5))
+        newProject.tap()
+        // (On the Mac, where acme is: the first host listed may be another.)
+        let device = app.navigationBars.buttons.matching(NSPredicate(format: "NOT (label ==[c] 'close')")).firstMatch
+        XCTAssertTrue(device.waitForExistence(timeout: 5))
+        if !device.label.hasPrefix("MacBook Pro") {
+            device.tap()
+            let mac = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'MacBook Pro'")).firstMatch
+            XCTAssertTrue(mac.waitForExistence(timeout: 5))
+            mac.tap()
+        }
+        let acme = app.staticTexts["acme"]
+        XCTAssertTrue(acme.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["folder-repositories"].exists, "home isn't a folder of repositories")
+        acme.tap()
+        let note = app.staticTexts["folder-repositories"]
+        XCTAssertTrue(note.waitForExistence(timeout: 10))
+        XCTAssertTrue(note.label.contains("Holds 4 repositories"), note.label)
+        snapshot(app, "new-project-repositories")
+        app.buttons["use-folder"].tap()
+        let chip = app.buttons["composer-chip-repositories"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "its new session offers its checkout")
+        // (The chips scroll: brought into view for the picture, without a fling.)
+        let host = app.buttons["composer-chip-host"]
+        if host.isHittable {
+            let start = host.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        snapshot(app, "new-project-session")
+    }
+
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
         let expand = app.buttons["Expand"].firstMatch

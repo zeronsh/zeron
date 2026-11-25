@@ -3,6 +3,7 @@ package sh.zeron.android.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -175,6 +176,35 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // A folder holding several repositories: that its worktrees can
+                    // check them out together (docs/reference/project-worktrees.md).
+                    // (As its host finds them: the count a worktree of it offers.)
+                    var repositories by remember { mutableStateOf(0) }
+                    LaunchedEffect(device?.id, current?.path) {
+                        repositories = 0
+                        val d = device ?: return@LaunchedEffect
+                        val at = current?.path ?: return@LaunchedEffect
+                        val found = runCatching { client?.listProjectRepositories(d.id, at) }.getOrNull()
+                        repositories = if (found == null || found.isRepo) 0 else found.repositories.size
+                    }
+                    if (repositories >= 2 && !loading) {
+                        Column(
+                            Modifier.testTag("folder-repositories"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                ZIcon(ZIcons.Worktree, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                Text("Holds $repositories repositories", style = MaterialTheme.typography.titleSmall)
+                            }
+                            Text(
+                                "New worktrees check them out together, on one branch.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                     status?.let {
                         Text(
                             it,

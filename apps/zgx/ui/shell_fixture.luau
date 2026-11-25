@@ -648,11 +648,49 @@ projects_stub.folders = function(device: string, path: string?): any
 			entries = { { name = "folders", is_dir = true, is_repo = false }, { name = "run", is_dir = false, is_repo = false } },
 		})
 	end
+	-- (Code: a folder holding several repositories, among them.)
+	if at == "/Users/me/code" then
+		return answer({
+			path = at,
+			truncated = false,
+			entries = {
+				{ name = "acme", is_dir = true, is_repo = false },
+				{ name = "zephyr", is_dir = true, is_repo = true },
+			},
+		})
+	end
+	if at == "/Users/me/code/acme" then
+		return answer({
+			path = at,
+			truncated = false,
+			entries = {
+				{ name = "api", is_dir = true, is_repo = true },
+				{ name = "packages", is_dir = true, is_repo = false },
+				{ name = "web", is_dir = true, is_repo = true },
+				{ name = "worker", is_dir = true, is_repo = true },
+				{ name = "AGENTS.md", is_dir = false, is_repo = false },
+			},
+		})
+	end
 	-- (A drive with a project in it already.)
 	if at == "/work" then
 		return answer({ path = at, truncated = false, entries = { { name = "atlas", is_dir = true, is_repo = true } } })
 	end
 	return answer({ path = at, truncated = false, entries = { { name = "zephyr", is_dir = true, is_repo = true } } })
+end
+-- Acme's repositories, as its host lists them for a worktree of it.
+chat_store.repositories = function(path: string, _device: string?): any
+	if path ~= "/Users/me/code/acme" then
+		return answer({ repo = true, list = {} })
+	end
+	return answer({
+		repo = false,
+		list = {
+			{ path = "api", branch = "main" },
+			{ path = "web", branch = "main" },
+			{ path = "worker", branch = "develop" },
+		},
+	})
 end
 projects_stub.drives = function(device: string): any
 	note(`drives:{device}`)
