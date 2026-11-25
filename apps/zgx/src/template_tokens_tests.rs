@@ -197,6 +197,24 @@ fn a_template_s_tokens_folder_leaves_zeron_s_tokens_in_place() {
     }
 }
 
+/// A `.lua` file beside the ones laid (`ds/tokens_template.lua`,
+/// `ds/tokens.lua`): zgx requires a module by its `.luau` (or a folder's
+/// init.luau), so they're never what runs.
+#[test]
+fn a_lua_file_beside_the_tokens_is_never_what_runs() {
+    let t = templates("twin");
+    let zeron = Probe::of(&t, live::BUILTIN).seen();
+    template(&t, "twin", MINIMAL);
+    for rel in ["ds/tokens_template.lua", "ds/tokens.lua"] {
+        std::fs::write(t.join("twin").join(rel), "error(\"not this one\")\nreturn {}").unwrap();
+    }
+    let p = Probe::of(&t, "twin");
+    assert!(t.join(live::LIVE).join("ds/tokens_template.lua").is_file(), "laid, and never required");
+    let seen = p.seen();
+    assert_eq!(seen["zeron.list.gap"], "9", "the laid .luau ran: {seen}");
+    zeron_s_but(&seen, &zeron, &["zeron.list.gap"], "beside a .lua");
+}
+
 /// A template's tokens that don't load, or throw in `setup`: Zeron's are all
 /// set (they ran first), the error is its `ds/tokens.luau`'s, and once that
 /// falls back the window runs on Zeron's own.

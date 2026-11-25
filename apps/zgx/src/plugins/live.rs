@@ -64,6 +64,33 @@ pub fn laid_by_zeron(rel: &str) -> bool {
     rel == zeron_plugin_guard::path::fold(TEMPLATE_TOKENS) || under(TEMPLATE_TOKENS) || under(TOKENS)
 }
 
+/// Zeron's own files, as a disk that folds names has them, and the folders
+/// they're in: what a template's file can't be laid across (`clashes`).
+pub struct ZeronShape {
+    files: BTreeSet<String>,
+    folders: BTreeSet<String>,
+}
+
+impl ZeronShape {
+    pub fn of<'a>(rels: impl IntoIterator<Item = &'a String>) -> Self {
+        let files: BTreeSet<String> = rels.into_iter().map(|rel| zeron_plugin_guard::path::fold(rel)).collect();
+        let folders = files.iter().flat_map(|rel| rel.match_indices('/').map(move |(at, _)| rel[..at].to_string())).collect();
+        Self { files, folders }
+    }
+
+    /// Whether a template's file `rel` can't be laid beside Zeron's: a
+    /// folder of Zeron's has its name (`screens`), or its path goes through
+    /// a file of Zeron's (`ds/button.luau/x.luau`). Laid, it would fail
+    /// part-way, the files before it written.
+    pub fn clashes(&self, rel: &str) -> bool {
+        let rel = zeron_plugin_guard::path::fold(rel);
+        self.folders.contains(&rel) || rel.match_indices('/').any(|(at, _)| self.files.contains(&rel[..at]))
+    }
+}
+
+/// What `template_status` says of a file `clashes` left out.
+pub const CLASHES: &str = "Not used: Zeron has a folder of this name, or a file where this path has a folder.";
+
 pub fn hash(bytes: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -326,6 +353,8 @@ pub struct Overlay {
     /// A template file laid at another path in `.live` than its own (its
     /// `ds/tokens.luau`, as `ds/tokens_template.luau`): `.live`'s → its own.
     pub laid_as: BTreeMap<String, String>,
+    /// The template's files left out for their path (`ZeronShape::clashes`).
+    pub clashing: BTreeSet<String>,
 }
 
 /// `.live` as `.zeron` with template `id` on top, leaving out the template's
@@ -341,8 +370,10 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
 /// the overlay that is: folders listed, nothing read.
 pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
+    let shape = ZeronShape::of(want.keys());
     let mut from_template = BTreeSet::new();
     let mut laid_as = BTreeMap::new();
+    let mut clashing = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
         // Each file is written under one spelling: a template's `App.luau`
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
@@ -350,6 +381,10 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
         for (rel, path) in files(&templates.join(id), |_| true) {
             if !composed(&rel) || failed.contains(&rel) || laid_by_zeron(&rel) {
+                continue;
+            }
+            if shape.clashes(&rel) {
+                clashing.insert(rel);
                 continue;
             }
             // Its tokens beside Zeron's, never over them: Zeron's run first
@@ -371,7 +406,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
             want.insert(rel, path);
         }
     }
-    (want, Overlay { template: id.to_string(), from_template, laid_as })
+    (want, Overlay { template: id.to_string(), from_template, laid_as, clashing })
 }
 
 /// Beside the templates: what a launch last laid `.live` down from, and
@@ -1221,6 +1256,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&want["ds/tokens_template.luau"]).unwrap(), "-- t tokens, spelt");
         assert_eq!(want.keys().filter(|k| k.to_lowercase().starts_with("ds/tokens")).count(), 2, "{want:?}");
         assert_eq!(overlay.laid_as["ds/tokens_template.luau"], "DS/Tokens.luau");
+    }
+
+    /// A template's file laid across Zeron's (a folder of Zeron's by its
+    /// name, or its path through a file of Zeron's) is left out, and said;
+    /// the rest of the template is laid as ever, and the lay-down doesn't
+    /// fail part-way.
+    #[test]
+    fn a_template_s_file_across_zeron_s_is_left_out_and_said() {
+        let t = setup("clash");
+        write(&t, "c/zeron-template.json", r#"{"id":"c"}"#);
+        write(&t, "c/app.luau/x.luau", "-- through Zeron's file");
+        write(&t, "c/screens/shell", "-- where Zeron has a folder");
+        write(&t, "c/screens/extra.luau", "-- c's own");
+        let (_, overlay) = compose(&t, "c", &BTreeSet::new(), false).expect("laid whole");
+        let live = t.join(LIVE);
+        assert_eq!(read(&live, "app.luau"), "-- zeron app");
+        assert_eq!(read(&live, "screens/shell/sidebar.luau"), "-- zeron sidebar");
+        assert_eq!(read(&live, "screens/extra.luau"), "-- c's own");
+        let mut clashing: Vec<_> = overlay.clashing.iter().map(|r| r.to_lowercase()).collect();
+        clashing.sort();
+        assert_eq!(clashing, ["app.luau/x.luau", "screens/shell"]);
+        assert!(!overlay.from_template.iter().any(|r| r.starts_with("app.luau/") || r.eq_ignore_ascii_case("screens/shell")));
+        // And a file beside, not across: laid.
+        let shape = ZeronShape::of([String::from("ds/button.luau"), String::from("screens/a/b.luau")].iter());
+        for (rel, clashes) in [("ds/button.luau/x.luau", true), ("screens/a", true), ("SCREENS", true), ("ds/button.luau", false), ("ds/button.luaux/x.luau", false), ("screens/a/c.luau", false), ("screens/ab", false)] {
+            assert_eq!(shape.clashes(rel), clashes, "{rel}");
+        }
     }
 
     /// The app's own refusal, whatever the guard: where Zeron lays a
