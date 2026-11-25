@@ -176,6 +176,7 @@ pub fn handles(method: &str) -> bool {
             | methods::DECIDE_TEMPLATE
             | methods::CHECK_TEMPLATE_UPDATES
             | methods::UPDATE_TEMPLATE
+            | methods::INSTALL_VERIFIED_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
@@ -2301,6 +2302,33 @@ impl Plugins {
                 .map_err(failed)?;
                 RpcReply::value(&reply)
             }
+            // From the store: fetched by its record, and it waits.
+            methods::IMPORT_TEMPLATE if params.get("store").is_some_and(|s| !s.is_null()) => {
+                #[derive(serde::Deserialize)]
+                struct StoreParams {
+                    store: String,
+                    #[serde(default)]
+                    version: Option<String>,
+                    #[serde(default)]
+                    path: Option<serde_json::Value>,
+                    #[serde(default)]
+                    url: Option<serde_json::Value>,
+                }
+                let p: StoreParams = parse_params(params)?;
+                if p.path.is_some() || p.url.is_some() {
+                    return Err(failed("Give a template file (`path`), a link (`url`) or a template's id in the store (`store`), one of them"));
+                }
+                RpcReply::value(&self.import_template_from_store(&p.store, p.version.as_deref()).await?)
+            }
+            methods::INSTALL_VERIFIED_TEMPLATE => {
+                #[derive(serde::Deserialize)]
+                struct InsteadParams {
+                    pending: String,
+                    hash: String,
+                }
+                let p: InsteadParams = parse_params(params)?;
+                RpcReply::value(&self.install_verified_template(p.pending.trim(), &p.hash).await?)
+            }
             // From a link: fetched and verified, then imported as a file is.
             methods::IMPORT_TEMPLATE if params.get("url").and_then(|u| u.as_str()).is_some_and(|u| !u.trim().is_empty()) => {
                 if params.get("path").and_then(|p| p.as_str()).is_some_and(|p| !p.trim().is_empty()) {
@@ -2403,6 +2431,7 @@ impl Plugins {
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
                 let this = self.clone();
                 let method = method.to_owned();
+                let counted = now.clone();
                 let reply = tokio::task::spawn_blocking(move || {
                     let path = p.path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from);
                     let author_of = |key: &str| this.author_of(key);
@@ -2443,6 +2472,9 @@ impl Plugins {
                 .await
                 .map_err(|_| failed("Couldn't reach the templates folder"))?
                 .map_err(failed)?;
+                if let Some(store) = counted.filter(|_| reply["installed"].is_string() && reply.get("updated").is_none()) {
+                    self.template_installed(&store);
+                }
                 RpcReply::value(&reply)
             }
             methods::PLUGIN_STATUS => {

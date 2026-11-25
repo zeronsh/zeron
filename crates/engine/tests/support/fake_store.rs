@@ -141,6 +141,8 @@ pub struct State {
     /// Version records answered without `verified` (a broken or hostile
     /// store: readers require it).
     pub records_without_verified: bool,
+    /// Version records answered as not verified, whatever the pages say.
+    pub records_unverified: bool,
     /// Update offers answered without `verified`.
     pub offers_without_verified: bool,
 }
@@ -583,6 +585,9 @@ impl FakeStore {
                 if state.records_without_verified {
                     info.as_object_mut().unwrap().remove("verified");
                 }
+                if state.records_unverified {
+                    info["verified"] = json!(false);
+                }
                 json_reply(200, info)
             }
             ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id, "versions", version, "package"]) => {
@@ -646,12 +651,13 @@ impl FakeStore {
                     None => not_found(),
                 }
             }
-            ("POST", ["store", "v1", "plugins", id, "installed"]) => {
+            ("POST", ["store", "v1", kind @ ("plugins" | "templates"), id, "installed"]) => {
                 if caller.is_none() {
                     return unauthorized();
                 }
                 let mut state = self.state.lock().unwrap();
-                let Some(p) = state.plugins.get_mut(*id) else { return not_found() };
+                let items = if *kind == "templates" { &mut state.template_items } else { &mut state.plugins };
+                let Some(p) = items.get_mut(*id) else { return not_found() };
                 p.installs += 1;
                 json_reply(200, json!({}))
             }

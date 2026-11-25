@@ -879,6 +879,8 @@ fn pending_paths(dir: &Path, pending: &str) -> Result<(PathBuf, PathBuf), String
 /// A waiting package from the store: the record it was fetched by, and what
 /// it is.
 pub struct FromStore {
+    /// The folder it's an update of, if it's one.
+    pub update_of: Option<String>,
     pub store: install::StoreSource,
     pub version: String,
     pub hash: String,
@@ -893,7 +895,72 @@ pub fn waiting_from_store(dir: &Path, pending: &str) -> Result<Option<FromStore>
     let about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let Some(store) = came_from(&about["origin"]).and_then(|s| s.store) else { return Ok(None) };
     let package = read_waiting(&package_path, &about, Some(&store))?;
-    Ok(Some(FromStore { version: package.version(), hash: package.hash, content_hash: package.content_hash, store }))
+    let update_of = about["update_of"].as_str().map(str::to_owned);
+    Ok(Some(FromStore { update_of, version: package.version(), hash: package.hash, content_hash: package.content_hash, store }))
+}
+
+/// A package the store served (`source`: the record it was fetched by), to
+/// wait for you: never installed here, whosever it is. The one that's waiting
+/// already, when it's that very package of that record's. Over an earlier
+/// version of it that's here (from the store, under whatever folder's name),
+/// as an update of that one; beside anything else of its id. As [`pending`]
+/// lists it. `at`: which one, when it's for one of them (an update's
+/// alternative).
+pub fn stage_from_store(dir: &Path, package: &Package, mut source: Source, at: Option<&str>) -> Result<Value, String> {
+    let store = source.store().cloned().ok_or(NOT_CHECKED)?;
+    let identity = super::template_blocks::Identity { id: store.id.clone(), version: package.version(), hash: store.hash.clone() };
+    super::template_blocks::refuse_package(dir, &package.content_hash, Some(&identity))?;
+    package.compatible()?;
+    let here = from_store(dir).into_iter().filter(|(folder, was)| was.id == store.id && at.is_none_or(|at| at == folder));
+    // (One in the folder of its id before a copy of it.)
+    let update_of = here.map(|(folder, _)| folder).min_by_key(|folder| *folder != store.id);
+    if let Some(folder) = &update_of {
+        let record = imported(&dir.join(folder)).ok_or("What's installed can't be read")?;
+        let was = record["version"].as_str().unwrap_or("").to_owned();
+        if !install::newer(&package.version(), &was) {
+            return Err(install::not_newer(&package.version(), &was));
+        }
+        let verified = came_from(&record["source"]).and_then(|s| s.store).is_some_and(|s| s.verified);
+        if let Some(store) = source.store.as_mut() {
+            store.replaced = Some(install::ReplacedVersion { version: was, verified });
+        }
+    }
+    let waiting_already = pending(dir).into_iter().find(|item| item["hash"] == package.hash.as_str() && item["store"]["id"] == store.id.as_str() && item["update_of"].as_str() == update_of.as_deref());
+    let name = match waiting_already.as_ref().and_then(|item| item["pending"].as_str()) {
+        Some(name) => {
+            keep_record(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
+            name.to_owned()
+        }
+        None => stage_as(dir, package, install::STORE, &source, update_of.as_deref())?,
+    };
+    let mut out = pending(dir).into_iter().find(|item| item["pending"] == name.as_str()).ok_or("Couldn't keep it for you to allow")?;
+    out["needs_consent"] = json!(true);
+    Ok(out)
+}
+
+/// The waiting package `pending`, dropped.
+pub fn drop_waiting(dir: &Path, pending: &str) {
+    if let Ok((about, package)) = pending_paths(dir, pending) {
+        let _ = std::fs::remove_file(package);
+        let _ = std::fs::remove_file(about);
+    }
+}
+
+/// What waits and can't be allowed (its package, its record or its file
+/// beside it isn't what it was), read and found so, dropped: it isn't listed,
+/// so nothing else would.
+pub fn drop_unusable(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join(PENDING)) else { return };
+    for name in entries.flatten().filter_map(|e| e.file_name().into_string().ok()?.strip_suffix(".json").map(str::to_owned)) {
+        let Ok((about, package)) = pending_paths(dir, &name) else { continue };
+        // (Couldn't be read just now: kept, for the next time.)
+        let (Some(about), Some(_)) = (templates::read_regular(&about), templates::read_regular(&package)) else { continue };
+        let about: Value = serde_json::from_slice(&about).unwrap_or_default();
+        if about["pending"].as_str() != Some(name.as_str()) || waiting(dir, &name, &about).is_none() {
+            tracing::info!(pending = %name, "templates: what waited can't be allowed any more; dropped");
+            drop_waiting(dir, &name);
+        }
+    }
 }
 
 /// The waiting store package `pending`'s record as the store has it now
@@ -2014,6 +2081,38 @@ mod tests {
         let pending_package = std::fs::read_dir(d.join(PENDING)).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == EXTENSION)).unwrap().path();
         write(&pending_package, "nope");
         assert!(pending(&d).is_empty());
+    }
+
+    /// What waits and can't be allowed is dropped; what can be, what's being
+    /// looked at and what isn't a waiting package stay.
+    #[test]
+    fn plugins_template_packages_drop_what_cannot_be_allowed() {
+        let d = dir("unusable").join("templates");
+        let package = from_the_store("1.0.0");
+        let source = store_source(&package.content_hash, ADA, true);
+        let stage = || stage_as(&d, &package, "store", &source, None).unwrap();
+        let (good, bad_package, bad_record, bad_update, named) = (stage(), stage(), stage(), stage(), stage());
+        let at = |name: &str, ext: &str| d.join(PENDING).join(format!("{name}.{ext}"));
+        write(&at(&bad_package, EXTENSION), "nope");
+        let forge = |name: &str, member: &str, value: Value| {
+            let mut v: Value = serde_json::from_slice(&std::fs::read(at(name, "json")).unwrap()).unwrap();
+            v[member] = value;
+            write(&at(name, "json"), &v.to_string());
+        };
+        forge(&bad_record, "origin", json!(store_source(&"0".repeat(64), ADA, true)));
+        forge(&bad_update, "update_of", json!("../x"));
+        forge(&named, "pending", json!("other-1"));
+        write(&at("half-1", "json"), &json!({ "pending": "half-1" }).to_string());
+        write(&d.join(PENDING).join("notes.txt"), "mine");
+        drop_unusable(&d);
+        let left = |name: &str| (at(name, "json").exists(), at(name, EXTENSION).exists());
+        assert_eq!(left(&good), (true, true));
+        for name in [&bad_package, &bad_record, &bad_update, &named] {
+            assert_eq!(left(name), (false, false), "{name}");
+        }
+        assert!(at("half-1", "json").exists() && d.join(PENDING).join("notes.txt").exists());
+        assert_eq!(pending(&d).len(), 1);
+        drop_unusable(&d.join("none"));
     }
 
     /// What's shown of a package is bounded, wherever it came from; what's

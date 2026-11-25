@@ -767,7 +767,10 @@ impl Plugins {
         lock(&self.inner.tasks).push(task);
         let weak = std::sync::Arc::downgrade(&self.inner);
         let (first, every) = takedown_every();
+        let templates = self.inner.data_dir.join(super::TEMPLATES_DIR);
         let feed = runtime.spawn(async move {
+            // (What waited and can't be allowed any more, once a start.)
+            let _ = tokio::task::spawn_blocking(move || template_packages::drop_unusable(&templates)).await;
             tokio::time::sleep(first).await;
             loop {
                 let Some(inner) = weak.upgrade() else { return };

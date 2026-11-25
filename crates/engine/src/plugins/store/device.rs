@@ -689,7 +689,11 @@ impl Plugins {
                         says_kind(&mut value, kind);
                         value
                     }
-                    Err(error) => not_ok(&error),
+                    Err(error) => {
+                        let mut value = not_ok(&error);
+                        says_kind(&mut value, kind);
+                        value
+                    }
                 })
             }
             methods::LIST_DEPLOY_TOKENS => {
@@ -715,7 +719,11 @@ impl Plugins {
                         says_kind(&mut value, kind);
                         value
                     }
-                    Err(error) => not_ok(&error),
+                    Err(error) => {
+                        let mut value = not_ok(&error);
+                        says_kind(&mut value, kind);
+                        value
+                    }
                 })
             }
             methods::ACK_STORE_NOTICES => {
@@ -1156,6 +1164,113 @@ impl Plugins {
             Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content or another signer than the update found, so it wasn't taken"))),
             Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
             Err(error) => Err(error),
+        }
+    }
+
+    /// `ImportTemplate {store, version?}`: template `id`'s version from the
+    /// store (none named: its newest listed, for a person; its newest
+    /// verified, for an agent), fetched and checked against its record, to
+    /// wait for the person in Zeron's own window, whatever its record says.
+    pub(in crate::plugins) async fn import_template_from_store(&self, id: &str, version: Option<&str>) -> Result<Value, RpcError> {
+        let id = id.trim();
+        check_item_id(Kind::Template, id)?;
+        let person = Self::by_person();
+        let (client, caller) = self.store_reader()?;
+        let client = client.of(Kind::Template);
+        let (_, detail) = client.plugin(id, &caller).await.map_err(failed)?;
+        let named = version.map(str::trim).filter(|v| !v.is_empty());
+        let wanted = match (named, person) {
+            (Some(named), _) => named.to_owned(),
+            (None, true) => detail.version.clone(),
+            (None, false) => detail.verified_version.clone().ok_or_else(|| agent_unverified(id, &detail.version))?,
+        };
+        if wanted.is_empty() {
+            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("The store lists no version of {id}"))));
+        }
+        let (package, source) = self.fetch_template(&client, &caller, id, &wanted, &detail.author).await?;
+        if !person && !source.store().is_some_and(|s| s.verified) {
+            return Err(agent_unverified(id, &wanted));
+        }
+        self.stage_template(&client, &caller, package, source, &detail.author, None).await
+    }
+
+    /// `InstallVerifiedTemplate {pending, hash}`: the verified version a
+    /// waiting template's sheet offers instead of it, its own item's (never a
+    /// caller's word), its record read now and refused (`not_verified`)
+    /// unless it says so. It waits in that one's place.
+    pub(in crate::plugins) async fn install_verified_template(&self, pending: &str, hash: &str) -> Result<Value, RpcError> {
+        if !Self::by_person() {
+            return Err(failed(failure(install::reason::NEEDS_PERSON, "Only the person chooses another version, in Zeron's window")));
+        }
+        let waiting = self.waiting_from_store(pending).await?.ok_or_else(|| failed("There's no template from the store waiting by that name"))?;
+        if !waiting.hash.eq_ignore_ascii_case(hash.trim()) {
+            return Err(failed("It changed since it was shown: look again"));
+        }
+        let id = waiting.store.id.clone();
+        let Some(version) = waiting.store.verified_alternative.as_ref().filter(|_| !waiting.store.verified).map(|a| a.version.clone()) else {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("{id} has no verified version to install instead"))));
+        };
+        let (client, caller) = self.store_reader()?;
+        let client = client.of(Kind::Template);
+        let (_, detail) = client.plugin(&id, &caller).await.map_err(failed)?;
+        let (package, source) = self.fetch_template(&client, &caller, &id, &version, &detail.author).await?;
+        if !source.store().is_some_and(|s| s.verified) {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("The store's record of {id} {version} doesn't say it's verified, so it wasn't taken"))));
+        }
+        let staged = self.stage_template(&client, &caller, package, source, &detail.author, waiting.update_of).await?;
+        let (dir, was) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned());
+        if staged["pending"] != was.as_str() {
+            let _ = tokio::task::spawn_blocking(move || template_packages::drop_waiting(&dir, &was)).await;
+        }
+        Ok(staged)
+    }
+
+    /// Version `version` of template `id`, by its own record, fetched now and
+    /// listed; its package fetched and checked against it.
+    async fn fetch_template(&self, client: &StoreClient, caller: &Caller, id: &str, version: &str, publisher: &client::Publisher) -> Result<(template_packages::Package, Source), RpcError> {
+        Version::parse(version).map_err(failed)?;
+        let (_, found) = client.version(id, version, caller).await.map_err(failed)?;
+        if found.status != "listed" || found.yanked {
+            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {version} of {id} can't be installed any more"))));
+        }
+        let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
+        let raw = client.package(id, version, caller, record.bytes).await.map_err(failed)?;
+        let (id, version, publisher, verified) = (id.to_owned(), version.to_owned(), publisher.clone(), found.verified);
+        let named = version.clone();
+        let (package, mut store) = tokio::task::spawn_blocking(move || super::verify_template(raw, &id, &named, &record, &publisher, verified))
+            .await
+            .map_err(|_| failed("Couldn't read it"))?
+            .map_err(failed)?;
+        store.verified_at = found.verified.then_some(found.verified_at).flatten();
+        Ok((package, Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version, installed_at: now_secs(), store: Some(store) }))
+    }
+
+    /// A template fetched from the store, waiting; not verified, with the
+    /// newest verified version this Zeron can run, for its sheet's "instead".
+    async fn stage_template(&self, client: &StoreClient, caller: &Caller, package: template_packages::Package, mut source: Source, publisher: &client::Publisher, at: Option<String>) -> Result<Value, RpcError> {
+        if let Some(store) = source.store.as_mut().filter(|s| !s.verified) {
+            store.verified_alternative = verified_template(client, caller, &store.id.clone(), &source.version, publisher).await;
+        }
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let staged = tokio::task::spawn_blocking(move || template_packages::stage_from_store(&dir, &package, source, at.as_deref()))
+            .await
+            .map_err(|_| failed("Couldn't reach the templates folder"))?
+            .map_err(failed)?;
+        tracing::info!(id = %staged["id"], version = %staged["version"], "store: a template waits to be allowed");
+        Ok(staged)
+    }
+
+    /// A store template installed here, anew, is counted once per account
+    /// (the edge's to say).
+    pub(in crate::plugins) fn template_installed(&self, store: &install::StoreSource) {
+        let Ok((client, caller)) = self.store_reader() else { return };
+        let (client, id) = (client.of(Kind::Template), store.id.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = client.installed(&id, &caller).await {
+                    tracing::debug!(template = %id, %error, "store: the install wasn't counted");
+                }
+            });
         }
     }
 
@@ -1929,6 +2044,38 @@ impl Plugins {
 /// verified one, who owns it.
 async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result<client::Detail, RpcError> {
     client.plugin(id, caller).await.map(|(_, detail)| detail).map_err(failed)
+}
+
+/// The newest verified version of template `id` this Zeron can run, other
+/// than `asked`: as its pages say, and its own record too. None when there's
+/// none, or the store can't say.
+async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, asked: &str, publisher: &client::Publisher) -> Option<install::Alternative> {
+    super::vouched(publisher).ok()?;
+    let zeron = version::zeron();
+    let mut cursor: Option<String> = None;
+    for _ in 0..ALTERNATIVE_PAGES {
+        let page = client.versions(id, cursor.as_deref(), Some(50), caller).await.ok()?;
+        let found = page["versions"].as_array().into_iter().flatten().find(|v| {
+            v["verified"] == true
+                && v["status"] == "listed"
+                && v["yanked"] != true
+                && v["version"].as_str().is_some_and(|x| !same_version(x, asked) && Version::parse(x).is_ok())
+                && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
+        });
+        if let Some(found) = found {
+            let version = found["version"].as_str()?.to_owned();
+            let (_, record) = client.version(id, &version, caller).await.ok()?;
+            return (record.verified && record.status == "listed" && !record.yanked).then(|| install::Alternative {
+                version,
+                added: Vec::new(),
+                removed: Vec::new(),
+                notes: notes(found["notes"].as_str().unwrap_or_default(), listing::MAX_NOTES_BYTES),
+                verified_at: record.verified_at,
+            });
+        }
+        cursor = Some(page["next_cursor"].as_str()?.to_owned());
+    }
+    None
 }
 
 /// An agent's install of a version Zeron hasn't verified: the person's to

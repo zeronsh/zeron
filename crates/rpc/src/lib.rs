@@ -655,6 +655,10 @@ pub mod methods {
     /// `{installed, name, author, ignored}`; anyone else's: kept for you to
     /// allow in Zeron, `{pending, id, name, …, key, author, hash, ignored,
     /// needs_consent: true}`. Unsigned or tampered packages are refused.
+    /// `{store, version?}`: from the store, by its id there; it waits,
+    /// whatever its record says (an agent's is a verified version, else
+    /// `needs_person`), over an earlier version of it that's here as an
+    /// update of that one: the item as `ListTemplates` lists it.
     pub const IMPORT_TEMPLATE: &str = "ImportTemplate";
     /// `{pending, allow, hash, review}` → `{installed, name, author, digest}`
     /// or `{declined}`: the consent window's answer for a waiting package
@@ -834,7 +838,7 @@ pub mod methods {
     /// [`PUBLISH_PLUGIN`], of a template as [`PREPARE_TEMPLATE_PUBLISH`]
     /// checked it. The person's act alone: never an agent's.
     pub const PUBLISH_TEMPLATE: &str = "PublishTemplate";
-    /// (Named for the app; not answered yet.) `{pending, hash}` → as
+    /// `{pending, hash}` → as
     /// `ImportTemplate`'s reply: the verified version of a waiting store
     /// template, instead of the unverified one; the version is the engine's
     /// own waiting item's, refused `not_verified` unless its record, read
