@@ -1568,11 +1568,9 @@ impl Plugins {
             }
             // A newer version found where it came from.
             if let (Some(id), Some(hash)) = (entry["id"].as_str(), entry["imported"]["hash"].as_str())
-                && let Some(found) = template_packages::found(&dir, id, hash)
+                && let Some(update) = template_packages::shown_update(&dir, id, hash)
             {
-                let version = listing::shown(&found.version, version::MAX_LEN);
-                entry["update"] = found.shown();
-                entry["update"]["version"] = serde_json::json!(version);
+                entry["update"] = update;
             }
         }
         let pending: Vec<serde_json::Value> = template_packages::pending(&dir)
@@ -2366,6 +2364,9 @@ impl Plugins {
                 }
                 let p: UpdateParams = parse_params(params)?;
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+                if let Some(installed) = self.store_template_at(p.id.trim()).await {
+                    return RpcReply::value(&self.update_store_template(installed).await?);
+                }
                 let this = self.clone();
                 let reply = tokio::task::spawn_blocking(move || {
                     template_packages::update(&dir, p.id.trim(), |key: &str| this.author_of(key))

@@ -1069,6 +1069,10 @@ pub struct Found {
     /// version newer than the one installed, offered beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_alternative: Option<Alternative>,
+    /// From the store: newer, and not taken here, this device taking verified
+    /// updates: said, its package not kept (a template's alone).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 /// The newest verified version, offered beside an unverified update: what
@@ -1091,6 +1095,9 @@ pub struct Alternative {
 impl Found {
     /// What the app is shown.
     pub fn shown(&self) -> Value {
+        if self.held {
+            return json!({ "version": self.version, "verified": false, "held": true, "installed_verified": self.installed_verified });
+        }
         let mut value = json!({ "version": self.version, "added": self.added, "removed": self.removed });
         if let Some(refused) = &self.refused {
             value["refused"] = json!(refused);
@@ -1212,6 +1219,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         store_verified_at: None,
         installed_verified: None,
         verified_alternative: None,
+        held: false,
     })
 }
 

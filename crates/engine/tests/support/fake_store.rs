@@ -501,7 +501,9 @@ impl FakeStore {
             Err((status, value)) => return json_reply(status, value),
         };
         let caller = who.as_ref().map(|(u, _)| u.clone());
-        let parts: Vec<&str> = path.split('?').next().unwrap().trim_start_matches('/').split('/').collect();
+        // (A version's `+`, as a path carries it.)
+        let decoded = path.split('?').next().unwrap().replace("%2B", "+");
+        let parts: Vec<&str> = decoded.trim_start_matches('/').split('/').collect();
         let query: BTreeMap<String, String> = path
             .split_once('?')
             .map_or("", |(_, q)| q)
@@ -688,7 +690,33 @@ impl FakeStore {
                 state.asks.push(ask.clone());
                 let zeron = Version::parse(ask["zeron"].as_str().unwrap_or("")).ok();
                 let mut updates = Vec::new();
+                let mut template_updates = Vec::new();
                 let mut blocked = Vec::new();
+                for asked in ask["templates"].as_array().into_iter().flatten().filter(|asked| real(asked)) {
+                    let (id, installed) = (asked["id"].as_str().unwrap(), Version::parse(asked["version"].as_str().unwrap()).unwrap());
+                    let Some(p) = state.template_items.get(id) else { continue };
+                    let newer: Vec<&StoredVersion> = p
+                        .listed()
+                        .into_iter()
+                        .filter(|v| Version::parse(&v.version).is_ok_and(|x| x > installed && (!x.is_prerelease() || asked["prerelease"] == true)))
+                        .collect();
+                    let offer = |v: &StoredVersion| {
+                        json!({
+                            "id": id, "kind": "template", "version": v.version, "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v),
+                            "key": v.key, "publisher": p.owner, "publisher_id": publisher_id(p.account()), "notes": "What's new.", "added": [], "removed": [],
+                            "prerelease": Version::parse(&v.version).is_ok_and(|x| x.is_prerelease()), "verified": v.verified, "verified_at": v.verified.then_some(1),
+                        })
+                    };
+                    let Some(best) = newer.first() else { continue };
+                    let mut item = offer(best);
+                    if state.offers_without_verified {
+                        item.as_object_mut().unwrap().remove("verified");
+                    }
+                    if let Some(verified) = newer.iter().find(|v| v.verified).filter(|_| !best.verified) {
+                        item["verified_update"] = offer(verified);
+                    }
+                    template_updates.push(item);
+                }
                 for asked in ask["plugins"].as_array().cloned().unwrap_or_default() {
                     let (id, installed) = (asked["id"].as_str().unwrap_or(""), asked["version"].as_str().unwrap_or(""));
                     let Some(p) = state.plugins.get(id).filter(|_| real(&asked)) else { continue };
@@ -735,7 +763,7 @@ impl FakeStore {
                     }
                 }
                 blocked.extend(state.blocked_anyway.iter().cloned());
-                json_reply(200, json!({ "updates": updates, "blocked": blocked }))
+                json_reply(200, json!({ "updates": updates, "template_updates": template_updates, "blocked": blocked }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };

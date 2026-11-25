@@ -767,7 +767,11 @@ impl Plugins {
             for (folder, store) in template_packages::from_store(&dir) {
                 // (Installed twice: the one in the folder of its id.)
                 if folder == store.id || !rows.contains_key(&store.id) {
-                    rows.insert(store.id.clone(), crate::plugins::templates::installed_row(&dir, &folder));
+                    let mut row = crate::plugins::templates::installed_row(&dir, &folder);
+                    if let Some(update) = row["imported"]["hash"].as_str().and_then(|hash| template_packages::shown_update(&dir, &folder, hash)) {
+                        row["update"] = update;
+                    }
+                    rows.insert(store.id.clone(), row);
                 }
             }
             rows
@@ -1191,7 +1195,7 @@ impl Plugins {
         if !person && !source.store().is_some_and(|s| s.verified) {
             return Err(agent_unverified(id, &wanted));
         }
-        self.stage_template(&client, &caller, package, source, &detail.author, None).await
+        self.stage_template(&client, &caller, package, source, &detail.author, None, false).await
     }
 
     /// `InstallVerifiedTemplate {pending, hash}`: the verified version a
@@ -1217,7 +1221,7 @@ impl Plugins {
         if !source.store().is_some_and(|s| s.verified) {
             return Err(failed(failure(install::reason::NOT_VERIFIED, format!("The store's record of {id} {version} doesn't say it's verified, so it wasn't taken"))));
         }
-        let staged = self.stage_template(&client, &caller, package, source, &detail.author, waiting.update_of).await?;
+        let staged = self.stage_template(&client, &caller, package, source, &detail.author, waiting.update_of, true).await?;
         let (dir, was) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned());
         if staged["pending"] != was.as_str() {
             let _ = tokio::task::spawn_blocking(move || template_packages::drop_waiting(&dir, &was)).await;
@@ -1247,17 +1251,241 @@ impl Plugins {
 
     /// A template fetched from the store, waiting; not verified, with the
     /// newest verified version this Zeron can run, for its sheet's "instead".
-    async fn stage_template(&self, client: &StoreClient, caller: &Caller, package: template_packages::Package, mut source: Source, publisher: &client::Publisher, at: Option<String>) -> Result<Value, RpcError> {
-        if let Some(store) = source.store.as_mut().filter(|s| !s.verified) {
-            store.verified_alternative = verified_template(client, caller, &store.id.clone(), &source.version, publisher).await;
-        }
+    async fn stage_template(&self, client: &StoreClient, caller: &Caller, package: template_packages::Package, mut source: Source, publisher: &client::Publisher, at: Option<String>, instead: bool) -> Result<Value, RpcError> {
         let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
-        let staged = tokio::task::spawn_blocking(move || template_packages::stage_from_store(&dir, &package, source, at.as_deref()))
+        if let Some(store) = source.store.as_mut().filter(|s| !s.verified) {
+            let place = {
+                let (dir, id, at) = (dir.clone(), store.id.clone(), at.clone());
+                tokio::task::spawn_blocking(move || template_packages::place_of(&dir, &id, at.as_deref())).await.ok().flatten()
+            };
+            let prereleases = lock(&self.inner.state).template_prerelease.contains(&store.id);
+            store.verified_alternative = verified_template(client, caller, &store.id.clone(), &source.version, publisher, place.as_ref(), prereleases).await;
+        }
+        let staged = tokio::task::spawn_blocking(move || template_packages::stage_from_store(&dir, &package, source, at.as_deref(), instead))
             .await
             .map_err(|_| failed("Couldn't reach the templates folder"))?
             .map_err(failed)?;
         tracing::info!(id = %staged["id"], version = %staged["version"], "store: a template waits to be allowed");
         Ok(staged)
+    }
+
+    /// The store template in folder `id`, if that's what it is.
+    pub(in crate::plugins) async fn store_template_at(&self, id: &str) -> Option<template_packages::Installed> {
+        let (dir, id) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), id.to_owned());
+        tokio::task::spawn_blocking(move || template_packages::installed_from_store(&dir, Some(&id)).into_iter().next()).await.ok()?
+    }
+
+    /// `UpdateTemplate` for a store template: the person's, its update's
+    /// record read now; it waits for them but for its listing files alone.
+    pub(in crate::plugins) async fn update_store_template(&self, installed: template_packages::Installed) -> Result<Value, RpcError> {
+        if !Self::by_person() {
+            return Err(Self::needs_person(&installed.name));
+        }
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let found = |installed: &template_packages::Installed| {
+            let (dir, id, hash) = (dir.clone(), installed.id.clone(), installed.hash.clone());
+            async move { tokio::task::spawn_blocking(move || template_packages::found(&dir, &id, &hash)).await.ok().flatten() }
+        };
+        let mut kept = found(&installed).await;
+        if kept.is_none() {
+            let (_, errors) = self.check_store_templates(Some(&installed.id)).await;
+            if let Some(error) = errors.first() {
+                return Err(failed(error["error"].as_str().unwrap_or("Couldn't check for an update").to_owned()));
+            }
+            kept = found(&installed).await;
+        }
+        let Some(kept) = kept else {
+            return Err(failed(install::failure(install::reason::UP_TO_DATE, format!("{} is up to date", installed.name))));
+        };
+        if let Some(refused) = kept.refused {
+            return Err(failed(refused));
+        }
+        let unverified = || failed(failure(install::reason::NOT_VERIFIED, format!("{} {} isn't verified, and this device takes verified updates of it", installed.name, plain(&kept.version, 64))));
+        if kept.held {
+            return Err(unverified());
+        }
+        let store = kept.source.as_ref().and_then(Source::store).cloned().ok_or_else(|| failed(template_packages::NOT_CHECKED))?;
+        let waiting = template_packages::FromStore { update_of: Some(installed.id.clone()), content_hash: store.hash.clone(), version: kept.version.clone(), hash: kept.hash.clone(), store };
+        let now = self.record_now(&waiting).await?;
+        // (A device that takes verified updates takes nothing its record
+        // doesn't say is verified, now.)
+        if !now.verified && lock(&self.inner.state).template_updates(&installed.store.id) == UpdatePreference::Verified {
+            return Err(unverified());
+        }
+        // Not verified: the verified version its sheet can offer instead.
+        let mut alternative = None;
+        if !now.verified && let Ok((client, caller)) = self.store_reader() {
+            let prereleases = lock(&self.inner.state).template_prerelease.contains(&now.id);
+            let publisher = client::Publisher { id: Some(now.publisher_id.clone()), username: Some(now.publisher.clone()), verified: false };
+            let place = template_packages::Place { folder: installed.id.clone(), version: installed.version.clone(), verified: installed.store.verified };
+            alternative = verified_template(&client.of(Kind::Template), &caller, &now.id, &waiting.version, &publisher, Some(&place), prereleases).await;
+        }
+        let id = installed.id;
+        tokio::task::spawn_blocking(move || template_packages::update_from_store(&dir, &id, &now, alternative)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
+    }
+
+    /// The update check of the store's templates here (`only`: the one in
+    /// that folder): each one's update by this device's choice, its package
+    /// kept, never installed: `(updates, errors)`, as a plugin's check says
+    /// them, `id` the folder's. (What's taken down is the feed's and the full
+    /// check's to say.)
+    pub(in crate::plugins) async fn check_store_templates(&self, only: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let here = {
+            let (dir, only) = (dir.clone(), only.map(str::to_owned));
+            tokio::task::spawn_blocking(move || template_packages::installed_from_store(&dir, only.as_deref())).await.unwrap_or_default()
+        };
+        let said = |t: &template_packages::Installed, error: &str| json!({ "id": t.id, "name": t.name, "error": error });
+        if here.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let (client, caller) = match self.store_reader() {
+            Ok(store) => store,
+            Err(error) => return (Vec::new(), here.iter().map(|t| said(t, &error.to_string())).collect()),
+        };
+        let client = client.of(Kind::Template);
+        let state = lock(&self.inner.state).clone();
+        // Each version of each, once, an id once in a request.
+        let mut all: Vec<template_blocks::Identity> = here.iter().map(|t| template_blocks::Identity { id: t.store.id.clone(), version: t.version.clone(), hash: t.store.hash.clone() }).filter(template_blocks::Identity::valid).collect();
+        all.sort();
+        all.dedup();
+        let (mut updates, mut errors) = (Vec::new(), Vec::new());
+        let mut answered: Vec<(template_blocks::Identity, Option<Offer>)> = Vec::new();
+        for asked in template_blocks::requests(&all, MAX_UPDATE_ITEMS) {
+            let ask = UpdatesAsk {
+                zeron: version::zeron().to_string(),
+                plugins: Vec::new(),
+                templates: asked.iter().map(|t| Asked { id: t.id.clone(), version: t.version.clone(), hash: t.hash.clone(), prerelease: state.template_prerelease.contains(&t.id) }).collect(),
+            };
+            match client.updates(&ask, &caller).await {
+                Ok(reply) => {
+                    for item in asked {
+                        if reply.unreadable.iter().any(|id| id.as_deref().is_none_or(|id| id == item.id)) {
+                            errors.extend(here.iter().filter(|t| t.store.id == item.id && t.version == item.version).map(|t| said(t, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read"))));
+                            continue;
+                        }
+                        let offer = reply.template_updates.iter().find(|o| o.id == item.id).cloned();
+                        answered.push((item, offer));
+                    }
+                }
+                Err(error) => errors.extend(here.iter().filter(|t| asked.iter().any(|a| a.id == t.store.id && a.version == t.version)).map(|t| said(t, &error))),
+            }
+        }
+        for t in &here {
+            let Some((_, offer)) = answered.iter().find(|(asked, _)| asked.id == t.store.id && asked.version == t.version && asked.hash == t.store.hash) else { continue };
+            let offer = offer.as_ref().filter(|o| install::newer_by_precedence(&o.version, &t.version));
+            let (staged, beside) = match (offer, state.template_updates(&t.store.id)) {
+                (None, _) => (None, None),
+                (Some(offer), UpdatePreference::Newest) => (Some(offer), offer.verified_update.as_deref()),
+                (Some(offer), UpdatePreference::Verified) if offer.verified => (Some(offer), None),
+                (Some(offer), UpdatePreference::Verified) => (offer.verified_update.as_deref().filter(|v| v.verified && install::newer_by_precedence(&v.version, &t.version)), None),
+            };
+            let Some(staged) = staged else {
+                // Only unverified updates, and this device takes verified
+                // ones of it: said, not kept.
+                let held = offer.map(|offer| Found {
+                    from: t.hash.clone(),
+                    version: plain(&offer.version, version::MAX_LEN),
+                    installed_verified: Some(t.store.verified),
+                    held: true,
+                    ..Found::default()
+                });
+                let kept = {
+                    let (dir, id, held) = (dir.clone(), t.id.clone(), held.clone());
+                    tokio::task::spawn_blocking(move || match held {
+                        Some(held) => template_packages::keep_found(&dir, &id, &held, None),
+                        None => {
+                            template_packages::forget_found(&dir, &id);
+                            Ok(())
+                        }
+                    })
+                    .await
+                };
+                if let Ok(Err(error)) = kept {
+                    errors.push(said(t, &error));
+                }
+                if let Some(held) = held {
+                    let mut shown = held.shown();
+                    shown["id"] = json!(t.id);
+                    shown["name"] = json!(t.name);
+                    updates.push(shown);
+                }
+                continue;
+            };
+            match self.found_template(&client, &caller, t, staged, beside).await {
+                Ok(mut shown) => {
+                    shown["id"] = json!(t.id);
+                    shown["name"] = json!(t.name);
+                    updates.push(shown);
+                }
+                Err(error) => errors.push(said(t, &error)),
+            }
+        }
+        (updates, errors)
+    }
+
+    /// `offer` as the update found for store template `t`: its package
+    /// fetched by its own record (or the one kept, when it's that), checked
+    /// and kept.
+    async fn found_template(&self, client: &StoreClient, caller: &Caller, t: &template_packages::Installed, offer: &Offer, beside: Option<&Offer>) -> Result<Value, String> {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let kept = {
+            let (dir, id, hash) = (dir.clone(), t.id.clone(), t.hash.clone());
+            tokio::task::spawn_blocking(move || {
+                let found = template_packages::found(&dir, &id, &hash)?;
+                let package = template_packages::kept_from_store(&dir, &id, &found).ok()?;
+                Some((package, found.source?))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        // (Its mark and publisher, as the offer says them: for its sheet;
+        // taking it asks the store's record again.)
+        let (publisher, publisher_id) = super::vouched(&offer.publisher())?;
+        let (package, mut source) = match kept.filter(|(package, _)| package.content_hash == offer.hash && package.version() == offer.version && package.key == offer.key) {
+            Some(kept) => kept,
+            None => self.fetch_template(client, caller, &t.store.id, &offer.version, &offer.publisher()).await.map_err(|e| e.to_string())?,
+        };
+        if package.content_hash != offer.hash {
+            return Err(failure(client::reason::STORE_MISMATCH, "The store's offer and its record name other contents, so it wasn't kept"));
+        }
+        if let Some(store) = source.store.as_mut() {
+            store.publisher = publisher;
+            store.publisher_id = publisher_id;
+            store.verified = offer.verified;
+            store.verified_at = offer.verified.then_some(offer.verified_at).flatten();
+        }
+        let refused = if install::newer_by_precedence(&package.version(), &t.version) { package.compatible().err() } else { Some(install::not_newer(&package.version(), &t.version)) };
+        let found = Found {
+            from: t.hash.clone(),
+            version: package.version(),
+            hash: package.hash.clone(),
+            refused,
+            new_owner: source.store().is_some_and(|s| s.publisher_id != t.store.publisher_id),
+            source: Some(source),
+            notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
+            store_verified: Some(offer.verified),
+            store_verified_at: offer.verified.then_some(offer.verified_at).flatten(),
+            installed_verified: Some(t.store.verified),
+            verified_alternative: beside.filter(|b| b.verified && !offer.verified && install::newer_by_precedence(&b.version, &t.version)).map(|b| install::Alternative {
+                version: plain(&b.version, version::MAX_LEN),
+                added: Vec::new(),
+                removed: Vec::new(),
+                notes: notes(&b.notes, listing::MAX_NOTES_BYTES),
+                verified_at: b.verified_at,
+            }),
+            ..Found::default()
+        };
+        let shown = found.shown();
+        let id = t.id.clone();
+        tokio::task::spawn_blocking(move || {
+            let keep = found.refused.is_none().then_some(&package);
+            template_packages::keep_found(&dir, &id, &found, keep)
+        })
+        .await
+        .map_err(|_| "Couldn't keep the update".to_string())??;
+        Ok(shown)
     }
 
     /// A store template installed here, anew, is counted once per account
@@ -1914,6 +2142,7 @@ impl Plugins {
                 notes: notes(&b.notes, listing::MAX_NOTES_BYTES),
                 verified_at: b.verified_at,
             }),
+            held: false,
         };
         let keep = found.refused.is_none().then_some(&package);
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;
@@ -2048,9 +2277,13 @@ async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result
 
 /// The newest verified version of template `id` this Zeron can run, other
 /// than `asked`: as its pages say, and its own record too. None when there's
-/// none, or the store can't say.
-async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, asked: &str, publisher: &client::Publisher) -> Option<install::Alternative> {
+/// none, the store can't say, or it can't go over what's here (`place`): it's
+/// what's installed, or older than a verified one. (Never one older than it.)
+/// A pre-release only where this device takes them of it (`prereleases`), or
+/// `asked` is one.
+async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, asked: &str, publisher: &client::Publisher, place: Option<&template_packages::Place>, prereleases: bool) -> Option<install::Alternative> {
     super::vouched(publisher).ok()?;
+    let prereleases = prereleases || Version::parse(asked).is_ok_and(|v| v.is_prerelease());
     let zeron = version::zeron();
     let mut cursor: Option<String> = None;
     for _ in 0..ALTERNATIVE_PAGES {
@@ -2060,10 +2293,14 @@ async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, aske
                 && v["status"] == "listed"
                 && v["yanked"] != true
                 && v["version"].as_str().is_some_and(|x| !same_version(x, asked) && Version::parse(x).is_ok())
+                && v["version"].as_str().is_some_and(|x| prereleases || Version::parse(x).is_ok_and(|x| !x.is_prerelease()))
                 && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
         });
         if let Some(found) = found {
             let version = found["version"].as_str()?.to_owned();
+            if place.is_some_and(|place| !install::newer_by_precedence(&version, &place.version) && !place.takes_instead(&version)) {
+                return None;
+            }
             let (_, record) = client.version(id, &version, caller).await.ok()?;
             return (record.verified && record.status == "listed" && !record.yanked).then(|| install::Alternative {
                 version,

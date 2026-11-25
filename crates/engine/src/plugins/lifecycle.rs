@@ -615,6 +615,10 @@ impl Plugins {
                 Err(error) => errors.push(json!({ "id": id, "name": name, "error": error })),
             }
         }
+        // The store's, asked about there.
+        let (from_store, store_errors) = self.check_store_templates(only).await;
+        updates.extend(from_store);
+        errors.extend(store_errors);
         json!({ "updates": updates, "errors": errors })
     }
 
