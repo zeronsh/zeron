@@ -21,7 +21,13 @@
 //   output's bound;
 // - its time, for work the meter might not count: within its own 32 KiB
 //   time times TIME_GROWTH at the cap (16 would be linear; the rest is the
-//   collector), and within TIME_MOST;
+//   collector), and within TIME_MOST. A family stopped before the cap is
+//   cut off there, so its time at the cap says nothing of the renderer: the
+//   largest size it is drawn at is held to the smallest it's measured at,
+//   by DRAWN_ROOM. Each time is the fastest of up to five. What this can't see: a family whose own work at its smallest
+//   size is already large hides a slow path that costs less than that
+//   ("an ordinary README": an uncounted square that failed "prose and
+//   tables" at 526 ms against 232 passed it);
 // - and the shapes held in OUTCOMES end as they do today: drawn where they
 //   are drawn, and stopped for the same reason where they stop (a table of
 //   64 columns stops at what it writes, not at what it keeps: rows kept
@@ -39,6 +45,11 @@ import { KEEP_MOST, meter, TOO_MUCH, type Meter } from "./meter.ts";
 export const READ_PER_BYTE = 72;
 const MOST = 2 * 1024 * 1024;
 const TIME_MOST = 1_500;
+/**
+ * Over the sizes a family stopped early is drawn at, its time may be this many times linear. (Measured over 129
+ * families, three times quiet and three loaded: 2.6 at most, and 3.3. A square the meter didn't count: 14.8 and 27.)
+ */
+const DRAWN_ROOM = 6;
 /** Sixteen times the text: sixteen times the time, and room for the collector. */
 const TIME_GROWTH = 48;
 
@@ -139,12 +150,17 @@ describe("linear in what it is given, family by family", () => {
     }
     const first = rows[0];
     const last = rows[rows.length - 1];
-    // (Its time is the fastest of up to five, at both ends: the machine's other work is none of the renderer's. The
-    // limits stay as they are.)
-    const within = () => last.ms <= Math.max(first.ms, 2) * TIME_GROWTH && last.ms < TIME_MOST;
-    for (let tries = 2; tries < TRIES && !within(); tries++) for (const row of [first, last]) row.ms = Math.min(row.ms, run(make(row.size)).ms);
+    // (Stopped before the cap: where it's drawn, from the smallest size measured to the largest drawn.)
+    const from = drawn[0];
+    const to = last.stopped && drawn.length > 1 ? drawn[drawn.length - 1] : undefined;
+    const room = (a: Row & { ms: number }, b: Row & { ms: number }) => Math.max(a.ms, 2) * DRAWN_ROOM * (b.size / a.size);
+    // (Its time is the fastest of up to five, at each end: the machine's other work is none of the renderer's. The two
+    // measured above are the first two tries. The limits stay as they are.)
+    const within = () => last.ms <= Math.max(first.ms, 2) * TIME_GROWTH && last.ms < TIME_MOST && (!to || to.ms <= room(from, to));
+    for (let tries = 2; tries < TRIES && !within(); tries++) for (const row of new Set([first, last, ...(to ? [from, to] : [])])) row.ms = Math.min(row.ms, run(make(row.size)).ms);
     expect(last.ms, "time at the cap, against its own at 32 KiB").toBeLessThanOrEqual(Math.max(first.ms, 2) * TIME_GROWTH);
     expect(last.ms, "time at the cap").toBeLessThan(TIME_MOST);
+    if (to) expect(to.ms, `time at ${to.size / 1024} KiB, the largest drawn, against its own at ${from.size / 1024} KiB`).toBeLessThanOrEqual(room(from, to));
   });
 
   test.each(Object.entries(OUTCOMES))("%s ends as it does today", (name, outcomes) => {
