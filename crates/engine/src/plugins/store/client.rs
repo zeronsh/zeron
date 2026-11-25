@@ -73,6 +73,9 @@ impl Kind {
     }
 }
 
+/// Domains anyone has names under: what's beside an edge on one isn't its.
+const SHARED_SUFFIXES: &[&str] = &["workers.dev", "pages.dev"];
+
 /// The edge's store routes, for items of one kind ([`StoreClient::of`]).
 #[derive(Clone)]
 pub struct StoreClient {
@@ -500,10 +503,12 @@ impl StoreClient {
         let on_its_site = |host: &str| {
             own.is_some_and(|own| {
                 let labels: Vec<&str> = own.rsplitn(3, '.').collect();
-                host == own || labels.len() >= 2 && {
-                    let parent = format!("{}.{}", labels[1], labels[0]);
-                    host == parent || host.ends_with(&format!(".{parent}"))
+                let parent = (labels.len() >= 2).then(|| format!("{}.{}", labels[1], labels[0]));
+                // (Under one anyone has names under, a store has no site.)
+                if parent.as_deref().is_some_and(|parent| SHARED_SUFFIXES.contains(&parent)) {
+                    return false;
                 }
+                host == own || parent.is_some_and(|parent| host == parent || host.ends_with(&format!(".{parent}")))
             })
         };
         let said = answer["page_url"].as_str().filter(|said| {
@@ -839,7 +844,14 @@ mod tests {
             assert_eq!(of(edge, odd.clone()), derived, "{odd}");
         }
         assert_eq!(StoreClient::new(edge).of(Kind::Template).published_page("midnight", &serde_json::json!({})), derived, "an older store's answer");
-        // A store that's an address, or one name, has no site beside it.
+        // A store that's an address, or one name, or under a domain anyone has
+        // names under, has no site beside it.
+        for base in ["https://edge.ada.workers.dev", "https://ada.workers.dev", "https://store.pages.dev", "https://workers.dev"] {
+            let derived = of(base, serde_json::Value::Null);
+            for said in ["https://eve.workers.dev/t", "https://edge.ada.workers.dev/t", "https://ada.workers.dev/t", "https://workers.dev/t", "https://eve.pages.dev/t", "https://store.pages.dev/t"] {
+                assert_eq!(of(base, said.into()), derived, "{base} {said}");
+            }
+        }
         for (base, said) in [("http://127.0.0.1:9", "https://0.1/t"), ("http://127.0.0.1:9", "https://127.0.0.1/t"), ("http://127.0.0.1:9", "http://127.0.0.1:9/plugins/midnight"), ("http://localhost:9", "https://a.localhost/t")] {
             assert_eq!(of(base, said.into()), format!("{base}/templates/midnight"), "{said}");
         }
