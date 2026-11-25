@@ -972,7 +972,7 @@ Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Pub
 
 ### The GitHub Action
 
-`zeronsh/zeron/actions/publish-plugin` installs Zeron's Linux command line and publishes the plugin with your deploy token. Add the token to the repository (Settings → Secrets and variables → Actions, as `ZERON_DEPLOY_TOKEN`), then add these steps to a workflow running on `ubuntu-latest`:
+`zeronsh/zeron/actions/publish-plugin` installs Zeron's Linux command line and publishes the plugin (or the template, of a folder with `zeron-template.json`) with your deploy token. Add the token to the repository (Settings → Secrets and variables → Actions, as `ZERON_DEPLOY_TOKEN`), then add these steps to a workflow running on `ubuntu-latest`:
 
 ```yaml
 - uses: actions/checkout@v4
