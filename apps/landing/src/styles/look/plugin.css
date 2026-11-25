@@ -10,9 +10,14 @@
 /* ---- the head: one block; the tile, its words beside it, getting it at the right ---- */
 /* (--tile: the tile's size; Get's button row is as tall, so the button sits level with its middle.) */
 .head { --tile: 80px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: var(--s24); align-items: start; padding-top: var(--s24); }
+/* (A template's: no tile, its words at the column; getting it level with its name.) */
+.head.bare { --tile: 40px; grid-template-columns: minmax(0, 1fr) auto; }
 .head .txt { min-width: 0; }
-.head h1 { font-size: 32px; line-height: 40px; letter-spacing: -0.03em; display: flex; align-items: center; gap: var(--s12); min-width: 0; }
-.head h1 .name { min-width: 0; overflow-wrap: anywhere; }
+.head h1 { font-size: 32px; line-height: 40px; letter-spacing: -0.03em; min-width: 0; }
+/* (The check right after the name's last letter, on its line, however the name wraps.) */
+.head h1 .name { overflow-wrap: anywhere; }
+/* (Centred on the capitals: Geist's are 0.71 of its size tall.) */
+.head h1 .seal.l { margin-left: var(--s4); vertical-align: calc((0.71em - 26px) / 2); }
 .head .sum { margin-top: var(--s4); max-width: 40em; font-size: 16px; line-height: 24px; color: var(--text-2); }
 .head .by { margin-top: var(--s8); color: var(--text-3); font-size: 14px; line-height: 20px; display: flex; flex-wrap: wrap; gap: var(--s4) var(--s8); align-items: center; }
 .head .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
@@ -43,6 +48,8 @@
 .get .ver .said.ok { color: var(--verified); }
 .get .ver .said.no { color: var(--warn); }
 .get .ver .said .seal { width: 14px; height: 14px; }
+/* (Beside the rail it's the rail's to say; stacked, the rail is far below: said here too.) */
+.get .runs-as { display: none; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
 .get .alt { font-size: 13px; line-height: 20px; color: var(--text-3); }
 .get .alt button { color: var(--text-2); box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; font-size: inherit; line-height: inherit; transition: color 0.12s var(--ease); }
 .get .alt button:hover { color: var(--text); }
@@ -60,7 +67,8 @@
 .get-help a:hover { background: none; }
 
 /* ---- the plugin's pictures: three across, a faint line round each; more, and the row scrolls ---- */
-.shots { position: relative; margin-top: var(--s32); }
+.shots { margin-top: var(--s32); }
+.shots-more { position: relative; }
 .shots-row { display: grid; grid-auto-flow: column; grid-auto-columns: calc((100% - 2 * var(--s16)) / 3); gap: var(--s16); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; }
 .shots-row::-webkit-scrollbar { display: none; }
 /* (One alone, the article's column's width; two, halves.) */
@@ -71,6 +79,14 @@
 .shot:hover::after { box-shadow: inset 0 0 0 1px var(--line-2); }
 .shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
 .shot:focus-visible { outline-offset: 2px; }
+/* (A template's preview: first, 16:10 as wide as the article's column, whole: another shape is contained on the
+   surface. The rest thirds under it, however many.) */
+.lead-shot { background: var(--surface); }
+.lead-shot img { object-fit: contain; object-position: center; }
+.pictured .shots { margin-top: 0; }
+.pictured .shots .shots-row { grid-auto-columns: calc((100% - 2 * var(--s16)) / 3); }
+.pictured .shots + .tabs { margin-top: var(--s48); }
+.lead-shot + .shots-more { margin-top: var(--s16); }
 /* (The row's arrows, at its ends, over its pictures' middle: a round button, the store's raised surface.) */
 .shots-arrow { position: absolute; top: 50%; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; translate: 0 -50%; background: var(--surface); color: var(--text); box-shadow: var(--shadow-2), 0 0 0 1px var(--line); transition: box-shadow 0.12s var(--ease); }
 .shots-arrow:hover { box-shadow: var(--shadow-2), 0 0 0 1px var(--line-2); }
@@ -103,6 +119,7 @@
 /* ---- the page under its head ---- */
 .cols2 { display: grid; grid-template-columns: minmax(0, 1fr) var(--rail); gap: var(--rail-gap); margin-top: var(--s48); align-items: start; }
 .cols2.after-head { margin-top: var(--s48); }
+.cols2.pictured { margin-top: var(--s32); }
 .tabs { display: flex; gap: var(--s32); box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; scrollbar-width: none; }
 .tabs a { position: relative; flex: none; padding: 0 0 var(--s12); font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: var(--s8); align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
 .tabs a:hover { color: var(--text); }
@@ -129,6 +146,8 @@
 
 /* ---- a README, or a version's notes, set to be read: every form the renderer draws ---- */
 .prose { padding-top: var(--s32); font-size: 16px; line-height: 27px; color: color-mix(in srgb, var(--text) 86%, var(--bg)); max-width: 720px; overflow-wrap: anywhere; }
+/* (On a page with a rail, the article column's own width.) */
+.cols2 > div > .prose { max-width: none; }
 .sec-title + .prose { padding-top: var(--s16); }
 .prose > * + * { margin-top: var(--s16); }
 .prose h1, .prose h2 { font-size: 21px; line-height: 28px; margin-top: var(--s48); color: var(--text); letter-spacing: -0.02em; }
@@ -182,6 +201,9 @@
 /* ---- the rail: what a person weighs before installing ---- */
 .rail { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: var(--s32); }
 .rail-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: var(--label); }
+/* (What a template runs as: a fact, in the text's ink, first.) */
+.rail .runs .rail-h { margin-bottom: var(--s4); font-size: 14px; color: var(--text); }
+.rail .runs p { font-size: 14px; line-height: 20px; color: var(--text-2); }
 .rail .none { font-size: 14px; line-height: 20px; color: var(--text-2); }
 .rail .more { margin-top: var(--s12); font-size: 13px; }
 .asks { display: flex; flex-direction: column; gap: var(--s12); padding: 0; list-style: none; }
@@ -265,6 +287,9 @@
   /* (Getting it goes under the words, on their column, its lines from the left.) */
   .head > .get { grid-column: 2; align-items: flex-start; max-width: 420px; margin-top: var(--s24); text-align: left; }
   .head > .get .get-btn { min-height: 0; }
+  .get .runs-as { display: block; }
+  .head.bare { grid-template-columns: minmax(0, 1fr); }
+  .head.bare > .get { grid-column: 1; }
   .head > .get .ver { justify-content: flex-start; }
   /* (Stacked, the rail is a section of its own: a section's distance from the page's content.) */
   .cols2 { grid-template-columns: minmax(0, 1fr); gap: var(--sections); }
@@ -276,22 +301,26 @@
      56 px tile, the lines after it going on below.) */
   .head { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); row-gap: 0; padding-top: var(--s16); align-items: start; }
   .head h1 { margin-top: var(--s12); }
+  .head.bare h1 { margin-top: 0; }
   .head > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
+  /* (A template's preview in its place: level with the title's first line, as the tile is.) */
+  .head > .thumb.xl { width: 56px; height: 35px; margin-top: var(--s12); border-radius: 6px; }
   .head .txt { display: contents; }
   .head h1 { font-size: 26px; line-height: 32px; letter-spacing: -0.03em; }
-  .head h1 .seal.l { width: 22px; height: 22px; }
+  .head h1 .seal.l { width: 22px; height: 22px; vertical-align: calc((0.71em - 22px) / 2); }
   .head .sum { grid-column: 1 / -1; margin-top: var(--s16); }
   .head .by { grid-column: 1 / -1; font-size: 13px; margin-top: var(--s8); }
   .head > .get { grid-column: 1 / -1; max-width: none; margin-top: var(--s24); }
   /* (One version's head: its tile beside its title; the byline, and where it stands, the width under them.) */
   /* (The row as wide as the screen, a picture and the next one's edge in view; a finger scrolls it.) */
-  .shots-row { grid-auto-columns: 84%; gap: var(--s12); margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
+  .shots-row, .pictured .shots .shots-row { grid-auto-columns: 84%; gap: var(--s12); margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
   .shots.one .shots-row { grid-auto-columns: 100%; }
   .shots.two .shots-row { grid-auto-columns: 84%; }
   .shots-arrow { display: none; }
   .lightbox img { max-width: calc(100vw - 2 * var(--gutter)); max-height: calc(100dvh - 2 * var(--s64) - var(--s32)); }
   .lb-step { top: auto; bottom: var(--s12); translate: none; }
   .cols2, .cols2.after-head { margin-top: var(--sections); }
+  .cols2.pictured { margin-top: var(--s32); }
   .tabs { gap: var(--s24); margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); }
   /* (As wide as the column, as wide as the screen.) */
   .prose pre { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; max-width: none; }

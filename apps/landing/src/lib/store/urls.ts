@@ -1,21 +1,22 @@
 // The site's own addresses for the store, made in one place.
+import { KIND_PATH, type Kind } from "./kind.ts";
 import { packagePath } from "./names.ts";
 
-/** A plugin's page. */
-export const pluginUrl = (id: string) => `/plugins/${encodeURIComponent(id)}`;
+/** A plugin's page, or a template's. */
+export const pluginUrl = (id: string, kind: Kind = "plugin") => `${KIND_PATH[kind]}/${encodeURIComponent(id)}`;
 
 /** A file of a version's package, through the site's file route. */
-export const fileUrl = (id: string, version: string, path: string) =>
-  `/plugins/${encodeURIComponent(id)}/files/${encodeURIComponent(version)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+export const fileUrl = (id: string, version: string, path: string, kind: Kind = "plugin") =>
+  `${pluginUrl(id, kind)}/files/${encodeURIComponent(version)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 
 /**
  * A picture of a plugin's on this site, from its path in the package and
  * the version it's from (amendment 35: always a path, never a URL). Null
  * when there's no version, or the path isn't one (packagePath).
  */
-export function pictureUrl(id: string, version: string | null, path: string | null | undefined): string | null {
+export function pictureUrl(id: string, version: string | null, path: string | null | undefined, kind: Kind = "plugin"): string | null {
   const clean = path ? packagePath(path) : null;
-  return clean && version ? fileUrl(id, version, clean) : null;
+  return clean && version ? fileUrl(id, version, clean, kind) : null;
 }
 
 /**
@@ -35,18 +36,20 @@ export function httpsUrl(value: string | null | undefined): string | null {
   }
 }
 
+/** An item's staff page, and a version's of it. (An id of the other kind isn't there under a prefix, for staff too.) */
+export const staffUrl = (id: string, kind: Kind = "plugin", version?: string) => `/admin${pluginUrl(id, kind)}${version === undefined ? "" : `/${encodeURIComponent(version)}`}`;
+
 /** A member's card (served by the edge on this host). */
 export const memberUrl = (username: string) => `/@${encodeURIComponent(username)}`;
 
-/** The app's own link to a plugin's page in Settings → Plugins (apps/zgx/src/links.rs). */
 /**
- * Zeron's own address for a plugin, naming a version when given (the
+ * Zeron's own address for a plugin or a template (apps/zgx/src/links.rs), naming a version when given (the
  * contract's "The link can name a version"). The app reads `version` only
  * as a version reads, unescaped (letters, digits, ".", "+", "-", at most
  * 32): one that doesn't is left out, and the link opens the plugin.
  */
-export const appUrl = (id: string, version?: string) =>
-  `zeron://open/plugin/${encodeURIComponent(id)}${version && linkable(version) ? `?version=${version}` : ""}`;
+export const appUrl = (id: string, version?: string, kind: Kind = "plugin") =>
+  `zeron://open/${kind}/${encodeURIComponent(id)}${version && linkable(version) ? `?version=${version}` : ""}`;
 
 /**
  * Whether Zeron's link can name this version. One it can't is never named

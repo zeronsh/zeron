@@ -19,7 +19,7 @@ const newToken = async (page: Page) => {
   await page.getByRole("link", { name: "New token" }).click();
   const dialog = page.getByRole("dialog", { name: "New deploy token" });
   await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
-  await dialog.getByLabel("Chosen plugins").check();
+  await dialog.getByLabel("Chosen").check();
   await dialog.getByLabel("Focus timer", { exact: true }).check();
 };
 
@@ -30,10 +30,12 @@ const newToken = async (page: Page) => {
 export const EXCEPTIONS: [string, string][] = [
   ["pre.numbers, td.n, .code > .n", "line numbers, right-aligned in a code view's gutter"],
   ["tr.hunk", "a diff's hunk head, in the code view's own table"],
+  [".tree a.file", "a file in the tree lines up with its folder's icon, past the arrow"],
   ["li li", "a list inside a list item steps in under it, as its level"],
   [".stage", "a screenshot set into its card's coloured stage: a picture, placed by the stage"],
   ["p code, li > code:not(:first-child)", "code inside a sentence that wraps to a line's start keeps its chip's 5 px"],
   ["pre > code", "a code block's lines start where the code puts them: its indentation is the code's"],
+  [".prose td > code", "in a README's table a literal is a word in its chip, as in the guide's"],
   [".guide :not(pre) > code", "in the guide a literal is a word in its chip wherever it falls, a table's field and a line's start too"],
   [".step-n", "a step's number hangs in the gutter, left of its title (Tailwind's steps)"],
   [".anchor", "a heading's # hangs in the gutter, left of its words"],
@@ -67,6 +69,17 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "version", path: "/plugins/focus-timer/versions/1.2.0" },
   { name: "version-not-verified", path: "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0" },
   { name: "not-here", path: "/plugins/no-such-plugin" },
+  // Templates: the same pages, given the kind.
+  { name: "templates", path: "/templates" },
+  { name: "templates-keyword", path: "/templates?keyword=calm&verified=1" },
+  { name: "templates-store-none", path: "/templates?q=nothing-matches-this" },
+  { name: "template", path: "/templates/control-room" },
+  { name: "template-not-verified", path: "/templates/dockside" },
+  { name: "template-worst", path: "/templates/template-at-every-limit-there-is-xyz1234" },
+  { name: "template-versions", path: "/templates/control-room/versions" },
+  { name: "template-version", path: "/templates/control-room/versions/1.1.0" },
+  { name: "template-report", path: "/templates/control-room/report", user: "user_kai" },
+  { name: "template-not-here", path: "/templates/no-such-template" },
   // Yours.
   { name: "yours", path: "/account", user: "user_ada" },
   { name: "yours-none", path: "/account", user: "user_noor" },
@@ -84,6 +97,10 @@ export const ALIGN_PAGES: AlignPage[] = [
     await Promise.all([page.waitForLoadState("networkidle"), page.getByRole("dialog").getByRole("button", { name: "Create token" }).click()]);
     await page.getByRole("heading", { name: "Copy your token now" }).waitFor();
   } },
+  { name: "mine-template", path: "/account/templates/dockside", user: "user_ada" },
+  { name: "mine-template-worst", path: "/account/templates/template-at-every-limit-there-is-xyz1234", user: "user_ada" },
+  { name: "mine-template-stop", path: "/account/templates/dockside/versions/1.0.0/yank", user: "user_ada" },
+  { name: "new-token-both", path: "/account/tokens/new?again=1&name=All&ends=90&scope=both", user: "user_ada" },
   { name: "mine", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
   { name: "mine-stop", path: "/account/plugins/session-badges/versions/1.2.1/yank", user: "user_ada" },
   // Review.
@@ -92,6 +109,13 @@ export const ALIGN_PAGES: AlignPage[] = [
   ...(["verified", "declined", "taken_down"] as const).map((state) => ({ name: `queue-empty-${state}`, path: `/admin/plugins?state=${state}`, user: "user_grace", fake: [["queue", { as: "empty" }]] as [string, Record<string, string>][] })),
   ...(["reports", "reservations", "audit"] as const).map((list) => ({ name: `staff-${list}-empty`, path: `/admin/${list}`, user: "user_grace", fake: [["queue", { as: "empty" }]] as [string, Record<string, string>][] })),
   { name: "review", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" },
+  { name: "review-template-first", path: "/admin/templates/early-hours/0.1.0", user: "user_grace" },
+  { name: "review-template-unknown", path: "/admin/templates/wide-columns/1.0.0", user: "user_grace" },
+  { name: "review-template", path: "/admin/templates/dockside/1.0.0", user: "user_grace" },
+  { name: "review-template-changes", path: "/admin/templates/dockside/1.0.0?view=changes", user: "user_grace" },
+  { name: "review-template-files", path: "/admin/templates/dockside/1.0.0?view=files", user: "user_grace" },
+  { name: "staff-template", path: "/admin/templates/dockside", user: "user_grace" },
+  { name: "staff-template-stop", path: "/admin/templates/dockside/1.0.0/take_down", user: "user_grace" },
   { name: "review-first", path: "/admin/plugins/first-light/0.1.0", user: "user_grace" },
   { name: "review-files", path: "/admin/plugins/xss-probe/1.1.0?view=files", user: "user_grace" },
   { name: "review-changes", path: "/admin/plugins/xss-probe/1.1.0?view=changes", user: "user_grace" },

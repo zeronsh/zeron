@@ -7,7 +7,7 @@ const read = (search: string) => readCatalog(new URLSearchParams(search), CATEGO
 describe("reading the catalog's address", () => {
   test("the front page", () => {
     const state = read("");
-    expect(state).toEqual({ q: "", category: null, keyword: null, verified: false, sort: null, cursor: null, page: null });
+    expect(state).toEqual({ kind: "plugin", q: "", category: null, keyword: null, verified: false, sort: null, cursor: null, page: null });
     expect(effectiveSort(state)).toBe("popular");
     expect(isFront(state)).toBe(true);
     // (Unnarrowed in any order is still the store's front: Featured shows over it.)

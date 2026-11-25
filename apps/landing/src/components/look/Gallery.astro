@@ -7,40 +7,56 @@
 // picture; with the script it opens the lightbox below instead (a native
 // <dialog>: the picture large, ‹ › and the arrow keys for the others, its
 // count, Escape or a click beside it to close: scripts/store.ts). None, and
-// there's no row.
+// there's no row. A template's preview comes first, as wide as its
+// column (what it looks like, all of it), its other pictures thirds under it.
 import Icon from "./Icon.astro";
+import type { Kind } from "../../lib/store/kind.ts";
 import { pictureUrl } from "../../lib/store/urls.ts";
 
 interface Props {
+  kind: Kind;
+  /** Its picture across the page, before the row: a template's preview. */
+  lead?: string | null;
   id: string;
   name: string;
   version: string;
   screenshots: string[];
 }
-const { id, name, version, screenshots } = Astro.props;
-const pictures = screenshots.map((s) => pictureUrl(id, version, s)).filter((s): s is string => s !== null);
+const { kind, lead = null, id, name, version, screenshots } = Astro.props;
+const large = pictureUrl(id, version, lead, kind);
+const row = screenshots.map((s) => pictureUrl(id, version, s, kind)).filter((s): s is string => s !== null);
+const pictures = large ? [large, ...row] : row;
 const alt = (i: number) => `${name}, picture ${i + 1} of ${pictures.length}`;
 ---
 
 {
   pictures.length > 0 && (
-    <section class:list={["shots", { one: pictures.length === 1, two: pictures.length === 2 }]} aria-label={`Pictures of ${name}`} data-shots>
-      <div class="shots-row" data-row>
-        {pictures.map((src, i) => (
-          <a class="shot" href={src} target="_blank" rel="noopener" data-shot={i}>
-            <img src={src} alt={alt(i)} loading={i < 3 ? "eager" : "lazy"} decoding="async" />
-          </a>
-        ))}
-      </div>
-      {pictures.length > 3 && (
-        <>
-          <button type="button" class="shots-arrow prev" aria-label="Earlier pictures" data-step="-1" hidden>
-            <Icon name="chev" />
-          </button>
-          <button type="button" class="shots-arrow next" aria-label="More pictures" data-step="1" hidden>
-            <Icon name="chev" />
-          </button>
-        </>
+    <section class:list={["shots", { one: row.length === 1, two: row.length === 2 }]} aria-label={`Pictures of ${name}`} data-shots>
+      {large && (
+        <a class="shot lead-shot" href={large} target="_blank" rel="noopener" data-shot="0">
+          <img src={large} alt={alt(0)} loading="eager" decoding="async" />
+        </a>
+      )}
+      {row.length > 0 && (
+        <div class="shots-more">
+          <div class="shots-row" data-row>
+            {row.map((src, i) => (
+              <a class="shot" href={src} target="_blank" rel="noopener" data-shot={i + (large ? 1 : 0)}>
+                <img src={src} alt={alt(i + (large ? 1 : 0))} loading={i < 3 && !large ? "eager" : "lazy"} decoding="async" />
+              </a>
+            ))}
+          </div>
+          {row.length > 3 && (
+            <>
+              <button type="button" class="shots-arrow prev" aria-label="Earlier pictures" data-step="-1" hidden>
+                <Icon name="chev" />
+              </button>
+              <button type="button" class="shots-arrow next" aria-label="More pictures" data-step="1" hidden>
+                <Icon name="chev" />
+              </button>
+            </>
+          )}
+        </div>
       )}
       <dialog class="lightbox" aria-label={`Pictures of ${name}`} data-lightbox>
         <figure>

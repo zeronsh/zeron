@@ -4,11 +4,10 @@
 // pages around it. A page's address is the whole of its state, so a search
 // can be shared, and Previous and Next are links.
 
+import { KIND_PATH, type Kind } from "./kind.ts";
 import type { Category, Sort } from "./types.ts";
 
 export const PAGE_SIZE = 24;
-/** The store: every plugin, a category's, a search's (/plugins/all, the old list, sends here). */
-export const LIST = "/plugins";
 const SORTS: readonly Sort[] = ["relevance", "popular", "updated", "new", "verified"];
 export const SORT_LABELS: Record<Sort, string> = {
   relevance: "Best match",
@@ -19,6 +18,8 @@ export const SORT_LABELS: Record<Sort, string> = {
 };
 
 export interface CatalogState {
+  /** Which of the store's lists: plugins (/plugins) or templates (/templates). */
+  kind: Kind;
   q: string;
   category: string | null;
   keyword: string | null;
@@ -40,8 +41,8 @@ export function effectiveSort(state: Pick<CatalogState, "q" | "sort">): Sort {
   return state.q ? "relevance" : "popular";
 }
 
-/** Reads the catalog's state from its address. `categories` is the edge's list. */
-export function readCatalog(params: URLSearchParams, categories: readonly Category[] | null): CatalogState {
+/** Reads the catalog's state from its address. `categories` is the edge's list. (A template has none.) */
+export function readCatalog(params: URLSearchParams, categories: readonly Category[] | null, kind: Kind = "plugin"): CatalogState {
   const q = clean(params.get("q") ?? "").slice(0, 100);
   const category = params.get("category");
   // (A keyword is 1 to 32 characters: amendment 22.)
@@ -50,6 +51,7 @@ export function readCatalog(params: URLSearchParams, categories: readonly Catego
   const cursor = params.get("cursor");
   const page = Number(params.get("page"));
   return {
+    kind,
     q,
     // (An unknown category is no filter at all, rather than an empty page.)
     category: category && (categories === null || categories.some((c) => c.id === category)) && /^[a-z0-9-]{1,40}$/.test(category) ? category : null,
@@ -64,7 +66,7 @@ export function readCatalog(params: URLSearchParams, categories: readonly Catego
 /** Whether the state's address says anything it shouldn't (it's then sent to the clean one). */
 export function canonicalSearch(params: URLSearchParams, state: CatalogState): string | null {
   const clean = catalogHref(state);
-  const asked = `${LIST}${params.size ? `?${params}` : ""}`;
+  const asked = `${KIND_PATH[state.kind]}${params.size ? `?${params}` : ""}`;
   return clean === asked ? null : clean;
 }
 
@@ -79,7 +81,7 @@ export function catalogHref(state: Partial<CatalogState>): string {
   if (sort && sort !== effectiveSort({ q: state.q ?? "", sort: null })) params.set("sort", sort);
   if (state.cursor) params.set("cursor", state.cursor);
   if (state.cursor && state.page) params.set("page", String(state.page));
-  return `${LIST}${params.size ? `?${params}` : ""}`;
+  return `${KIND_PATH[state.kind ?? "plugin"]}${params.size ? `?${params}` : ""}`;
 }
 
 /** The same search on another page: `step` 1 the next, −1 the one before (the first: no cursor). */

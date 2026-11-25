@@ -1,0 +1,23 @@
+---
+// What stands for an item in a row: a plugin's tile, or a template's
+// preview, small (16:10, the tile's height; a template has no icon). In a
+// list of both, the preview is cropped to the tile's square, from its top
+// left, so every name starts on one column.
+import Tile from "./Tile.astro";
+import { kindOfItem, type Kind } from "../../lib/store/kind.ts";
+import { pictureUrl } from "../../lib/store/urls.ts";
+
+interface Props {
+  item: { id: string; name: string; kind?: Kind; icon: string | null; cover?: string | null; version: string | null };
+  /** The version its tile's icon is from, when that isn't the listed one. */
+  version?: string | null;
+  size: "xs" | "s" | "xl";
+  /** In a list that holds both kinds: the tile's square. */
+  mixed?: boolean;
+}
+const { item, version = item.version, size, mixed = false } = Astro.props;
+const template = kindOfItem(item) === "template";
+const src = template ? pictureUrl(item.id, version, item.cover ?? "preview.png", "template") : null;
+---
+
+{template ? <span class:list={["thumb", size, { mixed }]} aria-hidden="true">{src && <img src={src} alt="" loading="lazy" decoding="async" />}</span> : <Tile id={item.id} name={item.name} icon={item.icon} version={version} size={size} />}

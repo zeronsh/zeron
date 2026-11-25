@@ -17,14 +17,15 @@ import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
-import Tile from "../../../components/look/Tile.astro";
+import Thumb from "../../../components/look/Thumb.astro";
 import TokenForm from "../../../components/look/TokenForm.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { count, date, day, since, sinceInSentence } from "../../../lib/store/format.ts";
+import { kindOfItem } from "../../../lib/store/kind.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { NO_FIELDS, NO_TOKENS } from "../../../lib/store/tokens.ts";
+import { allWords, howMany, NO_FIELDS, NO_TOKENS } from "../../../lib/store/tokens.ts";
 import type { DeployToken, MyPlugin } from "../../../lib/store/types.ts";
 import { store } from "../../../lib/store/words.ts";
 
@@ -37,15 +38,15 @@ const session = who.state === "in" ? who.session : null;
 privatePage(Astro);
 if (who.state === "down") Astro.response.status = 503;
 const flash = takeFlash(Astro.cookies);
-const [tokensResult, mine] = session ? await Promise.all([edge.tokens(), edge.myPlugins()]) : [null, null];
+const [tokensResult, mine, templates] = session ? await Promise.all([edge.tokens(), edge.mine("plugin"), edge.mine("template")]) : [null, null, null];
 const now = Date.now();
 const tokens = tokensResult?.ok ? tokensResult.data.tokens : null;
 const working = (k: DeployToken) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now);
 const live = tokens?.filter(working) ?? [];
 const gone = tokens?.filter((k) => !working(k)) ?? [];
-/** Your plugins by id: a scope reads as their names and tiles (one no longer yours, by its id). */
-const yours = new Map((mine?.ok ? mine.data.plugins : []).map((p) => [p.id, p]));
-const plugin = (id: string): Pick<MyPlugin, "id" | "name" | "icon" | "version"> => yours.get(id) ?? { id, name: id, icon: null, version: null };
+/** Yours by id, of both kinds: a scope reads as their names and tiles (one no longer yours, by its id). */
+const yours = new Map([...(mine?.ok ? mine.data : []), ...(templates?.ok ? templates.data : [])].map((p) => [p.id, p]));
+const plugin = (id: string): Pick<MyPlugin, "id" | "kind" | "name" | "icon" | "cover" | "version"> => yours.get(id) ?? { id, name: id, icon: null, version: null };
 /** Ending within 14 days: said in the warning's colour, in days. */
 const soon = (k: DeployToken) => k.expires_at !== null && k.expires_at - now < 14 * 86_400_000;
 const endsIn = (k: DeployToken) => {
@@ -53,20 +54,20 @@ const endsIn = (k: DeployToken) => {
   return days === 0 ? store("plugins.store.key.ends_today") : days === 1 ? store("plugins.store.key.ends_tomorrow") : store("plugins.store.key.ends_in", { n: days });
 };
 /** What a token can publish, in words: all of yours, its one plugin by name, or how many. */
-const scopeWords = (k: DeployToken) => ("all" in k.scope ? store("plugins.store.key.scope.all") : k.scope.plugins.length === 1 ? plugin(k.scope.plugins[0]!).name : `${count(k.scope.plugins.length)} plugins`);
+const scopeWords = (k: DeployToken) => ("all" in k.scope ? allWords(k.scope) : k.scope.plugins.length === 1 ? plugin(k.scope.plugins[0]!).name : howMany(k.scope.plugins, (id) => yours.get(id) && kindOfItem(yours.get(id)!)));
 /** When it was last used, and on which plugin: one line. Inside a sentence ("Last used yesterday"), its words in lower case. */
 const usedLine = (k: DeployToken, inSentence = false) => (k.last_used_at ? [(inSentence ? sinceInSentence : since)(k.last_used_at, now, true), k.last_used_plugin ? plugin(k.last_used_plugin).name : null].filter(Boolean).join(" · ") : store("plugins.store.key.not_used"));
 /** An account with no plugin has none a token could publish (a token sends a plugin's later versions): nothing to make. Not known, it may. */
-const canMake = !mine?.ok || mine.data.plugins.some((p) => p.versions.length > 0);
+const canMake = !mine?.ok || !templates?.ok || [...yours.values()].some((p) => p.versions.length > 0);
 ---
 
 <Store title="Deploy tokens · Zeron" description="Your account's deploy tokens." noindex current="publish" session={session}>
   <div class="wrap acct">
     <AccountHead
       title="Deploy tokens"
-      lead="Tokens let CI publish new versions of your plugins without your sign-in."
+      lead="Let CI publish new versions without your sign-in."
       current="tokens"
-      plugins={mine?.ok ? mine.data.plugins.length : null}
+      plugins={mine?.ok ? mine.data.length + (templates?.ok ? templates.data.length : 0) : null}
       tokens={tokens ? live.length : null}
       action={session && (canMake || live.length > 0) ? { label: "New token", icon: "plus", href: "/account/tokens/new", dialog: "new-token" } : null}
     >
@@ -95,7 +96,7 @@ const canMake = !mine?.ok || mine.data.plugins.some((p) => p.versions.length > 0
                 const ids = "all" in k.scope ? [] : k.scope.plugins;
                 const tiles = (
                   <span class="tiles" aria-hidden="true">
-                    {ids.slice(0, 3).map((id) => { const p = plugin(id); return <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" />; })}
+                    {ids.slice(0, 3).map((id) => { return <Thumb item={plugin(id)} size="xs" mixed />; })}
                     {ids.length > 3 && <span class="more num">+{ids.length - 3}</span>}
                   </span>
                 );
@@ -105,13 +106,13 @@ const canMake = !mine?.ok || mine.data.plugins.some((p) => p.versions.length > 0
                     {ids.length > 1 ? (
                       /* (Its plugins on request: the summary in its column, the list a row of its own under the token.) */
                       <details class="every">
-                        <summary class="c-scope"><span class="sw">{scopeWords(k)}</span>{tiles}<span class="show">Show all<span class="sr-only"> plugins {k.name} can publish</span></span><Icon name="chev" /></summary>
+                        <summary class="c-scope"><span class="sw">{scopeWords(k)}</span>{tiles}<span class="show">Show all<span class="sr-only"> that {k.name} can publish</span></span><Icon name="chev" /></summary>
                         <ul class="plist" aria-label={`What ${k.name} can publish`}>
-                          {ids.map((id) => { const p = plugin(id); return <li class="pl"><Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" /><span>{p.name}</span></li>; })}
+                          {ids.map((id) => { const p = plugin(id); return <li class="pl"><Thumb item={p} size="xs" mixed /><span>{p.name}</span></li>; })}
                         </ul>
                       </details>
                     ) : (
-                      <span class="c-scope" title={"all" in k.scope ? `${count(yours.size)} today, and any you publish later` : undefined}>
+                      <span class="c-scope" title={"all" in k.scope ? `${count([...yours.values()].filter((p) => ("all" in k.scope && k.scope.all_kinds?.includes("template")) || kindOfItem(p) === "plugin").length)} today, and any you publish later` : undefined}>
                         {ids.length === 1 && tiles}<span class="sw">{scopeWords(k)}</span>
                       </span>
                     )}
@@ -165,7 +166,7 @@ const canMake = !mine?.ok || mine.data.plugins.some((p) => p.versions.length > 0
     session && (canMake || live.length > 0) && (
       <dialog class="question" id="new-token" aria-labelledby="new-token-title" closedby="any">
         <h2 id="new-token-title">{store("plugins.store.key.new_title")}</h2>
-        <TokenForm id="new-token" csrf={session.csrf} fields={NO_FIELDS} plugins={[...yours.values()]} fresh={session.fresh_sign_in === true} dialog back="/account/tokens" />
+        <TokenForm id="new-token" csrf={session.csrf} fields={NO_FIELDS} items={[...yours.values()]} fresh={session.fresh_sign_in === true} dialog back="/account/tokens" />
       </dialog>
     )
   }

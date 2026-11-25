@@ -64,7 +64,6 @@ export const STORE_WORDS = {
   "plugins.store.key.done": "I've copied it",
   "plugins.store.key.made_today": "You've made 10 deploy tokens today. You can make more tomorrow.",
   "plugins.store.key.revoke_failed": "Couldn't revoke the token",
-  "plugins.store.key.scope.chosen": "Chosen plugins",
   "plugins.store.sign_in_to_see_keys": "Sign in to see your tokens",
   "plugins.store.key.name": "Name",
   "plugins.store.key.not_used": "Not used yet",

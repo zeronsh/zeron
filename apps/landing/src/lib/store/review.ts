@@ -1,6 +1,7 @@
 // What a reviewer reads: a package's files as a tree, what changed since the
 // newest verified version (files, manifest, lines), and each file's language.
 import { structuredPatch } from "diff";
+import type { Kind } from "./kind.ts";
 import type { PackageFile } from "./types.ts";
 
 // ── The file tree ──────────────────────────────────────────────────────
@@ -56,13 +57,15 @@ export interface ChangedFile {
  * the same manifest show no change.
  */
 export const MANIFEST_FILE = "zeron-plugin.json";
+/** A kind's manifest, by its file's name. */
+export const manifestName = (kind: Kind) => (kind === "template" ? "zeron-template.json" : MANIFEST_FILE);
 
 export const manifestText = (manifest: Record<string, unknown>): string => `${JSON.stringify(manifest, null, 2)}\n`;
 
-export async function manifestFile(text: string): Promise<PackageFile> {
+export async function manifestFile(text: string, path: string = MANIFEST_FILE): Promise<PackageFile> {
   const bytes = new TextEncoder().encode(text);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return { path: MANIFEST_FILE, bytes: bytes.length, sha256: [...digest].map((b) => b.toString(16).padStart(2, "0")).join(""), binary: false };
+  return { path, bytes: bytes.length, sha256: [...digest].map((b) => b.toString(16).padStart(2, "0")).join(""), binary: false };
 }
 
 /** Each file added, removed or changed since `base`, by path. */

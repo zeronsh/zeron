@@ -5,6 +5,8 @@
 // fixtures' accounts in place of WorkOS.
 
 import { SITE_IDS } from "../src/lib/store/names.ts";
+import { moreTemplates, templates } from "./templates.ts";
+import { PNG_OF, pngBytes } from "./png.ts";
 import { makeToken, tokenHash, tokenId, TOKEN_ID } from "./token.ts";
 import { audit, CATEGORIES, DAY, tokens, MANY_IDS, manyMore, NOW, plugins, reports, startClock, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
@@ -12,7 +14,8 @@ const COOKIE = "__Host-zeron_session";
 
 /** The fake's state, made on its first request (its clock, the fixtures' "now", starts then). */
 const freshState = () => ({
-  plugins: plugins(),
+  // (Both kinds, one set of ids: each public route reads its own kind.)
+  plugins: [...plugins(), ...templates()],
   reports: reports(),
   audit: audit(),
   tokens: tokens(),
@@ -81,6 +84,11 @@ const userOf = (id: string) => USERS.find((u) => u.id === id)!;
 
 // ── The store's views of a plugin ───────────────────────────────────────
 
+type Kind = "plugin" | "template";
+const kindOf = (p: FakePlugin): Kind => p.kind ?? "plugin";
+/** An item by its id, of this kind: the other kind's id isn't there. */
+const itemOf = (kind: Kind, id: string) => state.plugins.find((x) => x.id === id && kindOf(x) === kind);
+
 const prerelease = (v: FakeVersion) => v.version.includes("-");
 /** What the public sees of a plugin's versions: listed and yanked (amendment 45). */
 const shown = (v: FakeVersion) => v.status === "listed" || v.status === "yanked";
@@ -102,13 +110,14 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
   const v = version ?? p.versions[0]!;
   const m = v.manifest;
   return {
+    kind: kindOf(p),
     id: p.id,
     name: String(m.name),
     summary: String(m.description),
     icon: listedVersion && typeof m.icon === "string" ? m.icon : null,
     // (Its first picture's path in the package, of the version it shows; null when that has none: the edge's
     // card, as asked of it.)
-    cover: listedVersion && state.bare !== p.id ? (((listedVersion.manifest.screenshots as string[] | undefined) ?? [])[0] ?? null) : null,
+    cover: p.kind === "template" ? (listedVersion ? "preview.png" : null) : listedVersion && state.bare !== p.id ? (((listedVersion.manifest.screenshots as string[] | undefined) ?? [])[0] ?? null) : null,
     author: author(p.owner),
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],
@@ -184,7 +193,8 @@ function detail(p: FakePlugin) {
     ...card(p, v),
     readme: v.files["README.md"] ?? "",
     screenshots: state.bare === p.id ? [] : ((m.screenshots as string[]) ?? []),
-    permissions: permissions(m),
+    // (A template asks for nothing, and has no such key.)
+    ...(p.kind === "template" ? {} : { permissions: permissions(m) }),
     engines: v.engines,
     homepage: (m.homepage as string) ?? null,
     repository: (m.repository as string) ?? null,
@@ -228,7 +238,7 @@ function score(p: FakePlugin, terms: string[]): number {
   return total;
 }
 
-function catalog(url: URL): Response {
+function catalog(url: URL, kind: Kind = "plugin"): Response {
   const q = (url.searchParams.get("q") ?? "").trim().toLowerCase().slice(0, 100);
   const terms = q.split(/[^a-z0-9]+/).filter(Boolean);
   const category = url.searchParams.get("category");
@@ -251,6 +261,7 @@ function catalog(url: URL): Response {
   const before = (a: Key, b: Key) => a[0] > b[0] || (a[0] === b[0] && a[1] < b[1]);
 
   const all = state.plugins
+    .filter((p) => kindOf(p) === kind)
     .filter(listed)
     // (Featured holds only plugins whose newest version is verified.)
     .filter((p) => !featured || (p.featured && latest(p)!.verified))
@@ -289,8 +300,8 @@ function catalog(url: URL): Response {
 
 const TYPES: Record<string, string> = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", avif: "image/avif", md: "text/markdown; charset=utf-8", json: "application/json", luau: "text/plain; charset=utf-8" };
 
-function file(request: Request, id: string, version: string, path: string): Response {
-  const p = state.plugins.find((x) => x.id === id);
+async function file(request: Request, kind: Kind, id: string, version: string, path: string): Promise<Response> {
+  const p = itemOf(kind, id);
   const v = p?.versions.find((x) => x.version === version);
   if (!p || !v || !(path in v.files)) return notFound();
   const ext = path.split(".").pop()!.toLowerCase();
@@ -303,7 +314,7 @@ function file(request: Request, id: string, version: string, path: string): Resp
   const s = session(request);
   const allowed = open || (s && (s.user.id === p.owner || isAdmin(s.user)));
   if (!allowed) return notFound();
-  return new Response(v.files[path], {
+  return new Response(body.startsWith(PNG_OF) ? await pngBytes(body) : body, {
     headers: {
       "content-type": picture ? TYPES[ext]! : "application/octet-stream",
       "content-disposition": picture ? "inline" : "attachment",
@@ -318,9 +329,9 @@ function file(request: Request, id: string, version: string, path: string): Resp
 
 // ── The author's own ─────────────────────────────────────────────────────
 
-function mine(user: FakeUser) {
+function mine(user: FakeUser, kind: Kind = "plugin") {
   return state.plugins
-    .filter((p) => p.owner === user.id)
+    .filter((p) => p.owner === user.id && kindOf(p) === kind)
     // (Each version's publisher_id is the account that published it: here always its owner, nothing being transferred in.)
     .map((p) => ({ ...card(p), listing: p.status === "suspended" ? "suspended" : listed(p) ? "listed" : "unlisted", versions: p.versions.map((v) => ({ ...versionInfo(v, true), publisher_id: publisherOf(p.owner) })) }));
 }
@@ -396,6 +407,7 @@ const baseOf = (p: FakePlugin, v: FakeVersion) => p.versions.find((x) => x !== v
  * oldest first, plugins with open reports first.
  */
 function queue(url: URL): Response {
+  const onlyKind = url.searchParams.get("kind");
   const view = url.searchParams.get("state") ?? "undecided";
   if (!["undecided", "verified", "declined", "all", "taken_down"].includes(view)) return fail(400, "bad_request", "Unknown state.");
   // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.
@@ -416,6 +428,7 @@ function queue(url: URL): Response {
     const bound = base ? binds(base.manifest, v.manifest) : null;
     const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null) || bound!.mcp_changed !== null || bound!.service_changed !== null || bound!.settings_changed);
     return {
+      kind: kindOf(p),
       plugin: { id: p.id, name: String(v.manifest.name) },
       version: v.version,
       icon: typeof v.manifest.icon === "string" ? v.manifest.icon : null,
@@ -437,7 +450,7 @@ function queue(url: URL): Response {
   };
   // (How many earlier undecided versions a row superseded.)
   const earlierOf = (p: FakePlugin, v: FakeVersion) => p.versions.filter((x) => x.superseded?.by === v.version && !x.review.decided).length;
-  const items = state.plugins.flatMap((p) => {
+  const items = state.plugins.filter((p) => !onlyKind || kindOf(p) === onlyKind).flatMap((p) => {
     const matching = p.versions.filter(fits);
     if (view !== "undecided") return matching.map((v) => row(p, v, earlierOf(p, v)));
     // At most two a plugin: its newest undecided release, and its newest undecided pre-release when that is newer.
@@ -485,6 +498,7 @@ function filler(n: number) {
     const update = i % 3 !== 0;
     const username = PEOPLE[i % PEOPLE.length]!;
     return {
+      kind: "plugin" as Kind,
       plugin: { id: name.toLowerCase().replace(/ /g, "-"), name },
       version: update ? `1.${(i % 4) + 1}.${i % 3}` : "0.1.0",
       status: "listed" as const,
@@ -510,14 +524,20 @@ function submission(id: string, version: string): Response {
   const v = p?.versions.find((x) => x.version === version);
   if (!p || !v) return notFound();
   const base = baseOf(p, v);
-  const files = (fv: FakeVersion) => Object.entries(fv.files).map(([path, text]) => ({ path, bytes: text.length, sha256: hash(text), binary: false }));
+  // (A template's files against Zeron's own, at the version it names; a Zeron not out yet isn't known.)
+  const made = String(v.manifest.zeron_version ?? "");
+  const stock = { version: made, known: p.kind === "template" && made !== "0.9.0" };
+  const files = (fv: FakeVersion) => Object.entries(fv.files).map(([path, text]) => ({ path, bytes: text.length, sha256: hash(text), binary: text.startsWith(PNG_OF), zeron: p.kind === "template" && stock.known ? stockOf(path) : null }));
   const owner = userOf(p.owner);
+  const of = (kind: Kind) => { const mine = state.plugins.filter((x) => x.owner === p.owner && kindOf(x) === kind && listed(x)); return { total: mine.length, verified: mine.filter((x) => x.versions.some((y) => y.verified)).length }; };
   const theirs = state.plugins.filter((x) => x.owner === p.owner).flatMap((x) => x.versions.map((y) => ({ plugin: x, v: y })));
   const permissionsNow = permissions(v.manifest);
   const permissionsBase = base ? permissions(base.manifest) : null;
   const added = <T,>(now: T[], then: T[] | undefined) => now.filter((x) => !(then ?? []).includes(x));
   const m = v.manifest;
   return json({
+    kind: kindOf(p),
+    zeron_base: p.kind === "template" ? stock : null,
     plugin: card(p, v),
     version: { ...versionInfo(v, true), name: String(m.name), summary: String(m.description), icon: typeof m.icon === "string" ? m.icon : null, readme: v.files["README.md"] ?? "", screenshots: (m.screenshots as string[]) ?? [] },
     superseded: v.superseded,
@@ -527,7 +547,8 @@ function submission(id: string, version: string): Response {
       created_at: owner.created_at,
       // (When the account first listed a version, and its listed plugins, how many with a verified version: edge 566c2a5ba.)
       first_published_at: theirs.length ? Math.min(...theirs.map(({ v: y }) => y.published_at)) : null,
-      plugins: { total: state.plugins.filter((x) => x.owner === p.owner && listed(x)).length, verified: state.plugins.filter((x) => x.owner === p.owner && listed(x) && x.versions.some((y) => y.verified)).length },
+      plugins: of("plugin"),
+      templates: of("template"),
       decisions: { verified: theirs.filter(({ v: y }) => y.review.decision === "verified").length, declined: theirs.filter(({ v: y }) => y.review.decision === "declined").length },
       recent: theirs
         .map(({ plugin: x, v: y }) => ({ plugin_id: x.id, version: y.version, status: y.status, verified: y.verified, published_at: y.published_at }))
@@ -535,12 +556,12 @@ function submission(id: string, version: string): Response {
         .slice(0, 10),
     },
     manifest: v.manifest,
-    permissions: permissionsNow,
+    permissions: p.kind === "template" ? null : permissionsNow,
     files: files(v),
     base: base ? { version: base.version, manifest: base.manifest } : null,
     base_files: base ? files(base) : [],
     // (The edge's consentDiff, against the newest verified other version, or nothing.)
-    permissions_diff: (() => {
+    permissions_diff: p.kind === "template" ? null : (() => {
       const was = permissionsBase ?? { asks: [] as string[], commands: [] as string[], network_hosts: [] as string[], tools: [] as { name: string }[], ui: undefined };
       const ui = (x: { ui?: { change?: string[]; replace?: string[] } }) => ({ change: x.ui?.change ?? [], replace: x.ui?.replace ?? [] });
       return {
@@ -564,6 +585,9 @@ function submission(id: string, version: string): Response {
     checks: v.checks,
   });
 }
+
+/** Which of the fake's template files are Zeron's own, and which of those it changed. */
+const stockOf = (path: string) => (path.startsWith("ui/") || path === "shell/sidebar.luau" ? "same" : path === "init.luau" || path.startsWith("shell/") || path === "theme.css" ? "changed" : "new");
 
 function hash(text: string): string {
   let h = 2166136261;
@@ -614,8 +638,8 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     return notFound();
   }
   // plugins/:id/{suspend|restore|feature|transfer} and plugins/:id/versions/:version/{take-down|remove}
-  if (parts[0] === "plugins") {
-    const p = state.plugins.find((x) => x.id === parts[1]);
+  if (parts[0] === "plugins" || parts[0] === "templates") {
+    const p = itemOf(parts[0] === "plugins" ? "plugin" : "template", parts[1]!);
     if (!p) return notFound();
     if (parts[2] === "versions" && parts[4] === "restore") {
       // (A taken-down version back to listed, unverified, its block lifted; superseded again if anything newer on its line is listed.)
@@ -728,7 +752,7 @@ const fresh = (id: string) => {
   return typeof until === "number" && until > Date.now();
 };
 
-const wireToken = ({ owner: _, hash: __, ...t }: (typeof state.tokens)[number]) => t;
+const wireToken = ({ owner: _, hash: __, ...t }: (typeof state.tokens)[number]) => ({ ...t, scope: "all" in t.scope ? { all: true, all_kinds: t.scope.all_kinds ?? ["plugin"] } : t.scope });
 const refuse = (status: number, error: string, message: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ error, message, ...extra }), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
 
@@ -757,9 +781,11 @@ async function tokenRoute(request: Request, method: string, id: string | undefin
   const expires = body?.expires ?? null;
   if (expires !== null && !(Number.isSafeInteger(expires) && (expires as number) > now && (expires as number) <= now + 5 * 365 * DAY)) return refuse(400, "invalid_expiry", "expires must be a future time in epoch milliseconds, within 5 years.");
   const raw = body?.scope as Record<string, unknown> | undefined;
-  let scope: { all: true } | { plugins: string[] };
+  let scope: { all: true; all_kinds: Kind[] } | { plugins: string[] };
   const badScope = (message: string, ids?: unknown[]) => refuse(400, "invalid_scope", message, ids?.length ? { ids: ids.map(String) } : {});
-  if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length === 1 && raw.all === true) scope = { all: true };
+  // (`all` names its kinds; left out, plugins alone, and always said on an answer.)
+  const kinds = JSON.stringify(raw?.all_kinds ?? ["plugin"]);
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && raw.all === true && Object.keys(raw).every((k) => k === "all" || k === "all_kinds") && (kinds === '["plugin"]' || kinds === '["plugin","template"]')) scope = { all: true, all_kinds: JSON.parse(kinds) as Kind[] };
   else if (raw && typeof raw === "object" && Object.keys(raw).length === 1 && Array.isArray(raw.plugins)) {
     const ids = raw.plugins as unknown[];
     if (ids.length < 1 || ids.length > MOST_SCOPE) return badScope(`A token's scope lists 1 to ${MOST_SCOPE} plugins.`);
@@ -874,7 +900,7 @@ async function route(request: Request): Promise<Response> {
     state.plugins = state.plugins.filter((p) => !extra.has(p.id));
     if (on) state.plugins.push(...manyMore());
     const every = state.tokens.find((k) => k.owner === "user_ada" && k.name === "Every one");
-    if (every) every.scope = { plugins: state.plugins.filter((p) => p.owner === "user_ada").map((p) => p.id).sort() };
+    if (every) every.scope = { plugins: state.plugins.filter((p) => p.owner === "user_ada" && kindOf(p) === "plugin").map((p) => p.id).sort() };
     return json({ many: on });
   }
   if (parts[0] === "_fake" && parts[1] === "loose" && method === "POST") {
@@ -888,6 +914,11 @@ async function route(request: Request): Promise<Response> {
     state.plugins[i] = JSON.parse(JSON.stringify(state.plugins[i]).replaceAll(JSON.stringify(from), JSON.stringify(to)));
     return json({ renamed: to });
   }
+  if (parts[0] === "_fake" && parts[1] === "templates" && method === "POST") {
+    state.plugins = state.plugins.filter((p) => !p.id.startsWith("house-"));
+    if (url.searchParams.get("on") === "1") state.plugins.push(...moreTemplates());
+    return json({ plugins: state.plugins.length });
+  }
   if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
     state.down = url.searchParams.get("on") === "1";
     return json({ down: state.down });
@@ -896,14 +927,21 @@ async function route(request: Request): Promise<Response> {
   if (state.down) return fail(503, "unknown", "The store is down (the fake's own switch).");
   const [, , a, b, c, d, e] = parts;
 
+  // (The store-wide routes take `?kind=`, plugins unasked; the rest are under each kind's own prefix.)
+  const asked = url.searchParams.get("kind");
+  if (asked !== null && asked !== "plugin" && asked !== "template") return fail(400, "bad_request", "kind is plugin or template.");
+  const over: Kind = asked ?? "plugin";
+  const here: Kind = a === "templates" ? "template" : "plugin";
+  const ofKind = (p: FakePlugin) => kindOf(p) === over && listed(p);
   if (a === "categories" && b === undefined && method === "GET") {
+    if (over === "template") return json({ categories: [] }, 200, { "cache-control": "public, max-age=60" });
     // (Each with how many listed plugins it holds; with `top`, its n most installed, as the list's popular order has them: ac4fc5d3f.)
     const topText = url.searchParams.get("top");
     if (topText !== null && !/^[1-4]$/.test(topText)) return fail(400, "bad_request", "top is 1 to 4.");
     const counted = await Promise.all(
       CATEGORIES.map(async (c) => ({
         ...c,
-        count: state.plugins.filter((p) => listed(p) && card(p).categories.includes(c.id)).length,
+        count: state.plugins.filter((p) => ofKind(p) && card(p).categories.includes(c.id)).length,
         ...(topText ? { top: ((await catalog(new URL(`https://fake.invalid/?category=${c.id}&sort=popular&limit=${topText}`)).json()) as { items: unknown[] }).items } : {}),
       })),
     );
@@ -916,38 +954,38 @@ async function route(request: Request): Promise<Response> {
     if (category !== null && !CATEGORIES.some((c) => c.id === category)) return fail(400, "bad_request", "Unknown category.");
     if (limitText !== null && !(/^\d{1,2}$/.test(limitText) && Number(limitText) >= 1 && Number(limitText) <= 24)) return fail(400, "bad_request", "limit is 1 to 24.");
     const counts = new Map<string, number>();
-    for (const p of state.plugins.filter(listed).filter((p) => !category || card(p).categories.includes(category))) {
+    for (const p of state.plugins.filter(ofKind).filter((p) => !category || card(p).categories.includes(category))) {
       for (const k of new Set(card(p).keywords.map((k) => k.toLowerCase()))) counts.set(k, (counts.get(k) ?? 0) + 1);
     }
     const keywords = [...counts].map(([keyword, count]) => ({ keyword, count })).sort((x, y) => y.count - x.count || (x.keyword < y.keyword ? -1 : x.keyword > y.keyword ? 1 : 0));
     return json({ keywords: keywords.slice(0, Number(limitText ?? 24)) }, 200, { "cache-control": "public, max-age=60" });
   }
   if (a === "stats" && method === "GET") {
-    const all = state.plugins.filter(listed);
+    const all = state.plugins.filter(ofKind);
     // (new_7d: listed plugins first listed in the last seven days: ac4fc5d3f.)
     return json({ plugins: all.length, verified: all.filter((p) => latest(p)!.verified).length, new_7d: all.filter((p) => listedAt(p)! >= NOW - 7 * DAY).length }, 200, { "cache-control": "public, max-age=30" });
   }
-  if (a === "plugins" && b === undefined && method === "GET") return catalog(url);
-  if (a === "plugins" && b && c === undefined && method === "GET") {
-    const p = state.plugins.find((x) => x.id === b);
+  if ((a === "plugins" || a === "templates") && b === undefined && method === "GET") return catalog(url, here);
+  if ((a === "plugins" || a === "templates") && b && c === undefined && method === "GET") {
+    const p = itemOf(here, b);
     return p && listed(p) ? json(detail(p), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
-  if (a === "plugins" && b && c === "versions" && d === undefined && method === "GET") {
+  if ((a === "plugins" || a === "templates") && b && c === "versions" && d === undefined && method === "GET") {
     // (Every listed and yanked version, newest first, paged: amendment 45.)
-    const p = state.plugins.find((x) => x.id === b);
+    const p = itemOf(here, b);
     return p && listed(p) ? json(paged(p.versions.filter(shown).map((v) => versionInfo(v, false)), url, "versions"), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
-  if (a === "plugins" && b && c === "versions" && d && e === undefined && method === "GET") {
-    const p = state.plugins.find((x) => x.id === b);
+  if ((a === "plugins" || a === "templates") && b && c === "versions" && d && e === undefined && method === "GET") {
+    const p = itemOf(here, b);
     const v = p && listed(p) ? p.versions.find((x) => (state.loose || x.version === d) && shown(x)) : undefined;
     return v ? json(versionInfo(v, false), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
-  if (a === "plugins" && b && c === "files" && d && parts.length > 6 && method === "GET") return file(request, b, d, parts.slice(6).join("/"));
-  if (a === "plugins" && b && c === "versions" && d && ["yank", "unyank"].includes(e ?? "") && method === "POST") return versionAction(request, b, d, e!);
-  if (a === "plugins" && b && c === "reports" && method === "POST") {
+  if ((a === "plugins" || a === "templates") && b && c === "files" && d && parts.length > 6 && method === "GET") return file(request, here, b, d, parts.slice(6).join("/"));
+  if ((a === "plugins" || a === "templates") && b && (here === "plugin" || itemOf(here, b)) && c === "versions" && d && ["yank", "unyank"].includes(e ?? "") && method === "POST") return versionAction(request, b, d, e!);
+  if ((a === "plugins" || a === "templates") && b && c === "reports" && method === "POST") {
     const who = writer(request);
     if (who instanceof Response) return who;
-    const p = state.plugins.find((x) => x.id === b);
+    const p = itemOf(here, b);
     if (!p || !listed(p)) return notFound();
     const input = await body(request);
     const reason = String(input.reason ?? "");
@@ -956,10 +994,10 @@ async function route(request: Request): Promise<Response> {
     state.reports.unshift({ id: (state.reports.reduce((n, r) => Math.max(n, r.id), 0) + 1), plugin_id: p.id, version: latest(p)!.version, reason: reason as "other", text, reporter: who.user.id, created_at: Date.now(), status: "open", note: null });
     return json({ ok: true }, 201);
   }
-  if (a === "me" && b === "plugins" && method === "GET") {
+  if (a === "me" && (b === "plugins" || b === "templates") && method === "GET") {
     const s = session(request);
     // (`{publisher_id, plugins}`: the contract after e3daa69b4.)
-    return s ? json({ publisher_id: publisherOf(s.user.id), plugins: mine(s.user) }) : fail(401, "signed_out");
+    return s ? json({ publisher_id: publisherOf(s.user.id), ...(b === "plugins" ? { plugins: mine(s.user) } : { templates: mine(s.user, "template") }) }) : fail(401, "signed_out");
   }
   // The account's deploy tokens (contract a315eef5a): listed, made with a fresh sign-in, revoked.
   if (a === "me" && b === "tokens") return tokenRoute(request, method, c, parts.length);
@@ -978,8 +1016,8 @@ async function route(request: Request): Promise<Response> {
     if (who instanceof Response) return who;
     if (b === "queue") return queue(url);
     if (b === "versions" && c && d) return submission(c, d);
-    if (b === "plugins" && c) {
-      const p = state.plugins.find((x) => x.id === c);
+    if ((b === "plugins" || b === "templates") && c) {
+      const p = itemOf(b === "plugins" ? "plugin" : "template", c);
       if (!p) return notFound();
       return json({
         plugin: { ...card(p), listed_version: latest(p)?.version ?? null, created_at: p.created_at, suspend_reason: p.suspend_reason ?? null },
@@ -999,7 +1037,7 @@ async function route(request: Request): Promise<Response> {
     }
     if (b === "audit") {
       const plugin = url.searchParams.get("plugin");
-      return json(paged(state.audit.filter((x) => state.queueAs !== "empty" && (!plugin || x.plugin_id === plugin)).map((x) => ({ ...x, actor: { id: author(x.actor).id, username: userOf(x.actor).username, user_id: x.actor } })), url, "entries"));
+      return json(paged(state.audit.filter((x) => state.queueAs !== "empty" && (!plugin || x.plugin_id === plugin)).map((x) => ({ ...x, item_kind: ((p) => (p ? kindOf(p) : null))(state.plugins.find((p) => p.id === x.plugin_id)), actor: { id: author(x.actor).id, username: userOf(x.actor).username, user_id: x.actor } })), url, "entries"));
     }
   }
   return notFound();
@@ -1025,7 +1063,7 @@ function paged<T>(all: T[], url: URL, field: string): Record<string, unknown> {
 function reportView(r: (typeof state.reports)[number]) {
   const p = state.plugins.find((x) => x.id === r.plugin_id);
   const { plugin_id: _, reporter, ...rest } = r;
-  return { ...rest, plugin: { id: r.plugin_id, name: p ? String(p.versions[0]!.manifest.name) : null }, reporter: { id: author(reporter).id, username: userOf(reporter).username }, resolved_by: null, resolved_at: null };
+  return { ...rest, plugin: { id: r.plugin_id, name: p ? String(p.versions[0]!.manifest.name) : null, kind: p ? kindOf(p) : null }, reporter: { id: author(reporter).id, username: userOf(reporter).username }, resolved_by: null, resolved_at: null };
 }
 
 export default {

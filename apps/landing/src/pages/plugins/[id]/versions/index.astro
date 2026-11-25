@@ -14,6 +14,7 @@ import Seal from "../../../../components/look/Seal.astro";
 import Store from "../../../../layouts/Store.astro";
 import "../../../../styles/look/plugin.css";
 import { day, sinceInSentence } from "../../../../lib/store/format.ts";
+import { KIND_WORDS, kindOf } from "../../../../lib/store/kind.ts";
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
 import { isPrerelease } from "../../../../lib/store/names.ts";
@@ -28,11 +29,12 @@ export const prerender = false;
 
 /** Versions a page: each with its notes, drawn once and kept. */
 const PER_PAGE = 10;
+const kind = kindOf(Astro.url);
 const asked = Astro.params.id ?? "";
 const place = placeOf(Astro.url);
-const page = await loadPlugin(Astro.locals.edge, asked, { cursor: place.cursor ?? undefined, limit: PER_PAGE });
+const page = await loadPlugin(Astro.locals.edge, kind, asked, { cursor: place.cursor ?? undefined, limit: PER_PAGE });
 // A cursor from elsewhere (or an old one): its first page.
-if (page.state === "ok" && !page.versions && place.cursor) return Astro.redirect(`${pluginUrl(asked)}/versions`, 303);
+if (page.state === "ok" && !page.versions && place.cursor) return Astro.redirect(`${pluginUrl(asked, kind)}/versions`, 303);
 
 const notes = new Map<string, string>();
 if (page.state === "ok" && page.versions) {
@@ -41,7 +43,7 @@ if (page.state === "ok" && page.versions) {
   const shown: Drawn[] = [];
   for (const v of page.versions.versions) {
     if (!v.notes) continue;
-    const out = await drawn(Astro.url.origin, plugin.id, v.version, "notes", v.notes, { file: (p) => fileUrl(plugin.id, v.version, p), demote: true }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
+    const out = await drawn(Astro.url.origin, plugin.id, v.version, "notes", v.notes, { file: (p) => fileUrl(plugin.id, v.version, p, kind), demote: true }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
     shown.push(out);
     notes.set(v.version, out.html);
   }
@@ -51,7 +53,7 @@ if (page.state === "ok" && page.versions) {
 else Astro.response.status = page.state === "missing" ? 404 : 503;
 
 const now = Date.now();
-const versionUrl = (v: string) => `${pluginUrl(asked)}/versions/${encodeURIComponent(v)}`;
+const versionUrl = (v: string) => `${pluginUrl(asked, kind)}/versions/${encodeURIComponent(v)}`;
 /** Where a version stands, in a pill: verified (the seal), not yet, or no new installs. */
 const pill = (v: VersionInfo) => (v.yanked ? { tone: "quiet", label: statusWords("yanked") } : v.verified ? { tone: "ok", label: store("plugins.store.verified") } : { tone: "no", label: store("plugins.store.review.waiting") });
 /** The line beside it: when Zeron verified it and when it was published, or why it takes no new installs. */
@@ -65,12 +67,12 @@ const said = (v: VersionInfo) => {
   if (v.verified && v.verified_at !== null) return `Verified ${day(v.verified_at, now)} · ${published}`;
   return `Published ${sinceInSentence(v.published_at, now, true)}`;
 };
-const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)}/versions`, {}, place, page.versions, page.versions.versions.length) : null;
+const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked, kind)}/versions`, {}, place, page.versions, page.versions.versions.length) : null;
 ---
 
 {
   page.state === "ok" ? (
-    <Store title={`Versions · ${page.plugin.name} · Plugins · Zeron`} description={`Every version of ${page.plugin.name}, a plugin for Zeron, and which Zeron verified.`} noindex={Boolean(place.cursor)} canonical={`${pluginUrl(page.plugin.id)}/versions`} current="browse" class={hueClass(page.plugin.id)}>
+    <Store title={`Versions · ${page.plugin.name} · ${KIND_WORDS[kind].Many} · Zeron`} description={`Every version of ${page.plugin.name}, ${KIND_WORDS[kind].a} for Zeron, and which Zeron verified.`} noindex={Boolean(place.cursor)} canonical={`${pluginUrl(page.plugin.id, kind)}/versions`} current={kind} class={hueClass(page.plugin.id)}>
       <div class="wrap">
         <PluginHead plugin={page.plugin} category={page.category} versions={[...(page.versions?.versions ?? []), ...page.plugin.versions]} latestZeron={page.latestZeron} />
         <div class="cols2 after-head">
@@ -97,14 +99,14 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
                         {notes.get(v.version) ? <div class="notes prose" set:html={notes.get(v.version)} /> : <p class="notes t3">No notes for this version.</p>}
                       </div>
                       <div class="act">
-                        {v.yanked ? <span class="off">Can't be installed</span> : <a class="btn ghost sm" href={appUrl(page.plugin.id, newest ? undefined : v.version)}>{newest || linkable(v.version) ? store("plugins.store.install_version", { version: v.version }) : <>Open in Zeron<span class="sr-only"> for {v.version}</span></>}</a>}
+                        {v.yanked ? <span class="off">Can't be installed</span> : <a class="btn ghost sm" href={appUrl(page.plugin.id, newest ? undefined : v.version, kind)}>{newest || linkable(v.version) ? store("plugins.store.install_version", { version: v.version }) : <>Open in Zeron<span class="sr-only"> for {v.version}</span></>}</a>}
                       </div>
                     </li>
                   );
                 })}
               </ol>
             ) : (
-              <Failed href={`${pluginUrl(page.plugin.id)}/versions`} />
+              <Failed href={`${pluginUrl(page.plugin.id, kind)}/versions`} />
             )}
             {pager && (pager.previous || pager.next) && (
               <nav class="pager" aria-label="Pages of versions">
@@ -119,6 +121,6 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
       </div>
     </Store>
   ) : (
-    <NotHere state={page.state} retry={`${pluginUrl(asked)}/versions`} />
+    <NotHere kind={kind} state={page.state} retry={`${pluginUrl(asked, kind)}/versions`} />
   )
 }

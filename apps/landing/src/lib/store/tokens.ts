@@ -4,8 +4,10 @@
 // itself never passes through here: it's in the edge's answer, drawn once
 // on the page that answers the post (pages/account/tokens/new.astro), and
 // nowhere else.
+import { MOST_PLUGINS } from "./chosen.ts";
 import type { Result } from "./edge.ts";
 import { field } from "./forms.ts";
+import type { Kind } from "./kind.ts";
 import type { TokenScope } from "./types.ts";
 import { signInUrl } from "./urls.ts";
 import { store } from "./words.ts";
@@ -18,15 +20,18 @@ export const ENDS = ["30", "90", "365", "never"] as const;
 export type Ends = (typeof ENDS)[number];
 const isEnds = (value: string): value is Ends => (ENDS as readonly string[]).includes(value);
 
-/** The most plugins a token's scope may name (the edge's MAX_DEPLOY_TOKEN_PLUGINS). */
-export const MOST_PLUGINS = 50;
 const PLUGIN_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+
+const SCOPES = ["all", "both", "chosen"] as const;
+export type Scope = (typeof SCOPES)[number];
+const scopeOf = (value: string): Scope => SCOPES.find((s) => s === value) ?? "all";
 
 /** What the form holds: as typed, or as it came back. */
 export interface TokenFields {
   name: string;
   ends: Ends;
-  scope: "all" | "chosen";
+  /** All your plugins, all your plugins and templates, or the ones chosen. */
+  scope: Scope;
   plugins: string[];
 }
 
@@ -40,7 +45,7 @@ export function postedFields(form: FormData): TokenFields {
   return {
     name: field(form, "name", 200),
     ends: isEnds(ends) ? ends : NO_FIELDS.ends,
-    scope: field(form, "scope", 8) === "chosen" ? "chosen" : "all",
+    scope: scopeOf(field(form, "scope", 8)),
     plugins: plugins(form.getAll("plugins").filter((v): v is string => typeof v === "string")),
   };
 }
@@ -51,7 +56,7 @@ export function addressFields(url: URL): TokenFields {
   return {
     name: (url.searchParams.get("name") ?? "").slice(0, 200),
     ends: isEnds(ends) ? ends : NO_FIELDS.ends,
-    scope: url.searchParams.get("scope") === "chosen" ? "chosen" : "all",
+    scope: scopeOf(url.searchParams.get("scope") ?? ""),
     plugins: plugins((url.searchParams.get("plugins") ?? "").split(",")),
   };
 }
@@ -74,8 +79,9 @@ export function signInAgain(fields: TokenFields): string {
 /** What the edge is asked to make, or what's wrong with the form first. */
 export function tokenRequest(fields: TokenFields, now: number): { name: string; scope: TokenScope; expires?: number } | Refusal {
   if (!fields.name || fields.name.length > 64) return { field: "name", message: "Name the token in 1 to 64 characters." };
-  if (fields.scope === "chosen" && fields.plugins.length === 0) return { field: "plugins", message: "Choose at least one plugin it can publish." };
-  const scope: TokenScope = fields.scope === "all" ? { all: true } : { plugins: fields.plugins };
+  if (fields.scope === "chosen" && fields.plugins.length === 0) return { field: "plugins", message: "Choose at least one it can publish." };
+  // (Plugins alone is what `all` means unasked: said only when it's more.)
+  const scope: TokenScope = fields.scope === "all" ? { all: true } : fields.scope === "both" ? { all: true, all_kinds: ["plugin", "template"] } : { plugins: fields.plugins };
   return fields.ends === "never" ? { name: fields.name, scope } : { name: fields.name, scope, expires: now + Number(fields.ends) * 86_400_000 };
 }
 
@@ -98,9 +104,9 @@ export function refusalOf(result: Extract<Result<unknown>, { ok: false }>, name:
     case "invalid_name":
       return { field: "name", message: "Name the token in 1 to 64 characters, with no line breaks." };
     case "invalid_scope":
-      return { field: "plugins", message: result.ids?.length ? `These aren't plugins it can publish: ${names(result.ids)}.` : `Choose 1 to ${MOST_PLUGINS} plugins it can publish.` };
+      return { field: "plugins", message: result.ids?.length ? `It can't publish these: ${names(result.ids)}.` : `Choose 1 to ${MOST_PLUGINS} it can publish.` };
     case "not_owner":
-      return { field: "plugins", message: result.ids?.length ? `You don't own ${names(result.ids)} any more. Choose again.` : "You don't own one of those plugins any more. Choose again." };
+      return { field: "plugins", message: result.ids?.length ? `You don't own ${names(result.ids)} any more. Choose again.` : "You don't own one of those any more. Choose again." };
     case "too_many_tokens":
       return { field: null, message: "You have 20 deploy tokens, the most an account can have. Revoke one to make another." };
     case "rate_limited":
@@ -110,6 +116,17 @@ export function refusalOf(result: Extract<Result<unknown>, { ok: false }>, name:
     default:
       return { field: null, message: "The plugin store didn't make the token. Try again in a moment." };
   }
+}
+
+/** All your plugins, or your templates too: what a token of every one covers, in words. */
+export const BOTH = "All your plugins and templates";
+export const allWords = (scope: { all_kinds?: Kind[] }) => (scope.all_kinds?.includes("template") ? BOTH : store("plugins.store.key.scope.all"));
+
+/** How many it names, by their kind: "3 plugins", "2 templates", "3 chosen" of both (an id no longer yours counts as a plugin). */
+export function howMany(ids: string[], kindOf: (id: string) => Kind | undefined): string {
+  const templates = ids.filter((id) => kindOf(id) === "template").length;
+  const n = ids.length.toLocaleString("en-US");
+  return templates === 0 ? `${n} ${ids.length === 1 ? "plugin" : "plugins"}` : templates === ids.length ? `${n} ${ids.length === 1 ? "template" : "templates"}` : `${n} chosen`;
 }
 
 /** An account with no plugin yet: there's nothing a token could publish. */

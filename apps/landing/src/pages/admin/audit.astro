@@ -1,5 +1,5 @@
 ---
-// Everything done to the store's plugins, by reviewers and by their
+// Everything done to the store's plugins and templates, by reviewers and by their
 // authors, newest first, as a table; or one plugin's, from its page.
 // Admins only.
 import Empty from "../../components/look/Empty.astro";
@@ -16,6 +16,7 @@ import { isPluginId } from "../../lib/store/names.ts";
 import { pagerOf, placeOf } from "../../lib/store/paging.ts";
 import { adminSession } from "../../lib/store/session.ts";
 import { staffCounts, staffTabs } from "../../lib/store/staff.ts";
+import { staffUrl } from "../../lib/store/urls.ts";
 
 export const prerender = false;
 
@@ -67,9 +68,9 @@ function detailText(detail: unknown): string {
 const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "UTC" });
 ---
 
-<Store title="Audit log · Review · Zeron" description="What was done to the store's plugins." noindex current="review" session={session}>
+<Store title="Audit log · Review · Zeron" description="What was done to the store's plugins and templates." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Review" lead="What reviewers and authors did to the store's plugins, the newest first." tabs={staffTabs("audit", { ...counts, audit: result.ok ? result.data.total : null })}>
+    <StaffHead title="Review" lead="What reviewers and authors did to the store's plugins and templates, the newest first." tabs={staffTabs("audit", { ...counts, audit: result.ok ? result.data.total : null })}>
       {
         pluginFilter && (
           <p class="tools-line">
@@ -82,14 +83,14 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
         !result.ok ? (
           <Failed title="The log can't be loaded right now" line="Try again in a moment." />
         ) : entries.length === 0 ? (
-          <Empty icon="clock" title="Nothing yet" line="What reviewers and authors do to a plugin is written here as it's done." />
+          <Empty icon="clock" title="Nothing yet" line="What reviewers and authors do is written here as it's done." />
         ) : (
           <>
             <div class="tbl log">
               <div class="trow th" aria-hidden="true"><span>When</span><span>Who</span><span>What</span><span>Detail</span><span></span></div>
               <ul aria-label={`The audit log${pluginFilter ? ` for ${pluginFilter}` : ""}, the newest first`}>
                 {entries.map((e) => {
-                  const href = !e.plugin_id ? null : e.action.startsWith("reservation.") ? "/admin/reservations" : e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`;
+                  const href = !e.plugin_id ? null : e.action.startsWith("reservation.") ? "/admin/reservations" : e.item_kind === null ? null : staffUrl(e.plugin_id, e.item_kind ?? "plugin", e.version ?? undefined);
                   const detail = detailText(e.detail);
                   /* (A row about a plugin opens it: its id's link, stretched over the row.) */
                   return (
@@ -98,6 +99,7 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
                       <span class="c-who">{e.actor.username ? `@${e.actor.username}` : <span class="c-id t3">{e.actor.user_id}</span>}</span>
                       <span class="c-what">
                         <span>{Object.hasOwn(ACTIONS, e.action) ? ACTIONS[e.action] : e.action}</span>
+                        {!href && e.plugin_id && <span class="c-id t2">{e.plugin_id}{e.version && ` ${e.version}`}</span>}
                         {href && <a class="stretch c-id" href={href}>{e.plugin_id}{e.version && <span class="t2"> {e.version}</span>}</a>}
                       </span>
                       <span class="c-said t2" title={detail || undefined}>{detail}</span>

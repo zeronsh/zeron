@@ -4,14 +4,13 @@
 // nobody decides it blind, and a way to read it first. When the browser
 // says the visit came from another site, it says so plainly. Inside a
 // question's card (AskCard).
+import type { ComponentProps } from "astro/types";
 import Icon from "./Icon.astro";
-import Tile from "./Tile.astro";
+import Thumb from "./Thumb.astro";
 import { unbidi } from "../../lib/store/format.ts";
 
 interface Props {
-  id: string;
-  name: string;
-  icon: string | null;
+  item: ComponentProps<typeof Thumb>["item"];
   version: string | null;
   /** Its facts, one line: who sent it, new or an update, what the checks found. */
   facts: string[];
@@ -20,13 +19,13 @@ interface Props {
   /** The visit came from another site (Sec-Fetch-Site). */
   fromElsewhere: boolean;
 }
-const { id, icon, version, facts, read, fromElsewhere } = Astro.props;
-const name = unbidi(Astro.props.name);
+const { item, version, facts, read, fromElsewhere } = Astro.props;
+const name = unbidi(item.name);
 ---
 
 {fromElsewhere && <p class="flash bad elsewhere" role="status">You followed a link from somewhere else to this question. Read what you're deciding before you answer.</p>}
 <div class="deciding">
-  <Tile id={id} name={name} icon={icon} version={version} size="s" />
+  <Thumb item={{ ...item, name }} version={version} size="s" />
   <div class="words">
     <p class="name">{name}{version && <> <span class="ver">{version}</span></>}</p>
     <p class="facts">{facts.join(" · ")}</p>

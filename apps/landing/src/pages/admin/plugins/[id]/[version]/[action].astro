@@ -13,26 +13,34 @@ import "../../../../../styles/look/staff.css";
 import { isVersionAction, toWeigh, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { kindOf, kindOfItem } from "../../../../../lib/store/kind.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, versionParam } from "../../../../../lib/store/names.ts";
 import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
+import { staffUrl } from "../../../../../lib/store/urls.ts";
 import { adminSession } from "../../../../../lib/store/session.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id, action } = Astro.params;
 const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version) || !isVersionAction(action)) return new Response(null, { status: 404 });
 // (The middleware's admin gate let only an admin this far.)
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
-const submission = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
-const back = action === "remove" || action === "take_down" || action === "restore" ? `/admin/plugins/${encodeURIComponent(id)}` : submission;
+const submission = staffUrl(id, kind, version);
+const back = action === "remove" || action === "take_down" || action === "restore" ? staffUrl(id, kind) : submission;
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
-  const request = versionRequest(id, version, action, { get: (name) => field(form, name) });
+  // (The edge takes either kind's id to verify or decline: the other kind's isn't under this prefix, as on its page.)
+  if (action === "verify" || action === "decline") {
+    const record = await Astro.locals.edge.submission(id, version);
+    if (record.ok ? kindOfItem(record.data) !== kind : record.error === "not_found") return new Response(null, { status: 404 });
+  }
+  const request = versionRequest(kind, id, version, action, { get: (name) => field(form, name) });
   if (!request) return done(Astro, "bad_input", back);
   const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
   // (Every decision changes what the public sees: verified, or the version gone, or which one is the newest verified.)
@@ -43,7 +51,8 @@ if (Astro.request.method !== "GET") return new Response(null, { status: 405, hea
 privatePage(Astro);
 // What is being decided, so nobody decides it blind.
 const record = await Astro.locals.edge.submission(id, version);
-if (!record.ok && record.error === "not_found") return new Response(null, { status: 404 });
+// (Staff's too: an id of the other kind isn't under this prefix.)
+if (record.ok ? kindOfItem(record.data) !== kind : record.error === "not_found") return new Response(null, { status: 404 });
 const s = record.ok ? record.data : null;
 const name = s?.plugin.name ?? s?.version.name ?? (typeof s?.manifest.name === "string" ? s.manifest.name : id);
 const failing = s?.checks.filter((c) => c.level === "fail").length ?? 0;
@@ -69,7 +78,7 @@ const weigh = s && action === "verify" ? toWeigh(s) : null;
       {
         (s || wasCut(Astro.url)) && (
           <div class="body">
-            {s && <Deciding id={id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} facts={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
+            {s && <Deciding item={{ ...s.plugin, kind, name, icon: s.version.icon ?? s.plugin.icon }} version={version} facts={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
             {weigh && <p class:list={["weigh-line", weigh.tone]}>{weigh.text}</p>}
             {wasCut(Astro.url) && <p class="flash info cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
           </div>

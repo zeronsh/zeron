@@ -10,6 +10,7 @@
 // A pending one's are its owner's and the admins': asked for again with the
 // visitor's cookie, and kept by no one.
 import type { APIRoute } from "astro";
+import { kindOf } from "../../../../../lib/store/kind.ts";
 import { pluginTag } from "../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, packagePath, versionParam } from "../../../../../lib/store/names.ts";
 import { pictureType } from "../../../../../lib/store/review.ts";
@@ -41,6 +42,7 @@ const notFound = () => new Response(null, { status: 404, headers: { ...SANDBOX, 
 export const GET: APIRoute = async ({ params, request, locals, cache, url, redirect }) => {
   // One address per file: a query can't make the edge be asked again.
   if (url.search) return redirect(url.pathname, 301);
+  const kind = kindOf(url);
   const { id } = params;
   const version = versionParam(params.version);
   // The file's path from the address as sent, each part decoded once: a
@@ -58,10 +60,10 @@ export const GET: APIRoute = async ({ params, request, locals, cache, url, redir
   if (!type) return notFound();
 
   let open = true;
-  let answer = await locals.edge.file(id, version, path, false);
+  let answer = await locals.edge.file(id, version, path, false, kind);
   if (answer.status === 404 && request.headers.has("cookie")) {
     open = false;
-    answer = await locals.edge.file(id, version, path, true);
+    answer = await locals.edge.file(id, version, path, true, kind);
   }
   // A file the edge gives only as a download is never shown inline from here.
   const attachment = /^\s*attachment/i.test(answer.headers.get("content-disposition") ?? "");

@@ -4,6 +4,7 @@
 import type { Ask } from "./actions.ts";
 import type { FlashWord } from "./flash.ts";
 import { count } from "./format.ts";
+import type { Kind } from "./kind.ts";
 import { compared, together } from "./permissions.ts";
 import type { Submission } from "./types.ts";
 
@@ -74,7 +75,7 @@ export function pluginAsk(action: PluginAction, name: string): Ask {
 }
 
 /** The edge path and body for a version's action, from the form's fields; null when one is missing. */
-export function versionRequest(id: string, version: string, action: VersionAction, form: { get(name: string): string }): { path: string; body: Record<string, unknown> } | null {
+export function versionRequest(kind: Kind, id: string, version: string, action: VersionAction, form: { get(name: string): string }): { path: string; body: Record<string, unknown> } | null {
   const plugin = encodeURIComponent(id);
   const v = encodeURIComponent(version);
   switch (action) {
@@ -92,28 +93,28 @@ export function versionRequest(id: string, version: string, action: VersionActio
     case "restore": {
       const reason = form.get("reason");
       if (!reason) return null;
-      return { path: `plugins/${plugin}/versions/${v}/${action === "take_down" ? "take-down" : action}`, body: { reason } };
+      return { path: `${kind}s/${plugin}/versions/${v}/${action === "take_down" ? "take-down" : action}`, body: { reason } };
     }
   }
 }
 
 /** The edge path and body for a plugin's action; null when a field is missing. */
-export function pluginRequest(id: string, action: PluginAction, form: { get(name: string): string }): { path: string; body: Record<string, unknown> } | null {
+export function pluginRequest(kind: Kind, id: string, action: PluginAction, form: { get(name: string): string }): { path: string; body: Record<string, unknown> } | null {
   const plugin = encodeURIComponent(id);
   switch (action) {
     case "suspend": {
       const reason = form.get("reason");
-      return reason ? { path: `plugins/${plugin}/suspend`, body: { reason } } : null;
+      return reason ? { path: `${kind}s/${plugin}/suspend`, body: { reason } } : null;
     }
     case "restore":
-      return { path: `plugins/${plugin}/restore`, body: {} };
+      return { path: `${kind}s/${plugin}/restore`, body: {} };
     case "feature":
-      return { path: `plugins/${plugin}/feature`, body: { featured: true } };
+      return { path: `${kind}s/${plugin}/feature`, body: { featured: true } };
     case "unfeature":
-      return { path: `plugins/${plugin}/feature`, body: { featured: false } };
+      return { path: `${kind}s/${plugin}/feature`, body: { featured: false } };
     case "transfer": {
       const to = form.get("to_username").replace(/^@/, "").toLowerCase();
-      return /^[a-z0-9][a-z0-9_-]{2,19}$/.test(to) ? { path: `plugins/${plugin}/transfer`, body: { to_username: to } } : null;
+      return /^[a-z0-9][a-z0-9_-]{2,19}$/.test(to) ? { path: `${kind}s/${plugin}/transfer`, body: { to_username: to } } : null;
     }
   }
 }
@@ -128,7 +129,8 @@ export function pluginRequest(id: string, action: PluginAction, form: { get(name
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 export function toWeigh(s: Pick<Submission, "permissions" | "permissions_diff" | "base" | "checks">): { text: string; tone: "warn" | "bad" } | null {
-  const { lines } = compared(s.permissions, s.base ? s.permissions_diff : null);
+  // (A template asks for nothing: its checks, and its files, are what there is.)
+  const { lines } = s.permissions ? compared(s.permissions, s.base ? s.permissions_diff : null) : { lines: [] };
   const fresh = lines.filter((l) => l.change === "new");
   const changed = lines.filter((l) => l.change === "changed" && !l.bound);
   const bound = lines.filter((l) => l.bound).map((l) => l.bound!);

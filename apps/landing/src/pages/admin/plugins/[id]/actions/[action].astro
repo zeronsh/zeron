@@ -11,25 +11,28 @@ import "../../../../../styles/look/staff.css";
 import { isPluginAction, PLUGIN_FLASH, pluginAsk, pluginRequest } from "../../../../../lib/store/admin.ts";
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
+import { kindOf } from "../../../../../lib/store/kind.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../../lib/store/names.ts";
 import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
 import { adminSession } from "../../../../../lib/store/session.ts";
+import { staffUrl } from "../../../../../lib/store/urls.ts";
 import { everListed, listingState } from "../../../../../lib/store/states.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id, action } = Astro.params;
 if (!isPluginId(id) || !isPluginAction(action)) return new Response(null, { status: 404 });
 // (The middleware's admin gate let only an admin this far.)
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
-const back = `/admin/plugins/${encodeURIComponent(id)}`;
+const back = staffUrl(id, kind);
 
 if (Astro.request.method === "POST") {
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
-  const request = pluginRequest(id, action, { get: (name) => field(form, name) });
+  const request = pluginRequest(kind, id, action, { get: (name) => field(form, name) });
   if (!request) return done(Astro, "bad_input", back);
   const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
   if (result.ok) await purge(Astro, id);
@@ -38,7 +41,7 @@ if (Astro.request.method === "POST") {
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 privatePage(Astro);
 // What is being decided, so nobody decides it blind.
-const record = await Astro.locals.edge.adminPlugin(id);
+const record = await Astro.locals.edge.adminPlugin(id, kind);
 if (!record.ok && record.error === "not_found") return new Response(null, { status: 404 });
 const a = record.ok ? record.data : null;
 const name = a?.plugin.name ?? id;
@@ -57,9 +60,7 @@ const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
         <div class="body">
           {a && (
             <Deciding
-              id={id}
-              name={a.plugin.name}
-              icon={a.plugin.icon}
+              item={{ ...a.plugin, kind }}
               version={a.plugin.version}
               facts={[a.owner.username ? `by @${a.owner.username}` : "No username", listingState(a.status, everListed(a.versions)).label, `${open} open ${open === 1 ? "report" : "reports"}`]}
               read={back}

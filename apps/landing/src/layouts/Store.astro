@@ -1,8 +1,8 @@
 ---
 // Zeron Plugins: the store's pages, as a site of their own (the
 // coordinator's prototype, build.py's wrapper): a top bar (the brand,
-// Discover, Browse, Publish, Review for staff, the search, you), the page,
-// and the foot. No sidebar, no shell.
+// Plugins, Templates, Publish, Review for staff, the search of the kind
+// you're on, you), the page, and the foot. No sidebar, no shell.
 //
 // A public page is the same for everyone (kept by shared caches), so who
 // you are and Review are filled in by scripts/store.ts once the page is in;
@@ -15,10 +15,11 @@ import Icons from "../components/look/Icons.astro";
 import Inks from "../components/look/Inks.astro";
 import ZeronMark from "../components/look/ZeronMark.astro";
 import type { WebSession } from "../lib/store/types.ts";
+import { KIND_PATH, KIND_WORDS, kindOf } from "../lib/store/kind.ts";
 import { signInUrl } from "../lib/store/urls.ts";
 import "../styles/look/store.css";
 
-type Section = "browse" | "publish" | "review";
+type Section = "plugin" | "template" | "publish" | "review";
 
 interface Props {
   title: string;
@@ -51,8 +52,12 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
 // (As the script says it on a public page, and as the store says an author: "@ada".)
 const handle = session ? (session.username ? `@${session.username}` : (session.user.name ?? "You")) : "";
 const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
+/** What the bar's search searches: the kind you're on; on a page of neither (the guide, yours, the staff's), plugins. */
+const finds = Astro.url.pathname.startsWith("/account/") || Astro.url.pathname.startsWith("/admin/") ? "plugin" : kindOf(Astro.url);
+const find = `Search ${KIND_WORDS[finds].many}`;
 const SECTIONS: { id: Section; label: string; href: string }[] = [
-  { id: "browse", label: "Browse", href: "/plugins" },
+  { id: "plugin", label: "Plugins", href: "/plugins" },
+  { id: "template", label: "Templates", href: "/templates" },
   { id: "publish", label: "Publish", href: "/account" },
   { id: "review", label: "Review", href: "/admin/plugins" },
 ];
@@ -73,9 +78,9 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
     <Inks />
     <header class="top">
       <div class="wrap">
-        <a class="brand" href="/plugins">
+        <a class="brand" href="/">
           <ZeronMark pitch={5} />
-          <span>Zeron</span><span class="sep" aria-hidden="true">/</span><span>Plugins</span>
+          <span>Zeron</span>
         </a>
         <nav class="nav" aria-label="The store">
           {SECTIONS.filter((s) => shown(s.id)).map((s) => (
@@ -83,13 +88,13 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
           ))}
         </nav>
         <div class="grow"></div>
-        <form class="find" role="search" action="/plugins" method="get" data-tidy>
+        <form class="find" role="search" action={KIND_PATH[finds]} method="get" data-tidy>
           <Icon name="search" />
-          <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+          <input type="search" name="q" value={query || undefined} placeholder={find} aria-label={find} autocomplete="off" enterkeyhint="search" data-search />
           {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
           <kbd class="kbd" aria-hidden="true">/</kbd>
         </form>
-        <button class="find-icon" type="button" popovertarget="find-menu" aria-label="Search plugins"><Icon name="search" /></button>
+        <button class="find-icon" type="button" popovertarget="find-menu" aria-label={find}><Icon name="search" /></button>
         {(isPublic || !session) && <a class="signin" href={signInUrl(here)} data-signin>Sign in</a>}
         {(isPublic || session) && (
           <button class="me" type="button" popovertarget="me-menu" hidden={isPublic} data-me>
@@ -102,16 +107,16 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
 
     {/* The search, on a phone: the bar's one, opened from its icon. */}
     <div class="menu find-menu" id="find-menu" popover>
-      <form class="find" role="search" action="/plugins" method="get" data-tidy>
+      <form class="find" role="search" action={KIND_PATH[finds]} method="get" data-tidy>
         <Icon name="search" />
-        <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        <input type="search" name="q" value={query || undefined} placeholder={find} aria-label={find} autocomplete="off" enterkeyhint="search" data-search />
         {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
       </form>
     </div>
     {(isPublic || session) && (
       <div class="menu" id="me-menu" popover>
         <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>
-        <a href="/account">Your plugins</a>
+        <a href="/account">Published</a>
         <a href="/account/tokens">Deploy tokens</a>
         <a href="/plugins/publishing">Publishing guide</a>
         <hr />
@@ -145,7 +150,8 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
 
     <footer class="foot">
       <div class="wrap">
-        <span>Zeron Plugins</span>
+        <a href="/plugins">Plugins</a>
+        <a href="/templates">Templates</a>
         <a href="/">zeron.sh</a>
         <a href="/plugins/publishing">Publishing guide</a>
         <span class="grow"></span>

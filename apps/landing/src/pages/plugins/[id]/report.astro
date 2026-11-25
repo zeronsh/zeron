@@ -12,6 +12,7 @@ import { lsb } from "../../../lib/store/bearing.ts";
 import { unbidi } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
+import { KIND_PATH, KIND_WORDS, kindOf } from "../../../lib/store/kind.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
 import { hadSession, resumed, signInAndResume } from "../../../lib/store/resume.ts";
@@ -21,9 +22,10 @@ import { pluginUrl } from "../../../lib/store/urls.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
-const here = `${pluginUrl(id)}/report`;
+const here = `${pluginUrl(id, kind)}/report`;
 const session = await requireSession(Astro);
 if (session instanceof Response) {
   // Signed out while writing: sign in, and come back to the report as it was.
@@ -36,12 +38,12 @@ if (Astro.request.method === "POST") {
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
   const reason = field(form, "reason");
   if (!(REPORT_REASONS as readonly string[]).includes(reason)) return done(Astro, "bad_input", here);
-  const result = await Astro.locals.edge.report(id, { reason, text: field(form, "text", 2000) }, session.csrf);
+  const result = await Astro.locals.edge.report(id, { reason, text: field(form, "text", 2000) }, session.csrf, kind);
   return done(Astro, flashFor(result, "report_sent"), here);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 
-const result = await Astro.locals.edge.plugin(id);
+const result = await Astro.locals.edge.plugin(id, kind);
 if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
 privatePage(Astro);
 const flash = takeFlash(Astro.cookies);
@@ -51,18 +53,18 @@ const plugin = result.ok ? result.data : null;
 /** Each reason as the app's report sheet names it, and a line on what it covers. */
 const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
   malware: "It steals, spies, or does damage.",
-  misleading: "It asks for or does more than it tells you.",
+  misleading: kind === "plugin" ? "It asks for or does more than it tells you." : "It does more than it tells you, or isn't what it shows.",
   broken: "It fails, or breaks part of Zeron.",
   copyright: "It copies someone's code, art or brand without leave.",
   other: "Tell us below.",
 };
 ---
 
-<Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current="browse" session={session}>
+<Store title={`Report ${plugin?.name ?? id} · Zeron`} description={`Report ${KIND_WORDS[kind].a}.`} noindex current={kind} session={session}>
   {/* (One centred column, no box round it, as GitHub's report flow: whom it's about, why, what you saw, send.) */}
   <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is">
-      <a href="/plugins">Plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
+      <a href={KIND_PATH[kind]}>{KIND_WORDS[kind].Many}</a><Icon name="chev" /><a href={pluginUrl(id, kind)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
     </nav>
     <Flash flash={sent ? null : flash} />
     {
@@ -71,13 +73,13 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
           <span class="rpt-ok" aria-hidden="true"><Icon name="check" /></span>
           <h1>Thanks — the reviewers will read it.</h1>
           <p>If it needs to go, it goes from the store and from people's devices.</p>
-          <a class="back-link" href={pluginUrl(id)}><Icon name="left" />Back to {unbidi(plugin?.name ?? "the plugin")}</a>
+          <a class="back-link" href={pluginUrl(id, kind)}><Icon name="left" />Back to {unbidi(plugin?.name ?? `the ${KIND_WORDS[kind].one}`)}</a>
         </section>
       ) : (
         <form method="post" action={here} class="rpt-form">
           <input type="hidden" name="csrf" value={session.csrf} />
           <div class="rpt-who">
-            {plugin && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="ms" />}
+            {plugin && kind === "plugin" && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="ms" />}
             <div>
               <h1 class={lsb(store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) }))}>{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
               {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
@@ -100,7 +102,7 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
           </div>
           {/* (Sending a report destroys nothing: the store's primary button, not the danger's.) */}
           <div class="answers">
-            <a class="btn sec" href={pluginUrl(id)}>Cancel</a>
+            <a class="btn sec" href={pluginUrl(id, kind)}>Cancel</a>
             <button class="btn pri" type="submit">{store("plugins.store.report.send")}</button>
           </div>
         </form>
