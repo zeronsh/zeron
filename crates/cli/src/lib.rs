@@ -303,18 +303,33 @@ pub enum TemplateCommand {
         target: String,
     },
     /// Publish a template to the store: it's live at once, for anyone to
-    /// install, and marked verified once a reviewer has read it. With
-    /// ZERON_DEPLOY_TOKEN set to a deploy token (never pass it as an
-    /// argument): the folder is checked, packed and sent with the token, with
-    /// no Zeron running and no sign-in. Exits as `zeron plugin publish` does.
+    /// install, and marked verified once a reviewer has read it. In CI, set
+    /// ZERON_DEPLOY_TOKEN to a deploy token (never pass it as an argument):
+    /// the folder is checked, packed and sent with the token, with no Zeron
+    /// running and no sign-in. Without it, your own template goes through the
+    /// running Zeron, signed with this device's key and sent with your
+    /// session. Exits as `zeron plugin publish` does.
     Publish {
-        /// The template's folder, or the id of one in Zeron's templates
-        /// folder.
+        /// The template's folder (with ZERON_DEPLOY_TOKEN), or the id of your
+        /// template in Zeron's templates folder.
         target: String,
         /// Check and pack it, but don't send it.
         #[arg(long)]
         dry_run: bool,
     },
+    /// Your templates in the store: each version, whether Zeron has verified
+    /// it, and a reviewer's reason when it declined to. Through the running
+    /// Zeron, with your session: never a deploy token's. (`zeron template
+    /// status` is how one is on this device.)
+    Store {
+        /// Only this template.
+        id: Option<String>,
+    },
+    /// Stop new installs of a version (installed copies keep working).
+    /// Through the running Zeron, with your session: never a deploy token's.
+    Yank { id: String, version: String },
+    /// Undo `yank`.
+    Unyank { id: String, version: String },
 }
 
 /// `zeron mcp …`: the MCP servers Zeron gives agents. A server is named by

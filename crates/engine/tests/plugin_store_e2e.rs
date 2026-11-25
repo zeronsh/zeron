@@ -236,6 +236,12 @@ impl Env {
         let mut command = self.command(&device.home, &device.data);
         command.env("ZERON_IPC_PORT", device.port.to_string()).arg("plugin").args(args).output().unwrap()
     }
+
+    /// [`Self::cli_on`], of `zeron template <args>`.
+    fn template_cli_on(&self, device: &Device, args: &[&str]) -> Output {
+        let mut command = self.command(&device.home, &device.data);
+        command.env("ZERON_IPC_PORT", device.port.to_string()).arg("template").args(args).output().unwrap()
+    }
 }
 
 impl Device {
@@ -1161,6 +1167,21 @@ async fn the_template_store_end_to_end() {
     e.check("22", "its record names the contents and the signer that were sent", record.hash == parsed.content_hash && record.key == parsed.key, format!("{record:?}"));
     let preview = store.file(TEMPLATE, "1.0.0", "preview.png", &Caller::Anonymous, 1 << 20).await;
     e.check("22", "its preview is served as it is", preview.as_deref() == Ok(PIXEL), preview.map(|b| b.len().to_string()).unwrap_or_else(|e| e));
+
+    // (Its author's, from the command line with their Zeron running.)
+    let out = e.template_cli_on(&desk, &["yank", TEMPLATE, "1.0.0"]);
+    e.check("22", "the author yanks 1.0.0 (the CLI, with the session)", out.status.success() && text(&out).contains("1.0.0 yanked"), text(&out));
+    let out = e.template_cli_on(&desk, &["store", TEMPLATE]);
+    e.check("22", "`zeron template store` says so", out.status.success() && text(&out).contains("1.0.0  yanked  not verified"), text(&out));
+    let out = e.template_cli_on(&desk, &["unyank", TEMPLATE, "1.0.0"]);
+    e.check("22", "and puts it back", out.status.success() && text(&out).contains("1.0.0 back in the store"), text(&out));
+    template_folder(&own, TEMPLATE, "1.0.1");
+    let out = e.template_cli_on(&desk, &["publish", TEMPLATE]);
+    e.must("22", "the CLI publishes 1.0.1 through the running Zeron", out.status.success() && text(&out).contains("1.0.1: live now"), text(&out));
+    let (_, record) = store.version(TEMPLATE, "1.0.1", &Caller::Anonymous).await.unwrap();
+    e.check("22", "signed by the device's key", record.key.as_deref() == Some(key.public().as_str()), format!("{record:?}"));
+    let out = e.template_cli_on(&desk, &["store"]);
+    e.check("22", "1.0.0 is superseded", text(&out).contains("1.0.0  yanked  not verified: superseded by 1.0.1"), text(&out));
 
     // ── 23: a deploy token publishes the next ──
     let secret = deploy_token_on(&e, &desk, "user_tess", json!({ "plugins": [TEMPLATE] }), "Templates CI").await;

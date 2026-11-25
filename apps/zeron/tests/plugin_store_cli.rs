@@ -253,6 +253,24 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     assert_eq!(older.status.code(), Some(1), "{}", text(&older));
     assert!(text(&older).contains("error: not_newer (version)"), "{}", text(&older));
     assert_eq!(store.state.lock().unwrap().submitted_templates.len(), 1);
+    // What it leaves out is said, and in no one's way.
+    version("1.0.1");
+    std::fs::create_dir_all(folder.join("account")).unwrap();
+    write("account/page.luau", b"return {}");
+    let said = run.run(&store, None, "template", &["check", &arg]).await;
+    assert_eq!(said.status.code(), Some(0), "{}", text(&said));
+    assert!(text(&said).contains("warning: left_out (account/page.luau)"), "{}", text(&said));
+    std::fs::remove_dir_all(folder.join("account")).unwrap();
+    // The rest is the running Zeron's (2, when none is), never a token's.
+    for (token, args, words) in [
+        (None, vec!["publish", "midnight"], "Zeron isn't running here"),
+        (None, vec!["store"], "`zeron template store` needs Zeron running"),
+        (None, vec!["yank", "midnight", "1.0.0"], "`zeron template yank` needs Zeron running"),
+        (Some(secret.as_str()), vec!["unyank", "midnight", "1.0.0"], "a deploy token only publishes"),
+    ] {
+        let out = run.run(&store, token, "template", &args).await;
+        assert!(out.status.code() == Some(2) && text(&out).contains(words), "{args:?}: {}", text(&out));
+    }
     // No token, no such folder, a folder that's no template (2).
     for (token, args) in [(None, vec!["publish", &arg]), (Some(secret.as_str()), vec!["publish", "/no/such/folder"]), (None, vec!["check", run.home.to_str().unwrap()])] {
         let out = run.run(&store, token, "template", &args).await;
