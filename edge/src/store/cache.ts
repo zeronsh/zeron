@@ -46,6 +46,26 @@ export const openCache = (): Promise<Cache> => caches.open(CACHE_NAME);
 
 const headOnly = (response: Response): Response => new Response(null, { status: response.status, headers: response.headers });
 
+/** When an answer was stored (ms): kept with it, never sent. */
+const STORED_AT = "x-store-cached-at";
+
+/**
+ * The stored answer `hit` as it's sent: built as a fresh one is, of its body
+ * and type alone. Never the response `cache.match` gives: the zone writes over
+ * its headers (its browser TTL in place of a shorter `cache-control`, and its
+ * own `last-modified`, `age`, `cf-cache-status`). `cache-control` is what's
+ * left of its `ttl`, so nothing of the store's is kept past it from when it
+ * was read.
+ */
+const sendHit = (hit: Response, ttl: number, head: boolean): Response => {
+  const at = Number(hit.headers.get(STORED_AT) ?? Number.NaN);
+  const left = Number.isFinite(at) ? Math.ceil(ttl - (Date.now() - at) / 1000) : ttl;
+  const headers = new Headers({ "cache-control": `public, max-age=${Math.min(Math.max(left, 0), ttl)}` });
+  const type = hit.headers.get("content-type");
+  if (type) headers.set("content-type", type);
+  return new Response(head ? null : hit.body, { status: hit.status, headers });
+};
+
 /**
  * `compute`'s answer for `request`, through the cache under `key` for
  * `ttl` seconds. `compute` must answer the same for everyone without
@@ -62,14 +82,16 @@ export const throughCache = async (request: Request, key: string, ttl: number, c
   }
   const cache = await openCache();
   const hit = await cache.match(key);
-  if (hit) return head ? headOnly(hit) : hit;
+  if (hit) return sendHit(hit, ttl, head);
   const fresh = await compute();
   if (fresh.status !== 200 || head) return head ? headOnly(fresh) : fresh;
   const headers = new Headers(fresh.headers);
   headers.set("cache-control", `public, max-age=${ttl}`);
-  const stored = new Response(fresh.body, { status: 200, headers });
-  await cache.put(key, stored.clone());
-  return stored;
+  const sent = new Response(fresh.body, { status: 200, headers });
+  const stored = new Response(sent.clone().body, { status: 200, headers });
+  stored.headers.set(STORED_AT, String(Date.now()));
+  await cache.put(key, stored);
+  return sent;
 };
 
 /** A value kept in the cache as JSON for `ttl` seconds (`undefined` is never
