@@ -257,6 +257,44 @@ pub fn contents(folder: &Path, id: &str) -> Result<(Value, BTreeMap<String, Vec<
     Ok((manifest, files))
 }
 
+/// What a template's folder has and its package doesn't carry.
+pub struct LeftOut {
+    /// Each file, and why.
+    pub files: Vec<(String, &'static str)>,
+    /// How many of Zeron's own files there are as the template was made with
+    /// them, which no template replaces (and no one it's sent to lacks).
+    pub zeron_s: usize,
+    /// Each member of its manifest that isn't its signature or its author.
+    pub members: Vec<String>,
+}
+
+/// What template folder `folder` has that its package (`files`) doesn't.
+pub fn left_out(folder: &Path, files: &BTreeMap<String, Vec<u8>>) -> LeftOut {
+    const MOST: usize = 200;
+    let base: BTreeMap<String, String> = templates::read_regular(&folder.join(templates::BASE)).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let as_made = |rel: &String| protected(rel) && base.get(rel).is_some_and(|hash| templates::read_regular(&folder.join(rel)).is_some_and(|b| signing::sha256_hex(&b) == *hash));
+    let (zeron_s, theirs): (Vec<String>, Vec<String>) = templates::app_files(folder, &[MANIFEST, templates::BASE]).into_iter().filter(|rel| !files.contains_key(rel)).partition(as_made);
+    let mut left: Vec<(String, &'static str)> = theirs
+        .into_iter()
+        .map(|rel| {
+            let why = if protected(&rel) {
+                "it's one of Zeron's own files no template replaces"
+            } else if rel == listing::README {
+                "it's the README Zeron wrote: write your own"
+            } else {
+                "its name could be another file's on some disk"
+            };
+            (listing::shown(&rel, MAX_SHOWN_PATH), why)
+        })
+        .collect();
+    left.extend(templates::others(folder, MOST).into_iter().map(|rel| (listing::shown(&rel, MAX_SHOWN_PATH), "its name, or what it is, isn't one Zeron writes")));
+    left.truncate(MOST);
+    let own: Value = templates::read_regular(&folder.join(MANIFEST)).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let carried = [listing::TEMPLATE_REQUIRED, listing::TEMPLATE_OPTIONAL, &["author", "signature"]];
+    let members = own.as_object().into_iter().flatten().map(|(key, _)| key.clone()).filter(|key| !carried.iter().any(|list| list.contains(&key.as_str()))).take(MOST).collect();
+    LeftOut { files: left, zeron_s: zeron_s.len(), members }
+}
+
 /// `manifest` and `files` as a package's bytes: signed by `key` in the
 /// template domain, or unsigned (a deploy token's).
 pub fn pack(manifest: &Value, files: &BTreeMap<String, Vec<u8>>, key: Option<&SigningKey>) -> Result<Vec<u8>, String> {

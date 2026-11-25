@@ -52,6 +52,9 @@ pub struct State {
     /// (`store::notices`): none until it first looks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishes: Option<super::store::notices::Seen>,
+    /// The same of its templates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_publishes: Option<super::store::notices::Seen>,
     /// Publishes not made on this device that the app hasn't shown yet,
     /// oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

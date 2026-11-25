@@ -109,6 +109,9 @@ pub mod rule {
     pub const MISSING_LISTING: &str = "missing_listing";
     /// A listing field is there but wrong (`field` says which).
     pub const BAD_LISTING: &str = "bad_listing";
+    /// (Worth knowing alone.) What a template's folder has and its package
+    /// doesn't carry: a file (`path`), or a member of its manifest (`word`).
+    pub const LEFT_OUT: &str = "left_out";
     pub const TOO_LARGE: &str = "too_large";
     /// A template carrying one of the files no template replaces
     /// (`template_packages::PROTECTED`); `path` says which.

@@ -812,7 +812,7 @@ pub mod methods {
     /// `id`'s pre-releases; by the store's id, as [`SET_TEMPLATE_UPDATES`].
     pub const SET_TEMPLATE_PRERELEASES: &str = "SetTemplatePrereleases";
     /// `{ids}` → `{}`: the app has shown these of the plugin list's
-    /// `store_notices` (each `{id, plugin, version, name?, via: "device" |
+    /// `store_notices` (each `{id, kind, plugin, version, name?, via: "device" |
     /// "deploy_token", token_name?, at, words}`: a publish of one of the
     /// account's plugins this device didn't make), so the engine lets them
     /// go. Each is raised once per version, and kept until it's shown.
@@ -831,10 +831,11 @@ pub mod methods {
     /// checked, signed with this device's key and sent to the store with
     /// your session. The person's act alone: never an agent's.
     pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
-    /// (Named for the app; not answered yet.) `{id}` → as
-    /// [`PREPARE_PLUGIN_PUBLISH`], of one of your own templates.
+    /// `{id}` → as [`PREPARE_PLUGIN_PUBLISH`], of one of your own templates,
+    /// with `kind: "template"`. What its folder has and isn't sent is each a
+    /// warning (`left_out`).
     pub const PREPARE_TEMPLATE_PUBLISH: &str = "PrepareTemplatePublish";
-    /// (Named for the app; not answered yet.) `{id, hash, ticket}` → as
+    /// `{id, hash, ticket}` → as
     /// [`PUBLISH_PLUGIN`], of a template as [`PREPARE_TEMPLATE_PUBLISH`]
     /// checked it. The person's act alone: never an agent's.
     pub const PUBLISH_TEMPLATE: &str = "PublishTemplate";

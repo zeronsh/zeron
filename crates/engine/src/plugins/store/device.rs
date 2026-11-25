@@ -76,6 +76,8 @@ pub fn handles(method: &str) -> bool {
             | methods::SET_TEMPLATE_PRERELEASES
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
+            | methods::PREPARE_TEMPLATE_PUBLISH
+            | methods::PUBLISH_TEMPLATE
             | methods::STORE_MY_PLUGINS
             | methods::STORE_VERSION_ACTION
             | methods::LIST_DEPLOY_TOKENS
@@ -112,6 +114,13 @@ fn says_kind(reply: &mut Value, kind: Kind) {
     if kind == Kind::Template {
         reply["kind"] = json!("template");
     }
+}
+
+/// A refusal of a template's.
+fn not_template(error: &str) -> Value {
+    let mut value = not_ok(error);
+    says_kind(&mut value, Kind::Template);
+    value
 }
 
 /// What a store template's consent window draws of its record.
@@ -665,6 +674,43 @@ impl Plugins {
                 lock(&self.inner.reviews).redeem(reviews::Kind::Publish, &reviews::Origin::Local, &p.id, &p.hash, p.ticket.as_deref())?;
                 RpcReply::value(&self.publish(&p.id, &p.hash).await)
             }
+            methods::PREPARE_TEMPLATE_PUBLISH => {
+                let p: IdParams = parse_params(params)?;
+                let id = p.id.trim().to_owned();
+                let mut prepared = self.own_template(&id).await.map_err(failed)?;
+                // As a plugin's: newer than what the store has, as it said a
+                // moment ago, when it can be asked.
+                let versions = match self.store_as_person().await {
+                    Ok((client, caller)) => client.of(Kind::Template).my_plugins(&caller).await.ok().map(|mine| {
+                        mine["templates"].as_array().into_iter().flatten().find(|item| item["id"] == prepared.id()).map(|item| item["versions"].clone())
+                    }),
+                    Err(_) => None,
+                };
+                if let Some(Some(Value::Array(versions))) = &versions
+                    && let Some(problem) = publish::newer_problem(prepared.version(), versions)
+                {
+                    prepared.problems.push(problem);
+                }
+                let mut reply = prepared.shown();
+                reply["store_checked"] = json!(versions.is_some());
+                if versions.is_none() {
+                    reply["note"] = json!("Couldn't ask the store which versions it has: the store has the last word on whether this one is newer");
+                }
+                if prepared.ok() && zeron_rpc::caller().is_local() {
+                    let ticket = lock(&self.inner.reviews).mint(reviews::Kind::PublishTemplate, reviews::Origin::Local, &id, &prepared.hash)?;
+                    reply["ticket"] = json!(ticket);
+                }
+                RpcReply::value(&reply)
+            }
+            methods::PUBLISH_TEMPLATE => {
+                let p: PublishParams = parse_params(params)?;
+                if !zeron_rpc::caller().is_local() {
+                    return Err(reviews::needed("Publishing a template"));
+                }
+                let id = p.id.trim().to_owned();
+                lock(&self.inner.reviews).redeem(reviews::Kind::PublishTemplate, &reviews::Origin::Local, &id, &p.hash, p.ticket.as_deref())?;
+                RpcReply::value(&self.publish_template(&id, &p.hash).await)
+            }
             methods::STORE_MY_PLUGINS => {
                 let kind = kind_of(&params)?;
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
@@ -867,6 +913,70 @@ impl Plugins {
             }
             Err((error, fields)) => refused(&error, &fields),
         }
+    }
+
+    /// Template `id`, one of your own here, read and checked for publishing:
+    /// not Zeron's, not one installed from a package, nor one (or a copy of
+    /// one) that was taken down.
+    async fn own_template(&self, id: &str) -> Result<publish::PreparedTemplate, String> {
+        let (dir, id) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let folder = crate::plugins::templates::own_dir(&dir, &id)?;
+            template_blocks::refuse(&dir, &folder, "published")?;
+            let prepared = publish::read_template(&folder)?;
+            // (Here a template is its folder's id; published elsewhere, its
+            // manifest's: one that says both is no surprise.)
+            if prepared.id() != id {
+                return Err(failure(crate::plugins::listing::rule::BAD_PACKAGE, format!("Its zeron-template.json says its id is {:?}: make that {id:?}, its folder's name", plain(prepared.id(), 80))));
+            }
+            Ok(prepared)
+        })
+        .await
+        .map_err(|_| "Couldn't read it".to_string())?
+    }
+
+    /// Your template `id`, as checked (`hash`), signed with this device's key
+    /// in the templates' domain and sent with your session: the store's
+    /// answer.
+    async fn publish_template(&self, id: &str, hash: &str) -> Value {
+        let (client, caller) = match self.store_as_person().await {
+            Ok(store) => store,
+            Err(error) => return not_template(&error),
+        };
+        let client = client.of(Kind::Template);
+        self.register_key().await;
+        // (Read again: what's sent is what was checked.)
+        let prepared = match self.own_template(id).await {
+            Ok(prepared) => prepared,
+            Err(error) => return not_template(&error),
+        };
+        if prepared.hash != hash {
+            return not_template(&failure("changed", "It changed since it was checked: check it again"));
+        }
+        if !prepared.ok() {
+            let first = &prepared.problems[0];
+            let mut value = refused(&failure(first.rule, publish::lines(&prepared.problems).join("; ")), &json!({ "field": first.field, "cause": first.cause, "word": first.word }));
+            says_kind(&mut value, Kind::Template);
+            return value;
+        }
+        let (item, data_dir) = (prepared.id().to_owned(), self.inner.data_dir.clone());
+        let packed = tokio::task::spawn_blocking(move || prepared.pack(Some(&signing::load_or_create_key(&data_dir)?))).await;
+        let raw = match packed {
+            Ok(Ok(raw)) => raw,
+            Ok(Err(error)) => return not_template(&error),
+            Err(_) => return not_template("Couldn't pack it"),
+        };
+        let mut reply = match client.publish(&item, raw, &caller).await {
+            Ok(mut reply) => {
+                reply["ok"] = json!(true);
+                *lock(&self.inner.publishes_checked) = None;
+                reply["url"] = json!(client.page_url(&item));
+                reply
+            }
+            Err((error, fields)) => refused(&error, &fields),
+        };
+        says_kind(&mut reply, Kind::Template);
+        reply
     }
 
     /// A deploy token for the account (contract a315eef5a), its scope fixed
@@ -1783,7 +1893,7 @@ impl Plugins {
     /// Look over the account's publishes (`/me/plugins`) for any this
     /// device didn't make, and keep a notice of each for the app, with a
     /// desktop banner: once per version. Signed out, nothing. An account
-    /// with no plugins is asked again only every few hours.
+    /// with nothing there is asked again only every few hours.
     pub async fn check_publishes(&self) {
         let Ok((client, caller)) = self.store_as_person().await else { return };
         let idle_for = publishes_idle(super::super::lifecycle::local_every());
@@ -1791,35 +1901,50 @@ impl Plugins {
         if idle {
             return;
         }
-        let mine = match client.my_plugins(&caller).await {
-            Ok(mine) => mine,
-            Err(error) => {
-                tracing::debug!(%error, "store: the account's publishes couldn't be read");
-                return;
-            }
-        };
-        let had = mine["plugins"].as_array().is_some_and(|plugins| !plugins.is_empty());
-        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
-        let account = own_publisher_id(&mine).unwrap_or_default();
+        // Each kind on its own: one that can't be read holds up no other.
+        let (plugins, templates) = (client.my_plugins(&caller).await, client.of(Kind::Template).my_plugins(&caller).await);
         let own_key = signing::load_key(&self.inner.data_dir).map(|key| key.public()).unwrap_or_default();
-        let before = lock(&self.inner.state).publishes.clone().filter(|seen| seen.account == account);
-        let (mut seen, new) = notices::look(before.as_ref(), &mine, &own_key, |text| plain(text, 120));
-        seen.account = account;
-        if before.as_ref() == Some(&seen) && new.is_empty() {
-            return;
+        let (mut had, mut banners) = (false, Vec::new());
+        for (kind, answer) in [(Kind::Plugin, plugins), (Kind::Template, templates)] {
+            let mine = match answer {
+                Ok(mine) => mine,
+                // (A store without templates has none of yours.)
+                Err(error) if kind == Kind::Template && install::reason_of(&error) == Some(client::reason::NOT_IN_STORE) => continue,
+                Err(error) => {
+                    tracing::debug!(%error, kind = kind.segment(), "store: the account's publishes couldn't be read");
+                    had = true;
+                    continue;
+                }
+            };
+            had |= mine[kind.segment()].as_array().is_some_and(|items| !items.is_empty());
+            let account = own_publisher_id(&mine).unwrap_or_default();
+            let before = match kind {
+                Kind::Plugin => lock(&self.inner.state).publishes.clone(),
+                Kind::Template => lock(&self.inner.state).template_publishes.clone(),
+            }
+            .filter(|seen| seen.account == account);
+            let (mut seen, new) = notices::look(kind, before.as_ref(), &mine, &own_key, |text| plain(text, 120));
+            seen.account = account;
+            if before.as_ref() == Some(&seen) && new.is_empty() {
+                continue;
+            }
+            banners.extend(new.iter().map(|n| (if n.template { "Template published" } else { "Plugin published" }, n.words())));
+            let _ = self.update_state(|state| {
+                match kind {
+                    Kind::Plugin => state.publishes = Some(seen),
+                    Kind::Template => state.template_publishes = Some(seen),
+                }
+                notices::add(&mut state.publish_notices, new);
+            });
         }
-        let banners: Vec<String> = new.iter().map(notices::PublishNotice::words).collect();
-        let _ = self.update_state(|state| {
-            state.publishes = Some(seen);
-            notices::add(&mut state.publish_notices, new);
-        });
+        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
         if banners.is_empty() {
             return;
         }
         self.publish_list();
         if let Some(notify) = lock(&self.inner.notifier).clone() {
-            for words in banners {
-                notify("zeron", "Plugin published", &words, None);
+            for (title, words) in banners {
+                notify("zeron", title, &words, None);
             }
         }
     }
