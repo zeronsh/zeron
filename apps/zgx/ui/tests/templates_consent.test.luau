@@ -226,7 +226,7 @@ test("a verified version taken instead says what it replaces, older or not", fun
 	local app = open()
 	app:command("instead")
 	app:frames(20)
-	expect(app:tree("#template-consent-instead")).to_contain("This replaces 1.3.0 with 1.2.0, an older version")
+	expect(app:tree("#template-consent-instead")).to_contain("This replaces 1.3.0 with 1.2.0, an older version, which Zero")
 	-- Its mark taken off as it showed: no word that Zeron verified it.
 	app:command("instead_withdrawn")
 	app:frames(20)
@@ -234,7 +234,7 @@ test("a verified version taken instead says what it replaces, older or not", fun
 	expect(app:tree("#template-consent-instead")).never.to_contain("verified")
 	app:command("instead_unknown")
 	app:frames(20)
-	expect(app:tree("#template-consent-instead")).to_contain("This replaces the version you have with 1.4.0")
+	expect(app:tree("#template-consent-instead")).to_contain("This replaces the version you have with 1.4.0, which")
 	app:command("store")
 	app:frames(20)
 	expect(app:has("#template-consent-instead")).to_be(false)
