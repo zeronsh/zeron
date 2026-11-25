@@ -569,9 +569,11 @@ local function delegated_row(now: () -> Block, chat_of: ChatOf, open: OpenChat):
 			local words = DELEGATED[b.what or "subagents"] or DELEGATED.subagents
 			return locale.s(words[if b.live then 1 else 2], { n = #(b.tasks or {}) })
 		end,
-		-- (While the call is out, its line says that much.)
+		-- (While the call is out, its line says that much. A message's chats
+		-- aren't this one's to wait on: nothing to count.)
 		note = function(): string?
-			return if now().live then nil else standing_note(rows:get())
+			local b = now()
+			return if b.live or b.what == "message" then nil else standing_note(rows:get())
 		end,
 		rows = function(): { Delegation.Row }
 			return rows:get()
