@@ -240,8 +240,8 @@ const MAX_STOCK_BYTES: usize = 4 * 1024 * 1024;
 /// copies, and each official template's.
 pub fn stock(ui: &Path, version: &str) -> Result<Value, String> {
     use zeron_plugin_guard::template::{meta, of_the_app, plain};
-    super::version::Version::parse(version).map_err(|e| format!("{version:?} isn't a release's version: {e}"))?;
-    if version == "0.0.0" {
+    let parsed = super::version::Version::parse(version).map_err(|e| format!("{version:?} isn't a release's version: {e}"))?;
+    if (parsed.major, parsed.minor, parsed.patch) == (0, 0, 0) {
         return Err("0.0.0 is a development build's version, never a release's".into());
     }
     let mut files: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
@@ -868,8 +868,10 @@ mod tests {
         tokens.sort();
         let files = json!({ ".luaurc": [hash("{}")], "app.luau": [hash("app")], "ds/tokens.luau": tokens, "only.luau": [hash("only")], "same.luau": [hash("same")] });
         assert_eq!(stock(ui, "0.3.18").unwrap(), json!({ "version": "0.3.18", "files": files }));
-        assert_eq!(stock(ui, "0.4.0-beta.1").unwrap()["version"], "0.4.0-beta.1");
-        for version in ["", "0.3", "dev", "v0.3.18", "0.0.0"] {
+        for version in ["0.4.0-beta.1", "0.0.1"] {
+            assert_eq!(stock(ui, version).unwrap()["version"], version);
+        }
+        for version in ["", "0.3", "dev", "v0.3.18", "0.0.0", "0.0.0-dev", "0.0.0+x", "0.0.0-dev.1+x"] {
             assert!(stock(ui, version).is_err(), "{version:?} isn't a release");
         }
         assert!(stock(&ui.join("nowhere"), "0.3.18").is_err());
