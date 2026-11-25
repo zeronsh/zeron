@@ -61,7 +61,8 @@ pub fn short_name(rel: &str) -> bool {
 }
 
 /// Whether `rel` holds a character drawn as nothing (Default_Ignorable, or a
-/// control). Some filesystems (HFS+) leave them out of a name they look up, so
+/// control), but the selectors of ordinary emoji (`path::selector`, which
+/// `path::fold` compares names without). Some filesystems (HFS+) leave them out of a name they look up, so
 /// `screens/tem\u{200c}plates/page.luau` is `screens/templates/page.luau` there.
 /// Never loaded, on any system.
 pub fn unseen(rel: &str) -> bool {
@@ -69,7 +70,7 @@ pub fn unseen(rel: &str) -> bool {
         c.is_control()
             || matches!(c,
                 '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}'
-                | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+                | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0d}'
                 | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
                 | '\u{e0000}'..='\u{e0fff}')
     })
@@ -190,6 +191,13 @@ mod tests {
             (".luau\u{feff}rc", false, false, false, false, false, true),
             ("account\u{e0041}/x.luau", false, false, false, false, false, true),
             ("screens/a\u{7f}.luau", false, false, false, false, false, true),
+            ("screens/a\u{fe0d}.luau", false, false, false, false, false, true),
+            ("screens/\u{2764}\u{fe0f}.luau", false, false, false, false, true, true),
+            ("screens/a\u{fe0e}.luau", false, false, false, false, true, true),
+            ("README\u{fe0f}.md", false, false, false, false, true, true),
+            ("screens/templa\u{fe0f}tes/page.luau", false, false, true, false, false, false),
+            ("\u{fe0e}.luaurc", false, false, true, false, false, false),
+            ("screenshots\u{fe0f}/a.png", false, true, false, false, false, true),
             ("screens/设置.luau", false, false, false, false, true, true),
             ("screens/café.luau", false, false, false, false, true, true),
         ] {
