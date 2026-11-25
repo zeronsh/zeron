@@ -964,7 +964,9 @@ impl Actor {
                             .unwrap_or(body.as_str())
                             .to_owned();
                         if named {
-                            lock(&doc).reject_batch(&batch.batch, &reason);
+                            if lock(&doc).reject_batch(&batch.batch, &reason) {
+                                let _ = events.send(RegistryEvent::Applied);
+                            }
                         } else {
                             tracing::warn!(batch = %batch.batch, reason = %reason, "registry: http push refused; skipping it");
                             push_failed = true;
