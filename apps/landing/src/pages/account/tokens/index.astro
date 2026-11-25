@@ -96,7 +96,7 @@ const canMake = !mine?.ok || !templates?.ok || [...yours.values()].some((p) => p
                 const ids = "all" in k.scope ? [] : k.scope.plugins;
                 const tiles = (
                   <span class="tiles" aria-hidden="true">
-                    {ids.slice(0, 3).map((id) => { return <Thumb item={plugin(id)} size="xs" />; })}
+                    {ids.slice(0, 3).map((id) => { return <Thumb item={plugin(id)} size="xs" mixed />; })}
                     {ids.length > 3 && <span class="more num">+{ids.length - 3}</span>}
                   </span>
                 );
@@ -108,7 +108,7 @@ const canMake = !mine?.ok || !templates?.ok || [...yours.values()].some((p) => p
                       <details class="every">
                         <summary class="c-scope"><span class="sw">{scopeWords(k)}</span>{tiles}<span class="show">Show all<span class="sr-only"> that {k.name} can publish</span></span><Icon name="chev" /></summary>
                         <ul class="plist" aria-label={`What ${k.name} can publish`}>
-                          {ids.map((id) => { const p = plugin(id); return <li class="pl"><Thumb item={p} size="xs" /><span>{p.name}</span></li>; })}
+                          {ids.map((id) => { const p = plugin(id); return <li class="pl"><Thumb item={p} size="xs" mixed /><span>{p.name}</span></li>; })}
                         </ul>
                       </details>
                     ) : (

@@ -51,7 +51,7 @@ const WORD: Record<Change, string> = { added: "added", modified: "changed", remo
 </ul>
 
 <style>
-  .tree { display: grid; gap: 1px; font-size: 13px; }
+  .tree { display: grid; gap: 1px; padding: 0; list-style: none; font-size: 13px; }
   .tree .tree { margin-left: 13px; padding-left: 8px; border-left: 1px solid var(--line); }
   summary, .file { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; color: var(--text-2); border-radius: var(--radius-md); cursor: pointer; transition: background-color 0.12s, color 0.12s; }
   summary { list-style: none; }

@@ -5,7 +5,9 @@
 // what its author says changed; its files, what changed marked; what the
 // checks found; its listing as visitors will see it. Beside it, the
 // decision, which never scrolls away (amendment 45: it is listed already):
-// Mark verified, Don't verify (a reason, words, and the author's view of
+// (A template asks for nothing: where the asks are, it says it runs as Zeron
+// itself; its files are what there is to read, a first version's grouped by
+// whether they're Zeron's own.) Mark verified, Don't verify (a reason, words, and the author's view of
 // them), Take down (harmful: turned off on devices) or Remove; then the
 // author, the plugin's open reports and its versions. Its files and its
 // changes line by line are views of their own. Admins only; anyone else
@@ -14,7 +16,8 @@ import AppIcon from "../../../../components/look/AppIcon.astro";
 import Failed from "../../../../components/look/Failed.astro";
 import Icon from "../../../../components/look/Icon.astro";
 import Seal from "../../../../components/look/Seal.astro";
-import Tile from "../../../../components/look/Tile.astro";
+import FileRows from "../../../../components/look/FileRows.astro";
+import Thumb from "../../../../components/look/Thumb.astro";
 import Words from "../../../../components/look/Words.astro";
 import Decline from "../../../../components/kit/Decline.astro";
 import TakeDown from "../../../../components/kit/TakeDown.astro";
@@ -29,21 +32,24 @@ import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { bytes, count, date, dateTime, day, sinceInSentence, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
+import { KIND_WORDS, kindOf, kindOfItem, RUNS_AS } from "../../../../lib/store/kind.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { drawingChecks } from "../../../../lib/store/drawing.ts";
 import { drawn } from "../../../../lib/store/rendered.ts";
 import { HighlightBudget } from "../../../../lib/store/highlight.ts";
 import { isPluginId, isVersion, versionParam } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
-import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
+import { changedFiles, countRows, diffRows, fileTree, languageOf, manifestFile, manifestName, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+import { satisfies } from "../../../../lib/store/semver.ts";
+import { fileUrl, memberUrl, pictureUrl, pluginUrl, staffUrl } from "../../../../lib/store/urls.ts";
 import { reportReasonWords, statusWords, store } from "../../../../lib/store/words.ts";
 import type { Check, PackageFile, VersionInfo } from "../../../../lib/store/types.ts";
 import { lsb } from "../../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id } = Astro.params;
 const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version)) return new Response(null, { status: 404 });
@@ -52,8 +58,10 @@ if (!session) return new Response(null, { status: 404 });
 
 const edge = Astro.locals.edge;
 // (The plugin's own staff record beside it: its open reports and its versions, for the rail.)
-const [result, record] = await Promise.all([edge.submission(id, version), edge.adminPlugin(id)]);
-if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+// (And, for a template, the latest Zeron: the one it was made from is said plainly when it isn't that.)
+const [result, record, latestZeron] = await Promise.all([edge.submission(id, version), edge.adminPlugin(id, kind), kind === "template" ? edge.latestRelease() : null]);
+// (Staff's too: an id of the other kind isn't under this prefix.)
+if (result.ok ? kindOfItem(result.data) !== kind : result.error === "not_found") return new Response(null, { status: 404 });
 privatePage(Astro);
 const flash = takeFlash(Astro.cookies);
 const s = result.ok ? result.data : null;
@@ -65,15 +73,16 @@ const VIEWS = { overview: "Overview", files: "Files", changes: "Changes" } as co
 type View = keyof typeof VIEWS;
 const askedView = Astro.url.searchParams.get("view");
 const view: View = askedView && Object.hasOwn(VIEWS, askedView) && (askedView !== "changes" || s?.base) ? (askedView as View) : "overview";
-const here = `/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(version)}`;
+const here = staffUrl(id, kind, version);
 const viewHref = (v: View, extra: Record<string, string> = {}) => `${here}${v === "overview" && !Object.keys(extra).length ? "" : `?${new URLSearchParams({ view: v, ...extra })}`}`;
 
 // Its files, with its manifest among them as the reviewer reads it; against
 // the base's, what was added, changed or taken out (from the edge's hashes).
 const manifest = s ? manifestText(s.manifest) : "";
 const baseManifest = s?.base ? manifestText(s.base.manifest) : "";
-const files = s ? [await manifestFile(manifest), ...s.files] : [];
-const changes = s?.base ? changedFiles(files, [await manifestFile(baseManifest), ...s.base_files]) : [];
+const MANIFEST_FILE = manifestName(kind);
+const files = s ? [await manifestFile(manifest, MANIFEST_FILE), ...s.files] : [];
+const changes = s?.base ? changedFiles(files, [await manifestFile(baseManifest, MANIFEST_FILE), ...s.base_files]) : [];
 const changeOf = new Map(changes.map((c) => [c.path, c.change]));
 const unchanged = s?.base ? files.filter((f) => !changeOf.has(f.path)) : [];
 const CHANGE = { added: { mark: "A", label: "New", tone: "add" }, modified: { mark: "M", label: "Changed", tone: "mod" }, removed: { mark: "D", label: "Removed", tone: "del" } } as const;
@@ -82,7 +91,7 @@ const CHANGE = { added: { mark: "A", label: "New", tone: "add" }, modified: { ma
 // its own path: never another in its place), else the manifest. A picture
 // shows as itself; an SVG as itself and as its source, which is what runs.
 /** A file's text, from the edge (the manifest from what came with the submission). */
-const textOf = async (at: string, path: string, manifestAt: string) => (path === MANIFEST_FILE ? { text: manifestAt } : readText(await edge.file(id, at, path, true)));
+const textOf = async (at: string, path: string, manifestAt: string) => (path === MANIFEST_FILE ? { text: manifestAt } : readText(await edge.file(id, at, path, true, kind)));
 type Content = { text: string } | { binary: true } | { tooBig: true } | null;
 let viewing: { file: PackageFile | null; path: string; picture: string | null; content: Content | { missing: true } | "picture" } | null = null;
 if (s && view === "files") {
@@ -91,7 +100,7 @@ if (s && view === "files") {
   if (!file) viewing = { file: null, path: asked ?? "", picture: null, content: { missing: true } };
   else {
     const type = pictureType(file.path);
-    const picture = type ? fileUrl(id, version, file.path) : null;
+    const picture = type ? fileUrl(id, version, file.path, kind) : null;
     viewing = { file, path: file.path, picture, content: type && type !== "image/svg+xml" ? "picture" : file.binary ? { binary: true } : await textOf(version, file.path, manifest) };
   }
 }
@@ -107,12 +116,15 @@ let linesLeft = PAGE_LINES;
 let bytesLeft = PAGE_BYTES;
 /** What the changes may highlight, all files together (highlight.ts). */
 const diffHighlight = new HighlightBudget(64 * 1024);
-let diffs: { path: string; change: keyof typeof CHANGE; rows: DiffRow[] | null; note?: string }[] = [];
+let diffs: { path: string; change: keyof typeof CHANGE; rows: DiffRow[] | null; note?: string; pictures?: { before: string | null; after: string | null } }[] = [];
 if (s?.base && view === "changes") {
   const base = s.base.version;
   diffs = await Promise.all(
     changes.map(async (c, i) => {
       const file = c.now ?? c.before!;
+      // (A picture, before and after, side by side: an SVG's source is what runs, so it's compared as text.)
+      const type = pictureType(c.path);
+      if (type && type !== "image/svg+xml") return { path: c.path, change: c.change, rows: null, pictures: { before: c.before ? fileUrl(id, base, c.path, kind) : null, after: c.now ? fileUrl(id, version, c.path, kind) : null } };
       if (i >= DIFF_FILES) return { path: c.path, change: c.change, rows: null, note: "Open it in Files to read it." };
       if (file.binary) return { path: c.path, change: c.change, rows: null, note: "Not text: compare it by its files." };
       const [now, before] = await Promise.all([
@@ -135,9 +147,9 @@ if (s?.base && view === "changes") {
 
 // The overview's parts. (Rendered each time: what staff see of a version is no one's to keep.)
 const overview = s && view === "overview";
-const file = (p: string) => fileUrl(id, version, p);
+const file = (p: string) => fileUrl(id, version, p, kind);
 const readmeText = s ? (s.version.readme ?? (await (async () => {
-  const got = await readText(await edge.file(id, version, "README.md", true));
+  const got = await readText(await edge.file(id, version, "README.md", true, kind));
   return got && "text" in got ? got.text : "";
 })())) : "";
 // Drawn on every view (linear in their text, markdown.ts), each try recorded
@@ -155,11 +167,28 @@ const readme = overview ? (readmeDrawn?.html ?? "") : "";
 // view: a version that can't be drawn is itself a reason not to verify it.
 const drawing: Check[] = drawingChecks(readmeDrawn, notesDrawn, version);
 // (Each a path in the package, never anything else: pictureUrl refuses one that climbs out of it.)
-const pictures = (s?.version.screenshots ?? []).flatMap((p) => pictureUrl(id, version, p) ?? []);
-const weighed = s ? compared(s.permissions, s.base ? s.permissions_diff : null) : { lines: [], dropped: [] };
+// (A template's preview first: it's what its list and its page show.)
+const pictures = [...(s && kind === "template" ? ["preview.png"] : []), ...(s?.version.screenshots ?? [])].flatMap((p) => pictureUrl(id, version, p, kind) ?? []);
+const weighed = s?.permissions ? compared(s.permissions, s.base ? s.permissions_diff : null) : { lines: [], dropped: [] };
 const moved = weighed.lines.filter((l) => l.change);
 const same = weighed.lines.filter((l) => !l.change);
 const checks = [...drawing, ...(s?.checks ?? [])];
+// A template's files against Zeron's own, at the version its author says it was made from (the edge's hashes of it): the
+// page groups by it on a first version; against a base, a quiet word on each. Not known, every file is shown, and it says so.
+const zeron = kind === "template" ? (s?.zeron_base ?? null) : null;
+const grouped = zeron?.known === true && !s?.base;
+const ZERON = { same: "Same as Zeron's", changed: "Changed from Zeron's", new: "Not Zeron's" } as const;
+const wordOf = (f: PackageFile | undefined) => (zeron?.known && f?.zeron ? ZERON[f.zeron] : null);
+const row = (f: PackageFile) => ({ path: f.path, href: viewHref("files", { path: f.path }), bytes: f.bytes, binary: f.binary });
+const behind = zeron && latestZeron && satisfies(latestZeron, `>${zeron.version}`) === true ? ` The current Zeron is ${latestZeron}.` : "";
+const groups = grouped
+  ? [
+      { label: "Changed", rows: files.filter((f) => f.zeron === "changed"), folded: false },
+      // (Its manifest travels beside its files: new, as every template's is.)
+      { label: "New", rows: files.filter((f) => f.zeron !== "changed" && f.zeron !== "same"), folded: false },
+      { label: `Same as Zeron ${zeron!.version}'s`, rows: files.filter((f) => f.zeron === "same"), folded: true },
+    ].filter((g) => g.rows.length > 0)
+  : [];
 const toLook = checks.filter((c) => c.level !== "ok");
 const failed = checks.filter((c) => c.level === "fail").length;
 const passed = checks.length - toLook.length;
@@ -222,8 +251,8 @@ const versions = record.ok ? record.data.versions : null;
         <>
           {/* (As a plugin's page heads it: its tile; the name, the version a mono pill and where it stands right after it,
                on its line; who, when and from where, how many have it, under them.) */}
-          <header class="head vhead rv-head">
-            <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="xl" />
+          <header class:list={["head vhead rv-head", kind]}>
+            <Thumb item={{ ...s.plugin, kind, name, icon: s.version.icon ?? s.plugin.icon }} version={version} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b>{standing && <> <span class:list={["state", standing.tone]}>{standing.seal && <Seal quiet />}{standing.label}</span></>}</h1>
               <p class="by">
@@ -253,7 +282,13 @@ const versions = record.ok ? record.data.versions : null;
 
               {view === "overview" && (
                 <>
-                  <section id="asks" aria-labelledby="asks-h">
+                  {kind === "template" && (
+                    <section id="asks" aria-labelledby="asks-h">
+                      <h2 id="asks-h">{RUNS_AS.title}</h2>
+                      <p class="sub2">{RUNS_AS.line} It asks for nothing: what it does is in its files.</p>
+                    </section>
+                  )}
+                  {kind === "plugin" && <section id="asks" aria-labelledby="asks-h">
                     <h2 id="asks-h">What it asks for</h2>
                     <p class="sub2">{asksSaid}</p>
                     {weighed.lines.length === 0 ? (
@@ -301,7 +336,7 @@ const versions = record.ok ? record.data.versions : null;
                         ))}
                       </ul>
                     )}
-                  </section>
+                  </section>}
 
                   <section id="said" aria-labelledby="said-h">
                     <h2 id="said-h">What the author says changed</h2>
@@ -315,41 +350,47 @@ const versions = record.ok ? record.data.versions : null;
                         <p class="sub2">
                           {/* (Its package's files, as the size check counts them; the manifest travels beside them.) */}
                           {plural(s.files.length, "file")}, {bytes(s.files.reduce((n, f) => n + f.bytes, 0))}, and its manifest.{" "}
-                          {s.base ? (changes.length === 0 ? `None changed since ${s.base.version}.` : `${[changes.filter((c) => c.change === "modified").length && `${count(changes.filter((c) => c.change === "modified").length)} changed`, changes.filter((c) => c.change === "added").length && `${count(changes.filter((c) => c.change === "added").length)} added`, changes.filter((c) => c.change === "removed").length && `${count(changes.filter((c) => c.change === "removed").length)} taken out`].filter(Boolean).join(", ")} since ${s.base.version}.`) : "Its first version: every file is new."}
+                          {s.base ? (changes.length === 0 ? `None changed since ${s.base.version}.` : `${[changes.filter((c) => c.change === "modified").length && `${count(changes.filter((c) => c.change === "modified").length)} changed`, changes.filter((c) => c.change === "added").length && `${count(changes.filter((c) => c.change === "added").length)} added`, changes.filter((c) => c.change === "removed").length && `${count(changes.filter((c) => c.change === "removed").length)} taken out`].filter(Boolean).join(", ")} since ${s.base.version}.`) : zeron?.known ? `${[groups[0]?.label === "Changed" && `${count(groups[0].rows.length)} changed from Zeron's`, `${count(groups.find((g) => g.label === "New")?.rows.length ?? 0)} new`].filter(Boolean).join(", ")}.` : zeron ? "" : "Its first version: every file is new."}
                         </p>
                       </div>
                       {s.base && changes.length > 0 && <a class="btn sec sm" href={viewHref("changes")}>Read the changes<Icon name="arrow" /></a>}
                     </div>
-                    <div class="card files">
-                      <ul class="flist">
-                        {(s.base ? changes.map((c) => ({ path: c.path, bytes: (c.now ?? c.before)!.bytes, change: c.change as keyof typeof CHANGE | null, binary: (c.now ?? c.before)!.binary })) : files.map((f) => ({ path: f.path, bytes: f.bytes, change: null, binary: f.binary }))).map((f) => (
-                          <li>
-                            <a href={f.change ? `${viewHref("changes")}#change-${encodeURIComponent(f.path)}` : viewHref("files", { path: f.path })} class:list={{ removed: f.change === "removed" }}>
-                              {f.change && <span class:list={["m", CHANGE[f.change].tone]} title={CHANGE[f.change].label}>{CHANGE[f.change].mark}<span class="sr-only"> ({CHANGE[f.change].label})</span></span>}
-                              <span class="fn">{f.path}</span>
-                              {f.binary && <span class="state no">Not text</span>}
-                              <span class="d num">{bytes(f.bytes)}</span>
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                      {unchanged.length > 0 && (
-                        <details class="unchanged">
-                          <summary>{plural(unchanged.length, "file")} as in {s.base!.version}<Icon name="chev" /></summary>
-                          <ul class="flist">
-                            {unchanged.map((f) => (
-                              <li>
-                                <a href={viewHref("files", { path: f.path })}>
-                                  <span class="fn">{f.path}</span>
-                                  {f.binary && <span class="state no">Not text</span>}
-                                  <span class="d num">{bytes(f.bytes)}</span>
-                                </a>
-                              </li>
-                            ))}
-                          </ul>
-                        </details>
-                      )}
-                    </div>
+                    {zeron && (
+                      <p class="zeron-base">{zeron.known ? `Compared with Zeron ${zeron.version}, the version its author made it from.${behind}` : `Its author made it from Zeron ${zeron.version}.${behind} That version's own files aren't known here, so every file is shown.`}</p>
+                    )}
+                    {grouped ? (
+                      groups.map((g) =>
+                        g.folded ? (
+                          <div class="card files">
+                            <details class="unchanged">
+                              <summary>{g.label}<span class="num">{count(g.rows.length)}</span><Icon name="chev" /></summary>
+                              <FileRows rows={g.rows.map(row)} />
+                            </details>
+                          </div>
+                        ) : (
+                          <section class="fgroup" aria-label={g.label}>
+                            <h3>{g.label}<span class="num">{count(g.rows.length)}</span></h3>
+                            <div class="card files"><FileRows rows={g.rows.map(row)} /></div>
+                          </section>
+                        ),
+                      )
+                    ) : (
+                      <div class="card files">
+                        <FileRows
+                          rows={
+                            s.base
+                              ? changes.map((c) => ({ path: c.path, bytes: (c.now ?? c.before)!.bytes, binary: (c.now ?? c.before)!.binary, change: c.change, word: wordOf(c.now), href: `${viewHref("changes")}#change-${encodeURIComponent(c.path)}` }))
+                              : files.map(row)
+                          }
+                        />
+                        {unchanged.length > 0 && (
+                          <details class="unchanged">
+                            <summary>{plural(unchanged.length, "file")} as in {s.base!.version}<Icon name="chev" /></summary>
+                            <FileRows rows={unchanged.map((f) => ({ ...row(f), word: wordOf(f) }))} />
+                          </details>
+                        )}
+                      </div>
+                    )}
                   </section>
 
                   <section id="checks" aria-labelledby="checks-h">
@@ -373,7 +414,7 @@ const versions = record.ok ? record.data.versions : null;
                         <h2 id="listing-h">Its listing</h2>
                         <p class="sub2">As visitors will see it on its page.</p>
                       </div>
-                      {s.plugin.version && <a class="btn ghost sm" href={pluginUrl(id)}>Its page now<Icon name="out" /></a>}
+                      {s.plugin.version && <a class="btn ghost sm" href={pluginUrl(id, kind)}>Its page now<Icon name="out" /></a>}
                     </div>
                     {s.version.summary && <p class="rv-summary">{s.version.summary}</p>}
                     {pictures.length > 0 && (
@@ -425,7 +466,14 @@ const versions = record.ok ? record.data.versions : null;
                           <a class="fn" href={viewHref("files", { path: d.path })}>{d.path}</a>
                           {n && <span class="d num"><em class="pl">+{n.added}</em><em class="mi">−{n.removed}</em></span>}
                         </header>
-                        {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} budget={diffHighlight} /> : <p class="sub2 pad">Only its bytes changed.</p> : <p class="sub2 pad">{d.note}</p>}
+                        {d.pictures && (
+                          <div class="pair">
+                            {([["Before", d.pictures.before], ["After", d.pictures.after]] as const).map(([label, src]) => (
+                              <figure><figcaption>{label}</figcaption>{src ? <img src={src} alt={`${d.path}, ${label.toLowerCase()}`} loading="lazy" /> : <p class="none">None</p>}</figure>
+                            ))}
+                          </div>
+                        )}
+                        {d.pictures ? null : d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} budget={diffHighlight} /> : <p class="sub2 pad">Only its bytes changed.</p> : <p class="sub2 pad">{d.note}</p>}
                       </article>
                     );
                   })}
@@ -472,11 +520,11 @@ const versions = record.ok ? record.data.versions : null;
                   ) : (
                     <><dt>Account since</dt><dd>{s.publisher.created_at ? date(s.publisher.created_at) : "Deleted"}</dd></>
                   )}
-                  {s.publisher.plugins && <><dt>Plugins</dt><dd>{count(s.publisher.plugins.total)}{s.publisher.plugins.total > 0 && `, ${s.publisher.plugins.verified === s.publisher.plugins.total ? (s.publisher.plugins.total === 1 ? "verified" : "all verified") : `${count(s.publisher.plugins.verified)} with a verified version`}`}</dd></>}
+                  {([["Plugins", s.publisher.plugins], ["Templates", s.publisher.templates]] as const).map(([label, n]) => n && (label === "Plugins" || n.total > 0) && <><dt>{label}</dt><dd>{count(n.total)}{n.total > 0 && `, ${n.verified === n.total ? (n.total === 1 ? "verified" : "all verified") : `${count(n.verified)} with a verified version`}`}</dd></>)}
                 </dl>
               </section>
               <section aria-labelledby="reports-h">
-                <h2 class="rail-h" id="reports-h">Reports on this plugin</h2>
+                <h2 class="rail-h" id="reports-h">Reports on this {KIND_WORDS[kind].one}</h2>
                 {openReports === null ? (
                   <p class="none">They can't be loaded right now.</p>
                 ) : openReports.length === 0 ? (
@@ -506,8 +554,8 @@ const versions = record.ok ? record.data.versions : null;
                         const p = pill(v);
                         return (
                           <li>
-                            <a href={`/admin/plugins/${encodeURIComponent(id)}/${encodeURIComponent(v.version)}`} aria-current={v.version === version ? "page" : undefined}>
-                              <b>{v.version}</b>
+                            <a href={staffUrl(id, kind, v.version)} aria-current={v.version === version ? "page" : undefined}>
+                              <b title={v.version}>{v.version}</b>
                               <span class:list={["state", p.tone]}>{p.seal && <Seal quiet />}{p.label}</span>
                               <time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time>
                             </a>
@@ -515,7 +563,7 @@ const versions = record.ok ? record.data.versions : null;
                         );
                       })}
                     </ul>
-                    <a class="more" href={`/admin/plugins/${encodeURIComponent(id)}`}>{versions.length > VERSIONS_SHOWN ? `All ${count(versions.length)} versions` : "The plugin's staff page"}<Icon name="chev" /></a>
+                    <a class="more" href={staffUrl(id, kind)}>{versions.length > VERSIONS_SHOWN ? `All ${count(versions.length)} versions` : `The ${KIND_WORDS[kind].one}'s staff page`}<Icon name="chev" /></a>
                   </>
                 )}
               </section>

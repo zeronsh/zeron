@@ -36,6 +36,9 @@ export function httpsUrl(value: string | null | undefined): string | null {
   }
 }
 
+/** An item's staff page, and a version's of it. (An id of the other kind isn't there under a prefix, for staff too.) */
+export const staffUrl = (id: string, kind: Kind = "plugin", version?: string) => `/admin${pluginUrl(id, kind)}${version === undefined ? "" : `/${encodeURIComponent(version)}`}`;
+
 /** A member's card (served by the edge on this host). */
 export const memberUrl = (username: string) => `/@${encodeURIComponent(username)}`;
 

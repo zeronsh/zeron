@@ -11,7 +11,7 @@ import Failed from "../../../../components/look/Failed.astro";
 import Flash from "../../../../components/look/Flash.astro";
 import Icon from "../../../../components/look/Icon.astro";
 import Seal from "../../../../components/look/Seal.astro";
-import Tile from "../../../../components/look/Tile.astro";
+import Thumb from "../../../../components/look/Thumb.astro";
 import Words from "../../../../components/look/Words.astro";
 import Store from "../../../../layouts/Store.astro";
 import "../../../../styles/look/account.css";
@@ -20,24 +20,26 @@ import { lsb } from "../../../../lib/store/bearing.ts";
 import { pluginAsk, reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.ts";
+import { KIND_WORDS, kindOf } from "../../../../lib/store/kind.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../lib/store/names.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
 import { everListed, listingState, PILL_TONE, reasonWords, verificationState, versionState } from "../../../../lib/store/states.ts";
-import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+import { memberUrl, pluginUrl, staffUrl } from "../../../../lib/store/urls.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
 const session = await adminSession(Astro);
 if (!session) return new Response(null, { status: 404 });
-const result = await Astro.locals.edge.adminPlugin(id);
+const result = await Astro.locals.edge.adminPlugin(id, kind);
 if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
 privatePage(Astro);
 const flash = takeFlash(Astro.cookies);
 const a = result.ok ? result.data : null;
-const here = `/admin/plugins/${encodeURIComponent(id)}`;
+const here = staffUrl(id, kind);
 const act = (action: string) => `${here}/actions/${action}`;
 const removable = (status: string) => status === "listed" || status === "yanked";
 const vid = (v: string) => `take-down-${v.replace(/[^\w-]/g, "_")}`;
@@ -48,21 +50,22 @@ const transfer = pluginAsk("transfer", name);
 const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismissed: { label: "Dismissed" } } as const;
 ---
 
-<Store title={`${name} · Review · Zeron`} description="A plugin, for its reviewers." noindex current="review" session={session}>
+<Store title={`${name} · Review · Zeron`} description={`${KIND_WORDS[kind].One}, for its reviewers.`} noindex current="review" session={session}>
   <div class="wrap acct staff-plugin">
     <nav class="crumbs" aria-label="Where this is"><a href="/admin/plugins">Review</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
     <Flash flash={flash} />
     {
       !a ? (
-        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} />
+        <Failed title={`This ${KIND_WORDS[kind].one} can't be loaded right now`} line="Try again in a moment." href={here} />
       ) : (
         <>
           <header class="ohead">
-            <Tile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size="xl" />
+            <Thumb item={{ ...a.plugin, name, kind }} version={a.plugin.version ?? a.versions[0]?.version ?? null} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
                 <span class="mono">{a.plugin.id}</span>
+                {kind === "template" && <span class="kind-mark">Template</span>}
                 {listing && a.status !== "listed" && <span class:list={["state", PILL_TONE[listing.tone]]}>{listing.label}</span>}
                 {a.plugin.featured && <span class="state quiet">Featured</span>}
                 <i aria-hidden="true"></i>
@@ -85,7 +88,7 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
               ) : (
                 <a class="btn sec sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
               )}
-              {a.status === "listed" && <a class="btn sec sm" href={pluginUrl(a.plugin.id)}>Its page<Icon name="out" /></a>}
+              {a.status === "listed" && <a class="btn sec sm" href={pluginUrl(a.plugin.id, kind)}>Its page<Icon name="out" /></a>}
             </div>
           </header>
 

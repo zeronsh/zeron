@@ -689,6 +689,27 @@ describe("templates, as the edge holds them", () => {
     }
     for (const path of ["/plugins/calm-desk", "/plugins/calm-desk/files/1.0.0/preview.png", "/templates/focus-timer", "/templates/focus-timer/versions/1.0.0"]) expect((await visitor.get(path)).response.status, path).toBe(404);
     expect((await visitor.get("/templates/sitemap.xml")).body).toContain("<loc>https://zeron.sh/templates/calm-desk</loc>");
+    // As staff read it: in the queue, marked; its review under its own prefix alone, what it runs as where the asks are,
+    // the Zeron its author named (whose own files this edge hasn't: said, and every file shown); verified there.
+    const queue = (await grace.get("/admin/plugins")).body;
+    expect(queue).toContain('href="/admin/templates/calm-desk/1.0.0"');
+    const review = await grace.get("/admin/templates/calm-desk/1.0.0");
+    expect(review.response.status).toBe(200);
+    inert(review.body);
+    expect(review.body).toMatch(/<h2 id="asks-h">Runs as Zeron itself<\/h2>/);
+    expect(review.body).toContain("Its author made it from Zeron 0.3.0.");
+    expect(review.body).toContain("own files aren&#39;t known here, so every file is shown.");
+    expect(review.body).toContain('<span class="fn">app.luau</span>');
+    expect(review.body).toContain('<span class="fn">zeron-template.json</span>');
+    expect(review.body).toMatch(/<dt>Templates<\/dt><dd>1/);
+    for (const path of ["/admin/plugins/calm-desk", "/admin/plugins/calm-desk/1.0.0", "/admin/templates/focus-timer", "/admin/templates/focus-timer/1.0.0"]) expect((await grace.get(path)).response.status, path).toBe(404);
+    expect((await grace.get("/admin/templates/calm-desk")).body).toContain('<span class="kind-mark">Template</span>');
+    const csrf = /name="csrf" value="([^"]+)"/.exec(review.body)![1]!;
+    expect((await grace.post("/admin/plugins/calm-desk/1.0.0/verify", { csrf })).status).toBe(404);
+    const verified = await grace.post("/admin/templates/calm-desk/1.0.0/verify", { csrf });
+    expect(verified.status).toBe(303);
+    expect((await grace.get("/admin/templates/calm-desk/1.0.0")).body).toMatch(/<span class="state ok">/);
+    expect((await grace.get("/admin/audit")).body).toContain('href="/admin/templates/calm-desk/1.0.0"');
     // (Reported under its own prefix, as the edge takes it.)
     const form = await adaOnWeb.get("/templates/calm-desk/report");
     expect(form.response.status).toBe(200);

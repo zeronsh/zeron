@@ -303,6 +303,8 @@
   .head h1 { margin-top: var(--s12); }
   .head.bare h1 { margin-top: 0; }
   .head > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
+  /* (A template's preview in its place: level with the title's first line, as the tile is.) */
+  .head > .thumb.xl { width: 56px; height: 35px; margin-top: var(--s12); border-radius: 6px; }
   .head .txt { display: contents; }
   .head h1 { font-size: 26px; line-height: 32px; letter-spacing: -0.03em; }
   .head h1 .seal.l { width: 22px; height: 22px; vertical-align: calc((0.71em - 22px) / 2); }

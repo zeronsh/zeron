@@ -15,7 +15,7 @@
 .acct .hd-row h1 { min-width: 0; }
 .acct .hd-row > .btn { flex: none; }
 .acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
-.acct .lead { margin-top: var(--s8); max-width: 37em; }
+.acct .lead { margin-top: var(--s8); max-width: 37em; text-wrap: balance; }
 .sub { display: flex; gap: var(--s32); margin-top: var(--s32); box-shadow: inset 0 -1px 0 var(--line); }
 .sub a { position: relative; padding: 0 0 var(--s12); font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: var(--s8); align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
 .sub a:hover { color: var(--text); }
@@ -115,7 +115,7 @@ a.trow:focus-visible { outline-offset: -2px; }
 .c-scope .sw { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .c-scope .tiles { display: flex; flex: none; align-items: center; gap: var(--s4); }
 .c-scope .tile.xs { width: 20px; height: 20px; font-size: 9px; }
-.c-scope .thumb.xs { width: 32px; height: 20px; }
+.c-scope .thumb.mixed.xs { width: 20px; height: 20px; }
 .c-scope .more { font-size: 12px; color: var(--text-3); }
 .c-scope .show { font-size: 13px; color: var(--text-2); font-weight: 500; }
 .every { display: contents; }

@@ -14,6 +14,7 @@ import { takeFlash } from "../../../lib/store/flash.ts";
 import { dateTime, day, unbidi } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
+import { staffUrl } from "../../../lib/store/urls.ts";
 import { resumed } from "../../../lib/store/resume.ts";
 import { adminSession } from "../../../lib/store/session.ts";
 import { staffCounts, staffTabs } from "../../../lib/store/staff.ts";
@@ -51,7 +52,7 @@ const pluginName = (r: Report) => unbidi(r.plugin.name ?? r.plugin.id);
 
 <Store title="Reports · Review · Zeron" description="Reports about plugins." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Review" lead="What people reported about listed plugins, the newest first." tabs={staffTabs("reports", counts)}>
+    <StaffHead title="Review" lead="What people reported about listed plugins and templates, the newest first." tabs={staffTabs("reports", counts)}>
       <nav class="chips" aria-label="Reports by state">
         {(Object.keys(STATES) as State[]).map((s) => <a class="chip" href={stateHref(s)} aria-current={s === status ? "page" : undefined}>{STATES[s]}</a>)}
       </nav>
@@ -60,17 +61,17 @@ const pluginName = (r: Report) => unbidi(r.plugin.name ?? r.plugin.id);
         !result.ok ? (
           <Failed title="Reports can't be loaded right now" line="Try again in a moment." href={stateHref(status)} />
         ) : reports.length === 0 ? (
-          <Empty icon="flag" title={open ? "No open reports" : "Nothing here yet"} line={open ? "What people report about a plugin shows here, the newest first." : `Reports ${status === "actioned" ? "acted on" : "dismissed"} show here, with what was done.`} />
+          <Empty icon="flag" title={open ? "No open reports" : "Nothing here yet"} line={open ? "What people report shows here, the newest first." : `Reports ${status === "actioned" ? "acted on" : "dismissed"} show here, with what was done.`} />
         ) : (
           <>
             <div class="tbl reps">
-              <div class="trow th" aria-hidden="true"><span>Plugin</span><span>Reason</span><span>What they said</span><span>From</span><span>Sent</span><span>{open ? "" : "Closed"}</span><span></span></div>
+              <div class="trow th" aria-hidden="true"><span>About</span><span>Reason</span><span>What they said</span><span>From</span><span>Sent</span><span>{open ? "" : "Closed"}</span><span></span></div>
               <ul aria-label={`${STATES[status]} reports, the newest first`}>
                 {reports.map((r) => (
                   /* (The row opens the plugin's staff page: its name's link, stretched over the row; Close it is its own.) */
                   <li class="trow">
                     <span class="c-name">
-                      <a class="nm stretch" href={`/admin/plugins/${encodeURIComponent(r.plugin.id)}`} title={pluginName(r)}>{pluginName(r)}</a>
+                      <a class="nm stretch" href={staffUrl(r.plugin.id, r.plugin.kind ?? "plugin")} title={pluginName(r)}>{pluginName(r)}</a>
                       {r.version && <b class="vno mono">{r.version}</b>}
                     </span>
                     <span class="c-reason">{r.reason === "malware" ? <span class="state bad">{reasonOf(r)}</span> : <span class="t2">{reasonOf(r)}</span>}</span>

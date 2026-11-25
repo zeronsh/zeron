@@ -356,6 +356,8 @@ export type QueueState = "undecided" | "verified" | "declined" | "all" | "taken_
  * and its newest undecided pre-release when that is newer).
  */
 export interface QueueItem {
+  /** What it is (an edge before templates leaves it out: a plugin). */
+  kind?: Kind;
   plugin: { id: string; name: string };
   version: string;
   review: Review;
@@ -407,6 +409,8 @@ export interface Publisher {
   first_published_at?: number | null;
   /** Its listed plugins, and how many of them have a verified version (edge 566c2a5ba). */
   plugins?: { total: number; verified: number };
+  /** Its templates, counted apart (an edge before templates leaves it out). */
+  templates?: { total: number; verified: number };
   recent: { plugin_id: string; version: string; status: VersionStatus; verified: boolean; published_at?: number; reason?: string | null }[];
 }
 
@@ -416,6 +420,8 @@ export interface PackageFile {
   sha256: string;
   /** Not text: never shown as text, and called out. */
   binary: boolean;
+  /** A template's file against Zeron's own at the version its author named (null when that isn't known; null on a plugin). */
+  zeron?: "same" | "changed" | "new" | null;
 }
 
 /** What changed in what it asks since the newest verified other version (the edge's consentDiff). */
@@ -447,6 +453,10 @@ export interface McpRecord {
 }
 
 export interface Submission {
+  /** What it is (an edge before templates leaves it out: a plugin). */
+  kind?: Kind;
+  /** The Zeron a template's author made it from, and whether Zeron's own files of it are known; null on a plugin. */
+  zeron_base?: { version: string; known: boolean } | null;
   /** The plugin (for one never listed: this submission's words, `version` and `icon` null). */
   plugin: PluginCard;
   /** The version, with what it lists: its name, icon, README and more. */
@@ -454,7 +464,8 @@ export interface Submission {
   publisher: Publisher;
   /** The signed manifest, as submitted. */
   manifest: Record<string, unknown>;
-  permissions: Permissions;
+  /** (Null on a template: it asks for nothing.) */
+  permissions: Permissions | null;
   files: PackageFile[];
   /** The newest verified other version, which the diff is against, when there is one. */
   base?: { version: string; manifest: Record<string, unknown> } | null;
@@ -482,7 +493,7 @@ export type ReportStatus = "open" | "dismissed" | "actioned";
 
 export interface Report {
   id: number | string;
-  plugin: { id: string; name: string | null };
+  plugin: { id: string; name: string | null; kind?: Kind | null };
   version?: string | null;
   reason: ReportReason;
   text: string;
@@ -517,6 +528,8 @@ export interface AuditEntry {
   /** `version.verify`, `version.decline`, `plugin.suspend`, `report.dismissed`, `reservation.set`, … */
   action: string;
   plugin_id?: string | null;
+  /** The item's kind, for its staff page's prefix; null when the entry names none, or its id was released (an edge before templates leaves it out). */
+  item_kind?: Kind | null;
   version?: string | null;
   /** What else it recorded (the edge's JSON). */
   detail?: unknown;

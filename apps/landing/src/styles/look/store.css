@@ -231,9 +231,11 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
 /* A template's preview in a tile's place: 16:10, the tile's height (components/look/Thumb.astro). */
 .thumb { flex: none; display: block; width: 51px; height: 32px; border-radius: 6px; overflow: hidden; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); }
 .thumb.xs { width: 35px; height: 22px; border-radius: 4px; } .thumb.xl { width: 128px; height: 80px; border-radius: 10px; }
+.thumb.mixed { width: 32px; border-radius: 27%; } .thumb.mixed.xs { width: 22px; }
 .thumb img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
 /* (What an item is, said small beside it where plugins are the usual.) */
 .kind-mark { flex: none; padding: 0 var(--s8); border-radius: 6px; background: var(--sunken); font-size: 12px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+.c-sub .kind-mark { margin-right: var(--s8); }
 .stage {
   position: relative; overflow: hidden;
   background:

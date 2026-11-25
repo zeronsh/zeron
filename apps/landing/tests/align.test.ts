@@ -312,6 +312,49 @@ describe("a template's pictures", () => {
   }, 60_000);
 });
 
+describe("a list that holds both kinds", () => {
+  test("every name starts on one column, whether a tile or a preview stands before it; a version's line in the rail is one line", async () => {
+    for (const width of [1728, 390]) {
+      const page = await open({ path: "/admin/plugins", user: "user_grace" }, width, "dark");
+      try {
+        const got = await page.evaluate(() => [...document.querySelectorAll(".tbl.q ul .c-name")].map((row) => ({ name: Math.round(row.querySelector(".nm")!.getBoundingClientRect().left), mark: row.querySelector(":is(.tile, .thumb)")!.getBoundingClientRect().width, template: !!row.querySelector(".thumb") })));
+        expect(got.some((r) => r.template) && got.some((r) => !r.template)).toBe(true);
+        expect(new Set(got.map((r) => r.name)).size, `names at ${width}`).toBe(1);
+        for (const r of got) expect(r.mark, `${width}`).toBe(32);
+      } finally {
+        await page.context().close();
+      }
+    }
+    const page = await open({ path: "/account/tokens", user: "user_ada" }, 1728, "dark");
+    try {
+      const marks = await page.evaluate(() => [...document.querySelectorAll(".c-scope .tiles :is(.tile, .thumb)")].map((el) => [el.getBoundingClientRect().width, el.getBoundingClientRect().height].join("x")));
+      expect(new Set(marks)).toEqual(new Set(["20x20"]));
+    } finally {
+      await page.context().close();
+    }
+    const rail = await open({ path: "/admin/templates/template-at-every-limit-there-is-xyz1234/1.1.0-beta.20261124.build.99999", user: "user_grace" }, 1728, "dark");
+    try {
+      const lines = await rail.evaluate(() => [...document.querySelectorAll(".vmini b")].map((b) => b.getBoundingClientRect().height));
+      for (const h of lines) expect(h).toBe(20);
+    } finally {
+      await rail.context().close();
+    }
+  }, 60_000);
+});
+
+describe("Review's files, as a tree", () => {
+  test("no list marks: its glyphs are its marks, its names on their columns", async () => {
+    for (const path of ["/admin/templates/dockside/1.0.0?view=files", "/admin/plugins/xss-probe/1.1.0?view=files"]) {
+      const page = await open({ path, user: "user_grace" }, 1440, "dark");
+      try {
+        expect(await page.evaluate(() => [...document.querySelectorAll(".tree, .tree li")].map((el) => getComputedStyle(el).listStyleType).filter((s) => s !== "none")), path).toEqual([]);
+      } finally {
+        await page.context().close();
+      }
+    }
+  }, 60_000);
+});
+
 describe("the columns the rule names", () => {
   test("a plugin's Get ends on the page's right edge, the rail's; its button its own width, level with the tile's middle", async () => {
     for (const path of ["/plugins/focus-timer", "/plugins/first-light", "/plugins/worst-case-listing-at-every-limit-xyz12", "/plugins/focus-timer/versions/1.2.0"])

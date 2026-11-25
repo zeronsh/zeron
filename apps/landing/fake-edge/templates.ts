@@ -102,7 +102,7 @@ interface Spec {
   repository?: string;
   license?: string;
   zeron?: string;
-  history?: { version: string; status: Story; ago: number; notes?: string; via?: FakeVersion["via"]; review?: FakeVersion["review"]; look?: keyof typeof LOOKS }[];
+  history?: { version: string; status: Story; ago: number; notes?: string; via?: FakeVersion["via"]; review?: FakeVersion["review"]; look?: keyof typeof LOOKS; layout?: Layout }[];
   readme?: string;
 }
 
@@ -121,10 +121,10 @@ const SPECS: Spec[] = [
   },
   { id: "paper-desk", name: "Paper desk", summary: "One quiet page, set like a book. For long reading and long writing.", owner: "user_kai", look: "paper", layout: "reading", keywords: ["light", "reading", "calm"], installs: 2890, featured: true, age: 31, screenshots: 2, license: "MIT" },
   { id: "phosphor", name: "Phosphor", summary: "Four terminals in green on black, and nothing else.", owner: "user_mo", look: "phosphor", layout: "grid", keywords: ["terminal", "dark", "dense"], installs: 1740, featured: true, age: 22, screenshots: 1, license: "Apache-2.0" },
-  { id: "dockside", name: "Dockside", summary: "Your chats along the bottom of the window, as a dock.", owner: "user_ada", look: "plum", layout: "dock", keywords: ["dock", "dark"], installs: 960, age: 26, screenshots: 2, history: [{ version: "0.9.0", status: "verified", ago: 26, notes: "First release." }, { version: "1.0.0", status: "undecided", ago: 2, notes: "The dock hides while you type." }] },
+  { id: "dockside", name: "Dockside", summary: "Your chats along the bottom of the window, as a dock.", owner: "user_ada", look: "plum", layout: "dock", keywords: ["dock", "dark"], installs: 960, age: 26, screenshots: 2, history: [{ version: "0.9.0", status: "verified", ago: 26, notes: "First release.", layout: "single", look: "chalk" }, { version: "1.0.0", status: "undecided", ago: 2, notes: "The dock hides while you type." }] },
   { id: "one-thing", name: "One thing", summary: "A single chat, centred, with no sidebar until you ask for it.", owner: "user_mo", look: "chalk", layout: "single", keywords: ["light", "calm", "minimal"], installs: 1320, age: 60, screenshots: 1 },
   { id: "night-board", name: "Night board", summary: "Each project a column, each chat a card you can drag.", owner: "user_kai", look: "ember", layout: "board", keywords: ["board", "dark", "columns"], installs: 410, age: 12, screenshots: 2 },
-  { id: "early-hours", name: "Early hours", summary: "Warm and dim, for the first hour of the day.", owner: "user_ada", look: "ember", layout: "reading", keywords: ["warm", "calm"], installs: 0, age: 1, history: [{ version: "0.1.0", status: "undecided", ago: 1, notes: "First release." }] },
+  { id: "early-hours", name: "Early hours", summary: "Warm and dim, for the first hour of the day.", owner: "user_ada", look: "ember", layout: "reading", keywords: ["warm", "calm"], installs: 0, age: 1, zeron: "0.3.0", history: [{ version: "0.1.0", status: "undecided", ago: 1, notes: "First release." }] },
   { id: "white-board", name: "White board", summary: "The board, for bright rooms.", owner: "user_mo", look: "chalk", layout: "board", keywords: ["board", "light"], installs: 230, age: 15 },
   { id: "wide-columns", name: "Wide columns", summary: "Control room's columns in paper's colours.", owner: "user_kai", look: "paper", layout: "columns", keywords: ["light", "columns"], installs: 180, age: 8, zeron: "0.9.0" },
   { id: "plum-terminals", name: "Plum terminals", summary: "Four terminals, gentler on the eyes.", owner: "user_mo", look: "plum", layout: "grid", keywords: ["terminal", "dark"], installs: 120, age: 9 },
@@ -139,6 +139,7 @@ const SPECS: Spec[] = [
 const appFiles = (spec: Spec, version: string): Record<string, string> => ({
   "init.luau": `-- ${spec.name} ${version}\nlocal shell = require("shell")\n\nreturn shell.compose {\n\tlayout = "${spec.layout}",\n}\n`,
   "shell/layout.luau": `-- The ${spec.layout} layout.\nlocal ui = require("ui")\n\nreturn function(app)\n\treturn ui.row { app.sidebar, app.chat }\nend\n`,
+  ...Object.fromEntries(["button", "list", "menu", "dialog", "text", "icon", "scroll", "tabs"].map((n) => [`ui/${n}.luau`, `-- Zeron's own ${n}.\nreturn require("ui/${n}")\n`])),
   "shell/sidebar.luau": "-- Zeron's own sidebar.\nreturn require(\"ui/sidebar\")\n",
   "theme.css": `:root { --bg: ${LOOKS[spec.look]!.bg}; --accent: ${LOOKS[spec.look]!.accent}; }\n`,
 });
@@ -153,7 +154,7 @@ function build(spec: Spec): FakePlugin {
       ...appFiles(spec, h.version),
       "README.md": spec.readme ?? `# ${spec.name}\n\n${spec.summary}\n\n## What it changes\n\n- How the window is laid out.\n- Its colours, light and dark.\n\nAnything it leaves out is Zeron's own.`,
       "CHANGELOG.md": history.map((x) => `## ${x.version}\n\n${x.notes ?? ""}\n`).reverse().join("\n"),
-      "preview.png": PNG_OF + JSON.stringify(preview(LOOKS[spec.look]!, spec.layout)),
+      "preview.png": PNG_OF + JSON.stringify(preview(LOOKS[h.look ?? spec.look]!, h.layout ?? spec.layout)),
     };
     for (const [i, s] of shots.entries()) files[s] = PNG_OF + JSON.stringify(preview(LOOKS[spec.look]!, layouts[(layouts.indexOf(spec.layout) + i + 1) % layouts.length]!));
     const published = NOW - h.ago * DAY;

@@ -247,13 +247,13 @@ export class Edge {
     return this.#json(`/store/v1/admin/queue?${params}`, { signedIn: true });
   }
 
-  /** One version, as staff review it. */
+  /** One version, of either kind, as staff review it (it says its kind). */
   submission(id: string, version: string): Promise<Result<Submission>> {
     return this.#json(`/store/v1/admin/versions/${segment(id)}/${segment(version)}`, { signedIn: true });
   }
 
-  adminPlugin(id: string): Promise<Result<AdminPlugin>> {
-    return this.#json(`/store/v1/admin/plugins/${segment(id)}`, { signedIn: true });
+  adminPlugin(id: string, kind: Kind = "plugin"): Promise<Result<AdminPlugin>> {
+    return this.#json(`/store/v1/admin/${kind}s/${segment(id)}`, { signedIn: true });
   }
 
   reports(status: string, cursor?: string): Promise<Result<ReportsPage>> {
