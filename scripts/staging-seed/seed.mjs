@@ -34,7 +34,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PLUGINS, files, manifestFields } from "./catalog.mjs";
 import { whyNotTheirs } from "./ipc.mjs";
-import { whyNotSeeded } from "./where.mjs";
+import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 const MANIFEST = "zeron-plugin.json";
 /** Between two writes of one account: the store takes 30 a minute. */
@@ -57,7 +57,11 @@ const dryRun = args.includes("--dry-run");
 const accounts = JSON.parse(readFileSync(accountsFile, "utf8"));
 const edge = flag("--edge")?.replace(/\/$/, "");
 const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
-if (!refusedEdge && accounts.edge !== undefined && accounts.edge.replace(/\/$/, "") !== edge) usage("the accounts file's sessions are another edge's");
+// (What an author's Zeron publishes goes to its own edge, whatever this is
+// told: the file says which that is.)
+if (!refusedEdge && (typeof accounts.edge !== "string" || accounts.edge.replace(/\/$/, "") !== edge)) usage("the accounts file's edge isn't --edge");
+const refusedWorkos = whyNotItsWorkos(accounts.workos_client_id);
+if (!refusedEdge && refusedWorkos) usage(refusedWorkos);
 if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const authors = (accounts.authors ?? []).filter((a) => !only || only.includes(a.slot));
@@ -186,12 +190,11 @@ const publishVersion = async (a, plugin, i, have) => {
   }
 };
 
-// Each author's Zeron is this edge's, before any of them publishes.
-if (!dryRun) {
-  for (const a of authors) {
-    const why = await whyNotTheirs(a, accounts.workos_client_id);
-    if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
-  }
+// Each author's Zeron is this edge's, before anything is asked of it (a dry
+// run makes the plugins' folders in it too).
+for (const a of authors) {
+  const why = await whyNotTheirs(a, accounts.workos_client_id);
+  if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
 }
 
 // Pass 1: every plugin's first version, from its author's Zeron.
