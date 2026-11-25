@@ -691,8 +691,8 @@ private fun AskCard(ask: ChildAsk, index: Int, count: Int, modifier: Modifier, o
                     Text(q.question, style = MaterialTheme.typography.bodyMedium, maxLines = 6, overflow = TextOverflow.Ellipsis)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                    androidx.compose.material3.TextButton(onClick = { answer(q.id, "No") }, enabled = held == null) { Text("Deny") }
-                    androidx.compose.material3.Button(onClick = { answer(q.id, "Yes") }, enabled = held == null) { Text("Allow once") }
+                    androidx.compose.material3.TextButton(onClick = { answer(q.id, "No") }, enabled = held == null || held == "No") { Busy(held == "No", "Deny") }
+                    androidx.compose.material3.Button(onClick = { answer(q.id, "Yes") }, enabled = held == null || held == "Yes") { Busy(held == "Yes", "Allow once") }
                 }
             } else {
                 Text(q.question, style = MaterialTheme.typography.bodyMedium, maxLines = 6, overflow = TextOverflow.Ellipsis)
@@ -703,8 +703,8 @@ private fun AskCard(ask: ChildAsk, index: Int, count: Int, modifier: Modifier, o
                 ) {
                     if (answersInPlace(input)) {
                         for (option in q.options) {
-                            androidx.compose.material3.FilledTonalButton(onClick = { answer(q.id, option) }, enabled = held == null) {
-                                Text(option, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            androidx.compose.material3.FilledTonalButton(onClick = { answer(q.id, option) }, enabled = held == null || held == option) {
+                                Busy(held == option, option)
                             }
                         }
                     }
@@ -713,6 +713,20 @@ private fun AskCard(ask: ChildAsk, index: Int, count: Int, modifier: Modifier, o
             }
         }
     }
+}
+
+/**
+ * An answer's label, with a spinner while it's the one pressed (the
+ * desktop's busy answer): it keeps its look while the others step back.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun Busy(busy: Boolean, label: String) {
+    if (busy) {
+        LoadingIndicator(Modifier.size(20.dp), color = androidx.compose.material3.LocalContentColor.current)
+        Spacer(Modifier.width(6.dp))
+    }
+    Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
 /** A list item's leading inset to its words: its padding, its 44 dp tile and the gap. */
