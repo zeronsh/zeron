@@ -12,7 +12,7 @@ import Words from "./Words.astro";
 import { KIND_WORDS, kindOfItem, KINDS, type Kind } from "../../lib/store/kind.ts";
 import { count } from "../../lib/store/format.ts";
 import { chosenHint } from "../../lib/store/chosen.ts";
-import { BOTH, ENDS, type Refusal, type TokenFields } from "../../lib/store/tokens.ts";
+import { ENDS, type Refusal, type TokenFields } from "../../lib/store/tokens.ts";
 import type { MyPlugin } from "../../lib/store/types.ts";
 import { store } from "../../lib/store/words.ts";
 
@@ -78,11 +78,11 @@ const said = (field: Refusal["field"]) => (refusal && refusal.field === field ? 
       <input type="radio" name="scope" value="all" checked={fields.scope === "all"} />
     </label>
     <label class="rcard">
-      <span class="rc-words"><b>{BOTH}</b><small>A template can do anything Zeron can.</small></span>
+      <span class="rc-words"><b>{store("plugins.store.key.scope.all_both")}</b><small>{store("plugins.store.key.scope.all_both_hint")}</small></span>
       <input type="radio" name="scope" value="both" checked={fields.scope === "both"} />
     </label>
     <label class="rcard">
-      <span class="rc-words"><b>Chosen</b><small data-chosen-hint aria-live="polite">{chosenHint(ticked("plugin"), ticked("template"))}</small></span>
+      <span class="rc-words"><b>{store("plugins.store.key.scope.chosen")}</b><small data-chosen-hint aria-live="polite">{chosenHint(ticked("plugin"), ticked("template"))}</small></span>
       <input type="radio" name="scope" value="chosen" checked={fields.scope === "chosen"} disabled={items.length === 0} />
     </label>
     {

@@ -4,6 +4,7 @@
 // before the merge brings its `plugins.store` words here).
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
+import { RUNS_AS } from "./kind.ts";
 import { ON_THE_WEB } from "./permissions.ts";
 import { AUTHOR_ACTIONS, revokeAsk } from "./actions.ts";
 import { verificationState, versionState } from "./states.ts";
@@ -22,6 +23,17 @@ describe.skipIf(!appHasThem)("the store's words are the app's", () => {
     const onTheWeb = ON_THE_WEB.reduce((text, [from, to]) => text.replaceAll(from, to), app as string);
     expect(STORE_WORDS[key as keyof typeof STORE_WORDS]).toBe(onTheWeb);
   });
+});
+
+describe.skipIf(typeof lookup("templates.store") !== "object")("what the site says of templates is the app's words", () => {
+  test.each([
+    ["templates.store.runs_as_zeron", RUNS_AS.title],
+    ["templates.store.runs_as_zeron_body", RUNS_AS.line],
+    ["templates.store.runs_as_zeron_list", RUNS_AS.list],
+    ["templates.store.none_verified", "No version of this template is verified yet."],
+    ["templates.store.empty_title", "No templates in the store yet"],
+    ["templates.store.empty_body", "Templates people publish appear here."],
+  ])("%s", (key, said) => expect(said).toBe(lookup(key)));
 });
 
 describe("the site says them where they belong", () => {

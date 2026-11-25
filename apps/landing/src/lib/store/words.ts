@@ -37,8 +37,11 @@ export const STORE_WORDS = {
   "plugins.store.key.scope.two": "{a} and {b}",
   "plugins.store.key.not_used_made": "Not used yet · made {date}",
   // The account's deploy tokens (contract a315eef5a).
-  "plugins.store.keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each token publishes the plugins chosen when it's made.",
+  "plugins.store.keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins and templates without your session. Each token publishes the ones chosen when it's made.",
   "plugins.store.key.scope.all": "All your plugins",
+  "plugins.store.key.scope.all_both": "All your plugins and templates",
+  "plugins.store.key.scope.all_both_hint": "A template can do anything Zeron can.",
+  "plugins.store.key.scope.chosen": "Chosen",
   "plugins.store.key.last_used_on": "Last used {date} on {plugin}",
   // What its author can do to it, and the question each asks first.
   "plugins.store.action.yank": "Stop new installs",
@@ -60,7 +63,7 @@ export const STORE_WORDS = {
   "plugins.store.key.expiry.365": "In a year",
   "plugins.store.key.create": "Create token",
   "plugins.store.key.secret_title": "Copy your token now",
-  "plugins.store.key.secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins it's for, as you.",
+  "plugins.store.key.secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins and templates it's for, as you.",
   "plugins.store.key.done": "I've copied it",
   "plugins.store.key.made_today": "You've made 10 deploy tokens today. You can make more tomorrow.",
   "plugins.store.key.revoke_failed": "Couldn't revoke the token",
