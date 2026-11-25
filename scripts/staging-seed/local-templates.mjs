@@ -65,11 +65,13 @@ const engines = [];
 let edge;
 // Where a seed may write.
 {
-  const refused = (edge, host) => typeof whyNotSeeded(edge, host) === "string";
-  check("a seed is refused anything but a loopback or a named staging edge",
-    ["https://edge.zeron.sh", "https://zeron.sh", "https://staged.example.com", "https://notstaging.example.com", "http://staging.example.com", "https://staging.example.com/x", "https://a:b@staging.example.com", "ftp://127.0.0.1x", "nonsense"].every((e) => refused(e, URL.canParse(e) ? new URL(e).hostname : "")) &&
-      refused("https://staging.example.com") && refused("https://staging.example.com", "staging.example.org") &&
-      !refused("https://staging.example.com", "staging.example.com") && !refused("https://x-staging.example.com/", "x-staging.example.com") && !refused("http://127.0.0.1:9") && !refused("http://localhost:9"));
+  const list = "https://one.example.com, http://127.0.0.1:9";
+  const refused = (edge, allowed = list) => typeof whyNotSeeded(edge, allowed) === "string";
+  check("a seed writes to an edge it's allowed by name, and to no other",
+    !refused("https://one.example.com") && !refused("https://one.example.com/") && !refused("http://127.0.0.1:9") &&
+      [undefined, "", "nonsense", "http://one.example.com", "https://one.example.com:8443", "https://one.example.com/x", "https://a:b@one.example.com", "https://one.example.com.evil.example", "https://two.example.com", "http://127.0.0.1:8", "ftp://one.example.com"].every((e) => refused(e)) &&
+      ["", undefined, ",", "one.example.com", "https://*.example.com"].every((allowed) => refused("https://one.example.com", allowed === undefined ? null : allowed)));
+  check("and never to production's, even allowed", ["https://zeron.sh", "https://edge.zeron.sh", "https://EDGE.zeron.sh", "https://edge.zeron.sh.", "https://www.zeron.sh"].every((e) => refused(e, `${e},https://edge.zeron.sh,https://zeron.sh`)));
   const jwt = (iss) => `x.${Buffer.from(JSON.stringify({ iss })).toString("base64url")}.y`;
   check("and a Zeron signed in to another WorkOS", whyNotItsSession(jwt("https://w/client_a"), "client_a") === undefined && [whyNotItsSession(jwt("https://w/client_ab"), "client_a"), whyNotItsSession(jwt("https://w/client_a"), undefined), whyNotItsSession("", "client_a")].every((w) => typeof w === "string"));
 }
@@ -156,7 +158,7 @@ try {
     join(work, "accounts.json"),
     JSON.stringify({ edge: edge.url, workos_client_id: edge.clientId, zeron, authors: authors.map((d) => ({ slot: d.slot, home: d.home, data_dir: d.data, ipc_port: d.port, token_env: `SEED_TOKEN_${d.slot}` })) })
   );
-  const seed = (env, extra = []) => run(process.execPath, [join(here, "seed-templates.mjs"), "--accounts", join(work, "accounts.json"), "--ui", ui, "--playwright", playwright, ...extra], { env: { ...process.env, SEED_PACE_MS: "0", ...env } });
+  const seed = (env, extra = []) => run(process.execPath, [join(here, "seed-templates.mjs"), "--accounts", join(work, "accounts.json"), "--edge", edge.url, "--ui", ui, "--playwright", playwright, ...extra], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url, SEED_PACE_MS: "0", ...env } });
   // Stand-ins for the app's renderings (other bytes than the drawn ones).
   const shots = join(work, "pictures");
   const browser = await createRequire(join(playwright, "package.json"))("playwright").chromium.launch();
@@ -172,6 +174,11 @@ try {
   const drawnOnly = versions.filter((v) => !v.rendered).length;
   const dry = await seed({}, ["--dry-run", "--pictures", shots]);
   check(`the CLI's check takes every version (${versions.length})`, dry.code === 0 && (dry.out.match(/^ready /gm) ?? []).length === versions.length, (dry.err || dry.out).trim().split("\n").pop());
+  // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
+  // before it publishes anything.
+  writeFileSync(join(work, "elsewhere.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(work, "accounts.json"), "utf8")), workos_client_id: "client_elsewhere" }));
+  const elsewhere = await run(process.execPath, [join(here, "seed-templates.mjs"), "--accounts", join(work, "elsewhere.json"), "--edge", edge.url, "--ui", ui, "--playwright", playwright], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
+  check("a Zeron signed in to another WorkOS publishes nothing (exit 2)", elsewhere.code === 2 && elsewhere.err.includes("another WorkOS") && !elsewhere.out.includes("published"), elsewhere.err.trim().split("\n")[0]);
   const first = await seed({});
   process.stdout.write(first.out);
   check("the first pass publishes the 8 first versions and stops for tokens (exit 3)", first.code === 3 && (first.out.match(/^published .* \(device\)$/gm) ?? []).length === TEMPLATES.length, first.err.trim().slice(0, 400));
@@ -202,18 +209,30 @@ try {
     const right = t.versions.every((v) => got.get(v.v)?.via === (v.by === "device" ? "device" : "deploy_token") && (got.get(v.v)?.key === null) === (v.by === "token"));
     const release = t.versions.filter((v) => !v.v.includes("-")).at(-1).v;
     check(`${t.id}: its versions, device's signed and token's not, ${release} shown`, right && d.version === release && d.engines?.zeron === `>=${ZERON}` && d.cover === "preview.png" && d.icon === null && !("permissions" in d), { version: d.version, versions: [...got].map(([k, v]) => `${k}:${v.via}`) });
-    // A version that only replaces pictures: those, its number and its notes.
+    // A version that corrects its pictures and words, and the files of its
+    // that were wrong (its home page, its tokens): nothing else.
     for (const [i, v] of t.versions.entries()) {
       if (!v.rendered) continue;
       const read = async (version) => {
         const pkg = JSON.parse((await get(`/store/v1/templates/${t.id}/versions/${version}/package`)).body);
-        const { signature: _s, version: _v, ...manifest } = pkg.manifest;
+        const { signature: _s, version: _v, description: _d, keywords: _k, ...manifest } = pkg.manifest;
         return { manifest: JSON.stringify(manifest), files: pkg.files };
       };
       const [was, now] = [await read(t.versions[v.like].v), await read(v.v)];
       const names = [...new Set([...Object.keys(was.files), ...Object.keys(now.files)])].filter((f) => was.files[f] !== now.files[f]).sort();
-      check(`${t.id} ${v.v}: only its pictures and notes differ from ${t.versions[v.like].v}`, was.manifest === now.manifest && JSON.stringify(names) === JSON.stringify(["CHANGELOG.md", "preview.png", "screenshots/chat.png", "screenshots/new-chat.png"]), [i, names]);
+      check(`${t.id} ${v.v}: only its pictures, words, notes and wrong files differ from ${t.versions[v.like].v}`, was.manifest === now.manifest && JSON.stringify(names) === JSON.stringify(["CHANGELOG.md", "README.md", ...(t.change ? ["ds/tokens.luau"] : []), "preview.png", ...(t.home ? ["screens/chat/home.luau"] : []), ...(v.width ? ["screens/settings/prefs.luau"] : []), "screenshots/chat.png", "screenshots/new-chat.png"]), [i, names]);
     }
+    // Its changed copies of Zeron's files: Zeron's own but for what it means.
+    const shown = JSON.parse((await get(`/store/v1/templates/${t.id}/versions/${d.version}/package`)).body).files;
+    const lines = (path) => {
+      const [own, its] = [readFileSync(join(ui, path), "utf8").split("\n"), Buffer.from(shown[path], "base64").toString().split("\n")];
+      return { gone: own.filter((l) => !its.includes(l)).length, more: its.filter((l) => !own.includes(l)).length };
+    };
+    const now = t.versions.find((v) => v.v === d.version);
+    if (now.width) check(`${t.id}: its preferences are Zeron's but for one line`, JSON.stringify(lines("screens/settings/prefs.luau")) === '{"gone":1,"more":1}', lines("screens/settings/prefs.luau"));
+    if (now.plain) check(`${t.id}: it has no tokens of its own`, !("ds/tokens.luau" in shown));
+    if (t.change && !now.plain) check(`${t.id}: its tokens are Zeron's but for one line`, JSON.stringify(lines("ds/tokens.luau")) === '{"gone":1,"more":1}', lines("ds/tokens.luau"));
+    if (t.home) check(`${t.id}: its home page is Zeron's whole, and its words`, lines("screens/chat/home.luau").gone === 0 && lines("screens/chat/home.luau").more <= 16, lines("screens/chat/home.luau"));
     const pics = [];
     for (const path of ["preview.png", "screenshots/chat.png", "screenshots/new-chat.png"]) {
       const p = await get(`/store/v1/templates/${t.id}/files/${d.version}/${path}`);
@@ -225,6 +244,9 @@ try {
   check("wide-margin's newest, 1.2.0-beta.1, is a pre-release", beta?.version === "1.2.0-beta.1", beta?.version);
   const focus = (await get("/store/v1/templates?keyword=focus")).body.items.map((x) => x.id).sort();
   check("a keyword filters", JSON.stringify(focus) === JSON.stringify(["nightfall-cards", "wide-margin"]), focus.join(","));
+  const palette = (await get("/store/v1/templates?keyword=palette")).body.items.map((x) => x.id).sort();
+  const cards = (await get("/store/v1/templates?keyword=cards")).body.total;
+  check("the corrected keywords are the ones listed", JSON.stringify(palette) === JSON.stringify(["nightfall-cards", "slate-grid"]) && cards === 0, `palette ${palette.join(",")}; cards ${cards}`);
   const q = (await get("/store/v1/templates?q=slate")).body.items.map((x) => x.id);
   check("a search finds one by its name", q.includes("slate-grid"), q.join(","));
   const again = await seed(tokens, ["--pictures", shots]);

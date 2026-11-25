@@ -8,10 +8,10 @@
 // publish <folder>`, unsigned). The store is otherwise only read, to skip
 // what's already there, so a run that stopped part way picks up where it was.
 //
-//   node seed-templates.mjs --accounts accounts-templates.json --ui <Zeron's apps/zgx/ui at the release> --playwright <dir> [--host <the edge's host>] [--pictures <folder>] [--only 7,8] [--dry-run]
+//   node seed-templates.mjs --accounts accounts-templates.json --ui <Zeron's apps/zgx/ui at the release> --playwright <dir> --edge <url> [--pictures <folder>] [--only 7,8] [--ids a,b] [--dry-run]
 //
-// Writes only to a loopback edge, or a staging one named by --host too, from
-// a Zeron signed in to the accounts file's WorkOS (where.mjs).
+// Writes only to an edge SEED_ALLOWED_EDGES names, never production's, from a
+// Zeron signed in to the accounts file's WorkOS (where.mjs).
 //
 // `--pictures` has the app's own renderings, <id>/preview.png, chat.png and
 // new-chat.png (a pre-release's under <id>-beta), for the versions that use
@@ -28,9 +28,10 @@ import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { call, whyNotTheirs } from "./ipc.mjs";
 import { pictures } from "./pictures.mjs";
-import { TEMPLATES, files } from "./templates.mjs";
-import { whyNotItsSession, whyNotSeeded } from "./where.mjs";
+import { TEMPLATES as ALL, files } from "./templates.mjs";
+import { whyNotSeeded } from "./where.mjs";
 
 /** Between two writes of one account: the store takes 30 a minute. */
 const PACE_MS = Number(process.env.SEED_PACE_MS ?? 2500);
@@ -49,12 +50,16 @@ const ui = resolve(flag("--ui") ?? usage("give --ui"));
 if (!existsSync(join(ui, "ds/tokens.luau"))) usage(`${ui} isn't Zeron's apps/zgx/ui`);
 const require = createRequire(join(resolve(flag("--playwright") ?? usage("give --playwright")), "package.json"));
 const { chromium } = require("playwright");
-const WebSocket = require("ws");
 const only = flag("--only")?.split(",").map(Number);
 const rendered = flag("--pictures");
+const ids = flag("--ids")?.split(",");
+const unknownId = ids?.find((id) => !ALL.some((t) => t.id === id));
+if (unknownId) usage(`there's no template ${unknownId}`);
+const TEMPLATES = ALL.filter((t) => !ids || ids.includes(t.id));
 const dryRun = args.includes("--dry-run");
-const edge = String(accounts.edge ?? usage("the accounts file names no edge")).replace(/\/$/, "");
-const refusedEdge = whyNotSeeded(edge, flag("--host"));
+const edge = flag("--edge")?.replace(/\/$/, "");
+const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
+if (!refusedEdge && accounts.edge !== undefined && accounts.edge.replace(/\/$/, "") !== edge) usage("the accounts file's sessions are another edge's");
 if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const slots = new Set(TEMPLATES.map((t) => t.slot));
@@ -86,21 +91,6 @@ const ci = async (argv, extra) => {
     rmSync(scratch, { recursive: true, force: true });
   }
 };
-
-/** Call author `a`'s running Zeron, as its app does. */
-const call = (a, method, params) =>
-  new Promise((res, rej) => {
-    const token = readFileSync(join(a.data_dir, "ipc-token"), "utf8").trim();
-    const ws = new WebSocket(`ws://127.0.0.1:${a.ipc_port}`, { headers: { authorization: `Bearer ${token}` } });
-    ws.once("error", rej);
-    ws.once("open", () => ws.send(JSON.stringify({ id: 1, method, params })));
-    ws.on("message", (raw) => {
-      const frame = JSON.parse(String(raw));
-      if (frame.id !== 1) return;
-      ws.close();
-      frame.err !== undefined ? rej(new Error(typeof frame.err === "string" ? frame.err : JSON.stringify(frame.err))) : res(frame.ok);
-    });
-  });
 
 /** The app's own renderings of `t` at `version`, or undefined without them:
  * three still 16:10 PNGs. */
@@ -182,8 +172,7 @@ const publishVersion = async (a, t, i, have, drawn) => {
 // Each author's Zeron is this edge's, before any of them publishes.
 if (!dryRun) {
   for (const a of authors) {
-    const bearer = await call(a, "AccessToken", {}).then((r) => r?.token, (e) => usage(`author ${a.slot}'s Zeron doesn't answer: ${e.message}`));
-    const why = whyNotItsSession(bearer, accounts.workos_client_id);
+    const why = await whyNotTheirs(a, accounts.workos_client_id);
     if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
   }
 }

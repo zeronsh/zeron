@@ -12,11 +12,12 @@
 // with each account's email and password, as the person would; nothing is
 // bypassed. seed.mjs then runs with what this writes.
 //
-//   node sessions.mjs up     --zeron <bin> --edge <url> [--host <its host>] --client-id <id> --logins <file> --dir <folder> [--playwright <dir>]
+//   node sessions.mjs up     --zeron <bin> --edge <url> --client-id <id> --logins <file> --dir <folder> [--playwright <dir>]
 //   node sessions.mjs tokens …the same… [--templates]
 //   node sessions.mjs down   --dir <folder>
 //
-// `--only 7,8` is those authors alone (every author else). `--templates` makes
+// `--edge` must be one SEED_ALLOWED_EDGES names, never production's
+// (where.mjs). `--only 7,8` is those authors alone (every author else). `--templates` makes
 // their tokens for their templates too (`--all --templates`).
 //
 // `--logins` is a JSON list of {username, email, user_id, password}, slot n
@@ -83,7 +84,7 @@ if (command !== "up" && command !== "tokens") {
 
 const zeron = resolve(need("--zeron"));
 const edge = need("--edge").replace(/\/$/, "");
-const refusedEdge = whyNotSeeded(edge, flag("--host"));
+const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
 if (refusedEdge) {
   console.error(`sessions: ${refusedEdge}`);
   process.exit(2);

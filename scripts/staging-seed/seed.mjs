@@ -18,10 +18,10 @@
 // the two and says which to make; run it again once they're set. See
 // README.md for the accounts file.
 //
-//   node scripts/staging-seed/seed.mjs --accounts accounts.json [--host <the edge's host>] [--only 1,3] [--dry-run]
+//   node scripts/staging-seed/seed.mjs --accounts accounts.json --edge <url> [--only 1,3] [--dry-run]
 //
-// Writes only to a loopback edge, or a staging one named by --host too
-// (where.mjs).
+// Writes only to an edge SEED_ALLOWED_EDGES names, never production's, from
+// Zerons signed in to the accounts file's WorkOS (where.mjs).
 //
 // Exits 0 once every version of every plugin of the authors named is
 // published (or already was), 1 at the first refusal (with what the CLI
@@ -33,6 +33,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PLUGINS, files, manifestFields } from "./catalog.mjs";
+import { whyNotTheirs } from "./ipc.mjs";
 import { whyNotSeeded } from "./where.mjs";
 
 const MANIFEST = "zeron-plugin.json";
@@ -54,8 +55,9 @@ const only = flag("--only")?.split(",").map(Number);
 const dryRun = args.includes("--dry-run");
 
 const accounts = JSON.parse(readFileSync(accountsFile, "utf8"));
-const edge = String(accounts.edge ?? usage("the accounts file names no edge")).replace(/\/$/, "");
-const refusedEdge = whyNotSeeded(edge, flag("--host"));
+const edge = flag("--edge")?.replace(/\/$/, "");
+const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
+if (!refusedEdge && accounts.edge !== undefined && accounts.edge.replace(/\/$/, "") !== edge) usage("the accounts file's sessions are another edge's");
 if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const authors = (accounts.authors ?? []).filter((a) => !only || only.includes(a.slot));
@@ -183,6 +185,14 @@ const publishVersion = async (a, plugin, i, have) => {
     await sleep(PACE_MS);
   }
 };
+
+// Each author's Zeron is this edge's, before any of them publishes.
+if (!dryRun) {
+  for (const a of authors) {
+    const why = await whyNotTheirs(a, accounts.workos_client_id);
+    if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
+  }
+}
 
 // Pass 1: every plugin's first version, from its author's Zeron.
 const haves = new Map();

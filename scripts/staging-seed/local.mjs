@@ -22,7 +22,10 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PLUGINS, USERNAMES } from "./catalog.mjs";
+import { PLUGINS } from "./catalog.mjs";
+
+/** This run's authors, by slot (a real one's are the logins file's). */
+const USERNAMES = Object.fromEntries([...new Set(PLUGINS.map((p) => p.slot))].map((slot) => [slot, `seeds-${slot}`]));
 
 const VERSIONS = PLUGINS.reduce((n, p) => n + p.versions.length, 0);
 const YANKS = PLUGINS.reduce((n, p) => n + p.versions.filter((v) => v.yank).length, 0);
@@ -171,7 +174,12 @@ try {
     authors: authors.map((d) => ({ slot: d.slot, home: d.home, data_dir: d.data, ipc_port: d.port, token_env: `SEED_TOKEN_${d.slot}` }))
   };
   writeFileSync(join(work, "accounts.json"), JSON.stringify(accounts, null, 2));
-  const seed = (env) => run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json")], { env: { ...process.env, ...env }, onErr: (t) => process.stderr.write(t) });
+  const seed = (env) => run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json"), "--edge", edge.url], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url, ...env }, onErr: (t) => process.stderr.write(t) });
+  // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
+  // before it publishes anything.
+  writeFileSync(join(work, "elsewhere.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(work, "accounts.json"), "utf8")), workos_client_id: "client_elsewhere" }));
+  const elsewhere = await run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "elsewhere.json"), "--edge", edge.url], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
+  check("a Zeron signed in to another WorkOS publishes nothing (exit 2)", elsewhere.code === 2 && elsewhere.err.includes("another WorkOS") && !elsewhere.out.includes("published"), elsewhere.err.trim().split("\n")[0]);
   const firstPass = await seed({});
   process.stdout.write(firstPass.out);
   check("the first pass publishes the 30 first versions and stops for tokens (exit 3)", firstPass.code === 3 && (firstPass.out.match(/^published .* \(device\)$/gm) ?? []).length === 30, `exit ${firstPass.code}`);
@@ -267,7 +275,7 @@ try {
   writeFileSync(join(ci, "CHANGELOG.md"), "# Changes\n\n## 1.0.1\n\n- A fix.\n");
   const refused = await run(zeron, ["plugin", "publish", ci], { env: { PATH: process.env.PATH, HOME: join(work, "ci-home"), ZERON_DATA_DIR: join(work, "ci-home", "data"), ZERON_IPC_PORT: "1", ZERON_EDGE_URL: edge.url, ZERON_DEPLOY_TOKEN: two } });
   check("a token for two plugins is refused a third (exit 3, token_not_allowed)", refused.code === 3 && refused.err.includes("token_not_allowed"), refused.err.trim().split("\n").pop());
-  const again = await run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json")], { env: { ...process.env, ...tokens, SEED_PACE_MS: "0" } });
+  const again = await run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json"), "--edge", edge.url], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url, ...tokens, SEED_PACE_MS: "0" } });
   check("a second run writes nothing", again.code === 0 && again.out.includes(`done: 0 written, ${VERSIONS} already there`), again.out.trim().split("\n").pop());
 } catch (error) {
   check("the run", false, error.message);

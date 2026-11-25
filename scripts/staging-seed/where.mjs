@@ -1,24 +1,31 @@
 // Where a seed may write. An id published is never released, so a wrong
-// address would leave the seed's items in that store for good: only a
-// loopback edge, or a staging one (https, "staging" a word of its host) named
-// twice, by the address and by --host.
+// address would leave the seed's items in that store for good: only an edge
+// the operator allows by name, in SEED_ALLOWED_EDGES (addresses, separated by
+// commas), and never production's, allowed or not.
 
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+/** Production's hosts: its edge, and the site in front of it. */
+const PRODUCTION = new Set(["zeron.sh", "edge.zeron.sh", "www.zeron.sh"]);
 
-/** Why `edge` isn't one a seed may write to, `host` being what --host said;
- * undefined when it is. */
-export const whyNotSeeded = (edge, host) => {
+const originOf = (text) => {
   let url;
   try {
-    url = new URL(edge);
+    url = new URL(text);
   } catch {
-    return `${JSON.stringify(edge)} isn't an address`;
+    return undefined;
   }
-  if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return "the edge's address is its scheme and host alone";
-  if (LOOPBACK.has(url.hostname)) return undefined;
-  if (url.protocol !== "https:") return "an edge that isn't on this machine is reached over https";
-  if (!url.hostname.split(/[.-]/).includes("staging")) return `${url.hostname} isn't a staging edge: a seed never writes to any other`;
-  if (host !== url.hostname) return `the edge is ${url.hostname}: say --host ${url.hostname} to write to it`;
+  const alone = url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password;
+  return alone && (url.protocol === "https:" || url.protocol === "http:") ? url : undefined;
+};
+
+/** Why `edge` isn't one a seed may write to, `allowed` being
+ * SEED_ALLOWED_EDGES; undefined when it is. */
+export const whyNotSeeded = (edge, allowed) => {
+  const url = edge === undefined ? undefined : originOf(edge);
+  if (!url) return "give --edge, an address: its scheme and host alone";
+  // (A host's last dot names the same one.)
+  if (PRODUCTION.has(url.hostname.replace(/\.+$/, ""))) return `${url.hostname} is production: a seed never writes to it`;
+  const named = String(allowed ?? "").split(",").map((text) => originOf(text.trim())?.origin);
+  if (!named.includes(url.origin)) return `${url.origin} isn't among SEED_ALLOWED_EDGES`;
   return undefined;
 };
 
