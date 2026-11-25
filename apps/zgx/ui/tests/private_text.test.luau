@@ -74,6 +74,35 @@ test("a click shows that one address, another hides it, the rest staying hidden"
 	expect(shows(app, "mara@halcyon.dev")).to_be(false)
 end)
 
+test("in a row pressed as a whole, the pointer resting on the address shows it, passing or leaving doesn't", function()
+	local app = open()
+	app:command("private.hide")
+	app:frames(10)
+	local function shown(): boolean
+		return app:tree("#private-pressed"):find("theo.lindqvist@halcyon.dev", 1, true) ~= nil
+	end
+	expect(shown()).to_be(false)
+	-- (No switch of its own: the press is the row's.)
+	expect(app:tree("#private-pressed")).never.to_contain("Show email")
+	local stand_ins = app:state("private_stand_ins") :: { string }
+	local address = `#private-pressed >> "{stand_ins[2]}"`
+	-- Passing over it, on the way somewhere: nothing shows.
+	app:hover(address)
+	app:wait("#never-shown", { timeout_ms = 200 })
+	app:hover('#private-pressed >> "Account"')
+	app:wait("#never-shown", { timeout_ms = 900 })
+	expect(shown()).to_be(false)
+	-- Resting on it: it shows.
+	app:hover(address)
+	app:wait("#never-shown", { timeout_ms = 1000 })
+	app:frames(10)
+	expect(shown()).to_be(true)
+	app:hover('#private-pressed >> "Account"')
+	app:frames(10)
+	-- Leaving it: hidden again, at once.
+	expect(shown()).to_be(false)
+end)
+
 test("the toggle never moves the line: its height and baseline are the text's", function()
 	local app = open()
 	local function top_and_height(): (number, number)
