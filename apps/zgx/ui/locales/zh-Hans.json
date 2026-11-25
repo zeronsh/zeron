@@ -4580,7 +4580,6 @@
       "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
       "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。",
       "changed_here": "在这台设备上修改过",
-      "runs_as_zeron_said": "以 Zeron 本身运行。它可以做 Zeron 能做的一切。",
       "publish_body": "把一个版本发送到模板商店。它会立即以你的用户名出现在商店中，所有人都可以安装；在 Zeron 审核人员审阅之前，它会显示为尚未验证。",
       "sent_toast": "{name} {version} 已在模板商店",
       "check": {

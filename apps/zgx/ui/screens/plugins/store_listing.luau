@@ -1016,15 +1016,28 @@ function C.make(kind: kinds.Kind, browse: any)
 
 		-- What installing one is (a template): said here, beside Install.
 		local function runs_as(): Node
-			return ui.text {
+			return ui.column {
 				id = "store-runs-as",
-				ui.t("templates.store.runs_as_zeron_said"),
 				w_full = true,
 				px = ds.Settings.inset(),
-				wrap = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.secondary",
+				gap = "$zeron.space.hair",
+				ui.text {
+					ui.t("templates.store.runs_as_zeron"),
+					w_full = true,
+					wrap = true,
+					text_size = "$font.size.md",
+					line_height = "$font.line.md",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				},
+				ui.text {
+					ui.t("templates.store.runs_as_zeron_body"),
+					w_full = true,
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				},
 			}
 		end
 

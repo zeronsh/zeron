@@ -4580,7 +4580,6 @@
       "runs_as_zeron_body": "It can do anything Zeron can.",
       "update_replaces_edits": "You changed this template on this device. Updating replaces your changes.",
       "changed_here": "Changed on this device",
-      "runs_as_zeron_said": "Runs as Zeron itself. It can do anything Zeron can.",
       "publish_body": "Send a version to the template store. It's there at once, under your username, for everyone to install; it shows as not verified until Zeron's reviewers have read it.",
       "sent_toast": "{name} {version} is in the template store",
       "check": {
