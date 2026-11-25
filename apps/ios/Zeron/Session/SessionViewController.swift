@@ -28,6 +28,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var shown = SessionChrome()
     private let openedAt = CACurrentMediaTime()
     private var reportedOpen = false
+    /// The title floats in its own glass capsule: a naked bar title collided
+    /// with the transcript scrolling beneath, and the capsule gives the one
+    /// piece of context you must never lose a surface of its own.
+    private let titleCapsule = Glass.surface(radius: 17)
+    private let titleLabel = UILabel()
 
     init?(app: AppModel, chatId: String) {
         guard let source = app.sessionSource(chatId) else { return nil }
@@ -48,8 +53,30 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self?.saveDraft()
         }
         navigationItem.largeTitleDisplayMode = .never
-        // The title heads the bar — it's the one piece of context you must
-        // never lose — and "project @ device" heads the ⋯ menu beside it.
+        // The title heads the bar inside a glass capsule — it's the one
+        // piece of context you must never lose — and "project @ device"
+        // heads the ⋯ menu beside it.
+        titleLabel.font = Fonts.ui(.sansSemibold, 15)
+        titleLabel.textColor = Palette.text
+        titleLabel.textAlignment = .center
+        titleCapsule.contentView.addSubview(titleLabel)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        let titleHolder = UIView()
+        titleHolder.addSubview(titleCapsule)
+        titleCapsule.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: titleCapsule.contentView.leadingAnchor, constant: 13),
+            titleLabel.trailingAnchor.constraint(equalTo: titleCapsule.contentView.trailingAnchor, constant: -13),
+            titleLabel.topAnchor.constraint(equalTo: titleCapsule.contentView.topAnchor, constant: 5),
+            titleLabel.bottomAnchor.constraint(equalTo: titleCapsule.contentView.bottomAnchor, constant: -5),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
+            titleCapsule.centerXAnchor.constraint(equalTo: titleHolder.centerXAnchor),
+            titleCapsule.topAnchor.constraint(equalTo: titleHolder.topAnchor),
+            titleCapsule.bottomAnchor.constraint(equalTo: titleHolder.bottomAnchor),
+            titleCapsule.leadingAnchor.constraint(greaterThanOrEqualTo: titleHolder.leadingAnchor),
+            titleCapsule.trailingAnchor.constraint(lessThanOrEqualTo: titleHolder.trailingAnchor),
+        ])
+        navigationItem.titleView = titleHolder
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
         navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
         companionsItem = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in
@@ -77,7 +104,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         syncVoice()
 
         list.frame = view.bounds
-        list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        list.autoresizingMask = [.flexibleHeight]
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
@@ -665,6 +692,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        // The transcript shares the composer's reading column (centered, 768
+        // at most): full-bleed text on a wide detail pane ran hundreds of
+        // points past a comfortable measure.
+        let measure = min(view.bounds.width, 768 + 24)
+        let x = ((view.bounds.width - measure) / 2).rounded()
+        if abs(list.frame.minX - x) > 0.5 || list.frame.width != measure || list.frame.height != view.bounds.height {
+            list.frame = CGRect(x: x, y: 0, width: measure, height: view.bounds.height)
+        }
         let covered = view.bounds.maxY - bottom.frame.minY + 8
         let inset = max(0, covered - view.safeAreaInsets.bottom)
         if abs(list.contentInset.bottom - inset) > 0.5 {
@@ -800,7 +835,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let c = source.chrome
         let old = shown
         shown = c
-        if c.title != old.title || c.subtitle != old.subtitle || navigationItem.title == nil {
+        if c.title != old.title || c.subtitle != old.subtitle || titleLabel.text == nil {
+            titleLabel.text = c.title
+            titleCapsule.isHidden = c.title.isEmpty
             navigationItem.title = c.title
             navigationItem.rightBarButtonItem?.menu = sessionMenu(title: c.title, subtitle: c.subtitle)
         }
@@ -811,7 +848,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.placeholder = c.placeholder
         composer.chips = c.chips
         composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
-            (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
+            (chip.id, { [weak self] in
+                guard let self, let menu = self.source.chipMenu(chip.id) else { return nil }
+                guard chip.id == "model" else { return menu }
+                // The merged chip's menu leads with the model picker; the
+                // effort levels it replaced follow inline.
+                let choose = UIAction(title: "Choose Model…", image: UIImage(systemName: "square.grid.2x2")) { [weak self] _ in
+                    guard let self, let picker = self.source.modelPicker() else { return }
+                    self.present(picker, animated: true)
+                }
+                return UIMenu(title: menu.title, children: [choose] + menu.children)
+            })
         })
         // One banner for both the row's animation and its contents (the
         // Cloud reading may turn a "not delivered" into nothing).
