@@ -2035,18 +2035,18 @@ mod tests {
     /// grows). Add to this list with each release that adds one; never drop.
     #[test]
     fn plugins_template_packages_protected_only_grows() {
-        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/", "ds/tokens/"] {
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/", "ds/tokens/", "ds/themes/template-dark.json", "ds/themes/template-light.json"] {
             assert!(never_templated().iter().any(|p| p == released), "{released} was protected in a release: it stays so");
         }
     }
 
-    /// Where a template's tokens are laid beside Zeron's, and a folder that
-    /// would stand in for Zeron's tokens, is no template's to fill: refused at publish, never exported, and left out of an import, of
+    /// Where a template's tokens and theme files are laid beside Zeron's, and a
+    /// folder that would stand in for Zeron's tokens, is no template's to fill: refused at publish, never exported, and left out of an import, of
     /// a store's install and of what's put in its folder, each named.
     #[test]
     fn plugins_template_packages_no_one_brings_where_tokens_are_laid() {
         let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "", "version": "1.0.0", "zeron_version": "0.3.16" });
-        let rels = ["DS/Tokens_Template.luau", "ds/tokens/init.luau", "ds/tokens_template.luau", "ds/tokens_template/deep/a.luau", "ds/tokens_template/init.luau"];
+        let rels = ["DS/Tokens_Template.luau", "ds/themes/template-dark.json", "ds/themes/template-light.json", "ds/tokens/init.luau", "ds/tokens_template.luau", "ds/tokens_template/deep/a.luau", "ds/tokens_template/init.luau"];
         let mut files = BTreeMap::from([("app.luau".to_owned(), b"return 1".to_vec()), ("ds/tokens.luau".to_owned(), b"return {}".to_vec())]);
         files.extend(rels.map(|rel| (rel.to_owned(), b"planted".to_vec())));
         // At publish, each by name.
@@ -2068,7 +2068,7 @@ mod tests {
                 write(&t.join(rel), "planted");
             }
             let (_, sent) = contents(&t, &id).unwrap();
-            assert!(sent.keys().all(|rel| !rel.contains("tokens_template") && !rel.starts_with("ds/tokens/")), "{sent:?}");
+            assert!(sent.keys().all(|rel| !rel.contains("tokens_template") && !rel.contains("themes/template-") && !rel.starts_with("ds/tokens/")), "{sent:?}");
             let left = left_out(&t, &sent);
             assert!(rels[1..].iter().all(|rel| left.files.iter().any(|(left, _)| left == rel)), "{:?}", left.files);
         }

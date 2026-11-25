@@ -2294,6 +2294,46 @@
       "short_name": false,
       "template_protected": true,
       "unseen": false
+    },
+    {
+      "fold": "ds/themes/zeron-dark.json",
+      "fold_path": "ds/themes/zeron-dark.json",
+      "path": "ds/themes/zeron-dark.json",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ds/themes/template-dark.json",
+      "fold_path": "ds/themes/template-dark.json",
+      "path": "ds/themes/template-dark.json",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/themes/template-light.json",
+      "fold_path": "ds/themes/template-light.json",
+      "path": "DS/Themes/Template-Light.json",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/themes/template-light.json/x.json",
+      "fold_path": "ds/themes/template-light.json/x.json",
+      "path": "ds/themes/template-light.json/x.json",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/themes/template-dim.json",
+      "fold_path": "ds/themes/template-dim.json",
+      "path": "ds/themes/template-dim.json",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
     }
   ],
   "format": "zeron-plugin-package-vectors:v1",
