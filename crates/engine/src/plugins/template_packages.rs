@@ -611,6 +611,7 @@ fn came_from(value: &Value) -> Option<Source> {
 /// `source` with its words bounded, to be shown.
 fn bounded(source: &Source) -> Source {
     let mut source = source.clone();
+    source.kind = listing::shown(&source.kind, 16);
     for (text, max) in [(&mut source.url, MAX_SHOWN_PATH), (&mut source.git_ref, MAX_SHOWN_PATH)] {
         if let Some(text) = text {
             *text = listing::shown(text, max);
@@ -622,6 +623,12 @@ fn bounded(source: &Source) -> Source {
         store.publisher_id = listing::shown(&store.publisher_id, MAX_SHOWN_PUBLISHER);
         if let Some(other) = &mut store.verified_alternative {
             other.version = listing::shown(&other.version, version::MAX_LEN);
+            other.notes = other.notes.chars().take(listing::MAX_NOTES_BYTES).collect();
+            // (A template asks for nothing.)
+            (other.added, other.removed) = (Vec::new(), Vec::new());
+        }
+        if let Some(replaced) = &mut store.replaced {
+            replaced.version = listing::shown(&replaced.version, version::MAX_LEN);
         }
     }
     source
@@ -884,7 +891,7 @@ pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Res
     let (about_path, _) = pending_paths(dir, pending)?;
     let mut about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).ok_or("What waits can't be read")?;
     let mut source = came_from(&about["origin"]).ok_or("What waits can't be read")?;
-    let Some(store) = source.store.as_mut() else { return Ok(()) };
+    let Some(store) = source.store.as_mut().filter(|s| same_item(s, now)) else { return Ok(()) };
     let was = store.clone();
     take_record(store, now);
     if *store == was {
@@ -892,6 +899,12 @@ pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Res
     }
     about["origin"] = json!(source);
     templates::write_atomic(&dir.join(PENDING), &format!("{pending}.json"), &signing::pretty(&about))
+}
+
+/// Whether two records are of one version: its id, its contents and its
+/// signer, which the store never changes.
+fn same_item(a: &install::StoreSource, b: &install::StoreSource) -> bool {
+    a.id == b.id && a.hash == b.hash && a.key == b.key
 }
 
 /// What a store's record says now that it may have said otherwise before.
@@ -925,9 +938,11 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&i
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let mut source = came_from(&about["origin"]);
-    if let Some(store) = source.as_mut().and_then(|s| s.store.as_mut()) {
-        let now = now.filter(|n| n.id == store.id && n.hash == store.hash && n.key == store.key).ok_or(NOT_CHECKED)?;
-        take_record(store, now);
+    match (source.as_mut().and_then(|s| s.store.as_mut()), now) {
+        (None, None) => {}
+        (Some(store), Some(now)) if same_item(store, now) => take_record(store, now),
+        // (Not the store's as it was checked, or not checked as the store's.)
+        _ => return Err(NOT_CHECKED.into()),
     }
     let store = source.as_ref().and_then(Source::store).cloned();
     let package = match read_waiting(&package_path, &about, store.as_ref()) {
@@ -1444,6 +1459,20 @@ mod tests {
         for other in [None, Some(record(&"0".repeat(64), "midnight")), Some(record(&hash, "other")), Some(install::StoreSource { key: Some("k".into()), ..now.clone() })] {
             assert_eq!(decide(&d, &pending, true, &shown, other.as_ref(), nobody).unwrap_err(), NOT_CHECKED);
         }
+        // What its record says now is kept of it, and of no other.
+        let kept = |id: &str| serde_json::from_slice::<Value>(&std::fs::read(d.join(PENDING).join(format!("{id}.json"))).unwrap()).unwrap()["origin"]["store"]["publisher_id"].clone();
+        keep_record(&d, &pending, &install::StoreSource { hash: "0".repeat(64), ..now.clone() }).unwrap();
+        assert_eq!(kept(&pending), "pub_old");
+        keep_record(&d, &pending, &now).unwrap();
+        assert_eq!(kept(&pending), json!(now.publisher_id));
+        // One that isn't the store's any more isn't installed by its record.
+        let about = d.join(PENDING).join(format!("{pending}.json"));
+        let was = std::fs::read_to_string(&about).unwrap();
+        let mut forged: Value = serde_json::from_str(&was).unwrap();
+        forged["origin"] = json!({ "kind": "file", "version": "1.0.0", "installed_at": 0 });
+        write(&about, &forged.to_string());
+        assert_eq!(decide(&d, &pending, true, &shown, Some(&now), nobody).unwrap_err(), NOT_CHECKED);
+        write(&about, &was);
         let done = decide(&d, &pending, true, &shown, Some(&now), nobody).unwrap();
         assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("ada")), "{done}");
         // (What's been taken down is kept from before it: it isn't blocked.)
