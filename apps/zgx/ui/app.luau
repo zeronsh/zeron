@@ -4,6 +4,12 @@
 -- main window ("main": the shell, screens/shell). Each screen is required
 -- as `@app/screens/…`, so a trusted plugin can replace it whole.
 
+-- While the window changes hands (a template switch's first load, which
+-- only takes what ran before away: the host's `window.switching`), nothing.
+if ui.shared("window.switching", false):peek() then
+	return ui.column {}
+end
+
 ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()

@@ -802,8 +802,8 @@ pub fn prepare_live() -> PathBuf {
     {
         let id = live::active(&root);
         preview::launch_started(id != live::BUILTIN);
-        // (Nothing shows yet: what the window first loads is this switch's.)
-        let _ = preview::Switch::begin((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }), id != live::BUILTIN);
+        preview::set_template_running(id != live::BUILTIN);
+        preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
@@ -1701,19 +1701,17 @@ impl Bridge {
         let name = template_name(root, &id);
         // What a preview saved is kept with it, or goes with it; what failed
         // only because it was one is tried again (`Bridge::blame_as`).
-        // (Kept before the reload, so what loads shows it; and again once
-        // the switch settles, with what was held meanwhile.)
+        // (Kept or let go as what comes next loads: `Switch::finish`.)
         let was_previewing = preview::current();
         let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
         let dropped = !kept && was_previewing.as_ref().is_some_and(|p| trusted || p.id != id);
-        let held_state = |host: &ScriptHost| {
+        let held_state = move |host: &ScriptHost| {
             if kept {
                 host.keep_held_state();
             } else if dropped {
                 host.drop_held_state();
             }
         };
-        held_state(&self.host);
         let switch = preview::Switch::begin((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }), id != live::BUILTIN);
         let retry = kept && {
             let files = self.failed_files.borrow_mut().forget_under(&format!("{id}:"));
@@ -1738,6 +1736,7 @@ impl Bridge {
         };
         let mut changed = 0;
         let mut was_laid = true;
+        let want_again = want.clone();
         match laid.flatten() {
             Some(Ok((n, overlay))) => {
                 changed = n;
@@ -1752,26 +1751,51 @@ impl Bridge {
         }
         self.publish_templates();
         self.publish_page();
-        // (A switch from a preview settles only by a reload: what shows may
-        // be the one before still, its last reload failed, though nothing
-        // new is laid.)
-        let mut reload = preview::Reload::NotAsked;
-        if kept || (changed > 0 && template) || (switch.holds() && was_laid) {
-            reload = match self.host.reload() {
-                Ok(()) => preview::Reload::Replaced,
-                Err(error) => {
-                    eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
-                    self.blame_as(&error, true);
-                    preview::Reload::Failed
-                }
-            };
-        }
-        if switch.settled(was_laid, reload) {
-            held_state(&self.host);
+        // The window loads what comes next (`Switch::finish`); a switch from
+        // a preview reloads whether or not anything new was laid (what shows
+        // may be the one before still, its last reload failed).
+        let lay = {
+            let (me, root) = (self.clone(), root.to_path_buf());
+            move |which: preview::Lay| me.clone().lay_for_switch(root.clone(), which, want_again.clone())
+        };
+        let owed = preview::reload_owed();
+        let own_app = self.overlay.borrow().from_template.iter().any(|rel| zeron_plugin_guard::path::fold(rel) == "app.luau");
+        let finished = switch.finish(was_laid, kept || (changed > 0 && template), own_app, &self.host, held_state, lay).await;
+        if let preview::Finished::Failed { error, lifted } = finished {
+            eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
+            self.blame_as(&error, true);
+            // (What shows loaded under the preview before, a load owed:
+            // looked at again at once, and then at each change till one loads.)
+            if lifted && !owed {
+                self.look();
+            } else if lifted {
+                eprintln!("zeron-zgx: the window still owes a load: tried again at the next change");
+            }
         }
         // What failed as a preview, laid down as it is now.
         if retry {
             self.look();
+        }
+    }
+
+    /// For a switch (`preview::Switch::finish`): Zeron's own laid in
+    /// `.live`, or `want` again. Whether it was.
+    async fn lay_for_switch(self: Rc<Self>, root: PathBuf, which: preview::Lay, want: live::Laid) -> bool {
+        let next = which == preview::Lay::Next;
+        let (id, failed, whole) = if next { (want.id.clone(), want.failed.clone(), want.whole_failed) } else { (live::BUILTIN.to_string(), BTreeSet::new(), false) };
+        match off_thread(move || live::compose(&root, &id, &failed, whole).map_err(|e| e.to_string())).await {
+            Some(Ok((_, overlay))) => {
+                *self.overlay.borrow_mut() = overlay;
+                // (Zeron's own in `.live`: what the next look finds isn't
+                // what it asks for, so it lays that down again.)
+                *self.laid.borrow_mut() = if next { want } else { live::Laid::default() };
+                true
+            }
+            Some(Err(error)) => {
+                eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
+                false
+            }
+            None => false,
         }
     }
 

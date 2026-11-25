@@ -166,73 +166,159 @@ pub fn set_template_running(on: bool) {
     TEMPLATE_RUNNING.store(on, Ordering::Relaxed);
 }
 
-/// A switch of what the main window runs (`looked`, and the launch): begun
-/// before the files of what it switches to are laid, settled once they are
-/// and the window has reloaded with them. What the window shows until then
-/// is what ran before, and keeps that one's preview: a preview switched to
-/// from Zeron's own is one from the start; from a preview, to anything (a
-/// kept one, Zeron's own, another preview), the one before stands until the
-/// switch has settled, and stays if it doesn't.
+/// A switch of what the main window runs (`looked`): begun before the files
+/// of what it switches to are laid, finished by the window's reloads. zgx
+/// asks one guard for every script the window runs, not by which load made
+/// it, so a script runs under whatever preview stands as it asks. What shows
+/// until the switch finishes is what ran before, under its own preview. To
+/// another preview: one load, still under the one before, then the next
+/// one's. From a preview to what has its powers (Zeron's own, one kept,
+/// another kept before): a load under the one before takes what ran away
+/// (nothing of it, its effects on the states a new load sets among them,
+/// runs ungated); then none stands and the window loads again, so what stays
+/// binds what it keeps and asks for what it needs as itself.
 pub struct Switch {
     from: Option<Preview>,
     going: Option<Preview>,
     template: bool,
 }
 
+thread_local! {
+    /// The window owes a load: a switch's load as itself failed, so what
+    /// shows loaded under the preview before (what it keeps held). Cleared by
+    /// a load that's Ok.
+    static OWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the window owes a load (`OWED`): the next switch reloads.
+pub fn reload_owed() -> bool {
+    OWED.with(std::cell::Cell::get)
+}
+
+fn owe(owed: bool) {
+    OWED.with(|o| o.set(owed));
+}
+
+/// What the host tells the window's app while a switch's first load runs
+/// (`Switch::finish`): Zeron's own app loads nothing then (app.luau).
+pub const SWITCHING: &str = "window.switching";
+
+/// What a switch asks laid for a load (`Switch::finish`): Zeron's own, or
+/// what it switches to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lay {
+    ZeronsOwn,
+    Next,
+}
+
+/// How a switch finished (`Switch::finish`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Finished {
+    /// What comes next runs, as itself.
+    Settled,
+    /// Its files weren't laid: what ran before stands.
+    NotLaid,
+    /// A load failed (the error). Not `lifted`: what ran before stands,
+    /// under its preview. `lifted`: what ran before is gone and none stands;
+    /// what shows is what loaded under it, to be looked at again.
+    Failed { error: String, lifted: bool },
+}
+
 impl Switch {
     /// `going`: the preview switched to, if it's one; `template`: whether
     /// it's a template other than Zeron's own.
     pub fn begin(going: Option<Preview>, template: bool) -> Self {
-        let from = current().filter(|now| Some(now) != going.as_ref());
-        if from.is_none() {
-            set(going.clone());
-        }
         // (A template's terminals are noted while one runs, to close in safe
-        // mode: on at once, off once the switch to Zeron's own has settled.)
+        // mode: on at once, off once a switch to Zeron's own has settled.)
         if template {
             set_template_running(true);
         }
-        Self { from, going, template }
+        Self { from: current(), going, template }
     }
 
-    /// Whether the preview before stands until the window reloads: then
-    /// the window must reload, changed or not, for it to settle.
+    /// Whether what ran before is a preview that isn't what comes next:
+    /// then the window reloads, laid anew or not.
     pub fn holds(&self) -> bool {
-        self.from.is_some()
+        self.from.is_some() && self.from != self.going
     }
 
-    /// The files laid (or none to lay), and how the window's reload went:
-    /// what was mounted replaced, or not. A reload not asked settles only a
-    /// switch that holds nothing. Whether it settled.
-    pub fn settled(self, laid: bool, reload: Reload) -> bool {
-        let done = laid
-            && match reload {
-                Reload::Replaced => true,
-                Reload::NotAsked => self.from.is_none(),
-                Reload::Failed => false,
-            };
-        if !done {
-            return false;
-        }
-        if self.from.is_some() {
-            set(self.going);
-        }
+    fn settled(&self) {
         if !self.template {
             set_template_running(false);
         }
-        true
     }
-}
 
-/// How a switch's reload went (`Switch::settled`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reload {
-    /// The window loaded what was laid: what it ran before is gone.
-    Replaced,
-    /// It failed: what it ran before stays mounted.
-    Failed,
-    /// None was asked.
-    NotAsked,
+    /// The files laid or not (`laid`), a reload asked for what changed
+    /// (`asked`), and whether what comes next has an app of its own
+    /// (`own_app`: a template's app.luau). `held` keeps or lets go of what
+    /// the preview before held, before anything new loads. `lay` lays
+    /// Zeron's own, or what comes next again.
+    pub async fn finish<F, Fut>(self, laid: bool, asked: bool, own_app: bool, host: &zgx_script::ScriptHost, held: impl FnOnce(&zgx_script::ScriptHost), mut lay: F) -> Finished
+    where
+        F: FnMut(Lay) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        if !laid {
+            return Finished::NotLaid;
+        }
+        held(host);
+        if !self.holds() {
+            // None before (or this same preview): what comes next has its
+            // own from its first line; a failed load leaves what was.
+            set(self.going.clone());
+            if asked || reload_owed() {
+                if let Err(error) = host.reload() {
+                    set(self.from);
+                    return Finished::Failed { error, lifted: false };
+                }
+                owe(false);
+            }
+            self.settled();
+            return Finished::Settled;
+        }
+        if self.going.is_some() {
+            if let Err(error) = host.reload() {
+                return Finished::Failed { error, lifted: false };
+            }
+            owe(false);
+            set(self.going);
+            return Finished::Settled;
+        }
+        // The load under the one before only takes what ran away: Zeron's
+        // own app loads nothing while `SWITCHING` says so (one of a
+        // template's own may load whole, under the one before).
+        // The load under the one before only takes what ran away: it's of
+        // Zeron's own app, which loads nothing while `SWITCHING` says so (a
+        // template with an app of its own has Zeron's laid for it, then its
+        // own again, still under the one before). So it asks for nothing,
+        // and fails on no refusal. Every wait is here: from the one before
+        // let go to the load as itself, nothing else runs, lands or loads.
+        let switching = host.shared(SWITCHING, zgx_script::Value::Bool(false));
+        switching.set(zgx_script::Value::Bool(true));
+        let own_app = self.template && own_app;
+        if own_app && !lay(Lay::ZeronsOwn).await {
+            switching.set(zgx_script::Value::Bool(false));
+            return Finished::NotLaid;
+        }
+        let first = host.reload();
+        let relaid = first.is_err() || !own_app || lay(Lay::Next).await;
+        switching.set(zgx_script::Value::Bool(false));
+        if let Err(error) = first {
+            return Finished::Failed { error, lifted: false };
+        }
+        // What ran before is gone. What loaded under it held what it keeps:
+        // let go, and loaded again as itself.
+        set(None);
+        host.drop_held_state();
+        self.settled();
+        let finished = match host.reload() {
+            Ok(()) if relaid => Finished::Settled,
+            Ok(()) => Finished::Failed { error: "the template's files weren't laid again: Zeron's own loaded".into(), lifted: true },
+            Err(error) => Finished::Failed { error, lifted: true },
+        };
+        owe(finished != Finished::Settled);
+        finished
+    }
 }
 
 /// Refused while a template runs as a preview: what the script is told.
@@ -623,7 +709,9 @@ mod tests {
 
     /// The window's app file as a preview has it: a timer that asks for
     /// `plugin.x.run` on each turn, a window of its own whose timer asks
-    /// too, and a call still out whose answer asks again.
+    /// too, a call still out whose answer asks again, its cleanup asking as
+    /// it goes, and an effect and a binding that ask as a named state the
+    /// next load sets moves.
     const ASKING: &str = r#"ui.every(16, function()
 	ui.invoke("turn", 1)
 	pcall(ui.invoke, "plugin.x.run", 1)
@@ -640,11 +728,68 @@ ui.call("slow", 1):after(function()
 	ui.invoke("answered_late", 1)
 	pcall(ui.invoke, "plugin.x.run", 1)
 end)
-return ui.column { ui.text { "asking" } }"#;
+ui.on_cleanup(function()
+	pcall(ui.invoke, "plugin.x.run", 1)
+end)
+local shared = ui.state("shared_n", 0)
+ui.effect(function()
+	if shared:get() > 0 then
+		ui.invoke("old_followed", 1)
+		pcall(ui.invoke, "plugin.x.run", 1)
+	end
+end)
+return ui.column {
+	ui.text { "asking" },
+	ui.text { function()
+		if shared:get() > 0 then
+			pcall(ui.invoke, "plugin.x.run", 1)
+		end
+		return "bound " .. shared:get()
+	end },
+}"#;
+    /// What comes next with an app of its own (a template's): it counts its
+    /// loads, moves the named state the preview follows to its load's
+    /// number, keeps a key, and asks for `plugin.x.load` as it loads.
+    const NEXT_OWN: &str = r#"ui.invoke("loaded", 1)
+local loads = ui.state("next_loads", 0)
+loads:set(loads:peek() + 1)
+ui.state("shared_n", 0):set(loads:peek())
+local width = ui.persist("width", 1)
+ui.state("width_read", 0):set(width:peek())
+pcall(ui.invoke, "plugin.x.load", 1)
+ui.command { id = "widen", title = "Widen", run = function() width:set(width:peek() + 1) end }
+return ui.column { ui.text { "next" } }"#;
+    /// What comes next with Zeron's own app, which loads nothing while the
+    /// window changes hands (ui/app.luau's first lines).
+    const NEXT: &str = concat!(
+        r#"if ui.shared("window.switching", false):peek() then return ui.column {} end
+"#,
+        r#"ui.invoke("loaded", 1)
+local loads = ui.state("next_loads", 0)
+loads:set(loads:peek() + 1)
+ui.state("shared_n", 0):set(loads:peek())
+local width = ui.persist("width", 1)
+ui.state("width_read", 0):set(width:peek())
+pcall(ui.invoke, "plugin.x.load", 1)
+ui.command { id = "widen", title = "Widen", run = function() width:set(width:peek() + 1) end }
+return ui.column { ui.text { "next" } }"#
+    );
+    /// A template's own, failing after it moved the state.
+    const NEXT_FAILING: &str = r#"ui.state("shared_n", 0):set(7)
+error("fails as it loads")"#;
     /// Zeron's own, for these tests: asks nothing.
     const QUIET: &str = r#"return ui.column { ui.text { "quiet" } }"#;
     /// One that doesn't load.
     const BROKEN: &str = "return ui.column {";
+
+    /// A future that's ready: its value.
+    fn now<T>(f: impl std::future::Future<Output = T>) -> T {
+        let mut f = std::pin::pin!(f);
+        match f.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!("not ready"),
+        }
+    }
 
     /// A window on `app.luau`, counting what its scripts did.
     struct Window {
@@ -652,20 +797,29 @@ return ui.column { ui.text { "asking" } }"#;
         file: PathBuf,
         counts: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<&'static str, u32>>>,
         slow: std::rc::Rc<std::cell::RefCell<Vec<zgx::task::LatestSender<()>>>>,
+        laid: std::rc::Rc<std::cell::RefCell<Vec<Lay>>>,
     }
 
     impl Window {
         fn new(name: &str) -> Self {
-            let file = dir(name).join("app.luau");
+            let at = dir(name);
+            let file = at.join("app.luau");
             std::fs::write(&file, ASKING).unwrap();
             let counts: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<&'static str, u32>>> = Default::default();
             let slow: std::rc::Rc<std::cell::RefCell<Vec<zgx::task::LatestSender<()>>>> = Default::default();
             let (c, w) = (counts.clone(), slow.clone());
-            let entry = file.clone();
+            let (entry, storage) = (file.clone(), at.join("storage"));
             let app = zgx_script::testing::TestApp::new(move |runtime| {
-                let host = zgx_script::ScriptHost::new(runtime, &entry);
-                host.guard(guard);
-                for name in ["turn", "window_turn", "answered_late", "plugin.x.run"] {
+                let host = zgx_script::ScriptHost::new(runtime, &entry).storage(storage);
+                let refused = c.clone();
+                host.guard(move |kind, name| {
+                    let said = guard(kind, name);
+                    if said.is_err() {
+                        *refused.borrow_mut().entry("refused").or_default() += 1;
+                    }
+                    said
+                });
+                for name in ["turn", "window_turn", "answered_late", "old_followed", "loaded", "plugin.x.run", "plugin.x.load"] {
                     let c = c.clone();
                     host.action(name, move |_| *c.borrow_mut().entry(name).or_default() += 1);
                 }
@@ -680,7 +834,7 @@ return ui.column { ui.text { "asking" } }"#;
                 });
                 host
             });
-            Self { app, file, counts, slow }
+            Self { app, file, counts, slow, laid: Default::default() }
         }
 
         fn count(&self, name: &str) -> u32 {
@@ -694,19 +848,76 @@ return ui.column { ui.text { "asking" } }"#;
             (self.count("turn") + self.count("window_turn") - turns, self.count("plugin.x.run") - answered)
         }
 
-        /// `code` laid as its app file and the window reloaded on it.
-        fn reload(&self, code: &str) -> Reload {
+        /// `code` laid as its app file.
+        fn lay(&self, code: &str) {
             std::fs::write(&self.file, code).unwrap();
-            match self.app.host.reload() {
-                Ok(()) => Reload::Replaced,
-                Err(_) => Reload::Failed,
+        }
+
+        /// A switch finished: `next` what comes next, `QUIET` Zeron's own.
+        fn finish(&self, switch: Switch, laid: bool, asked: bool, next: &'static str, held: impl FnOnce(&zgx_script::ScriptHost)) -> Finished {
+            let (file, record) = (self.file.clone(), self.laid.clone());
+            // (What comes next has an app of its own unless it's Zeron's.)
+            let own_app = !next.starts_with("if ui.shared(\"window.switching\"") && next != QUIET;
+            let finished = now(switch.finish(laid, asked, own_app, &self.app.host, held, move |which| {
+                record.borrow_mut().push(which);
+                std::fs::write(&file, if which == Lay::ZeronsOwn { QUIET } else { next }).unwrap();
+                std::future::ready(true)
+            }));
+            assert!(!self.switching(), "not left changing hands: {finished:?}");
+            finished
+        }
+
+        fn state(&self, name: &str) -> String {
+            self.app.host.states().into_iter().find(|(n, _)| n.ends_with(name)).map(|(_, v)| v.to_json()).unwrap_or_default()
+        }
+
+        /// Whether the host says the window is changing hands.
+        fn switching(&self) -> bool {
+            self.app.host.shared(SWITCHING, false).signal().with_untracked(|v| *v == zgx_script::Value::Bool(true))
+        }
+
+        /// What `NEXT` keeps: widened once, saved, and read back by a load.
+        fn keeps_its_width(&self) -> bool {
+            let before: u32 = self.state("width_read").parse().unwrap_or(0);
+            assert!(self.app.host.run_command("widen"));
+            self.app.frames(2);
+            self.app.host.save();
+            self.app.host.reload().unwrap();
+            self.app.frames(2);
+            self.state("width_read").parse::<u32>().unwrap_or(0) == before + 1
+        }
+
+        /// `preview_is_gone`, but where what comes next is a preview too
+        /// (`still`): its asks refused still, whatever runs.
+        fn preview_is_gone_unless(&self, still: bool) {
+            if still {
+                let answered = self.count("plugin.x.run");
+                self.app.frames(6);
+                assert_eq!(self.count("plugin.x.run"), answered);
+            } else {
+                self.preview_is_gone();
             }
+        }
+
+        /// Nothing of the preview runs or is answered from here on: its
+        /// timers, its window's, its call's late answer.
+        fn preview_is_gone(&self) {
+            for tell in self.slow.borrow_mut().drain(..) {
+                tell.send(());
+            }
+            let turns = self.count("turn") + self.count("window_turn");
+            self.app.frames(6);
+            assert_eq!(self.count("turn") + self.count("window_turn"), turns, "nothing of the preview runs once it's replaced");
+            assert_eq!(self.count("answered_late"), 0, "nor does its call's answer reach it");
         }
     }
 
     fn named(id: &str) -> Preview {
         Preview { id: id.into(), name: id.into() }
     }
+
+    const DROP: fn(&zgx_script::ScriptHost) = |h| h.drop_held_state();
+    const KEEP: fn(&zgx_script::ScriptHost) = |h| drop(h.keep_held_state());
 
     /// Switches from a preview, as `looked` makes each: Revert (Zeron's own,
     /// chosen in safe mode) and an agent's switch to Zeron's own are the
@@ -715,7 +926,8 @@ return ui.column { ui.text { "asking" } }"#;
     /// laid anything new.
     #[test]
     fn a_template_switch_settles_in_order() {
-        let window = Window::new("switch-order");
+        let mut window = Window::new("switch-order");
+        let failed = |f: &Finished, was: bool| matches!(f, Finished::Failed { lifted, .. } if *lifted == was);
         set(Some(named("a")));
         let (turns, answered) = window.run();
         assert!(turns > 0 && answered == 0, "a preview's: {turns} turns, {answered} answered");
@@ -725,60 +937,352 @@ return ui.column { ui.text { "asking" } }"#;
         let switch = Switch::begin(None, false);
         assert_eq!(window.run().1, 0, "while the files are laid");
         assert!(switch.holds());
-        assert!(!switch.settled(false, Reload::NotAsked));
-        assert_eq!(window.run().1, 0);
+        assert_eq!(window.finish(switch, false, false, QUIET, DROP), Finished::NotLaid);
+        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
 
-        // An agent's switch to Zeron's own, its reload failing: what ran
-        // before stays mounted, and runs.
-        let switch = Switch::begin(None, false);
-        let reload = window.reload(BROKEN);
-        assert_eq!(reload, Reload::Failed);
-        assert!(!switch.settled(true, reload));
+        // An agent's switch to Zeron's own, its load failing: what ran
+        // before stays mounted, runs, and is still the preview.
+        window.lay(BROKEN);
+        let f = window.finish(Switch::begin(None, false), true, true, QUIET, DROP);
+        assert!(failed(&f, false), "{f:?}");
         let (turns, answered) = window.run();
         assert!(turns > 0 && answered == 0, "still mounted: {turns} turns, {answered} answered");
-
-        // A look again that finds nothing new to lay, and asks no reload.
-        let switch = Switch::begin(None, false);
-        assert!(!switch.settled(true, Reload::NotAsked), "a reload not asked settles nothing held");
-        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
-
-        // To another preview: never none between them.
-        let switch = Switch::begin(Some(named("b")), true);
-        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
-        assert!(!switch.settled(true, Reload::Failed));
         assert_eq!(current(), Some(named("a")));
 
-        // Revert that settles: what ran before is gone, its window's timer
-        // and its call's answer with it.
-        let switch = Switch::begin(None, false);
-        let reload = window.reload(QUIET);
-        assert_eq!(reload, Reload::Replaced);
-        assert!(switch.settled(true, reload));
-        assert_eq!(current(), None);
-        for tell in window.slow.borrow_mut().drain(..) {
-            tell.send(());
-        }
-        assert_eq!(window.run(), (0, 0), "nothing of the preview runs once it's replaced");
-        assert_eq!(window.count("answered_late"), 0, "its call's answer reached nothing");
+        // A look again that finds nothing new to lay still reloads.
+        let f = window.finish(Switch::begin(None, false), true, false, QUIET, DROP);
+        assert!(failed(&f, false), "a switch from a preview always reloads: {f:?}");
+        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
 
-        // From Zeron's own to a preview: one before anything of it runs.
+        // To another preview, its load failing: the one before stands.
+        let f = window.finish(Switch::begin(Some(named("b")), true), true, true, QUIET, DROP);
+        assert!(failed(&f, false), "{f:?}");
+        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
+
+        // Revert that settles: a load under the preview takes it away
+        // (Zeron's own app loads nothing then), then Zeron's own loads as
+        // itself: what it asks as it loads answered, nothing of it refused,
+        // what it keeps kept. The next frame is Zeron's own.
+        window.lay(NEXT);
+        window.app.frames(1);
+        assert!(window.app.tree().contains("\"asking\"") && !window.app.tree().contains("\"next\""));
+        let (loads, refused) = (window.count("loaded"), window.count("refused"));
+        assert_eq!(window.finish(Switch::begin(None, false), true, true, QUIET, DROP), Finished::Settled);
+        assert_eq!(current(), None);
+        assert_eq!(window.count("loaded"), loads + 1, "Zeron's own ran once: its load under the preview loaded nothing");
+        assert_eq!(window.count("refused"), refused, "nothing of it refused, so nothing said of it");
+        assert_eq!(window.count("plugin.x.load"), 1, "answered as itself");
+        assert_eq!((window.count("old_followed"), window.count("plugin.x.run")), (0, 0), "the preview's effects had nothing to follow, nor anything answered");
+        window.app.frames(1);
+        assert!(window.app.tree().contains("\"next\"") && !window.app.tree().contains("\"asking\""), "the next frame is Zeron's own");
+        let refused = window.count("refused");
+        window.preview_is_gone();
+        assert_eq!(window.count("refused"), refused, "Zeron's own is refused nothing");
+        assert!(window.keeps_its_width(), "what Zeron's own keeps is kept: {}", window.state("width_read"));
+        assert!(window.laid.borrow().is_empty(), "laid nothing else");
+
+        // From Zeron's own to a preview: one load, under its own.
+        window.lay(ASKING);
         let switch = Switch::begin(Some(named("c")), true);
         assert!(!switch.holds());
-        let reload = window.reload(ASKING);
-        assert!(switch.settled(true, reload));
+        assert_eq!(window.finish(switch, true, true, ASKING, DROP), Finished::Settled);
         assert_eq!(current(), Some(named("c")));
         let (turns, answered) = window.run();
         assert!(turns > 0 && answered == 0);
 
-        // Kept: the same until it's reloaded.
+        // To another preview: one load, under the one before; never none.
+        window.lay(NEXT);
+        let (loads, answers) = (window.count("loaded"), window.count("plugin.x.load"));
+        assert_eq!(window.finish(Switch::begin(Some(named("d")), true), true, true, NEXT, DROP), Finished::Settled);
+        assert_eq!((current(), window.count("loaded"), window.count("plugin.x.load")), (Some(named("d")), loads + 1, answers));
+
+        // Kept, nothing new laid: reloaded, as itself, what it held kept.
         let switch = Switch::begin(None, true);
-        assert_eq!(window.run().1, 0);
-        assert!(!switch.settled(true, Reload::NotAsked));
-        assert_eq!(window.run().1, 0);
-        let switch = Switch::begin(None, true);
-        assert!(switch.settled(true, window.reload(ASKING)));
+        assert!(switch.holds());
+        assert_eq!(window.finish(switch, true, false, NEXT, KEEP), Finished::Settled);
+        assert_eq!((current(), window.count("loaded"), window.count("plugin.x.load")), (None, loads + 2, answers + 1));
+        assert!(window.keeps_its_width(), "what the kept one keeps is kept: {}", window.state("width_read"));
+        assert_eq!(window.count("plugin.x.run"), 0, "no ask of a preview's was ever answered");
+        set(None);
+    }
+
+    /// A preview's effect and binding following a named state that what
+    /// loads next moves: to another preview, that load is under the one
+    /// before, and what they ask is refused; to a template kept (an app of
+    /// its own), Zeron's own loads under the preview first and moves
+    /// nothing, then the template loads as itself (the state moved, to 1)
+    /// with nothing of the preview alive to follow it.
+    #[test]
+    fn a_preview_s_effects_on_what_the_next_load_sets_stay_gated() {
+        for (going, held) in [(Some(named("b")), DROP), (None, KEEP), (None, DROP)] {
+            let window = Window::new("follows");
+            set(Some(named("a")));
+            window.app.frames(4);
+            window.lay(NEXT_OWN);
+            assert_eq!(window.finish(Switch::begin(going.clone(), true), true, true, NEXT_OWN, held), Finished::Settled);
+            assert_eq!(window.count("plugin.x.run"), 0, "{going:?}: nothing it asked was answered");
+            match &going {
+                Some(_) => assert!(window.count("old_followed") > 0, "its effect followed the state that load moved"),
+                None => {
+                    assert_eq!(window.count("old_followed"), 0, "Zeron's own moved nothing");
+                    assert_eq!((window.count("loaded"), window.count("plugin.x.load"), window.laid.borrow().clone()), (1, 1, vec![Lay::ZeronsOwn, Lay::Next]));
+                }
+            }
+            window.preview_is_gone_unless(going.is_some());
+            assert_eq!(window.count("plugin.x.run"), 0);
+            set(None);
+        }
+    }
+
+    /// Zeron's own app (ui/app.luau), loaded while the window changes hands
+    /// under a preview: nothing built, nothing asked, nothing refused.
+    #[test]
+    fn zeron_s_own_app_loads_nothing_while_the_window_changes_hands() {
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/app.luau");
+        let asked: std::rc::Rc<std::cell::Cell<u32>> = Default::default();
+        let a = asked.clone();
+        set(Some(named("a")));
+        let mut app = zgx_script::testing::TestApp::new(move |runtime| {
+            let host = zgx_script::ScriptHost::new(runtime, &entry);
+            host.guard(move |kind, name| {
+                a.set(a.get() + 1);
+                guard(kind, name)
+            });
+            host.shared("window", "main");
+            host.shared(SWITCHING, true);
+            host
+        });
+        app.frames(4);
+        assert_eq!(app.error(), None);
+        assert_eq!(asked.get(), 0, "asked for nothing");
+        assert!(!app.tree().contains("\"text\""), "built nothing: {}", app.tree());
+        set(None);
+    }
+
+    /// A preview that says the window is changing hands itself (and follows
+    /// it) leaves nothing empty: what comes next loads whole as itself, and
+    /// what the preview asks as it follows is refused.
+    #[test]
+    fn a_preview_saying_the_window_changes_hands_changes_nothing() {
+        const SAYS_SWITCHING: &str = r#"local switching = ui.shared("window.switching", false)
+switching:set(true)
+ui.effect(function()
+	switching:get()
+	pcall(ui.invoke, "plugin.x.run", 1)
+end)
+return ui.column { ui.text { "says switching" } }"#;
+        let mut window = Window::new("says-switching");
+        set(Some(named("a")));
+        window.lay(SAYS_SWITCHING);
+        window.app.host.reload().unwrap();
+        window.app.frames(2);
+        window.lay(NEXT);
+        assert_eq!(window.finish(Switch::begin(None, false), true, true, QUIET, DROP), Finished::Settled);
+        window.app.frames(1);
+        assert_eq!((window.count("loaded"), window.count("plugin.x.run")), (1, 0));
+        assert!(window.app.tree().contains("\"next\""), "{}", window.app.tree());
+        set(None);
+    }
+
+    /// A load that moves the states a preview's effects follow, then fails:
+    /// to another preview (under the one before) what they ask as it moves
+    /// and as it's undone is refused, and the one before stands; kept (an
+    /// app of its own), Zeron's own loads first and moves nothing, and the
+    /// kept one's failure as itself is its own, a load owed.
+    #[test]
+    fn a_load_that_moves_states_then_fails_leaves_the_preview_gated() {
+        for kept in [false, true] {
+            let window = Window::new(&format!("moves-then-fails-{kept}"));
+            set(Some(named("a")));
+            window.app.frames(4);
+            window.lay(NEXT_FAILING);
+            let going = (!kept).then(|| named("b"));
+            let f = window.finish(Switch::begin(going, true), true, true, NEXT_FAILING, if kept { KEEP } else { DROP });
+            assert_eq!(window.count("plugin.x.run"), 0, "kept {kept}: nothing asked was answered");
+            if kept {
+                assert!(matches!(f, Finished::Failed { lifted: true, .. }), "{f:?}");
+                assert_eq!((current(), window.count("old_followed"), window.laid.borrow().clone()), (None, 0, vec![Lay::ZeronsOwn, Lay::Next]));
+                assert!(reload_owed());
+                window.preview_is_gone();
+            } else {
+                assert!(window.count("old_followed") > 0, "its effect followed, as the state moved and as it was undone");
+                assert!(matches!(f, Finished::Failed { lifted: false, .. }), "{f:?}");
+                assert_eq!(current(), Some(named("a")));
+            }
+            set(None);
+        }
+    }
+
+    /// A template that asks for what a preview may not as it loads, its
+    /// refusal not caught: kept, it fails under the preview, so Zeron's own
+    /// loads under it instead, and then the kept one as itself: it runs,
+    /// and isn't failed. Switched to as another preview, the one before
+    /// stands.
+    #[test]
+    fn a_kept_template_asking_as_it_loads_runs() {
+        const ASKS_AT_LOAD: &str = r#"ui.invoke("plugin.x.run", 1)
+return ui.column { ui.text { "asks at load" } }"#;
+        let window = Window::new("asks-at-load");
+        set(Some(named("a")));
+        window.app.frames(2);
+        window.lay(ASKS_AT_LOAD);
+        let f = window.finish(Switch::begin(Some(named("b")), true), true, true, ASKS_AT_LOAD, DROP);
+        assert!(matches!(f, Finished::Failed { lifted: false, .. }), "{f:?}");
+        assert_eq!(current(), Some(named("a")));
+        assert_eq!(window.finish(Switch::begin(None, true), true, true, ASKS_AT_LOAD, KEEP), Finished::Settled);
+        assert_eq!((current(), window.count("plugin.x.run"), window.laid.borrow().clone()), (None, 1, vec![Lay::ZeronsOwn, Lay::Next]));
+        set(None);
+    }
+
+    /// The load as itself failing (here: a script that fails once what it
+    /// asks for is answered): none stands, what loaded under the preview
+    /// shows, to be looked at again.
+    #[test]
+    fn a_second_load_that_fails_is_said() {
+        const FAILS_AS_ITSELF: &str = r#"if pcall(ui.invoke, "plugin.x.load", 1) then error("fails as itself") end
+return ui.column { ui.text { "loaded under the preview" } }"#;
+        let mut window = Window::new("second-fails");
+        set(Some(named("a")));
+        window.app.frames(2);
+        window.lay(FAILS_AS_ITSELF);
+        let f = window.finish(Switch::begin(None, false), true, true, QUIET, DROP);
+        assert!(matches!(&f, Finished::Failed { lifted: true, error } if error.contains("fails as itself")), "{f:?}");
         assert_eq!(current(), None);
-        assert!(window.run().1 > 0, "kept, and reloaded");
+        window.app.frames(1);
+        assert!(window.app.tree().contains("loaded under the preview"));
+        window.preview_is_gone();
+        // A load is owed: the next look's switch reloads though it laid
+        // nothing new, and once one is Ok nothing more is owed.
+        assert!(reload_owed());
+        window.lay(NEXT);
+        assert_eq!(window.finish(Switch::begin(None, false), true, false, QUIET, DROP), Finished::Settled);
+        window.app.frames(1);
+        assert!(window.app.tree().contains("\"next\"") && !reload_owed(), "{}", window.app.tree());
+        set(None);
+    }
+
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().flat_map(|e| if e.path().is_dir() { files_under(&e.path()) } else { vec![e.path()] }).collect()
+    }
+
+    /// What comes next after a switch from a preview (Zeron's own, or the
+    /// one kept) keeps what it changes: shown, and saved.
+    #[test]
+    fn what_comes_after_a_switch_keeps_what_it_changes() {
+        const SAVING: &str = r#"
+local accent = ui.persist("accent", "default")
+ui.command { id = "set", title = "Set", run = function() accent:set("changed") end }
+return ui.column { ui.text { id = "accent", function() return accent:get() end } }
+"#;
+        for kept in [false, true] {
+            let root = dir(&format!("after-switch-saves-{kept}"));
+            let storage = root.join("state");
+            let file = root.join("app.luau");
+            std::fs::write(&file, r#"return ui.column { ui.text { "a preview" } }"#).unwrap();
+            let (st, entry) = (storage.clone(), file.clone());
+            set(Some(named("a")));
+            let mut app = zgx_script::testing::TestApp::new(move |runtime| {
+                let host = zgx_script::ScriptHost::new(runtime, &entry).storage(st);
+                host.guard(guard);
+                host
+            });
+            app.frames(4);
+            let switch = Switch::begin(None, kept);
+            std::fs::write(&file, SAVING).unwrap();
+            let held = move |h: &zgx_script::ScriptHost| {
+                if kept {
+                    h.keep_held_state();
+                } else {
+                    h.drop_held_state();
+                }
+            };
+            assert_eq!(now(switch.finish(true, true, false, &app.host, held, |_| std::future::ready(false))), Finished::Settled);
+            app.frames(4);
+            assert!(app.host.run_command("set"));
+            app.frames(4);
+            app.host.save();
+            assert_eq!(app.text("accent"), "changed", "kept {kept}");
+            let saved = files_under(&storage).iter().any(|f| std::fs::read_to_string(f).is_ok_and(|t| t.contains("changed")));
+            assert!(saved, "kept {kept}: saved to disk");
+            set(None);
+        }
+    }
+
+    /// A switch from a preview: nothing of what goes is answered as it's
+    /// torn down (a part still mounted too); what comes
+    /// next has what it asks for as it loads, builds, runs its effects and
+    /// calls answered.
+    #[test]
+    fn what_goes_is_torn_down_as_a_preview_and_what_comes_loads_as_itself() {
+        const LEAVING: &str = r#"ui.on_cleanup(function()
+	ui.invoke("cleanup_ran", 1)
+	pcall(ui.invoke, "plugin.x.run", 1)
+end)
+local Part = ui.component(function()
+	ui.on_cleanup(function()
+		ui.invoke("part_cleanup_ran", 1)
+		pcall(ui.invoke, "plugin.x.run", 1)
+	end)
+	return ui.text { "part" }
+end)
+return ui.column { Part {} }"#;
+        const LOADS: &str = r#"local ok = pcall(ui.invoke, "plugin.y.run", 1)
+ui.invoke(if ok then "load_ok" else "load_refused", 1)
+ui.call("later", 1):after(function() ui.invoke("later_ok", 1) end, function() ui.invoke("later_refused", 1) end)
+local P = ui.component(function()
+	local ok = pcall(ui.invoke, "plugin.y.run", 1)
+	ui.invoke(if ok then "build_ok" else "build_refused", 1)
+	ui.effect(function()
+		local ok = pcall(ui.invoke, "plugin.y.run", 1)
+		ui.invoke(if ok then "effect_ok" else "effect_refused", 1)
+	end)
+	return ui.text { "p" }
+end)
+return ui.column { P {} }"#;
+        let file = dir("goes-and-comes").join("app.luau");
+        std::fs::write(&file, LEAVING).unwrap();
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+        let (l, entry) = (log.clone(), file.clone());
+        set(Some(named("a")));
+        let app = zgx_script::testing::TestApp::new(move |runtime| {
+            let host = zgx_script::ScriptHost::new(runtime, &entry);
+            host.guard(guard);
+            for name in ["cleanup_ran", "part_cleanup_ran", "plugin.x.run", "plugin.y.run", "load_ok", "load_refused", "build_ok", "build_refused", "effect_ok", "effect_refused", "later_ok", "later_refused"] {
+                let l = l.clone();
+                host.action(name, move |_| l.borrow_mut().push(name.to_string()));
+            }
+            host.async_action("later", move |_| async move {
+                match current().is_some() {
+                    true => Err("refused".to_string()),
+                    false => Ok(zgx_script::Value::Nil),
+                }
+            });
+            host
+        });
+        app.frames(6);
+        log.borrow_mut().clear();
+
+        for (kept, going) in [(true, None), (false, Some(named("b")))] {
+            let switch = Switch::begin(going.clone(), kept);
+            std::fs::write(&file, LOADS).unwrap();
+            assert_eq!(now(switch.finish(true, true, false, &app.host, DROP, |_| std::future::ready(false))), Finished::Settled);
+            app.frames(12);
+            let seen = std::mem::take(&mut *log.borrow_mut());
+            // (zgx runs no cleanup's call as it reloads: either way none of
+            // the preview's is answered.)
+            assert!(!seen.contains(&"plugin.x.run".into()), "torn down: {seen:?}");
+            let expect = |word: &str| if going.is_none() { format!("{word}_ok") } else { format!("{word}_refused") };
+            for word in ["load", "build", "effect", "later"] {
+                assert!(seen.contains(&expect(word)), "{going:?}: {word} as what comes next is: {seen:?}");
+            }
+            assert_eq!(current(), going);
+            // (Back to a preview of LEAVING for the next.)
+            set(Some(named("a")));
+            std::fs::write(&file, LEAVING).unwrap();
+            app.host.reload().unwrap();
+            app.frames(6);
+            log.borrow_mut().clear();
+        }
         set(None);
     }
 
