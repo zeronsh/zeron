@@ -64,7 +64,10 @@ fn sheet(item: &Json) -> String {
     // (And what the store's word on it is drawn as: a new word is a sheet to
     // be read again.)
     let said = drawn(item).map(|d| d.to_string()).unwrap_or_default();
-    format!("{}{said}", key(field("keep"), field("pending"), field("hash")))
+    // (And the lines over it the engine may add under the same package: what
+    // it replaces and how.)
+    let lines: Json = ["instead", "update_of", "replaces_edits", "new_owner", "also_installed"].iter().map(|k| (k.to_string(), item[*k].clone())).collect::<serde_json::Map<_, _>>().into();
+    format!("{}{said}{lines}{}", key(field("keep"), field("pending"), field("hash")), item["from"]["replaced"])
 }
 
 /// Whether a yes to `asked` (`key`: which package, as what) may be taken now:
@@ -570,6 +573,11 @@ mod tests {
         let t2 = SEEN.with(|s| s.borrow().as_ref().unwrap().1);
         assert!(!armed(Some(&now), &asked, t2));
         assert!(armed(Some(&now), &asked, t2 + super::super::consent::ARMED));
+        // A line the engine adds under the same package (an edit made as it
+        // showed): waited for anew too.
+        let mut edited = now.clone();
+        edited["replaces_edits"] = json!(true);
+        assert!(!armed(Some(&edited), &asked, t2 + super::super::consent::ARMED));
     }
 
     /// What the engine holds the store's record to is what's drawn, and only
