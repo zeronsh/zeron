@@ -786,6 +786,34 @@ pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Sen
     heard.recv().await
 }
 
+/// Template `id` (its `failed` files Zeron's; Zeron's own alone if `whole`)
+/// laid in `.live` off this thread. What `.live` holds is unknown (`laid` a
+/// default, which no look takes for laid) from the start until it's Ok, then
+/// `then`, with its `overlay`: a lay-down that fails partway leaves part of it
+/// written, and the next look lays it again. How many files changed, or why
+/// it failed (its thread stopped among them).
+pub(crate) async fn lay_down(
+    root: &Path,
+    id: String,
+    failed: BTreeSet<String>,
+    whole: bool,
+    then: live::Laid,
+    laid: &RefCell<live::Laid>,
+    overlay: &RefCell<live::Overlay>,
+) -> Result<usize, String> {
+    *laid.borrow_mut() = live::Laid::default();
+    let root = root.to_path_buf();
+    match off_thread(move || live::compose(&root, &id, &failed, whole).map_err(|e| e.to_string())).await {
+        Some(Ok((changed, laid_now))) => {
+            *overlay.borrow_mut() = laid_now;
+            *laid.borrow_mut() = then;
+            Ok(changed)
+        }
+        Some(Err(error)) => Err(error),
+        None => Err("its thread stopped".into()),
+    }
+}
+
 /// The main window's app file: `.live/app.luau`, laid down now from Zeron's
 /// own and the active template (before the window's host is made, which
 /// fixes its file), or `ui/app.luau` where there's no templates folder.
@@ -802,12 +830,6 @@ pub fn prepare_live() -> PathBuf {
     if ZERON_TEMPLATE.swap(false, std::sync::atomic::Ordering::Relaxed) {
         preview::enter_safe();
     }
-    {
-        let id = live::active(&root);
-        preview::launch_started(id != live::BUILTIN);
-        preview::set_template_running(id != live::BUILTIN);
-        preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
-    }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
     // (retired_themes.rs).
@@ -815,7 +837,11 @@ pub fn prepare_live() -> PathBuf {
         retired_themes::retire(&root, &data);
     }
     let ui = crate::ui_dir();
+    // (Read once: the preview it runs as is the one laid.)
     let id = live::active(&root);
+    preview::launch_started(id != live::BUILTIN);
+    preview::set_template_running(id != live::BUILTIN);
+    preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     // `.live` as the last launch left it, from the same Zeron and template:
     // it runs as it is (live::LaunchStamp), nothing read or written.
     let stamp = live::LaunchStamp::now(&ui, &root, &id);
@@ -1732,31 +1758,18 @@ impl Bridge {
                 .is_some_and(|v| v["chat"].as_str().is_some_and(|c| !c.is_empty()));
             host_bar::notice(host_bar::Notice::switched(&name, id == live::BUILTIN, by_chat, !trusted));
         }
-        let laid = {
-            let (root, want) = (root.to_path_buf(), want.clone());
-            off_thread(move || compose.then(|| live::compose(&root, &want.id, &want.failed, want.whole_failed).map_err(|e| e.to_string())))
-            .await
-        };
         let mut changed = 0;
         let mut was_laid = true;
         let want_again = want.clone();
-        match laid.flatten() {
-            Some(Ok((n, overlay))) => {
-                changed = n;
-                *self.overlay.borrow_mut() = overlay;
-                *self.laid.borrow_mut() = want;
+        if compose {
+            let (id, failed, whole) = (want.id.clone(), want.failed.clone(), want.whole_failed);
+            match lay_down(root, id, failed, whole, want, &self.laid, &self.overlay).await {
+                Ok(n) => changed = n,
+                Err(error) => {
+                    was_laid = false;
+                    eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
+                }
             }
-            Some(Err(error)) => {
-                was_laid = false;
-                eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
-            }
-            // (Asked, and no answer: its thread died. What `.live` holds is
-            // anyone's guess, so nothing laid.)
-            None if compose => {
-                was_laid = false;
-                eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: its thread stopped");
-            }
-            None => {}
         }
         self.publish_templates();
         self.publish_page();
@@ -1792,19 +1805,15 @@ impl Bridge {
     async fn lay_for_switch(self: Rc<Self>, root: PathBuf, which: preview::Lay, want: live::Laid) -> bool {
         let next = which == preview::Lay::Next;
         let (id, failed, whole) = if next { (want.id.clone(), want.failed.clone(), want.whole_failed) } else { (live::BUILTIN.to_string(), BTreeSet::new(), false) };
-        match off_thread(move || live::compose(&root, &id, &failed, whole).map_err(|e| e.to_string())).await {
-            Some(Ok((_, overlay))) => {
-                *self.overlay.borrow_mut() = overlay;
-                // (Zeron's own in `.live`: what the next look finds isn't
-                // what it asks for, so it lays that down again.)
-                *self.laid.borrow_mut() = if next { want } else { live::Laid::default() };
-                true
-            }
-            Some(Err(error)) => {
+        // (Zeron's own in `.live`: what the next look finds isn't what it
+        // asks for, so it lays that down again.)
+        let then = if next { want } else { live::Laid::default() };
+        match lay_down(&root, id, failed, whole, then, &self.laid, &self.overlay).await {
+            Ok(_) => true,
+            Err(error) => {
                 eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
                 false
             }
-            None => false,
         }
     }
 
@@ -3224,7 +3233,7 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move { crate::plugins::preview::refuse("plugins.remove")?;
+                { let allowed = crate::plugins::preview::refuse("plugins.remove"); async move { allowed?;
                     let (id, device) = remote::id_and_device(&arg);
                     let elsewhere = device.is_some();
                     call_on(&me, device, "RemovePlugin", json!({ "id": id })).await?;
@@ -3237,7 +3246,7 @@ impl Bridge {
                         settings::forget_in(&dir, &id);
                     }
                     Ok(Value::Nil)
-                }
+                } }
             }
         });
         // A plugin's setting, set from its page in Settings (never by a
@@ -3282,7 +3291,7 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move { crate::plugins::preview::refuse("plugins.install")?;
+                { let allowed = crate::plugins::preview::refuse("plugins.install"); async move { allowed?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     let device = remote::device_of(&arg);
                     let params = match (given("path"), given("url")) {
@@ -3297,7 +3306,7 @@ impl Bridge {
                     let reply = call_on(&me, device, "InstallPlugin", params).await?;
                     eprintln!("zeron-zgx: plugins: installed {}", reply["plugin"]["id"].as_str().unwrap_or("?"));
                     Ok(json_value(&reply))
-                }
+                } }
             }
         });
         // The update found for it (what it changes in its grants is on its
@@ -3306,11 +3315,11 @@ impl Bridge {
             let me = me.clone();
             move |arg| {
                 let me = me.clone();
-                async move { crate::plugins::preview::refuse("plugins.update")?;
+                { let allowed = crate::plugins::preview::refuse("plugins.update"); async move { allowed?;
                     let (id, device) = remote::id_and_device(&arg);
                     let reply = call_on(&me, device, "UpdatePlugin", json!({ "id": id })).await?;
                     Ok(json_value(&reply))
-                }
+                } }
             }
         });
         // Every installed plugin's source checked for a new version (nil, or
@@ -3325,7 +3334,7 @@ impl Bridge {
                 }
             }
         });
-        host.async_action("plugins.new", |name| async move { crate::plugins::preview::refuse("plugins.new")?;
+        host.async_action("plugins.new", |name| { let allowed = crate::plugins::preview::refuse("plugins.new"); async move { allowed?;
             let name = text(&name).trim().to_string();
             let id = slug(&name);
             if id.len() < 2 {
@@ -3334,7 +3343,7 @@ impl Bridge {
             // A new plugin asks for nothing: what it needs, you allow later.
             let item = call("NewPlugin", json!({ "id": id, "name": name, "permissions": [] })).await?;
             Ok(Value::from(item["id"].as_str().unwrap_or(&id)))
-        });
+        } });
         host.action("plugins.open_folder", {
             let me = me.clone();
             move |id| {
@@ -3369,9 +3378,9 @@ impl Bridge {
             let me = me.clone();
             move |id| {
                 let me = me.clone();
-                async move {
+                { let allowed = preview::refuse("templates.use"); async move {
                     // (A preview can't switch templates: preview.rs.)
-                    preview::refuse("templates.use")?;
+                    allowed?;
                     template_call("UseTemplate", json!({ "id": text(&id) })).await?;
                     // Chosen here, on Zeron's own Templates page (never a
                     // template's: screens/templates is never templated):
@@ -3383,7 +3392,7 @@ impl Bridge {
                         b.rewatch();
                     }
                     Ok(Value::Nil)
-                }
+                } }
             }
         });
         // A new template by the name it's given: a copy of Zeron's own.
@@ -3391,8 +3400,8 @@ impl Bridge {
             let me = me.clone();
             move |name| {
                 let me = me.clone();
-                async move {
-                    preview::refuse("templates.create")?;
+                { let allowed = preview::refuse("templates.create"); async move {
+                    allowed?;
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let name = text(&name).trim().chars().take(60).collect::<String>();
@@ -3401,15 +3410,15 @@ impl Bridge {
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
-                }
+                } }
             }
         });
         host.async_action("templates.duplicate", {
             let me = me.clone();
             move |id| {
                 let me = me.clone();
-                async move {
-                    preview::refuse("templates.duplicate")?;
+                { let allowed = preview::refuse("templates.duplicate"); async move {
+                    allowed?;
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let from = text(&id);
@@ -3418,15 +3427,15 @@ impl Bridge {
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
-                }
+                } }
             }
         });
         host.async_action("templates.delete", {
             let me = me.clone();
             move |id| {
                 let me = me.clone();
-                async move {
-                    preview::refuse("templates.delete")?;
+                { let allowed = preview::refuse("templates.delete"); async move {
+                    allowed?;
                     template_call("DeleteTemplate", json!({ "id": text(&id) })).await?;
                     // One made later under its id isn't one you kept.
                     if let Some(path) = preview::approvals_path() {
@@ -3437,15 +3446,15 @@ impl Bridge {
                         b.rewatch();
                     }
                     Ok(Value::Nil)
-                }
+                } }
             }
         });
         // Sharing (screens/templates): a template signed as yours, as one
         // file; and one brought in. Yours installs; someone else's waits for
         // you in its own consent window (template_consent), which alone can
         // allow it.
-        host.async_action("templates.export", |arg| async move {
-            preview::refuse("templates.export")?;
+        host.async_action("templates.export", |arg| { let allowed = preview::refuse("templates.export"); async move {
+            allowed?;
             let id = arg.field("id").map(text).unwrap_or_default();
             let mut path = arg.field("path").map(text).unwrap_or_default();
             // (A save dialog's name, its extension taken off.)
@@ -3453,14 +3462,14 @@ impl Bridge {
                 path.push_str(".zeron-template");
             }
             template_call("ExportTemplate", json!({ "id": id, "path": path })).await.map(|v| json_value(&v))
-        });
+        } });
         host.async_action("templates.import", {
             let me = me.clone();
             // A file (`path`, or `{ path }`) or a link (`{ url }`).
             move |arg| {
                 let me = me.clone();
-                async move {
-                    preview::refuse("templates.import")?;
+                { let allowed = preview::refuse("templates.import"); async move {
+                    allowed?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url")) {
                         (Some(path), None) => json!({ "path": path }),
@@ -3477,7 +3486,7 @@ impl Bridge {
                         b.look();
                     }
                     Ok(json_value(&reply))
-                }
+                } }
             }
         });
         // Each template from a link (or a file) checked where it came from
@@ -3500,8 +3509,8 @@ impl Bridge {
             let me = me.clone();
             move |id| {
                 let me = me.clone();
-                async move {
-                    preview::refuse("templates.update")?;
+                { let allowed = preview::refuse("templates.update"); async move {
+                    allowed?;
                     let reply = template_call("UpdateTemplate", json!({ "id": text(&id) })).await?;
                     if let Some(b) = me.upgrade() {
                         // A new version with new code waits for you, as an
@@ -3513,7 +3522,7 @@ impl Bridge {
                         b.look();
                     }
                     Ok(json_value(&reply))
-                }
+                } }
             }
         });
         host.action("templates.review", {
@@ -3636,13 +3645,13 @@ pub(crate) fn set_off_action_for_tests(host: &ScriptHost) {
 fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
     host.async_action("plugins.set_off", move |arg| {
         let me = me.clone();
-        async move {
-            preview::refuse("plugins.set_off")?;
+        { let allowed = preview::refuse("plugins.set_off"); async move {
+            allowed?;
             let (id, device) = remote::id_and_device(&arg);
             let off = arg.field("off").is_some_and(Value::truthy);
             eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
             call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
-        }
+        } }
     });
 }
 

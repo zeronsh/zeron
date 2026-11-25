@@ -65,12 +65,12 @@ pub fn install(host: &ScriptHost) {
         let _ = call("ReleaseHomeFolderSearch", json!({}), &arg).await;
         Ok(Value::Nil)
     });
-    host.async_action("projects.clone", |arg| async move { crate::plugins::preview::refuse("projects.clone")?;
+    host.async_action("projects.clone", |arg| { let allowed = crate::plugins::preview::refuse("projects.clone"); async move { allowed?;
         let url = field(&arg, "url").ok_or("Type the repository's address")?;
         let parent = field(&arg, "parent").ok_or("Choose where to clone it")?;
         let repo = call("CloneRepo", json!({ "url": url, "parent": parent }), &arg).await?;
         Ok(value(&json!({ "path": repo["path"], "name": repo["name"] })))
-    });
+    } });
     host.async_action("projects.create", |arg| async move {
         let device = field(&arg, "device").ok_or("Choose a device")?;
         let path = field(&arg, "path").ok_or("Choose a folder")?;
@@ -88,15 +88,15 @@ pub fn install(host: &ScriptHost) {
         engine::get().call("Mutate", params).await?;
         Ok(Value::from(id.as_str()))
     });
-    host.async_action("projects.delete", |id| async move {
-        crate::plugins::preview::refuse("projects.delete")?;
+    host.async_action("projects.delete", |id| { let allowed = crate::plugins::preview::refuse("projects.delete"); async move {
+        allowed?;
         let id = text(&id);
         if id.is_empty() {
             return Err("no project".into());
         }
         engine::get().call("Mutate", json!({ "op": "deleteSpace", "spaceId": id })).await?;
         Ok(Value::Nil)
-    });
+    } });
 }
 
 /// `method` on the device `arg` names: through the relay when it's another.

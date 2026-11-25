@@ -396,10 +396,10 @@ pub fn install(host: &ScriptHost) {
             Some(id) => (text(&id), field("method"), field("provider")),
             None => (text(&args), None, None),
         };
-        async move {
-            crate::plugins::preview::refuse("agents.sign_in")?;
+        { let allowed = crate::plugins::preview::refuse("agents.sign_in"); async move {
+            allowed?;
             a.sign_in(id, method, provider).await.map_err(String::from)
-        }
+        } }
     });
     // An API key for one provider of an agent that keeps a login per
     // provider: this Mac's agents only (a key never goes to another
@@ -412,10 +412,10 @@ pub fn install(host: &ScriptHost) {
         let provider = args.field("provider").map(text).unwrap_or_default();
         let key = args.field("key").map(text).unwrap_or_default();
         let name = args.field("name").map(text).filter(|n| !n.trim().is_empty());
-        async move {
-            crate::plugins::preview::refuse("agents.add_key")?;
+        { let allowed = crate::plugins::preview::refuse("agents.add_key"); async move {
+            allowed?;
             a.add_key(id, provider, key, name).await
-        }
+        } }
     });
     // An API key's name (no secret: on whichever device shows it), rejecting
     // with the engine's words.
@@ -424,10 +424,10 @@ pub fn install(host: &ScriptHost) {
         let a = a.clone();
         let (id, account) = harness_and_account(&args);
         let name = args.field("name").map(text).unwrap_or_default();
-        async move {
-            crate::plugins::preview::refuse("agents.rename")?;
+        { let allowed = crate::plugins::preview::refuse("agents.rename"); async move {
+            allowed?;
             a.rename(id, account, name).await
-        }
+        } }
     });
     let a = agents.clone();
     host.async_action("agents.set_key", move |args| {
@@ -435,7 +435,7 @@ pub fn install(host: &ScriptHost) {
         let id = args.field("id").map(text).unwrap_or_default();
         let var = args.field("var").map(text).unwrap_or_default();
         let value = args.field("value").map(text).unwrap_or_default();
-        async move { crate::plugins::preview::refuse("agents.set_key")?; a.set_key(id, var, value).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("agents.set_key"); async move { allowed?; a.set_key(id, var, value).await.map_err(String::from) } }
     });
     let a = agents.clone();
     host.action("agents.cancel", move |id| a.cancel(&text(&id)));
@@ -443,7 +443,7 @@ pub fn install(host: &ScriptHost) {
     let a = agents.clone();
     host.async_action("agents.sign_out", move |id| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("agents.sign_out")?; a.sign_out(text(&id)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("agents.sign_out"); async move { allowed?; a.sign_out(text(&id)).await.map_err(String::from) } }
     });
     // The page a sign-in under way opened, again (a closed tab, a browser
     // that didn't come forward).
@@ -487,12 +487,12 @@ pub fn install(host: &ScriptHost) {
     host.async_action("agents.remove", move |args| {
         let a = a.clone();
         let (id, account) = harness_and_account(&args);
-        async move { crate::plugins::preview::refuse("agents.remove")?; a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("agents.remove"); async move { allowed?; a.account_call("ForgetAgentAccount", id, account).await.map_err(String::from) } }
     });
     let a = agents.clone();
     host.async_action("agents.install", move |id| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("agents.install")?; a.install(text(&id)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("agents.install"); async move { allowed?; a.install(text(&id)).await.map_err(String::from) } }
     });
     let a = agents.clone();
     host.action("agents.cancel_install", move |id| {

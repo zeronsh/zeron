@@ -219,6 +219,23 @@ fn switching_now(on: bool) {
     SWITCHING_NOW.with(|s| s.set(on));
 }
 
+/// `switching` on while it lives: off however its switch ends (a look's
+/// task dropped in a wait, the window closed there, included).
+struct Switching;
+
+impl Switching {
+    fn on() -> Self {
+        switching_now(true);
+        Self
+    }
+}
+
+impl Drop for Switching {
+    fn drop(&mut self) {
+        switching_now(false);
+    }
+}
+
 /// What a switch asks laid for a load (`Switch::finish`): Zeron's own, or
 /// what it switches to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +279,11 @@ impl Switch {
     /// Whether what ran before is a preview that isn't what comes next:
     /// then the window reloads, laid anew or not.
     pub fn holds(&self) -> bool {
-        self.from.is_some() && self.from != self.going
+        // (By id: a preview renamed is the same one, what it holds kept.)
+        match (&self.from, &self.going) {
+            (Some(from), Some(going)) => from.id != going.id,
+            (from, _) => from.is_some(),
+        }
     }
 
     fn settled(&self) {
@@ -284,11 +305,14 @@ impl Switch {
         if !laid {
             return Finished::NotLaid;
         }
-        held(host);
         if !self.holds() {
-            // None before (or this same preview): what comes next's stands
-            // since `begin`, and stays if its load fails (its files are what
-            // a next load loads).
+            // None before (or this same preview, by any name): what comes
+            // next's stands since `begin`, and stays if its load fails (its
+            // files are what a next load loads).
+            held(host);
+            if self.from.is_some() {
+                set(self.going.clone());
+            }
             if asked || reload_owed() {
                 if let Err(error) = host.reload() {
                     return Finished::Failed { error, lifted: false };
@@ -304,20 +328,22 @@ impl Switch {
         // own again, still under the one before). So it asks for nothing,
         // and fails on no refusal. Every wait is here: from the one before
         // let go to the load as itself, nothing else runs, lands or loads.
-        switching_now(true);
+        let switching = Switching::on();
         let own_app = self.template && own_app;
         if own_app && !lay(Lay::ZeronsOwn).await {
-            switching_now(false);
             return Finished::NotLaid;
         }
         let first = host.reload();
         let relaid = first.is_err() || !own_app || lay(Lay::Next).await;
-        switching_now(false);
+        drop(switching);
         if let Err(error) = first {
             return Finished::Failed { error, lifted: false };
         }
-        // What ran before is gone. What loaded under it held what it keeps:
-        // let go, and loaded again as itself (or under its own preview).
+        // What ran before is gone: what it held kept or let go now (not
+        // before: a first load that fails leaves it standing, still held),
+        // what the load under it held let go, and loaded again as itself
+        // (or under its own preview).
+        held(host);
         set(self.going.clone());
         host.drop_held_state();
         self.settled();
@@ -1292,6 +1318,227 @@ return ui.column { ui.text { "loaded under the preview" } }"#;
         set(None);
     }
 
+    /// A future run to its end on this thread (a lay-down's thread wakes it).
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(v) = future.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Zeron's own app, for the lay-down tests: asks nothing.
+    const ZERONS_APP: &str = concat!(
+        r#"local asked, switching = pcall(ui.call_sync, "window.switching", nil)
+if asked and switching == true then return ui.column {} end
+"#,
+        r#"return ui.column { ui.text { "zeron's own" } }"#
+    );
+    /// A template's app that asks for what a preview may not, as it loads and
+    /// on a timer.
+    const ITS_APP: &str = r#"pcall(ui.invoke, "plugin.x.run", 1)
+ui.every(16, function() pcall(ui.invoke, "plugin.x.run", 1) end)
+return ui.column { ui.text { "its app" } }"#;
+
+    /// Templates under a folder of their own, Zeron's laid; a window on its
+    /// `.live`, counting `plugin.x.run` answered.
+    struct Laying {
+        root: PathBuf,
+        laid: std::cell::RefCell<live::Laid>,
+        overlay: std::cell::RefCell<live::Overlay>,
+        app: zgx_script::testing::TestApp,
+        answered: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Laying {
+        fn new(name: &str) -> Self {
+            let root = dir(name).join("templates");
+            write(&root.join(live::ZERON), "app.luau", ZERONS_APP);
+            write(&root.join(live::ZERON), "screens/shell/sidebar.luau", "return {}");
+            let (laid, overlay) = (std::cell::RefCell::default(), std::cell::RefCell::default());
+            block_on(super::super::lay_down(&root, live::BUILTIN.into(), std::collections::BTreeSet::new(), false, Self::laid_as(live::BUILTIN), &laid, &overlay)).unwrap();
+            let entry = root.join(live::LIVE).join("app.luau");
+            let answered = std::rc::Rc::new(std::cell::Cell::new(0));
+            let a = answered.clone();
+            let app = zgx_script::testing::TestApp::new(move |runtime| {
+                let host = zgx_script::ScriptHost::new(runtime, &entry);
+                host.guard(guard);
+                host.function(SWITCHING, |_| zgx_script::Value::Bool(switching()));
+                host.action("plugin.x.run", move |_| a.set(a.get() + 1));
+                host.action("plugin.k.run", |_| {});
+                host
+            });
+            Self { root, laid, overlay, app, answered }
+        }
+
+        fn laid_as(id: &str) -> live::Laid {
+            live::Laid { id: id.into(), ui_stamp: "ui".into(), ..Default::default() }
+        }
+
+        /// Template `id` laid, as a look lays it: Ok or not.
+        fn lay(&self, id: &str) -> bool {
+            block_on(super::super::lay_down(&self.root, id.into(), std::collections::BTreeSet::new(), false, Self::laid_as(id), &self.laid, &self.overlay)).is_ok()
+        }
+
+        /// A template whose app is `ITS_APP` and, with `across`, a file
+        /// whose path runs through one of Zeron's: its lay-down fails with
+        /// its app already written.
+        fn template(&self, id: &str, across: bool) {
+            self.template_of(id, ITS_APP, across);
+        }
+
+        fn template_of(&self, id: &str, app: &str, across: bool) {
+            write(&self.root.join(id), "zeron-template.json", &format!(r#"{{"id":"{id}","name":"{id}"}}"#));
+            write(&self.root.join(id), "app.luau", app);
+            if across {
+                write(&self.root.join(id), "screens/shell/sidebar.luau/x.luau", "-- across Zeron's");
+            }
+        }
+
+        fn live_app(&self) -> String {
+            std::fs::read_to_string(self.root.join(live::LIVE).join("app.luau")).unwrap()
+        }
+    }
+
+    /// A preview's lay-down failing partway (its app written, a file across
+    /// one of Zeron's not), then Revert: `.live` was unknown, so the look
+    /// lays Zeron's own again, and nothing of the preview's app is answered,
+    /// through both loads and after. Through the real lay-down.
+    #[test]
+    fn a_lay_down_that_fails_partway_is_laid_again() {
+        let mut w = Laying::new("partway");
+        set(None);
+        w.app.frames(2);
+        w.template("b", true);
+        let switch = Switch::begin(Some(named("b")), true);
+        assert!(!w.lay("b"), "fails across Zeron's file");
+        assert_eq!(*w.laid.borrow(), live::Laid::default(), "unknown, not Zeron's own");
+        assert_eq!(w.live_app(), ITS_APP, "its app was written");
+        assert_eq!(now(switch.finish(false, true, false, &w.app.host, DROP, |_| std::future::ready(false))), Finished::NotLaid);
+        w.app.host.reload_if_changed();
+        w.app.frames(4);
+        assert_eq!(w.answered.get(), 0, "under its preview");
+
+        // Revert: the look's want is Zeron's own, which isn't what's laid.
+        let want = Laying::laid_as(live::BUILTIN);
+        assert_ne!(*w.laid.borrow(), want, "so it lays it again");
+        let switch = Switch::begin(None, false);
+        assert!(w.lay(live::BUILTIN));
+        assert_eq!(w.live_app(), ZERONS_APP);
+        assert_eq!(now(switch.finish(true, true, false, &w.app.host, DROP, |_| std::future::ready(false))), Finished::Settled);
+        w.app.frames(6);
+        assert_eq!((current(), w.answered.get()), (None, 0), "nothing of the preview's answered");
+        assert!(w.app.tree().contains("zeron's own"));
+        set(None);
+    }
+
+    /// A kept template with an app of its own whose lay-down again (after
+    /// Zeron's own under the preview) fails partway: `.live` unknown, a load
+    /// owed, nothing of the preview before answered.
+    #[test]
+    fn a_kept_template_s_lay_down_again_failing_partway_is_owed() {
+        let w = Laying::new("again-partway");
+        w.template("a", false);
+        assert!(w.lay("a"));
+        set(Some(named("a")));
+        w.app.host.reload().unwrap();
+        w.app.frames(4);
+        assert_eq!(w.answered.get(), 0);
+        // (The kept one's own asks are its to make: another action.)
+        const KEPTS_APP: &str = r#"pcall(ui.invoke, "plugin.k.run", 1)
+return ui.column { ui.text { "kept" } }"#;
+        w.template_of("k", KEPTS_APP, false);
+        let switch = Switch::begin(None, true);
+        assert!(w.lay("k"));
+        w.template_of("k", KEPTS_APP, true);
+        let lay = |which: Lay| {
+            let id = if which == Lay::ZeronsOwn { live::BUILTIN } else { "k" };
+            let ok = w.lay(id);
+            w.app.host.reload_if_changed();
+            std::future::ready(ok)
+        };
+        let f = now_or_block(switch.finish(true, true, true, &w.app.host, KEEP, lay));
+        assert!(matches!(f, Finished::Failed { lifted: true, .. }), "{f:?}");
+        assert_eq!(*w.laid.borrow(), live::Laid::default(), "unknown");
+        assert!(reload_owed());
+        w.app.frames(6);
+        assert_eq!(w.answered.get(), 0, "nothing of the preview before answered");
+        set(None);
+    }
+
+    /// `now`, for a finish whose lay closure is already ready.
+    fn now_or_block<T>(f: impl std::future::Future<Output = T>) -> T {
+        block_on(f)
+    }
+
+    /// An async call the preview's script makes as it's leaving (its effect
+    /// following a value the host publishes in the switch's turn, or a state
+    /// the first load moves) is refused at the call, as every refusing action
+    /// decides (`every_refusal_is_decided_at_the_call`), though its future is
+    /// polled after the switch: in every pair from a preview to what has its
+    /// powers, nothing of it runs.
+    #[test]
+    fn a_call_made_as_a_preview_leaves_is_refused_at_the_call() {
+        const LEAVING: &str = r#"local published = ui.shared("host.published", 0)
+local moved = ui.state("moved_at_load", 0)
+ui.effect(function()
+	if published:get() > 0 or moved:get() > 0 then
+		ui.call("probe.leave", 1)
+	end
+end)
+return ui.column { ui.text { "leaving" } }"#;
+        const MOVES_AT_LOAD: &str = r#"ui.state("moved_at_load", 0):set(1)
+return ui.column { ui.text { "moves at load" } }"#;
+        for (template, own_app, first_moves) in [(false, false, false), (true, false, false), (true, true, false), (false, false, true), (true, false, true)] {
+            let file = dir("leaving").join("app.luau");
+            std::fs::write(&file, LEAVING).unwrap();
+            let (called, ran) = (std::rc::Rc::new(std::cell::Cell::new(0)), std::rc::Rc::new(std::cell::Cell::new(0)));
+            let (c, r, entry) = (called.clone(), ran.clone(), file.clone());
+            set(Some(named("a")));
+            let app = zgx_script::testing::TestApp::new(move |runtime| {
+                let host = zgx_script::ScriptHost::new(runtime, &entry);
+                host.guard(guard);
+                host.function(SWITCHING, |_| zgx_script::Value::Bool(switching()));
+                // (As every refusing action is made: decided as it's called.)
+                host.async_action("probe.leave", move |_| {
+                    c.set(c.get() + 1);
+                    let allowed = refuse("terminal.start");
+                    let r = r.clone();
+                    async move {
+                        allowed?;
+                        r.set(r.get() + 1);
+                        Ok(zgx_script::Value::Nil)
+                    }
+                });
+                host
+            });
+            app.frames(2);
+            std::fs::write(&file, if first_moves { MOVES_AT_LOAD } else { QUIET }).unwrap();
+            if !first_moves {
+                app.host.shared("host.published", 0.0).set(zgx_script::Value::from(1.0));
+            }
+            let switch = Switch::begin(None, template);
+            let f = now(switch.finish(true, true, own_app, &app.host, DROP, |_| std::future::ready(true)));
+            assert_eq!(f, Finished::Settled);
+            for _ in 0..10 {
+                app.frames(2);
+            }
+            let case = format!("{template} {own_app} {first_moves}");
+            assert_eq!(ran.get(), 0, "{case}: nothing of it ran (called {})", called.get());
+            set(None);
+        }
+    }
+
     fn files_under(dir: &Path) -> Vec<PathBuf> {
         std::fs::read_dir(dir).into_iter().flatten().flatten().flat_map(|e| if e.path().is_dir() { files_under(&e.path()) } else { vec![e.path()] }).collect()
     }
@@ -1668,6 +1915,91 @@ return ui.column {{
             let (checked, aloud) = (format!("refuse(\"{action}"), format!("refuse_aloud(\"{action}"));
             assert!(sources.contains(&checked) || sources.contains(&aloud), "nothing refuses {action}");
         }
+    }
+
+    /// Every refusal is decided as its action is called, never inside the
+    /// async block or `async fn` that runs when its future is first polled:
+    /// a call made, then a switch in the same turn, would be let through.
+    #[test]
+    fn every_refusal_is_decided_at_the_call() {
+        let mut found = Vec::new();
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("preview.rs") && !path.to_string_lossy().ends_with("_tests.rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (line, inside) in refusals_inside_async(&text) {
+                        if inside {
+                            found.push(format!("{}:{line}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "decided when polled, not called: {found:#?}");
+        // (The scan itself: one decided at the call, one not.)
+        let seen = refusals_inside_async(
+            "fn i(h: &H) {\n h.async_action(\"a\", |x| { let allowed = preview::refuse(\"a\"); async move { allowed?; Ok(x) } });\n h.async_action(\"b\", |x| async move { preview::refuse(\"b\")?; Ok(x) });\n}\nasync fn c() { preview::refuse(\"c\").ok(); }",
+        );
+        assert_eq!(seen, vec![(2, false), (3, true), (5, true)]);
+    }
+
+    /// Each `refuse(`/`refuse_aloud(` (or a `preview::current().is_some()`) in
+    /// `text`: its line, and whether any block
+    /// round it is an async block or an `async fn`'s body. (Strings, chars
+    /// and comments skipped.)
+    fn refusals_inside_async(text: &str) -> Vec<(usize, bool)> {
+        let b = text.as_bytes();
+        let (mut out, mut blocks, mut pending_fn) = (Vec::new(), Vec::<bool>::new(), false);
+        let (mut i, mut line) = (0, 1);
+        while i < b.len() {
+            if !text.is_char_boundary(i) {
+                i += 1;
+                continue;
+            }
+            let rest = &text[i..];
+            if rest.starts_with("//") {
+                i += rest.find('\n').unwrap_or(rest.len());
+                continue;
+            }
+            if rest.starts_with("/*") {
+                i += rest.find("*/").map_or(rest.len(), |e| e + 2);
+                continue;
+            }
+            match b[i] {
+                b'\n' => line += 1,
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\n' {
+                            line += 1;
+                        }
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'\'' if rest.len() > 2 && (rest.as_bytes()[2] == b'\'' || rest.as_bytes()[1] == b'\\') => {
+                    i += rest[1..].find('\'').map_or(1, |e| e + 1);
+                }
+                b'{' => {
+                    let before = text[..i].trim_end();
+                    let opener = before.ends_with("async") || before.ends_with("async move") || std::mem::take(&mut pending_fn);
+                    blocks.push(opener);
+                }
+                b'}' => {
+                    blocks.pop();
+                }
+                _ if rest.starts_with("async fn") => pending_fn = true,
+                _ if rest.starts_with("refuse(\"") || rest.starts_with("refuse_aloud(\"") || rest.starts_with("preview::current().is_some()") => {
+                    out.push((line, blocks.iter().any(|a| *a)));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Wing's call: an unkept preview can't delete what you have or undo your

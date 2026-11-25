@@ -108,38 +108,38 @@ const ENGINE_METHODS: &[&str] = &[
 ];
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
-    host.async_action("account.me", |_| async { crate::plugins::preview::refuse("account.me")?; me("GET", None).await });
+    host.async_action("account.me", |_| { let allowed = crate::plugins::preview::refuse("account.me"); async move { allowed?; me("GET", None).await } });
     host.async_action("account.rename", |name| {
         let body = json!({ "name": text(&name) });
-        async move { crate::plugins::preview::refuse("account.rename")?; me("PATCH", Some(body)).await }
+        { let allowed = crate::plugins::preview::refuse("account.rename"); async move { allowed?; me("PATCH", Some(body)).await } }
     });
     host.async_action("account.set_title", |title| {
         let body = json!({ "title": text(&title) });
-        async move { crate::plugins::preview::refuse("account.set_title")?; me("PATCH", Some(body)).await }
+        { let allowed = crate::plugins::preview::refuse("account.set_title"); async move { allowed?; me("PATCH", Some(body)).await } }
     });
     host.async_action("account.photo_size", |args| {
         let path = args.field("path").map(text).unwrap_or_default();
-        async move { crate::plugins::preview::refuse("account.photo_size")?;
+        { let allowed = crate::plugins::preview::refuse("account.photo_size"); async move { allowed?;
             let (w, h) = off_thread(move || picture(&path).map(|(w, h, _)| (w, h))).await.ok_or("failed")??;
             Ok(Value::record([("w", Value::from(w as f64)), ("h", Value::from(h as f64))]))
-        }
+        } }
     });
     host.async_action("account.set_photo", |args| {
         let path = args.field("path").map(text).unwrap_or_default();
         let num = |key: &str| args.field(key).and_then(Value::as_f64).unwrap_or(0.0);
         let (x, y, side) = (num("x"), num("y"), num("side"));
-        async move { crate::plugins::preview::refuse("account.set_photo")?;
+        { let allowed = crate::plugins::preview::refuse("account.set_photo"); async move { allowed?;
             let png = off_thread(move || square_png(&path, x, y, side)).await.ok_or("failed")??;
             match edge_bytes("PUT", "/auth/me/photo".into(), png, "image/png").await? {
                 (200, body) => Ok(me_value(&body)),
                 (413, _) => Err("too_large".into()),
                 (status, body) => Err(outcome(status, &body).into()),
             }
-        }
+        } }
     });
     host.async_action("account.photo_file", |args| {
         let url = args.field("url").map(text).unwrap_or_default();
-        async move { crate::plugins::preview::refuse("account.photo_file")?;
+        { let allowed = crate::plugins::preview::refuse("account.photo_file"); async move { allowed?;
             let Some(dir) = engine::data_dir().map(|d| d.join("photos")) else {
                 return Ok(Value::Nil);
             };
@@ -148,7 +148,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 Some(Ok(path)) => Value::from(path.to_string_lossy().as_ref()),
                 _ => Value::Nil,
             })
-        }
+        } }
     });
     // An image for something of yours (a project's icon): the square cut
     // as a photo's is, smaller (a tile is never past 128 points), kept by
@@ -157,7 +157,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let path = args.field("path").map(text).unwrap_or_default();
         let num = |key: &str| args.field(key).and_then(Value::as_f64).unwrap_or(0.0);
         let (x, y, side) = (num("x"), num("y"), num("side"));
-        async move { crate::plugins::preview::refuse("account.upload_image")?;
+        { let allowed = crate::plugins::preview::refuse("account.upload_image"); async move { allowed?;
             let png = off_thread(move || square_png_at(&path, x, y, side, &[IMAGE_SIDE, 192])).await.ok_or("failed")??;
             match edge_bytes("PUT", "/auth/me/images".into(), png, "image/png").await? {
                 (200, body) => body["url"].as_str().map(Value::from).ok_or_else(|| "failed".to_string()),
@@ -167,13 +167,13 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 (404 | 405, _) => Err("unavailable".into()),
                 (status, body) => Err(outcome(status, &body).into()),
             }
-        }
+        } }
     });
     // One of those let go of (replaced): only an image of the edge's own,
     // by its key; anything else is left alone.
     host.async_action("account.delete_image", |args| {
         let url = args.field("url").map(text).unwrap_or_default();
-        async move { crate::plugins::preview::refuse("account.delete_image")?;
+        { let allowed = crate::plugins::preview::refuse("account.delete_image"); async move { allowed?;
             let Some(key) = image_key(&url) else {
                 return Ok(Value::Bool(false));
             };
@@ -181,45 +181,45 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 (200, _) => Ok(Value::Bool(true)),
                 _ => Ok(Value::Bool(false)),
             }
-        }
+        } }
     });
-    host.async_action("account.remove_photo", |_| async { crate::plugins::preview::refuse("account.remove_photo")?;
+    host.async_action("account.remove_photo", |_| { let allowed = crate::plugins::preview::refuse("account.remove_photo"); async move { allowed?;
         match edge("DELETE", "/auth/me/photo".into(), None).await? {
             (200, body) => Ok(me_value(&body)),
             (status, body) => Err(outcome(status, &body).into()),
         }
-    });
+    } });
     // Deleting the account is the engine's, with the ticket of a sign-in
     // made just now (R16): the bearer alone can't, so no local agent can.
     host.async_action("account.delete", |args| {
         let confirm = args.field("confirm").map(text).unwrap_or_default();
-        async move {
-            crate::plugins::preview::refuse("account.delete")?;
+        { let allowed = crate::plugins::preview::refuse("account.delete"); async move {
+            allowed?;
             delete_account(&confirm).await.map(|()| Value::Bool(true)).map_err(String::from)
-        }
+        } }
     });
     host.async_action("account.delete_signed_in", |args| {
         let confirm = args.field("confirm").map(text).unwrap_or_default();
-        async move {
-            crate::plugins::preview::refuse("account.delete_signed_in")?;
+        { let allowed = crate::plugins::preview::refuse("account.delete_signed_in"); async move {
+            allowed?;
             delete_signed_in(&confirm).await.map(|()| Value::Bool(true)).map_err(String::from)
-        }
+        } }
     });
     host.action("account.cancel_step_up", |_| {
         STEP_UP.with(|n| n.set(n.get() + 1));
     });
-    host.async_action("account.signing_keys", |_| async {
-        crate::plugins::preview::refuse("account.signing_keys")?;
+    host.async_action("account.signing_keys", |_| { let allowed = crate::plugins::preview::refuse("account.signing_keys"); async move {
+        allowed?;
         let answer = engine::get()
             .call("PluginSigningKey", json!({ "keys": true }))
             .await
             .map_err(|error| engine::outcome(&error))?;
         Ok(json_value(&signing_keys(&answer)))
-    });
+    } });
     host.async_action("account.revoke_key", |key| {
         let key = text(&key);
-        async move {
-            crate::plugins::preview::refuse("account.revoke_key")?;
+        { let allowed = crate::plugins::preview::refuse("account.revoke_key"); async move {
+            allowed?;
             if key.trim().is_empty() {
                 return Err("invalid".into());
             }
@@ -228,38 +228,38 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 .await
                 .map(|_| Value::Bool(true))
                 .map_err(|error| engine::outcome(&error).into())
-        }
+        } }
     });
     host.async_action("account.members", |org| {
         let path = format!("/auth/orgs/{}/members", encode_path(&text(&org)));
-        async move { crate::plugins::preview::refuse("account.members")?; list(path, "members").await }
+        { let allowed = crate::plugins::preview::refuse("account.members"); async move { allowed?; list(path, "members").await } }
     });
     host.async_action("account.invitations", |org| {
         let path = format!("/auth/orgs/{}/invitations", encode_path(&text(&org)));
-        async move { crate::plugins::preview::refuse("account.invitations")?; list(path, "invitations").await }
+        { let allowed = crate::plugins::preview::refuse("account.invitations"); async move { allowed?; list(path, "invitations").await } }
     });
     host.async_action("account.remove_member", |args| {
         let path = item(&args, "members", None);
-        async move { crate::plugins::preview::refuse("account.remove_member")?; done("DELETE", path, None).await }
+        { let allowed = crate::plugins::preview::refuse("account.remove_member"); async move { allowed?; done("DELETE", path, None).await } }
     });
     host.async_action("account.set_role", |args| {
         let path = item(&args, "members", None);
         let body = json!({ "role": args.field("role").map(text).unwrap_or_default() });
-        async move { crate::plugins::preview::refuse("account.set_role")?; done("PATCH", path, Some(body)).await }
+        { let allowed = crate::plugins::preview::refuse("account.set_role"); async move { allowed?; done("PATCH", path, Some(body)).await } }
     });
     host.async_action("account.revoke_invite", |args| {
         let path = item(&args, "invitations", None);
-        async move { crate::plugins::preview::refuse("account.revoke_invite")?; done("DELETE", path, None).await }
+        { let allowed = crate::plugins::preview::refuse("account.revoke_invite"); async move { allowed?; done("DELETE", path, None).await } }
     });
     host.async_action("account.resend_invite", |args| {
         let path = item(&args, "invitations", Some("resend"));
-        async move { crate::plugins::preview::refuse("account.resend_invite")?; done("POST", path, None).await }
+        { let allowed = crate::plugins::preview::refuse("account.resend_invite"); async move { allowed?; done("POST", path, None).await } }
     });
     host.async_action("account.rename_org", |args| {
         let org = args.field("organization_id").map(text).unwrap_or_default();
         let path = format!("/auth/orgs/{}", encode_path(&org));
         let body = json!({ "name": args.field("name").map(text).unwrap_or_default() });
-        async move { crate::plugins::preview::refuse("account.rename_org")?; done("PATCH", path, Some(body)).await }
+        { let allowed = crate::plugins::preview::refuse("account.rename_org"); async move { allowed?; done("PATCH", path, Some(body)).await } }
     });
     // Banners are the engine's (crates/engine desktop_notify): it reads
     // these three from `ui-settings.json` in its data folder whenever one

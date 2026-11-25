@@ -215,17 +215,17 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.write", move |arg| {
         let f = f.clone();
-        async move { crate::plugins::preview::refuse("files.write")?; f.write(arg).await }
+        { let allowed = crate::plugins::preview::refuse("files.write"); async move { allowed?; f.write(arg).await } }
     });
     let f = files.clone();
     host.async_action("files.move", move |arg| {
         let f = f.clone();
-        async move { crate::plugins::preview::refuse("files.move")?; f.move_entry(arg).await }
+        { let allowed = crate::plugins::preview::refuse("files.move"); async move { allowed?; f.move_entry(arg).await } }
     });
     let f = files.clone();
     host.async_action("files.delete", move |arg| {
         let f = f.clone();
-        async move { crate::plugins::preview::refuse("files.delete")?; f.delete(arg).await }
+        { let allowed = crate::plugins::preview::refuse("files.delete"); async move { allowed?; f.delete(arg).await } }
     });
     let f = files.clone();
     host.async_action("files.search", move |arg| {
@@ -240,7 +240,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.create", move |arg| {
         let f = f.clone();
-        async move { crate::plugins::preview::refuse("files.create")?; f.create(arg).await }
+        { let allowed = crate::plugins::preview::refuse("files.create"); async move { allowed?; f.create(arg).await } }
     });
     let f = files.clone();
     host.async_action("files.reveal", move |arg| {
@@ -250,7 +250,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.open_external", move |arg| {
         let f = f.clone();
-        async move { crate::plugins::preview::refuse("files.open_external")?; f.show(arg, false).await }
+        { let allowed = crate::plugins::preview::refuse("files.open_external"); async move { allowed?; f.show(arg, false).await } }
     });
     let f = files.clone();
     host.async_action("files.watch", move |arg| {

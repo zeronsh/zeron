@@ -67,12 +67,12 @@ pub(crate) fn issued(line: &str) -> bool {
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     engine::install(cx);
-    host.async_action("terminal.start", |arg| async move { crate::plugins::preview::refuse("terminal.start")?; start(arg).await });
+    host.async_action("terminal.start", |arg| { let allowed = crate::plugins::preview::refuse("terminal.start"); async move { allowed?; start(arg).await } });
     host.async_action("terminal.claimed", |arg| async move { claimed(arg).await });
-    host.async_action("terminal.command", |arg| async move { crate::plugins::preview::refuse("terminal.command")?;
+    host.async_action("terminal.command", |arg| { let allowed = crate::plugins::preview::refuse("terminal.command"); async move { allowed?;
         let device = crate::files::route_to(opt_text(arg.field("device"))).await;
         command(arg, device)
-    });
+    } });
     host.async_action("terminal.status", |arg| async move {
         let reply = call_for("TerminalStatus", &arg, Map::new()).await?;
         Ok(Value::record([
@@ -84,14 +84,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         call_for("CloseTerminal", &arg, Map::new()).await?;
         Ok(Value::Nil)
     });
-    host.async_action("terminal.write", |arg| async move { crate::plugins::preview::refuse("terminal.write")?;
+    host.async_action("terminal.write", |arg| { let allowed = crate::plugins::preview::refuse("terminal.write"); async move { allowed?;
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(text(arg.field("text")));
         let mut params = Map::new();
         params.insert("data".into(), Json::String(data));
         call_for("WriteTerminal", &arg, params).await?;
         Ok(Value::Nil)
-    });
+    } });
 }
 
 fn text(value: Option<&Value>) -> String {

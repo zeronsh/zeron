@@ -329,65 +329,65 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("account.sign_in", move |kind| {
         let a = a.clone();
         let create = text(&kind) == "create";
-        async move { crate::plugins::preview::refuse("account.sign_in")?; a.sign_in(create).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.sign_in"); async move { allowed?; a.sign_in(create).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.action("account.cancel", move |_| a.cancel());
     let a = auth.clone();
     host.async_action("account.sign_out", move |_| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.sign_out")?;
+        { let allowed = crate::plugins::preview::refuse("account.sign_out"); async move { allowed?;
             a.sign_out().await;
             Ok(Value::Nil)
-        }
+        } }
     });
     host.async_action("account.keeps_chats_local", move |_| async move {
         Ok(Value::Bool(engine::get().keeps_chats_local()))
     });
-    host.async_action("account.keep_chats_local", move |on| async move {
-        crate::plugins::preview::refuse("account.keep_chats_local")?;
+    host.async_action("account.keep_chats_local", move |on| { let allowed = crate::plugins::preview::refuse("account.keep_chats_local"); async move {
+        allowed?;
         engine::get().keep_chats_local(matches!(on, Value::Bool(true)))?;
         Ok(Value::Nil)
-    });
+    } });
     let a = auth.clone();
     host.async_action("account.username", move |_| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.username")?; a.username().await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.username"); async move { allowed?; a.username().await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.check_username", move |name| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.check_username")?; a.check_username(text(&name)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.check_username"); async move { allowed?; a.check_username(text(&name)).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.claim_username", move |name| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.claim_username")?; a.claim_username(text(&name)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.claim_username"); async move { allowed?; a.claim_username(text(&name)).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.card", move |name| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.card")?; a.card(text(&name)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.card"); async move { allowed?; a.card(text(&name)).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.orgs", move |_| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.orgs")?; a.orgs().await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.orgs"); async move { allowed?; a.orgs().await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.create_org", move |name| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.create_org")?; a.create_org(text(&name)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.create_org"); async move { allowed?; a.create_org(text(&name)).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.choose_org", move |id| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.choose_org")?; a.choose_org(text(&id)).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.choose_org"); async move { allowed?; a.choose_org(text(&id)).await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.onboarding", move |_| {
         let a = a.clone();
-        async move { crate::plugins::preview::refuse("account.onboarding")?; a.onboarding().await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.onboarding"); async move { allowed?; a.onboarding().await.map_err(String::from) } }
     });
     let a = auth.clone();
     host.async_action("account.onboarded", move |ids| {
@@ -396,7 +396,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Value::List(list) => list.iter().map(text).collect(),
             _ => Vec::new(),
         };
-        async move { crate::plugins::preview::refuse("account.onboarded")?; a.onboarded(ids).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.onboarded"); async move { allowed?; a.onboarded(ids).await.map_err(String::from) } }
     });
     let a = auth;
     host.async_action("account.invite", move |args| {
@@ -406,7 +406,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Some(Value::List(list)) => list.iter().map(text).collect(),
             _ => Vec::new(),
         };
-        async move { crate::plugins::preview::refuse("account.invite")?; a.invite(id, emails).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("account.invite"); async move { allowed?; a.invite(id, emails).await.map_err(String::from) } }
     });
 }
 

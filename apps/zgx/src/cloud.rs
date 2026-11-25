@@ -83,51 +83,51 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("cloud.wake", |args| {
         let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
         let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
-        async move {
-            crate::plugins::preview::refuse("cloud.wake")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.wake"); async move {
+            allowed?;
             on_machine("CloudSessionWake", chat, machine).await
-        }
+        } }
     });
     host.async_action("cloud.sleep", |args| {
         let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
-        async move {
-            crate::plugins::preview::refuse("cloud.sleep")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.sleep"); async move {
+            allowed?;
             on_machine("CloudSessionSleep", chat, None).await
-        }
+        } }
     });
     host.async_action("cloud.retry", |args| {
         let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
         let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
-        async move {
-            crate::plugins::preview::refuse("cloud.retry")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.retry"); async move {
+            allowed?;
             on_machine("CloudSessionRetry", chat, machine).await
-        }
+        } }
     });
     host.async_action("cloud.set_machine", |args| {
         let machine = args.field("machine").map(text).filter(|m| !m.is_empty());
-        async move {
-            crate::plugins::preview::refuse("cloud.set_machine")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.set_machine"); async move {
+            allowed?;
             let status = call("CloudSetMachine", json!({ "machine": machine.ok_or("invalid")? })).await?;
             Ok(status_value(&status))
-        }
+        } }
     });
     host.async_action("cloud.set_reach", |args| {
         let reach = args.field("reach").map(text).filter(|r| is_reach(r));
-        async move {
-            crate::plugins::preview::refuse("cloud.set_reach")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.set_reach"); async move {
+            allowed?;
             let status = call("CloudSetReach", json!({ "reach": reach.ok_or("invalid")? })).await?;
             Ok(status_value(&status))
-        }
+        } }
     });
     host.async_action("cloud.set_session_reach", |args| {
         let chat = args.field("chat").map(text).filter(|c| !c.is_empty());
         let reach = args.field("reach").map(text).filter(|r| is_reach(r));
-        async move {
-            crate::plugins::preview::refuse("cloud.set_session_reach")?;
+        { let allowed = crate::plugins::preview::refuse("cloud.set_session_reach"); async move {
+            allowed?;
             let params = json!({ "chatId": chat.ok_or("invalid")?, "reach": reach.ok_or("invalid")? });
             let session = call("CloudSessionSetReach", params).await?;
             Ok(session_value(&session))
-        }
+        } }
     });
     host.async_action("cloud.usage", |args| {
         let day = |key: &str| args.field(key).map(text).filter(|d| is_day(d));
@@ -174,7 +174,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             }
             _ => None,
         };
-        async move { crate::plugins::preview::refuse("billing.checkout")?; open_link("BillingCheckout", params.ok_or("invalid")?).await }
+        { let allowed = crate::plugins::preview::refuse("billing.checkout"); async move { allowed?; open_link("BillingCheckout", params.ok_or("invalid")?).await } }
     });
     host.async_action("billing.portal", |_| async { open_link("BillingPortal", json!({})).await });
 }

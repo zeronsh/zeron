@@ -204,7 +204,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
 }
 
 fn install_restart(host: &ScriptHost) {
-    host.async_action("engine.restart", |_| async move { crate::plugins::preview::refuse("engine.restart")?;
+    host.async_action("engine.restart", |_| { let allowed = crate::plugins::preview::refuse("engine.restart"); async move { allowed?;
         let engine = engine::get();
         let Some(config) = engine.config() else {
             return Err("Zeron isn't available here".into());
@@ -227,7 +227,7 @@ fn install_restart(host: &ScriptHost) {
         eprintln!("zeron-zgx: engine: starting the engine on disk in place of an older one");
         engine.stop().await?;
         Ok(Value::Nil)
-    });
+    } });
 }
 
 #[cfg(test)]
