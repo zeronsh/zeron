@@ -1,0 +1,116 @@
+---
+// The Pixel Walker plugin's fellow in a red cap, strolling along the top bar
+// of the recreated window as he does in the app: the same 14 × 16 artwork
+// (sprite.luau), drawn at its "Normal" size (two points a pixel), at its
+// default 40 points a second, pausing 0.7 s at each end before he turns,
+// starting a fifth of the way along, heading right.
+//
+// In the app he walks the whole bar; the hero's tilted window only shows its
+// left end (at 1440 wide, little past x 180), so here he keeps to that end:
+// from x 14, over the traffic lights and arrows, to x 178 at his right edge.
+//
+// Every move is a transform or an opacity, so it all runs on the compositor
+// and nothing is repainted: the walk is a translate, the turn a scale, the
+// stride a four-frame sheet stepped along, and a pause swaps in the
+// standing frame. With Reduce Motion he stands still, as the plugin does.
+
+const PALETTE: Record<string, string> = {
+  h: "#e4605b", // red 500: cap
+  k: "#362001", // amber 950: hair
+  s: "#ffd3be", // orange 200: skin
+  t: "#f9837b", // red 400: shirt
+  p: "#18aa99", // teal 500: overalls
+  b: "#905d02", // amber 700: boots
+  y: "#f0e4b6", // yellow 200: buttons
+};
+const HEAD = [
+  "....hhhhh.....",
+  "...hhhhhhhh...",
+  "...kksssks....",
+  "..ksssssks....",
+  "..kssssssss...",
+  "...ksssss.....",
+  "....ssss......",
+  "...tttttt.....",
+];
+const POSES = [
+  ["..ttpttptt....", "..ttpyyptt....", "..ssppppss....", "...pppppp.....", "...pp..pp.....", "..pp....pp....", "..bb....bb....", ".bbb....bbb..."],
+  ["...tpttpt.....", "...tpyypt.....", "...spppps.....", "....pppp......", "....pppp......", "....pppp......", "....bbbb......", "....bbbbb....."],
+  ["..ttpttptt....", "..ttpyyptt....", "...sppppsss...", "...pppppp.....", "...pp..pp.....", "....pp..pp....", "....bb..bb....", "...bbb..bbb..."],
+  ["...tpttpt.....", "...tpyypt.....", "...spppps.....", "....pppp......", "...pppp.......", "...pppp.......", "...bbbb.......", "...bbbbb......"],
+];
+const W = 14;
+
+// One rect per run of a colour, as the plugin paints them. The second and
+// fourth strides bob up a pixel, so each frame sits in a box one row taller.
+function rects(pose: string[], dx: number, dy: number) {
+  let out = "";
+  [...HEAD, ...pose].forEach((row, y) => {
+    for (let x = 0; x < row.length; ) {
+      let end = x + 1;
+      while (end < row.length && row[end] === row[x]) end++;
+      if (row[x] !== ".") out += `<rect x="${dx + x}" y="${dy + y}" width="${end - x}" height="1" fill="${PALETTE[row[x]]}"/>`;
+      x = end;
+    }
+  });
+  return out;
+}
+const sheet = POSES.map((pose, i) => rects(pose, i * W, i % 2 === 1 ? 0 : 1)).join("");
+const standing = rects(POSES[1], 0, 1);
+---
+
+<div class="walker" aria-hidden="true">
+  <div class="face">
+    <div class="stride"><svg class="sheet" viewBox="0 0 56 17" shape-rendering="crispEdges" set:html={sheet} /></div>
+    <svg class="stand" viewBox="0 0 14 17" shape-rendering="crispEdges" set:html={standing} />
+  </div>
+</div>
+
+<style>
+  /* In the stage's points: his walk starts at x 14; his feet sit a point
+     above the bar's foot (y 41), and the box is a row taller for the bob. */
+  .walker { left: 14px; top: 7px; width: 28px; height: 34px; pointer-events: none; translate: 27.2px 0; }
+  .face, .stride, .stand { position: absolute; inset: 0; }
+  .stride { overflow: hidden; opacity: 0; }
+  /* The sheet is four frames wide, wider than its box: the page's own svg rule would shrink it. */
+  .sheet { display: block; width: 112px; max-width: none; height: 34px; }
+  .stand { display: block; width: 28px; height: 34px; }
+
+  /* One round trip: 136 points each way at 40 a second is 3.4 s, and a 0.7 s
+     pause at each end makes 8.2 s. 3.4 / 8.2 = 41.463 %, 7.5 / 8.2 = 91.463 %.
+     Starting a fifth of the way along the first leg is 0.68 s in. */
+  @media (prefers-reduced-motion: no-preference) {
+    .walker, .face, .stride, .stand { animation-duration: 8.2s; animation-delay: -0.68s; animation-iteration-count: infinite; }
+    .walker { animation-name: walk; animation-timing-function: linear; }
+    .face { animation-name: face; animation-timing-function: step-end; }
+    .stride { animation-name: striding; animation-timing-function: step-end; }
+    .stand { animation-name: standing; animation-timing-function: step-end; }
+    /* Four strides of 0.12 s each. */
+    .sheet { animation: strides 0.48s steps(4) infinite; }
+  }
+  @keyframes walk {
+    0% { translate: 0 0; }
+    41.463% { translate: 136px 0; }
+    50% { translate: 136px 0; }
+    91.463% { translate: 0 0; }
+    100% { translate: 0 0; }
+  }
+  /* He turns when a pause ends, as the plugin does. */
+  @keyframes face {
+    0% { scale: 1 1; }
+    50% { scale: -1 1; }
+  }
+  @keyframes striding {
+    0% { opacity: 1; }
+    41.463% { opacity: 0; }
+    50% { opacity: 1; }
+    91.463% { opacity: 0; }
+  }
+  @keyframes standing {
+    0% { opacity: 0; }
+    41.463% { opacity: 1; }
+    50% { opacity: 0; }
+    91.463% { opacity: 1; }
+  }
+  @keyframes strides { to { translate: -112px 0; } }
+</style>
