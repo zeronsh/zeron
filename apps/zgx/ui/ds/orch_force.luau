@@ -251,6 +251,19 @@ local DASH = { dash = { 4, 4 } }
 local ROUND = { cap = "round" :: "round", join = "round" :: "round" }
 
 
+-- The pivot's switch: orchestrators as the hubs, or machines.
+function M.Pivot(): Node
+	return Segmented {
+		id = "orch-force-pivot",
+		value = M.pivot,
+		label = locale.t("ds.orch.map.pivot"),
+		options = {
+			{ value = "orchestrator", label = locale.t("ds.orch.map.pivot_orchestrators") },
+			{ value = "machine", label = locale.t("ds.orch.map.pivot_machines") },
+		},
+	}
+end
+
 M.View = ui.component(function(props: {
 	world: () -> any,
 	chat: (id: string) -> any,
@@ -272,6 +285,9 @@ M.View = ui.component(function(props: {
 	-- The field's height, where the Map's room decides it (a full page);
 	-- else about 0.62 of its width.
 	height: (() -> number)?,
+	-- The pivot shown by the host, out of the field (`M.Pivot`, in the
+	-- Control room's Map head): none in the field's corner.
+	pivot_outside: boolean?,
 }): Node
 	local width = ui.use_state(0)
 	-- (The field's height as last worked out: read where nothing should
@@ -2930,9 +2946,12 @@ M.View = ui.component(function(props: {
 						return item.id
 					end, class = "orch-force-legend", gap = "$space.3", direction = "row", pointer_events = "none" }),
 				},
-				-- The pivot, at the bottom right: orchestrators as the hubs (their
-				-- machines the colour), or machines (their orchestrators').
-				ui.div {
+				-- The pivot, at the bottom right (unless its host shows it):
+				-- orchestrators as the hubs (their machines the colour), or
+				-- machines (their orchestrators').
+				ui.show(function(): boolean
+					return not props.pivot_outside
+				end, ui.div {
 					class = "orch-force-pivot",
 					absolute = true,
 					right = 8,
@@ -2940,16 +2959,8 @@ M.View = ui.component(function(props: {
 					on_resize = function(size: { w: number, h: number })
 						measured("pivot", size)
 					end,
-					Segmented {
-						id = "orch-force-pivot",
-						value = M.pivot,
-						label = locale.t("ds.orch.map.pivot"),
-						options = {
-							{ value = "orchestrator", label = locale.t("ds.orch.map.pivot_orchestrators") },
-							{ value = "machine", label = locale.t("ds.orch.map.pivot_machines") },
-						},
-					},
-				},
+					M.Pivot(),
+				}),
 				-- Fit, at the top right.
 				ui.row {
 					absolute = true,

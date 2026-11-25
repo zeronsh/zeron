@@ -46,6 +46,9 @@ export type Props = {
 	-- The Graph's field height, where a page gives the Map its room (the
 	-- Control room's Map tab); else the Graph's own, from its width.
 	height: (() -> number)?,
+	-- The Graph's pivot shown by the host (ds/orch_force `Pivot`), not in
+	-- the field.
+	pivot_outside: boolean?,
 	-- One chat by id, followed by itself (account/rows); else read out of
 	-- the world, every thread following all of it.
 	chat: ((id: string) -> any)?,
@@ -351,6 +354,7 @@ M.Map = ui.component(function(props: Props): Node
 					on_open_card = props.on_open_card,
 					on_resume_card = props.on_resume_card,
 					height = props.height,
+					pivot_outside = props.pivot_outside,
 					register = register,
 				}
 			elseif variant == "machines" then
