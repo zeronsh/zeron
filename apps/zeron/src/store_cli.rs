@@ -161,8 +161,8 @@ pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> a
             out!("{} {} meets the store's rules.", checked.id, checked.version);
             Ok(None)
         }
-        TemplateCommand::Stock { zeron } => {
-            let stock = zeron_engine::plugins::templates::stock(&zeron).map_err(|e| exit(SETUP, e))?;
+        TemplateCommand::Stock { ui, version } => {
+            let stock = zeron_engine::plugins::templates::stock(&ui, &version).map_err(|e| exit(SETUP, e))?;
             println!("{}", serde_json::to_string_pretty(&stock)?);
             Ok(None)
         }

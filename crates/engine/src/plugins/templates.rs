@@ -233,29 +233,64 @@ fn zeron_files(zeron: &Path) -> Vec<String> {
 /// The most `stock/<version>.json` may be (the edge reads no more).
 const MAX_STOCK_BYTES: usize = 4 * 1024 * 1024;
 
-/// Zeron's own files as the app lays them out (its `.zeron` folder), for the
-/// store's `stock/<version>.json`: what a template's first reviewer reads
-/// each of its files against. `{version, files: {rel: sha256}}`, the files a
-/// template copies (never `.zeron`'s bookkeeping).
-pub fn stock(zeron: &Path) -> Result<Value, String> {
-    let manifest: Manifest = read_regular(&zeron.join(MANIFEST))
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or("That isn't Zeron's own template folder (.zeron): it has no manifest that can be read")?;
-    let version = manifest.zeron_version.unwrap_or_default();
-    super::version::Version::parse(&version).map_err(|e| format!("Its Zeron version ({version:?}) isn't one a release has: {e}"))?;
-    let mut files = serde_json::Map::new();
-    for rel in zeron_files(zeron) {
-        let bytes = inside(zeron, &rel).and_then(|path| read_regular(&path)).ok_or_else(|| format!("Couldn't read {rel}"))?;
-        files.insert(rel, json!(super::signing::sha256_hex(&bytes)));
+/// Zeron's own files at release `version`, from its interface's source (`ui`,
+/// a checkout's `apps/zgx/ui`), for the store's `stock/<version>.json`: what a
+/// template's reviewer reads each of its files against. `{version, files:
+/// {rel: [sha256, …]}}`: the default's file by that path, which a template
+/// copies, and each official template's.
+pub fn stock(ui: &Path, version: &str) -> Result<Value, String> {
+    use zeron_plugin_guard::template::{meta, of_the_app, plain};
+    super::version::Version::parse(version).map_err(|e| format!("{version:?} isn't a release's version: {e}"))?;
+    if version == "0.0.0" {
+        return Err("0.0.0 is a development build's version, never a release's".into());
+    }
+    let mut files: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut take = |root: &Path, keep: &dyn Fn(&str) -> bool| -> Result<(), String> {
+        for rel in regular_files(root)?.into_iter().filter(|rel| plain(rel) && zeron_plugin_guard::path::is_safe(rel) && keep(rel)) {
+            let bytes = read_regular(&root.join(&rel)).ok_or_else(|| format!("Couldn't read {rel}"))?;
+            files.entry(rel).or_default().insert(super::signing::sha256_hex(&bytes));
+        }
+        Ok(())
+    };
+    take(ui, &of_the_app)?;
+    let official = ui.join("templates");
+    if official.is_dir() {
+        for entry in std::fs::read_dir(&official).map_err(|e| format!("Couldn't read {}: {e}", official.display()))? {
+            let entry = entry.map_err(|e| format!("Couldn't read {}: {e}", official.display()))?;
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) && !entry.file_name().to_string_lossy().starts_with('.') {
+                take(&entry.path(), &|rel| !meta(rel))?;
+            }
+        }
     }
     if !files.contains_key("app.luau") {
-        return Err("That isn't Zeron's own template folder (.zeron): it has no app.luau".into());
+        return Err("That isn't Zeron's interface (a checkout's apps/zgx/ui): it has no app.luau".into());
     }
     let stock = json!({ "version": version, "files": files });
-    if serde_json::to_vec(&stock).map_or(0, |b| b.len()) > MAX_STOCK_BYTES {
+    if serde_json::to_vec_pretty(&stock).map_or(0, |b| b.len()) >= MAX_STOCK_BYTES {
         return Err("Zeron's own files are more than the store reads (4 MB)".into());
     }
     Ok(stock)
+}
+
+/// Every regular file under `root` (no links followed), by its path from it.
+/// Dot folders are skipped; a folder that can't be read is refused.
+fn regular_files(root: &Path) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(at) = stack.pop() {
+        let entries = std::fs::read_dir(root.join(&at)).map_err(|e| format!("Couldn't read {}: {e}", root.join(&at).display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Couldn't read {}: {e}", root.join(&at).display()))?;
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            let rel = if at.is_empty() { name.clone() } else { format!("{at}/{name}") };
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() && !name.starts_with('.') => stack.push(rel),
+                Ok(kind) if kind.is_file() => out.push(rel),
+                _ => {}
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A template's own app files: none of its listing files
@@ -807,31 +842,37 @@ mod tests {
             .collect()
     }
 
-    /// Zeron's own files as a release has them: each by its sha256, its
-    /// bookkeeping left out; anything else isn't Zeron's, or isn't a release.
+    /// Zeron's own files as a release has them, by their sha256: the
+    /// default's, and each official template's by the path it's laid at.
     #[test]
     fn plugins_templates_stock_is_zeron_s_files_by_hash() {
         let dir = tempfile::tempdir().unwrap();
-        let z = dir.path();
+        let ui = dir.path();
         let put = |rel: &str, text: &str| {
-            std::fs::create_dir_all(z.join(rel).parent().unwrap()).unwrap();
-            std::fs::write(z.join(rel), text).unwrap();
+            std::fs::create_dir_all(ui.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(ui.join(rel), text).unwrap();
         };
-        assert!(stock(z).is_err(), "no manifest");
-        put(MANIFEST, r#"{"id":"zeron","zeron_version":"0.3.18"}"#);
-        assert!(stock(z).is_err(), "no app");
-        for (rel, text) in [("app.luau", "app"), ("ds/tokens.luau", "tokens"), (".luaurc", "{}"), (HASHES, "{}"), (CATALOG, "{}"), (".hidden/x", "x")] {
+        put("ds/tokens.luau", "tokens");
+        assert!(stock(ui, "0.3.18").is_err(), "no app");
+        for (rel, text) in [("app.luau", "app"), (".luaurc", "{}"), ("same.luau", "same"), ("templates/zeron-v2/same.luau", "same"), ("templates/zeron-v2/ds/tokens.luau", "older"), ("templates/zeron-v2/only.luau", "only"), ("templates/zeron-v1/ds/tokens.luau", "oldest")] {
             put(rel, text);
         }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(z.join("app.luau"), z.join("linked.luau")).unwrap();
-        let made = stock(z).unwrap();
-        let hash = |text: &str| json!(super::super::signing::sha256_hex(text.as_bytes()));
-        assert_eq!(made, json!({ "version": "0.3.18", "files": { ".luaurc": hash("{}"), "app.luau": hash("app"), "ds/tokens.luau": hash("tokens") } }));
-        for version in ["", "0.3", "dev"] {
-            put(MANIFEST, &json!({ "id": "zeron", "zeron_version": version }).to_string());
-            assert!(stock(z).is_err(), "{version:?} isn't a release");
+        // None of them the interface.
+        for rel in ["gallery.luau", "consent.luau", "chat_fixture.luau", "tests/a.luau", "demos/a.luau", ".hidden/x.luau", ".HASHES", "templates/stray.luau", "templates/zeron-v2/.base.json", "templates/zeron-v2/zeron-template.json", "templates/zeron-v2/README.md", "templates/zeron-v2/preview.png", "templates/zeron-v2/.git/x", "templates/.other/x.luau"] {
+            put(rel, "no");
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(ui.join("app.luau"), ui.join("linked.luau")).unwrap();
+        let hash = |text: &str| super::super::signing::sha256_hex(text.as_bytes());
+        let mut tokens = [hash("tokens"), hash("older"), hash("oldest")];
+        tokens.sort();
+        let files = json!({ ".luaurc": [hash("{}")], "app.luau": [hash("app")], "ds/tokens.luau": tokens, "only.luau": [hash("only")], "same.luau": [hash("same")] });
+        assert_eq!(stock(ui, "0.3.18").unwrap(), json!({ "version": "0.3.18", "files": files }));
+        assert_eq!(stock(ui, "0.4.0-beta.1").unwrap()["version"], "0.4.0-beta.1");
+        for version in ["", "0.3", "dev", "v0.3.18", "0.0.0"] {
+            assert!(stock(ui, version).is_err(), "{version:?} isn't a release");
+        }
+        assert!(stock(&ui.join("nowhere"), "0.3.18").is_err());
     }
 
     #[test]

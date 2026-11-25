@@ -278,6 +278,26 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     }
 }
 
+/// A release's own template files, from its source: JSON alone on stdout (a
+/// file is made of it), or nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_s_stock_is_printed_whole_or_not_at_all() {
+    let store = FakeStore::start().await;
+    let run = Run::new();
+    let ui = run.home.join("ui");
+    std::fs::create_dir_all(&ui).unwrap();
+    let arg = ui.display().to_string();
+    for (args, words) in [(["stock", &arg, "--version", "0.3.20"], "no app.luau"), (["stock", &arg, "--version", "0.0.0"], "development build")] {
+        let out = run.run(&store, None, "template", &args).await;
+        assert!(out.status.code() == Some(2) && out.stdout.is_empty() && text(&out).contains(words), "{args:?}: {}", text(&out));
+    }
+    std::fs::write(ui.join("app.luau"), "return {}").unwrap();
+    let out = run.run(&store, None, "template", &["stock", &arg, "--version", "0.3.20"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stock: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((&stock["version"], stock["files"]["app.luau"].as_array().map(Vec::len)), (&json!("0.3.20"), Some(1)), "{stock}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn each_failure_has_one_line_and_its_exit_code() {
     let store = FakeStore::start().await;

@@ -291,8 +291,11 @@ pub enum TemplateCommand {
     /// (the release's: what a template's first reviewer reads against).
     #[command(hide = true)]
     Stock {
-        /// Zeron's own template folder, as the app lays it out (`.zeron`).
-        zeron: std::path::PathBuf,
+        /// Zeron's interface's source: a checkout's `apps/zgx/ui`.
+        ui: std::path::PathBuf,
+        /// The release's version.
+        #[arg(long)]
+        version: String,
     },
     /// Check a template against the store's rules (README, preview, listing,
     /// version, files): every problem, before anything is sent. Needs no
