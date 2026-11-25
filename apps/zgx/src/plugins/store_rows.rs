@@ -61,9 +61,14 @@ pub fn choices(said: &Json) -> Json {
 
 /// What the engine says of package `name` waiting, beyond what's on the disk.
 pub fn waiting(said: &Json, pending: &mut Json) {
+    const ENGINES: [&str; 5] = ["store", "update_of", "replaces_edits", "new_owner", "also_installed"];
+    // (Its own file's word on any of it is nothing.)
+    if let Some(pending) = pending.as_object_mut() {
+        pending.retain(|key, _| !ENGINES.contains(&key.as_str()));
+    }
     let name = pending["pending"].clone();
     let Some(item) = said["pending"].as_array().and_then(|all| all.iter().find(|p| p["pending"] == name && p["hash"] == pending["hash"])) else { return };
-    for key in ["store", "update_of", "replaces_edits", "new_owner", "also_installed"] {
+    for key in ENGINES {
         if !item[key].is_null() {
             pending[key] = item[key].clone();
         }
@@ -121,8 +126,8 @@ mod tests {
         let mut same = json!({ "pending": "midnight-1", "hash": "h1", "key": "k" });
         waiting(&said, &mut same);
         assert_eq!(same, json!({ "pending": "midnight-1", "hash": "h1", "key": "k", "store": { "id": "midnight" }, "replaces_edits": true }));
-        let mut other = json!({ "pending": "midnight-1", "hash": "h2" });
+        let mut other = json!({ "pending": "midnight-1", "hash": "h2", "store": { "id": "midnight", "verified": true }, "update_of": "x", "also_installed": [] });
         waiting(&said, &mut other);
-        assert!(other["store"].is_null());
+        assert_eq!(other, json!({ "pending": "midnight-1", "hash": "h2" }), "what its own file says of the store isn't the store's word");
     }
 }

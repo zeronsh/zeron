@@ -73,7 +73,7 @@ fn key(keep: &str, pending: &str, hash: &str) -> String {
 /// only if it reads as one.
 fn shown(item: &Json) -> Json {
     let mut out = item.clone();
-    for (key, most) in [("name", 64), ("description", 300), ("id", 64), ("zeron_version", 32)] {
+    for (key, most) in [("name", 60), ("description", 300), ("id", 64), ("zeron_version", 32)] {
         if let Some(text) = item[key].as_str() {
             out[key] = json!(super::consent::plain(text, most));
         }
@@ -86,6 +86,7 @@ fn shown(item: &Json) -> Json {
         out["version"] = json!("");
     }
     if let Some(files) = item["ignored"].as_array() {
+        out["ignored_n"] = json!(files.len());
         out["ignored"] = files.iter().filter_map(Json::as_str).take(20).map(|f| super::consent::plain(f, 120)).collect::<Vec<_>>().into();
     }
     out
@@ -183,7 +184,9 @@ fn keep_item(id: &str) -> Option<Json> {
         Some(imported) if imported["source"]["kind"] == "store" => {
             json!({ "kind": "unknown", "reason": "From the store. Its files may have been changed on this device since." })
         }
-        Some(imported) => imported["author"].clone(),
+        // (A file's or a link's the same: it's kept because it changed, or
+        // was never kept, so its signer isn't named over it.)
+        Some(_) => json!({ "kind": "unknown", "reason": "Installed from a file or a link. Its files may have been changed on this device since." }),
         None => json!({ "kind": "unknown", "reason": "Made on this device, by you or an agent." }),
     };
     Some(json!({
@@ -497,6 +500,7 @@ mod tests {
         assert_eq!(item["name"], "Midnight ✓ Verified");
         assert_eq!(item["version"], "");
         assert_eq!(item["description"].as_str().unwrap().chars().count(), 300);
+        assert_eq!(item["ignored_n"], 2, "all of them counted");
         assert_eq!(item["ignored"], json!(["a b"]));
         assert_eq!((&item["key"], &item["hash"]), (&json!("k"), &json!("h")), "what's answered with is as it was");
         assert_eq!(shown(&json!({ "name": "\u{200b}", "id": "midnight", "version": "1.2.0-beta.1" }))["name"], "midnight");

@@ -742,7 +742,10 @@ function M.View(): Node
 	end)
 	-- Once a visit: the tabs, unless a link opened a template's page as
 	-- Settings came up.
-	visits.once("templates", nav.arrive)
+	visits.once("templates", function()
+		nav.arrive()
+		state.refresh()
+	end)
 	-- Yours shown: where your templates stand in the store, read again.
 	ui.effect(function()
 		if tab:get() == "yours" and nav.view:get() == "catalog" then

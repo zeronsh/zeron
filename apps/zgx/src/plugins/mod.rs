@@ -3970,6 +3970,16 @@ impl Bridge {
         // Each template from a link (or a file) checked where it came from
         // for a newer version; and the one found for a template, installed
         // in its place.
+        // The page opens: what the engine says of the store's, as it is now
+        // (a mark is of when it's shown: one not in use isn't watched).
+        host.action("templates.refresh", {
+            let me = me.clone();
+            move |_| {
+                if let Some(b) = me.upgrade() {
+                    b.ask_templates();
+                }
+            }
+        });
         host.async_action("templates.check_updates", {
             let me = me.clone();
             move |_| {

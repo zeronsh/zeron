@@ -173,6 +173,11 @@ function M.import(from: string | { path: string?, url: string?, store: string?, 
 	return ui.call("templates.import", from)
 end
 
+-- The page opens: what the engine says of the store's, asked again.
+function M.refresh()
+	pcall(ui.invoke, "templates.refresh", nil)
+end
+
 function M.check_updates(): any
 	return ui.call("templates.check_updates", nil)
 end

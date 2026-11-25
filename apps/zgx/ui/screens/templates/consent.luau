@@ -304,17 +304,36 @@ local function body(key: string): Node
 						"file-code",
 						if made_for
 							then ui.t("templates.consent.files_made_for", { n = files, version = made_for })
-							else ui.t("templates.consent.files", { n = files }),
-						if it.description and it.description ~= "" then it.description else nil
+							else ui.t("templates.consent.files", { n = files })
 					),
 					if #ignored > 0
 						then fact(
 							"lock-keyhole-unlocked",
-							ui.t("templates.consent.left_out", { n = #ignored }),
-							ui.t("templates.consent.left_out_detail", { files = table.concat(ignored, ", ") })
+							ui.t("templates.consent.left_out", { n = tonumber(it.ignored_n) or #ignored }),
+							ui.t("templates.consent.left_out_detail", { files = table.concat(ignored, ", ") .. (if (tonumber(it.ignored_n) or 0) > #ignored then "…" else "") })
 						)
 						else nil,
 				},
+				-- The package's own words, under a line saying so: never among the
+				-- facts, which are Zeron's.
+				if type(it.description) == "string" and it.description ~= "" and not keep
+					then ui.column {
+						id = "template-consent-own-words",
+						w_full = true,
+						gap = "$zeron.space.hair",
+						ui.text { ui.t("templates.consent.own_words"), w_full = true, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+						ui.text {
+							function(): string
+								return it.description
+							end,
+							w_full = true,
+							wrap = true,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+						},
+					}
+					else nil,
 			},
 		},
 		ui.column {

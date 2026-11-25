@@ -202,6 +202,16 @@ test("an Allow the store refuses says why, the sheet staying to try again", func
 	end
 end)
 
+test("a package's own words stand apart from what Zeron says of it", function()
+	local app = open()
+	expect(app:tree("#template-consent-own-words")).to_contain("In its own words")
+	expect(app:tree("#template-consent-own-words")).to_contain("Dense rows, ledger lines.")
+	expect(app:tree("#template-consent-facts")).never.to_contain("Dense rows")
+	app:command("mystery")
+	app:frames(20)
+	expect(app:has("#template-consent-own-words")).to_be(false)
+end)
+
 test("one from a file or a link says it isn't from the store", function()
 	local app = open()
 	expect(app:tree("#template-consent")).to_contain("From a file, not from the store")

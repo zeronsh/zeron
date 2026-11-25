@@ -4544,7 +4544,8 @@
       "now_verified": "Zeron 刚刚验证了它。请再看一遍。",
       "now_publisher": "它的发布者刚刚变更。请再看一遍。",
       "taken_down": "Zeron 已将这个版本下架，无法安装。",
-      "not_in_store": "这个版本已不在模板商店中。"
+      "not_in_store": "这个版本已不在模板商店中。",
+      "own_words": "它自己的说明"
     },
     "store": {
       "search": "搜索模板",
