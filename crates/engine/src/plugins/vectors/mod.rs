@@ -1798,7 +1798,8 @@ fn template_block_cases() -> Value {
                 ("b", with("/source/store/hash", json!("CD".repeat(32))), None),
                 ("c", with("/source/store/hash", json!("cd")), None),
                 ("d", with("/version", json!("")), None),
-                ("e", with("/version", json!("1".repeat(129))), None),
+                ("e", with("/version", json!("1".repeat(33))), None),
+                ("g", with("/version", json!("1".repeat(32))), None),
                 ("f", None, Some(json!([{ "id": "Not An Id", "version": "1.0.0", "hash": hash }]).to_string())),
             ],
         ),
@@ -1838,43 +1839,119 @@ fn template_block_cases() -> Value {
     )
 }
 
-/// The template part of an update request: each identity, and whether a
-/// device sends it (`Identity::valid`); and how many requests it makes of
-/// some, an id once in each, at most `most` in one.
+/// An update request (`POST /store/v1/updates`). `items`: each as one of a
+/// request that's otherwise fine, whether a device sends it (`Identity::valid`)
+/// and what the store makes of it: `asked`, or `unknown`, as one it hasn't
+/// got, the rest answered (an id, version or hash that isn't one, missing and
+/// not text among them, or a flag that isn't a boolean). `refused` and `taken`:
+/// whole bodies, 400 for their shape alone, and not. `requests`: those a
+/// device makes of some, an id once in each, at most `most` in one.
 fn update_ask_cases() -> Value {
     let hash = "cd".repeat(32);
     let identity = |id: &str, version: &str, hash: &str| Identity { id: id.into(), version: version.into(), hash: hash.into() };
-    let items = [
-        identity("midnight", "1.0.0", &hash),
-        identity("a1", "1.0.0-rc.1+build.2", &hash),
-        identity(&"a".repeat(40), "1", &hash),
-        identity("midnight", &"1".repeat(128), &hash),
-        identity("midnight", &"1".repeat(129), &hash),
-        identity("midnight", &"\u{e9}".repeat(64), &hash),
-        identity("midnight", &"\u{e9}".repeat(65), &hash),
-        identity("midnight", "", &hash),
-        identity(&"a".repeat(41), "1.0.0", &hash),
-        identity("a", "1.0.0", &hash),
-        identity("Midnight", "1.0.0", &hash),
-        identity("-midnight", "1.0.0", &hash),
-        identity("mid_night", "1.0.0", &hash),
-        identity("", "1.0.0", &hash),
-        identity("midnight", "1.0.0", &hash.to_uppercase()),
-        identity("midnight", "1.0.0", &hash[1..]),
-        identity("midnight", "1.0.0", &format!("{hash}0")),
-        identity("midnight", "1.0.0", &"g".repeat(64)),
+    let item = |id: Value, version: Value, hash: Value| json!({ "id": id, "version": version, "hash": hash });
+    let fine = item(json!("midnight"), json!("1.0.0"), json!(hash));
+    let with = |member: &str, value: Value| {
+        let mut v = fine.clone();
+        v[member] = value;
+        v
+    };
+    let without = |member: &str| {
+        let mut v = fine.clone();
+        v.as_object_mut().unwrap().remove(member);
+        v
+    };
+    let long = |n: usize| format!("1.0.0-{}", "a".repeat(n - 6));
+    let items = vec![
+        fine.clone(),
+        with("id", json!("a1")),
+        with("id", json!("a".repeat(40))),
+        with("version", json!("1.0.0-rc.1+build.2")),
+        with("version", json!(long(version::MAX_LEN))),
+        with("version", json!(long(version::MAX_LEN + 1))),
+        with("version", json!("1.0.0-\u{e9}")),
+        with("version", json!("1.0")),
+        with("version", json!("v1.0.0")),
+        with("version", json!("")),
+        with("version", json!(1)),
+        with("version", Value::Null),
+        without("version"),
+        with("id", json!("a".repeat(41))),
+        with("id", json!("a")),
+        with("id", json!("Midnight")),
+        with("id", json!("-midnight")),
+        with("id", json!("mid_night")),
+        with("id", json!("")),
+        with("id", json!(7)),
+        with("id", Value::Null),
+        without("id"),
+        with("hash", json!(hash.to_uppercase())),
+        with("hash", json!(hash[1..])),
+        with("hash", json!(format!("{hash}0"))),
+        with("hash", json!("g".repeat(64))),
+        with("hash", json!(1)),
+        with("hash", Value::Null),
+        without("hash"),
+        with("prerelease", json!(true)),
+        with("prerelease", json!("true")),
+        with("prerelease", Value::Null),
+        with("verified_only", json!(false)),
+        with("verified_only", json!(1)),
+        with("more", json!(1)),
     ];
+    let real = |v: &Value| {
+        let text = |key: &str| v[key].as_str().unwrap_or("").to_owned();
+        let flags = ["prerelease", "verified_only"].iter().all(|key| v.get(*key).is_none_or(Value::is_boolean));
+        let identity = identity(&text("id"), &text("version"), &text("hash"));
+        (identity.valid(), identity.valid() && Version::parse(&identity.version).is_ok() && flags)
+    };
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|v| {
+            // (What a device sends is what it sends of it: its own members.)
+            let own = v.as_object().unwrap().keys().all(|key| ["id", "version", "hash"].contains(&key.as_str()));
+            let (sent, asked) = real(&v);
+            json!({ "item": v, "sent": own && sent, "answer": if asked { "asked" } else { "unknown" } })
+        })
+        .collect();
+    let body = |plugins: Value, templates: Value| json!({ "zeron": "0.3.20", "plugins": plugins, "templates": templates });
+    let many = |n: usize| Value::Array((0..n).map(|n| item(json!(format!("t{n}")), json!("1.0.0"), json!(hash))).collect());
+    let odd = |n: usize| Value::Array((0..n).map(|_| item(json!("Odd"), json!("1.0.0"), json!(hash))).collect());
+    let most = super::store::MAX_UPDATE_ITEMS;
+    let refused = vec![
+        ("plugins isn't a list", body(json!({}), json!([]))),
+        ("no plugins", json!({ "zeron": "0.3.20", "templates": [] })),
+        ("templates isn't a list", body(json!([]), json!("midnight"))),
+        ("templates is null", body(json!([]), Value::Null)),
+        ("an item that's null", body(json!([]), json!([fine, null]))),
+        ("an item that's text", body(json!(["focus"]), json!([]))),
+        ("an item that's a list", body(json!([]), json!([[]]))),
+        ("one over the most, over both lists", body(many(most - 1), json!([fine, with("id", json!("dusk"))]))),
+        ("one over the most, with unknown ones", body(many(most), odd(1))),
+        ("an id twice in a list", body(json!([]), json!([fine, fine]))),
+        ("an id twice, at two versions", body(json!([]), json!([fine, with("version", json!("1.1.0"))]))),
+        ("an id twice, one of them unknown", body(json!([]), json!([fine, with("version", json!("1.0"))]))),
+        ("a zeron that isn't a version", json!({ "zeron": "0.3", "plugins": [], "templates": [] })),
+        ("a body that isn't an object", json!([])),
+    ];
+    let taken = vec![
+        ("nothing asked", json!({ "zeron": "0.3.20", "plugins": [] })),
+        ("the most, over both lists", body(many(most - 1), json!([fine]))),
+        ("the most, with unknown ones", body(many(most - 1), odd(1))),
+        ("one id in each list", body(json!([fine]), json!([fine]))),
+        ("a bad id twice: two unknown ones", body(json!([]), odd(2))),
+        ("no id twice: two unknown ones", body(json!([]), json!([{}, {}]))),
+        ("one unknown beside one that's real", body(json!([]), json!([with("version", json!("1.0")), with("id", json!("dusk"))]))),
+    ];
+    let bodies = |list: Vec<(&str, Value)>| Value::Array(list.into_iter().map(|(name, body)| json!({ "name": name, "body": body })).collect());
     let versions: Vec<Identity> = ["1.0.0", "1.1.0", "1.2.0"].iter().map(|v| identity("midnight", v, &hash)).collect();
-    let many: Vec<Identity> = (0..5).map(|n| identity(&format!("t{n}"), "1.0.0", &hash)).collect();
-    let mixed: Vec<Identity> = versions.iter().chain(&many).cloned().collect();
-    let requests: Vec<Value> = [("nothing", Vec::new(), 2), ("three versions of one id", versions, 200), ("five ids, two at a time", many, 2), ("both", mixed, 4)]
+    let five: Vec<Identity> = (0..5).map(|n| identity(&format!("t{n}"), "1.0.0", &hash)).collect();
+    let mixed: Vec<Identity> = versions.iter().chain(&five).cloned().collect();
+    let requests: Vec<Value> = [("nothing", Vec::new(), 2), ("three versions of one id", versions, 200), ("five ids, two at a time", five, 2), ("both", mixed, 4)]
         .into_iter()
         .map(|(name, all, most)| json!({ "name": name, "items": all, "most": most, "requests": template_blocks::requests(&all, most) }))
         .collect();
-    json!({
-        "items": items.iter().map(|i| json!({ "item": i, "sent": i.valid() })).collect::<Vec<_>>(),
-        "requests": requests,
-    })
+    json!({ "items": items, "refused": bodies(refused), "taken": bodies(taken), "requests": requests })
 }
 
 // ── What a plugin asks for ──────────────────────────────────────────────────

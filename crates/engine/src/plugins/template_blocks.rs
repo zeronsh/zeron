@@ -67,17 +67,14 @@ pub struct Identity {
     pub hash: String,
 }
 
-/// The longest version the store is asked about.
-const MAX_VERSION: usize = 128;
-
 impl Identity {
     /// Whether the store can be asked about it: a store id, a version, and a
     /// content hash. Anything else isn't what a store template is (a
     /// `.lineage.json` is a file anyone may write), and is never sent: the
-    /// store refuses the whole request for one.
+    /// store has nothing to say of one.
     pub(super) fn valid(&self) -> bool {
         templates::valid_id(&self.id)
-            && (1..=MAX_VERSION).contains(&self.version.len())
+            && (1..=super::version::MAX_LEN).contains(&self.version.len())
             && self.hash.len() == 64
             && self.hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
@@ -535,7 +532,7 @@ mod tests {
         assert!(requests(&[], 2).is_empty());
         let tmp = tempfile::tempdir().unwrap();
         let t = template(tmp.path(), "copy", None);
-        for bad in [identity("Not An Id", "1.0.0"), identity("aa", ""), identity("aa", &"1".repeat(129)), Identity { hash: "h".into(), ..identity("aa", "1.0.0") }, Identity { hash: "AB".repeat(32), ..identity("aa", "1.0.0") }] {
+        for bad in [identity("Not An Id", "1.0.0"), identity("aa", ""), identity("aa", &"1".repeat(33)), Identity { hash: "h".into(), ..identity("aa", "1.0.0") }, Identity { hash: "AB".repeat(32), ..identity("aa", "1.0.0") }] {
             std::fs::write(t.join(LINEAGE), serde_json::to_vec(&[identity("aa", "1.0.0"), bad.clone()]).unwrap()).unwrap();
             assert_eq!(identities(&t), Err(Unreadable), "{bad:?}");
             assert!(all_identities(tmp.path()).is_empty(), "{bad:?}");

@@ -652,18 +652,23 @@ impl FakeStore {
             ("POST", ["store", "v1", "updates"]) => {
                 let ask: Value = serde_json::from_slice(body).unwrap_or_default();
                 let mut state = self.state.lock().unwrap();
-                // As the edge (updates.ts `parseList`): one bad item, or an
-                // id twice in its list, refuses the whole request.
+                // As the edge (updates.ts `parseList`): an item that isn't an
+                // object, or a real id twice in its list, refuses the request;
+                // one with an id, version or hash that isn't one is unknown.
                 let hex = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
                 let many = ["plugins", "templates"].iter().map(|l| ask[*l].as_array().map_or(0, Vec::len)).sum::<usize>() > zeron_engine::plugins::store::MAX_UPDATE_ITEMS;
                 if many || state.refuse_template_asks && ask["templates"].as_array().is_some_and(|t| !t.is_empty()) {
                     return json_reply(400, json!({ "error": "bad_request", "message": "Not a list this store takes." }));
                 }
+                let real = |item: &Value| {
+                    let text = |key: &str| item[key].as_str().unwrap_or("");
+                    zeron_engine::plugins::templates::valid_id(text("id")) && Version::parse(text("version")).is_ok() && hex(text("hash"))
+                };
                 for list in ["plugins", "templates"] {
                     let mut seen = std::collections::BTreeSet::new();
                     for item in ask[list].as_array().into_iter().flatten() {
-                        let (id, version, hash) = (item["id"].as_str().unwrap_or(""), item["version"].as_str().unwrap_or(""), item["hash"].as_str().unwrap_or(""));
-                        if !zeron_engine::plugins::templates::valid_id(id) || version.len() > 128 || !hex(hash) || !seen.insert(id.to_owned()) {
+                        let id = item["id"].as_str().filter(|id| zeron_engine::plugins::templates::valid_id(id));
+                        if !item.is_object() || id.is_some_and(|id| !seen.insert(id.to_owned())) {
                             return json_reply(400, json!({ "error": "bad_request", "message": "Each item is { id, version, hash }, each id once in its list." }));
                         }
                     }
@@ -674,7 +679,7 @@ impl FakeStore {
                 let mut blocked = Vec::new();
                 for asked in ask["plugins"].as_array().cloned().unwrap_or_default() {
                     let (id, installed) = (asked["id"].as_str().unwrap_or(""), asked["version"].as_str().unwrap_or(""));
-                    let Some(p) = state.plugins.get(id) else { continue };
+                    let Some(p) = state.plugins.get(id).filter(|_| real(&asked)) else { continue };
                     let Ok(installed_v) = Version::parse(installed) else { continue };
                     if let Some(v) = p.versions.iter().find(|v| v.version == installed && v.blocked.is_some()) {
                         blocked.push(json!({ "id": id, "version": v.version, "reason": v.blocked }));
@@ -712,7 +717,7 @@ impl FakeStore {
                 }
                 updates.append(&mut state.offer_anyway);
                 for asked in ask["templates"].as_array().into_iter().flatten() {
-                    let is = |(id, version): &&(String, String)| asked["id"] == id.as_str() && asked["version"] == version.as_str();
+                    let is = |(id, version): &&(String, String)| real(asked) && asked["id"] == id.as_str() && asked["version"] == version.as_str();
                     if state.templates_down.iter().any(|d| is(&d)) {
                         blocked.push(json!({ "item_kind": "template", "id": asked["id"], "version": asked["version"], "reason": "From the full check." }));
                     }
