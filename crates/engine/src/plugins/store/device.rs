@@ -1604,7 +1604,27 @@ impl Plugins {
                 Err(error) => errors.push(said(t, &error)),
             }
         }
+        self.mark_templates(&client, &caller, here).await;
         (updates, errors)
+    }
+
+    /// Each store template of `here` installed unverified whose own record,
+    /// read now, says verified of the same contents and signer: its install
+    /// record says so from now on, as a plugin's (`catch_up_verified`). Only
+    /// ever that way.
+    async fn mark_templates(&self, client: &StoreClient, caller: &Caller, here: Vec<template_packages::Installed>) {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        for t in here.into_iter().filter(|t| !t.store.verified) {
+            let since = template_packages::unmarked();
+            let Ok((_, record)) = client.version(&t.store.id, &t.version, caller).await else { continue };
+            if !record.verified || !record.hash.eq_ignore_ascii_case(&t.store.hash) || record.key != t.store.key {
+                continue;
+            }
+            let (dir, id) = (dir.clone(), t.id.clone());
+            if tokio::task::spawn_blocking(move || template_packages::mark(&dir, &t, record.verified_at, since)).await.unwrap_or_default() {
+                tracing::info!(template = %id, "store: the version installed is verified now");
+            }
+        }
     }
 
     /// `offer` as the update found for store template `t`: its package
@@ -1868,9 +1888,11 @@ impl Plugins {
                     _ => None,
                 })
                 .collect();
+            let applied = self.apply_template_changes(&templates_dir, changes).await;
+            // (After what's blocked: a mark its check puts on meanwhile goes too.)
             // Taken down or restored, in whatever order: no mark.
             let unmarked = self.unmark_templates(events.iter().filter(|e| e.item_kind == Some(client::Kind::Template) && matches!(e.kind.as_str(), "take_down" | "restore")).map(|e| (e.id.clone(), e.version.clone())).collect()).await;
-            let templates_kept = match self.apply_template_changes(&templates_dir, changes).await {
+            let templates_kept = match applied {
                 Ok(()) => unmarked,
                 Err(error) => {
                     tracing::warn!(%error, "store: a template's take-down couldn't be kept");
@@ -2185,8 +2207,10 @@ impl Plugins {
         if held.is_some() {
             let whole = settled.len() == templates.len();
             let dir = templates_dir.clone();
-            let unmarked = self.unmark_templates(template_downs.iter().map(|b| (b.id.clone(), b.version.clone())).collect()).await;
-            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await {
+            let downs: Vec<(String, String)> = template_downs.iter().map(|b| (b.id.clone(), b.version.clone())).collect();
+            let kept = self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await;
+            let unmarked = self.unmark_templates(downs).await;
+            match kept {
                 Ok(whole) => {
                     check.templates_settled = whole && unmarked;
                     if !whole {

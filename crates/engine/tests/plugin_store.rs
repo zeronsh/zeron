@@ -728,12 +728,25 @@ async fn a_version_taken_down_has_no_mark_again() {
         let record: Value = serde_json::from_slice(&std::fs::read(templates.join("midnight/.imported.json")).unwrap()).unwrap();
         assert_eq!((&record["version"], &record["source"]["store"]["id"], &record["source"]["store"]["publisher"], record["hash"].is_string()), (&json!("1.0.0"), &json!("midnight"), &json!("ada"), true), "{record}");
         assert_eq!((&record["source"]["store"]["verified"], record["source"]["store"].get("verified_at")), (&json!(false), None), "{record}");
-        // Nothing after brings it back: a check of updates, and the page.
+        // Nothing after brings it back but staff: a check of updates, and the page.
         d.check().await;
         d.call(methods::CHECK_TEMPLATE_UPDATES, json!({})).await.unwrap();
         d.plugins.check_takedowns().await;
         let page = d.call(methods::STORE_PLUGIN, json!({ "kind": "template", "id": "midnight" })).await.unwrap();
         assert_eq!((mark("midnight").await, plugin().await, &page["installed"]["verified"]), ((json!(false), false), json!(false), &json!(false)), "{n}");
+        // Verified again by them, its own check says so, of both.
+        {
+            let mut state = store.state.lock().unwrap();
+            state.template_items.get_mut("midnight").unwrap().versions[0].verified = true;
+            state.plugins.get_mut("focus").unwrap().versions[0].verified = true;
+        }
+        d.plugins.check_takedowns().await;
+        assert_eq!(mark("midnight").await, (json!(false), false), "{n}: not by the feed");
+        d.call(methods::CHECK_TEMPLATE_UPDATES, json!({ "id": "midnight" })).await.unwrap();
+        assert_eq!((mark("midnight").await, mark("midnight-2").await), ((json!(true), true), (json!(false), false)), "{n}: the one asked of");
+        d.call(methods::CHECK_TEMPLATE_UPDATES, json!({})).await.unwrap();
+        d.check().await;
+        assert_eq!((mark("midnight-2").await, plugin().await), ((json!(true), true), json!(true)), "{n}");
     }
     // One whose record can't be written is asked for again.
     {
@@ -773,6 +786,54 @@ async fn a_version_taken_down_has_no_mark_again() {
         }
         assert_eq!(marked().await, false, "started over: {started_over}");
     }
+}
+
+/// A template installed before it was verified has the mark once its record
+/// says so: the same contents and signer, said whole, and not one that's down.
+#[tokio::test]
+async fn a_template_installed_unverified_has_the_mark_once_its_record_says_so() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add_template("ada", &listed_template(&key, "1.0.0", "return 1", "# One"), "listed");
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    let staged = d.call(methods::IMPORT_TEMPLATE, json!({ "store": "midnight" })).await.unwrap();
+    assert_eq!(allow_template(&d, &staged).await.unwrap()["installed"], "midnight");
+    let check = async || {
+        let checked = d.call(methods::CHECK_TEMPLATE_UPDATES, json!({})).await.unwrap();
+        let source = template_at(&d, "midnight").await["imported"]["source"].clone();
+        assert_eq!(source["verified"].as_bool().unwrap(), source.get("verified_at").is_some(), "{source}");
+        (source["verified"].clone(), checked["errors"].clone())
+    };
+    assert_eq!(check().await, (json!(false), json!([])));
+    let set = |change: &dyn Fn(&mut fake_store::StoredVersion)| change(&mut store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0]);
+    let was = store.state.lock().unwrap().template_items["midnight"].versions[0].clone();
+    set(&|v| v.verified = true);
+    // Not by a record that doesn't say, isn't whole, or is of other contents
+    // or another signer; nor with the store out of reach.
+    store.state.lock().unwrap().records_without_verified = true;
+    assert_eq!(check().await.0, false, "a record that doesn't say");
+    store.state.lock().unwrap().records_without_verified = false;
+    set(&|v| v.hash = "0".repeat(64));
+    assert_eq!(check().await.0, false, "other contents");
+    set(&|v| (v.hash, v.key) = (was.hash.clone(), None));
+    assert_eq!(check().await.0, false, "no signer");
+    set(&|v| v.key = was.key.clone());
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(check().await.0, false, "out of reach");
+    store.offline.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Nor of one that's down here.
+    let file = templates.join(".blocked.json");
+    let list = std::fs::read(&file).unwrap();
+    std::fs::write(&file, json!({ "format": "zeron-template-blocks:v1", "blocks": [{ "id": "midnight", "version": "1.0.0", "reason": "Bad.", "at": 4_000_000_000u64 }] }).to_string()).unwrap();
+    assert_eq!(check().await.0, false, "down");
+    std::fs::write(&file, list).unwrap();
+    assert_eq!(check().await.0, true);
+    // Never the other way, by a check.
+    set(&|v| v.verified = false);
+    assert_eq!(check().await.0, true);
 }
 
 /// A template's take-down is never a plugin's, whatever its id and version;

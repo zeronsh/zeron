@@ -1217,11 +1217,38 @@ pub fn imported(folder: &Path) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
+/// How often marks were taken off: a mark whose record was read before one
+/// was isn't put on after it.
+static UNMARKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`mark`]'s `since`, taken before the record is read.
+pub fn unmarked() -> u64 {
+    UNMARKED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Template `installed`, whose own record in the store says it's verified
+/// (`verified_at`), is marked so, unless it's down here, changed, or a mark was
+/// taken off `since` its record was read. Whether it was.
+pub fn mark(dir: &Path, installed: &Installed, verified_at: Option<i64>, since: u64) -> bool {
+    let _changing = changing();
+    let at = dir.join(&installed.id);
+    if unmarked() != since || super::template_blocks::blocked(dir, &at).is_some() {
+        return false;
+    }
+    let Some(mut record) = imported(&at).filter(|record| record["hash"] == installed.hash.as_str() && source(&at).is_some_and(|s| s.store() == Some(&installed.store))) else { return false };
+    record["source"]["store"]["verified"] = json!(true);
+    if let Some(verified_at) = verified_at {
+        record["source"]["store"]["verified_at"] = json!(verified_at);
+    }
+    templates::write_atomic(&at, IMPORTED, &signing::pretty(&record)).is_ok()
+}
+
 /// Each template in `dir` that's one of `versions` (a store id and version)
 /// by its own record isn't verified any more: its record says so. The folders
 /// changed, and whether every one that should be was.
 pub fn unmark(dir: &Path, versions: &[(String, String)]) -> (Vec<String>, bool) {
     let _changing = changing();
+    UNMARKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let (mut changed, mut all) = (Vec::new(), true);
     for (folder, store) in from_store(dir) {
         let at = dir.join(&folder);
@@ -1532,6 +1559,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
 }
 
 /// A store template here, as the update check asks about it.
+#[derive(Clone)]
 pub struct Installed {
     /// Its folder.
     pub id: String,
@@ -2017,6 +2045,33 @@ mod tests {
             let left = left_out(&t, &sent);
             assert!(rels[1..].iter().all(|rel| left.files.iter().any(|(left, _)| left == rel)), "{:?}", left.files);
         }
+    }
+
+    /// A mark is put on the record it was read for, once: not on another
+    /// install's, nor after one was taken off since.
+    #[test]
+    fn plugins_template_packages_a_mark_is_put_on_what_it_was_read_for() {
+        let d = dir("marked");
+        let t = d.join("midnight");
+        write(&t.join(MANIFEST), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#);
+        let record = json!({ "key": null, "hash": "h", "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+            "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+        super::super::template_blocks::begin(&d).unwrap();
+        let put = || write(&t.join(IMPORTED), &record.to_string());
+        let verified = || from_store(&d)[0].1.verified;
+        put();
+        let here = installed_from_store(&d, None).remove(0);
+        for other in [Installed { hash: "other".into(), ..here.clone() }, Installed { store: install::StoreSource { publisher_id: "pub_other".into(), ..here.store.clone() }, ..here.clone() }, Installed { id: "elsewhere".into(), ..here.clone() }] {
+            assert!(!mark(&d, &other, Some(7), unmarked()) && !verified());
+        }
+        // (Any taken off, meanwhile: other tests' too, so it's tried again.)
+        let since = unmarked();
+        unmark(&d, &[("other".into(), "1.0.0".into())]);
+        assert!(!mark(&d, &here, Some(7), since) && !verified());
+        assert!((0..1000).any(|_| mark(&d, &here, Some(7), unmarked())));
+        assert!(verified());
+        assert_eq!(unmark(&d, &[("midnight".into(), "1.0.0".into())]), (vec!["midnight".to_owned()], true));
+        assert!(!verified());
     }
 
     /// A template is for the Zeron it was made from and later.
