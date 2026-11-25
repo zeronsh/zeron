@@ -875,6 +875,11 @@ impl Tools {
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        // (Each that asks for what's only this device's. A plugin's own tool
+        // reads its arguments itself.)
+        if [&plugins::NAMES[..], &themes::NAMES, &mcp_servers::NAMES].iter().any(|names| names.contains(&name)) {
+            self.only_here(name, &args).await?;
+        }
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
@@ -932,6 +937,29 @@ impl Tools {
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))
+    }
+
+    /// `tool` works on this device alone: asked of another (a `device`, as
+    /// other tools take one, or the engine's `targetDeviceId`), it's refused,
+    /// never done here in its place.
+    async fn only_here(&self, tool: &str, args: &Value) -> Result<(), String> {
+        for key in ["device", "targetDeviceId"] {
+            let Some(named) = args.get(key).filter(|named| !named.is_null() && **named != "") else { continue };
+            let local = self.zeron.local_device_id().await.map_err(|e| format!("{e:#}"))?;
+            // (A `device` is read as the other tools read one: two of a name
+            // are neither.)
+            let why = match named.as_str() {
+                Some(named) if named == local => continue,
+                Some(named) if key == "device" => match self.zeron.resolve_device_id(Some(named)).await {
+                    Ok(id) if id == local => continue,
+                    Ok(_) => String::new(),
+                    Err(error) => format!(" ({error:#})"),
+                },
+                _ => String::new(),
+            };
+            return Err(format!("{tool} works on this device alone. It was asked of another ({key}: {named}), and nothing was done.{why}"));
+        }
+        Ok(())
     }
 
     /// Poll every request together, including its optional wait. A waiting
@@ -2239,6 +2267,68 @@ mod tests {
         for def in &defs {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
+        }
+    }
+
+    /// What a tool asked the engine, every method answered, and which device
+    /// this is.
+    struct Asked(Mutex<Vec<String>>, Mutex<&'static str>);
+
+    #[async_trait]
+    impl RpcService for Asked {
+        async fn handle(&self, method: &str, _: Value) -> Result<RpcReply, RpcError> {
+            Ok(match method {
+                methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": *self.1.lock().unwrap() })),
+                methods::WATCH_DEVICES => stream(json!([
+                    { "id": "dev-local", "name": "Laptop", "platform": "linux", "lastSeenAt": null },
+                    { "id": "dev-remote", "name": "Worker", "platform": "linux", "lastSeenAt": null },
+                    { "id": "dev-here-too", "name": "Studio", "platform": "linux", "lastSeenAt": null },
+                    { "id": "dev-there", "name": "studio", "platform": "linux", "lastSeenAt": null },
+                ])),
+                method => {
+                    self.0.lock().unwrap().push(method.to_owned());
+                    RpcReply::Value(json!({}))
+                }
+            })
+        }
+    }
+
+    /// A tool that's only this device's, asked for another (however it's
+    /// named), is refused and asks the engine nothing: never done here.
+    #[tokio::test]
+    async fn a_tool_of_this_device_s_alone_is_never_done_for_another_here() {
+        let asked = Arc::new(Asked(Mutex::default(), Mutex::new("dev-local")));
+        let tools = Tools::new(Arc::new(Zeron::with_client(memory_client(asked.clone()), Origin::default())));
+        // Every plugin's, template's, theme's and MCP server's, whichever is
+        // added later.
+        let names: Vec<&str> = catalog().into_iter().map(|d| d.name).filter(|n| ["plugin", "template", "theme", "mcp"].iter().any(|of| n.contains(of)) || ["describe_app", "describe_elements"].contains(n)).collect();
+        assert_eq!(names.len(), 26, "{names:?}");
+        let given = |key: &str, value: Value| {
+            let mut args = json!({ "id": "midnight", "name": "Midnight", "store": "midnight", "action": "add", "url": "https://example.com/mcp" });
+            args[key] = value;
+            args
+        };
+        for name in &names {
+            for (key, value) in [("device", json!("Worker")), ("device", json!("dev-remote")), ("device", json!("Nowhere")), ("device", json!("Studio")), ("device", json!("dev")), ("targetDeviceId", json!("Laptop")), ("device", json!(["Worker"])), ("targetDeviceId", json!("dev-remote")), ("targetDeviceId", json!(7))] {
+                let refused = tools.call(name, given(key, value.clone())).await.unwrap_err();
+                assert!(refused.contains("this device alone") && refused.contains(name), "{name} {key} {value}: {refused}");
+            }
+        }
+        assert_eq!(*asked.0.lock().unwrap(), Vec::<String>::new());
+        // Two of one name are neither, and it says so; this device's own name
+        // among them too.
+        let refused = tools.call("use_template", given("device", json!(" STUDIO "))).await.unwrap_err();
+        assert!(refused.contains("2 devices are named") && refused.contains("dev-there"), "{refused}");
+        *asked.1.lock().unwrap() = "dev-here-too";
+        assert!(tools.call("use_template", given("device", json!("Studio"))).await.unwrap_err().contains("2 devices are named"));
+        assert_eq!(*asked.0.lock().unwrap(), Vec::<String>::new());
+        tools.call("use_template", given("device", json!("dev-here-too"))).await.unwrap();
+        *asked.1.lock().unwrap() = "dev-local";
+        // This one, however it's named, or none.
+        for (key, value) in [("device", json!("laptop")), ("device", json!("  Laptop ")), ("device", json!(" dev-local ")), ("device", json!("dev-local")), ("targetDeviceId", json!("dev-local")), ("device", Value::Null), ("targetDeviceId", json!("")), ("other", json!("Worker"))] {
+            asked.0.lock().unwrap().clear();
+            tools.call("use_template", given(key, value.clone())).await.unwrap();
+            assert_eq!(*asked.0.lock().unwrap(), [methods::USE_TEMPLATE], "{key} {value}");
         }
     }
 
