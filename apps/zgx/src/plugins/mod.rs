@@ -587,6 +587,9 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.fetch_policy(plugin_network.clone());
     // What the app's VM (a template in preview, while it is one) may reach.
     host.guard(preview::guard);
+    // Whether a template switch's first load runs (preview.rs `Switch`):
+    // Zeron's own app loads nothing then.
+    host.function(preview::SWITCHING, |_| Value::Bool(preview::switching()));
     let bridge = Rc::new(Bridge {
         host: host.clone(),
         network: plugin_network,
@@ -1746,6 +1749,12 @@ impl Bridge {
             Some(Err(error)) => {
                 was_laid = false;
                 eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
+            }
+            // (Asked, and no answer: its thread died. What `.live` holds is
+            // anyone's guess, so nothing laid.)
+            None if compose => {
+                was_laid = false;
+                eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: its thread stopped");
             }
             None => {}
         }

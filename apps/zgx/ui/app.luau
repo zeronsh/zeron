@@ -5,8 +5,10 @@
 -- as `@app/screens/…`, so a trusted plugin can replace it whole.
 
 -- While the window changes hands (a template switch's first load, which
--- only takes what ran before away: the host's `window.switching`), nothing.
-if ui.shared("window.switching", false):peek() then
+-- only takes what ran before away: as the host says, `window.switching`),
+-- nothing.
+local asked, switching = pcall(ui.call_sync, "window.switching", nil)
+if asked and switching == true then
 	return ui.column {}
 end
 
