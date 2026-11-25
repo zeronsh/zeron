@@ -185,8 +185,8 @@ fn rows(path: &Path) -> Read<(Json, Vec<(String, Block)>)> {
 }
 
 /// What the engine answered of the templates (`ListTemplates`): each row it
-/// says is taken down is, from now on, and one it no longer says is let go of
-/// if the list reads and doesn't name it. Whether anything changed.
+/// says is taken down is, from now on, and one it no longer says (or whose
+/// folder is gone) is let go of if the list reads and doesn't name it. Whether anything changed.
 pub fn take_rows(templates: &Path, said: &Json) -> bool {
     let Some(copy) = copy_path() else { return false };
     let Some(answered) = said["templates"].as_array() else { return false };
@@ -198,7 +198,9 @@ pub fn take_rows(templates: &Path, said: &Json) -> bool {
     let mut now: Vec<(String, Block)> = Vec::new();
     for (folder, block) in &was {
         let row = answered.iter().find(|row| row["id"] == folder.as_str());
-        let clear = row.is_some_and(|row| !row["blocked"].is_object())
+        // (Its folder gone, no row of it will ever come: the list is the word.)
+        let unsaid = row.map_or_else(|| !templates.join(folder).exists(), |row| !row["blocked"].is_object());
+        let clear = unsaid
             && listed.as_ref().is_some_and(|l| !l.iter().any(|b| b.id == block.id && same_version(&b.version, &block.version)));
         if !clear {
             now.push((folder.clone(), block.clone()));
@@ -669,5 +671,18 @@ mod tests {
         take_rows(&r.templates, &down);
         r.write("midnight-2/.imported.json", "{");
         assert!(r.down("midnight-2"));
+        // Its folder gone (deleted, and restored at the store): the same
+        // version installed again, in another, isn't blocked for good.
+        std::fs::remove_dir_all(r.templates.join("midnight-2")).unwrap();
+        r.store("midnight-3", "midnight", "1.2.0");
+        let gone = json!({ "templates": [{ "id": "midnight-3" }] });
+        assert!(r.down("midnight-3"), "until a list says so");
+        r.midnight();
+        assert!(!take_rows(&r.templates, &gone), "the list still names it");
+        r.write(FILE, "{");
+        assert!(!take_rows(&r.templates, &gone), "nor while it can't be read");
+        r.blocks(json!([]));
+        assert!(take_rows(&r.templates, &gone));
+        assert_eq!((r.why("midnight-3"), r.why("copy")), (None, None));
     }
 }

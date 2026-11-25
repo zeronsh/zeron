@@ -211,6 +211,17 @@ test("an Allow the store refuses says why, the sheet staying to try again", func
 	end
 end)
 
+test("a version with words of its own is said in the facts, never beside the marks", function()
+	local app = open()
+	app:command("store")
+	app:frames(20)
+	expect(app:tree(".template-consent-version")).to_contain("1.2.0")
+	app:command("worded")
+	app:frames(20)
+	expect(app:has(".template-consent-version")).to_be(false)
+	expect(app:tree("#template-consent-facts")).to_contain("Version 1.0.0-verified")
+end)
+
 test("a package's own words stand apart from what Zeron says of it", function()
 	local app = open()
 	expect(app:tree("#template-consent-own-words")).to_contain("In its own words")

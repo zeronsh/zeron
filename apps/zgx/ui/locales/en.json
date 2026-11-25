@@ -4545,7 +4545,8 @@
       "now_publisher": "Its publisher changed just now. Look again.",
       "taken_down": "Zeron took this version down, so it can't be installed.",
       "not_in_store": "This version isn't in the template store anymore.",
-      "own_words": "In its own words"
+      "own_words": "In its own words",
+      "version": "Version {version}"
     },
     "store": {
       "search": "Search templates",

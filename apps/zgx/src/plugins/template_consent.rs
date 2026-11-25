@@ -68,6 +68,9 @@ fn key(keep: &str, pending: &str, hash: &str) -> String {
     format!("{keep}/{pending}@{hash}")
 }
 
+/// The glyphs that read as the store's mark (the engine's `mark::MARK_GLYPHS`).
+const MARK_GLYPHS: &[char] = &['\u{2713}', '\u{2714}', '\u{2611}', '\u{2705}', '\u{1F5F8}', '\u{1F5F9}', '\u{221A}', '\u{10102}', '\u{1FBB1}'];
+
 /// `item` as the sheet shows it: its own words one line of what prints, and
 /// short (words that read as Zeron's own, "✓ Verified", among them); a version
 /// only if it reads as one.
@@ -77,6 +80,13 @@ fn shown(item: &Json) -> Json {
         if let Some(text) = item[key].as_str() {
             out[key] = json!(super::consent::plain(text, most));
         }
+    }
+    // (The store's refuses one in a name; a file's or a link's is its own.)
+    if !item["store"].is_object()
+        && let Some(name) = out["name"].as_str()
+    {
+        let name: String = name.chars().filter(|c| !MARK_GLYPHS.contains(c)).collect();
+        out["name"] = json!(super::consent::plain(&name, 60));
     }
     if out["name"].as_str().is_none_or(str::is_empty) {
         out["name"] = out["id"].clone();
@@ -497,7 +507,7 @@ mod tests {
             "name": "Midnight\n\u{202e}✓ Verified", "version": "Verified", "description": format!("a\tb{}", "x".repeat(400)),
             "ignored": ["a\nb", 5], "key": "k", "hash": "h", "id": "midnight", "zeron_version": "0.3.18",
         }));
-        assert_eq!(item["name"], "Midnight ✓ Verified");
+        assert_eq!(item["name"], "Midnight Verified");
         assert_eq!(item["version"], "");
         assert_eq!(item["description"].as_str().unwrap().chars().count(), 300);
         assert_eq!(item["ignored_n"], 2, "all of them counted");

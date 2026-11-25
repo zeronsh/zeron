@@ -46,6 +46,10 @@ local function item(): any
 	return consent:get().item
 end
 
+local function bare_version(it: any): boolean
+	return type(it.version) == "string" and string.match(it.version, "^%d[%d.]*$") ~= nil
+end
+
 -- A username as its badge takes it: with "…" where the widest letters would
 -- run past the window's side (39 at most; it's whole in the red box). Cut
 -- here, by what each letter may take: zgx's own "…" goes to the last word's
@@ -236,7 +240,9 @@ local function body(key: string): Node
 								then ds.Badge { ui.t("plugins.store.verified"), class = "template-consent-verified", tone = "success" }
 								elseif store then ds.Badge { ui.t("plugins.store.review.waiting"), class = "template-consent-verified", tone = "warning" }
 								else nil,
-							if it.version and it.version ~= "" then ds.Badge { it.version, tabular = true } else nil,
+							-- (A version of numbers alone: one with words of its own
+							-- is said in the facts, never beside the marks.)
+							if bare_version(it) then ds.Badge { it.version, tabular = true, class = "template-consent-version" } else nil,
 						},
 					},
 				},
@@ -324,6 +330,9 @@ local function body(key: string): Node
 							then ui.t("templates.consent.files_made_for", { n = files, version = made_for })
 							else ui.t("templates.consent.files", { n = files })
 					),
+					if type(it.version) == "string" and it.version ~= "" and not bare_version(it)
+						then fact("info-circle", ui.t("templates.consent.version", { version = it.version }))
+						else nil,
 					if #ignored > 0
 						then fact(
 							"lock-keyhole-unlocked",
