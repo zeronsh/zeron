@@ -1217,6 +1217,31 @@ pub fn imported(folder: &Path) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
+/// Each template in `dir` that's one of `versions` (a store id and version)
+/// by its own record isn't verified any more: its record says so. The folders
+/// changed, and whether every one that should be was.
+pub fn unmark(dir: &Path, versions: &[(String, String)]) -> (Vec<String>, bool) {
+    let _changing = changing();
+    let (mut changed, mut all) = (Vec::new(), true);
+    for (folder, store) in from_store(dir) {
+        let at = dir.join(&folder);
+        let Some(mut record) = imported(&at).filter(|_| store.verified) else { continue };
+        let version = record["version"].as_str().unwrap_or_default();
+        if !versions.iter().any(|(id, down)| *id == store.id && super::template_blocks::same_version(down, version)) {
+            continue;
+        }
+        record["source"]["store"]["verified"] = json!(false);
+        if let Some(store) = record["source"]["store"].as_object_mut() {
+            store.remove("verified_at");
+        }
+        match templates::write_atomic(&at, IMPORTED, &signing::pretty(&record)) {
+            Ok(()) => changed.push(folder),
+            Err(_) => all = false,
+        }
+    }
+    (changed, all)
+}
+
 /// Whether `folder` has an `.imported.json` at all, one that can be read or
 /// not: it isn't Zeron's, nor made here.
 pub fn has_record(folder: &Path) -> bool {

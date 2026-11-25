@@ -667,6 +667,114 @@ async fn a_template_taken_down_is_blocked_here_and_so_are_its_copies() {
     assert!(asked("/store/v1/takedowns?after=2") >= 1);
 }
 
+/// A version taken down has no mark from then on, restored or not, however
+/// its events come: a template's, and a plugin's.
+#[tokio::test]
+async fn a_version_taken_down_has_no_mark_again() {
+    // (How the events come: pages of them, in order; or none, the full check
+    // alone, before and after the restore.)
+    let pages: [&[&[&str]]; 5] = [&[&["take_down"], &["restore"]], &[&["take_down", "restore"]], &[&["restore"]], &[&["restore", "take_down"], &["restore"]], &[&["take_down", "restore", "take_down", "restore"]]];
+    for (n, pages) in pages.iter().enumerate() {
+        let store = FakeStore::start().await;
+        let (key, _) = SigningKey::generate().unwrap();
+        store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+        let d = with_midnight(&store, &key).await;
+        d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+        assert_eq!(d.allow("focus").await["status"], "on");
+        let templates = d._dir.path().join("templates");
+        d.call(methods::CREATE_TEMPLATE, json!({ "id": "mine", "from": "midnight" })).await.unwrap();
+        // Its own install, in another folder, and one of another version.
+        for (id, version) in [("midnight-2", "1.0.0"), ("other", "0.9.0")] {
+            std::fs::create_dir_all(templates.join(id)).unwrap();
+            for file in ["zeron-template.json", "app.luau", "README.md"] {
+                std::fs::copy(templates.join("midnight").join(file), templates.join(id).join(file)).unwrap();
+            }
+            let mut record: Value = serde_json::from_slice(&std::fs::read(templates.join("midnight/.imported.json")).unwrap()).unwrap();
+            record["version"] = json!(version);
+            record["source"]["version"] = json!(version);
+            std::fs::write(templates.join(id).join(".imported.json"), record.to_string()).unwrap();
+        }
+        let mark = async |id: &str| {
+            let source = template_at(&d, id).await["imported"]["source"].clone();
+            (source["verified"].clone(), source.get("verified_at").is_some())
+        };
+        let plugin = async || d.item("focus").await["source"]["verified"].clone();
+        d.plugins.check_takedowns().await;
+        assert_eq!((mark("midnight").await, mark("midnight-2").await, plugin().await), ((json!(true), true), (json!(true), true), json!(true)), "{n}");
+        // Taken down, then restored, unverified from then on.
+        let mut seq = store.state.lock().unwrap().events.len() as u64;
+        {
+            let mut state = store.state.lock().unwrap();
+            state.template_items.get_mut("midnight").unwrap().versions[0].verified = false;
+            state.plugins.get_mut("focus").unwrap().versions[0].verified = false;
+        }
+        for page in pages.iter() {
+            for kind in page.iter() {
+                let mut state = store.state.lock().unwrap();
+                for id in ["midnight", "focus"] {
+                    seq += 1;
+                    state.events.push((seq, (*kind).into(), id.into(), "1.0.0".into(), "It read your chats.".into()));
+                    if id == "midnight" {
+                        state.template_events.insert(seq);
+                    }
+                }
+            }
+            d.plugins.check_takedowns().await;
+            assert_eq!((mark("midnight").await, mark("midnight-2").await, plugin().await), ((json!(false), false), (json!(false), false), json!(false)), "{n} {page:?}");
+        }
+        assert!(template_at(&d, "midnight").await.get("blocked").is_none(), "{n}: restored");
+        // (Another version's mark is its own; nothing else of a record moves.)
+        assert_eq!(mark("other").await, (json!(true), true), "{n}");
+        let record: Value = serde_json::from_slice(&std::fs::read(templates.join("midnight/.imported.json")).unwrap()).unwrap();
+        assert_eq!((&record["version"], &record["source"]["store"]["id"], &record["source"]["store"]["publisher"], record["hash"].is_string()), (&json!("1.0.0"), &json!("midnight"), &json!("ada"), true), "{record}");
+        assert_eq!((&record["source"]["store"]["verified"], record["source"]["store"].get("verified_at")), (&json!(false), None), "{record}");
+        // Nothing after brings it back: a check of updates, and the page.
+        d.check().await;
+        d.call(methods::CHECK_TEMPLATE_UPDATES, json!({})).await.unwrap();
+        d.plugins.check_takedowns().await;
+        let page = d.call(methods::STORE_PLUGIN, json!({ "kind": "template", "id": "midnight" })).await.unwrap();
+        assert_eq!((mark("midnight").await, plugin().await, &page["installed"]["verified"]), ((json!(false), false), json!(false), &json!(false)), "{n}");
+    }
+    // One whose record can't be written is asked for again.
+    {
+        let store = FakeStore::start().await;
+        let (key, _) = SigningKey::generate().unwrap();
+        let d = with_midnight(&store, &key).await;
+        d.plugins.check_takedowns().await;
+        let folder = d._dir.path().join("templates/midnight");
+        let writable = |on: bool| std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(if on { 0o755 } else { 0o555 })).unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            state.events.push((1, "restore".into(), "midnight".into(), "1.0.0".into(), String::new()));
+            state.template_events.insert(1);
+        }
+        writable(false);
+        d.plugins.check_takedowns().await;
+        assert_eq!(template_at(&d, "midnight").await["imported"]["source"]["verified"], true);
+        writable(true);
+        d.plugins.check_takedowns().await;
+        assert_eq!(template_at(&d, "midnight").await["imported"]["source"]["verified"], false);
+    }
+    // By the full check alone, and by a feed that starts over after it all.
+    for started_over in [false, true] {
+        let store = FakeStore::start().await;
+        let (key, _) = SigningKey::generate().unwrap();
+        let d = with_midnight(&store, &key).await;
+        d.plugins.check_takedowns().await;
+        let marked = async || template_at(&d, "midnight").await["imported"]["source"]["verified"].clone();
+        assert_eq!(marked().await, true);
+        store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0].verified = false;
+        if started_over {
+            store.state.lock().unwrap().feed_floor = 10;
+            d.plugins.check_takedowns().await;
+        } else {
+            store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+            d.check().await;
+        }
+        assert_eq!(marked().await, false, "started over: {started_over}");
+    }
+}
+
 /// A template's take-down is never a plugin's, whatever its id and version;
 /// the device's place in the feed moves past it all the same.
 #[tokio::test]
