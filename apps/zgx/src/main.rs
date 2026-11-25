@@ -87,6 +87,8 @@ mod waiting_toast_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]
+mod template_tokens_tests;
+#[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
 mod composer_metrics_tests;

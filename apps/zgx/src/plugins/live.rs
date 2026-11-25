@@ -44,6 +44,53 @@ pub const ZERON_VERSION: &str = env!("ZERON_VERSION");
 pub use zeron_plugin_guard::template::{meta as template_meta, plain, protected as never_templated};
 use zeron_plugin_guard::template::{composed, of_the_app};
 
+/// A template's tokens: never laid over Zeron's, but beside them as
+/// `TEMPLATE_TOKENS` (Zeron ships a stub there), which Zeron's run after
+/// their own, so whatever the template doesn't name is the running Zeron's.
+/// (No template has a file of its own there: zeron-plugin-guard's
+/// `NEVER_TEMPLATED`, the folder of that name too.)
+pub const TOKENS: &str = "ds/tokens.luau";
+pub const TEMPLATE_TOKENS: &str = "ds/tokens_template.luau";
+
+/// Whether `rel` is where Zeron lays a template's tokens, or would stand for
+/// Zeron's own, as a disk that folds names has it: `TEMPLATE_TOKENS`, or
+/// anything under a folder named as it or `TOKENS` (whose init.luau Luau
+/// takes in place of the file beside it, so `ds/tokens/init.luau` would skip
+/// Zeron's tokens whole). Never a template's own, whatever the guard says:
+/// the app's own refusal beside it, for a template's folder edited by hand.
+pub fn laid_by_zeron(rel: &str) -> bool {
+    let rel = zeron_plugin_guard::path::fold(rel);
+    let under = |file: &str| rel.strip_prefix(&zeron_plugin_guard::path::fold(file.trim_end_matches(".luau"))).is_some_and(|rest| rest.starts_with('/'));
+    rel == zeron_plugin_guard::path::fold(TEMPLATE_TOKENS) || under(TEMPLATE_TOKENS) || under(TOKENS)
+}
+
+/// Zeron's own files, as a disk that folds names has them, and the folders
+/// they're in: what a template's file can't be laid across (`clashes`).
+pub struct ZeronShape {
+    files: BTreeSet<String>,
+    folders: BTreeSet<String>,
+}
+
+impl ZeronShape {
+    pub fn of<'a>(rels: impl IntoIterator<Item = &'a String>) -> Self {
+        let files: BTreeSet<String> = rels.into_iter().map(|rel| zeron_plugin_guard::path::fold(rel)).collect();
+        let folders = files.iter().flat_map(|rel| rel.match_indices('/').map(move |(at, _)| rel[..at].to_string())).collect();
+        Self { files, folders }
+    }
+
+    /// Whether a template's file `rel` can't be laid beside Zeron's: a
+    /// folder of Zeron's has its name (`screens`), or its path goes through
+    /// a file of Zeron's (`ds/button.luau/x.luau`). Laid, it would fail
+    /// part-way, the files before it written.
+    pub fn clashes(&self, rel: &str) -> bool {
+        let rel = zeron_plugin_guard::path::fold(rel);
+        self.folders.contains(&rel) || rel.match_indices('/').any(|(at, _)| self.files.contains(&rel[..at]))
+    }
+}
+
+/// What `template_status` says of a file `clashes` left out.
+pub const CLASHES: &str = "Not used: Zeron has a folder of this name, or a file where this path has a folder.";
+
 pub fn hash(bytes: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -139,9 +186,67 @@ fn mirror_reading(
         Ok(())
     })?;
     let mut changed = changed.into_inner();
+    let mut held: BTreeSet<String> = BTreeSet::new();
     for (rel, path) in files(to, |_| true) {
         if !want.contains_key(&rel) && !keep(&rel) {
             std::fs::remove_file(path)?;
+            changed += 1;
+        } else {
+            held.insert(rel);
+        }
+    }
+    // Then the folders nothing wanted or kept is in. Luau takes a folder's
+    // init.luau over the file beside it, even when there's none, so one left
+    // by an older lay-down (`ds/tokens_template/`) would stand for the module
+    // of that name. Anyone can write here (it's a folder like any), so what
+    // they may have left is never deleted: a folder empty once the strays
+    // are gone is removed; one that still holds something (a dot file, a
+    // `.git`, a name no listing reads) stays as it is, unless it stands for
+    // a wanted module, and then it's moved aside whole (`SET_ASIDE`).
+    let folders: BTreeSet<&str> = want.keys().map(String::as_str).chain(held.iter().map(String::as_str)).flat_map(|rel| rel.match_indices('/').map(move |(at, _)| &rel[..at])).collect();
+    let modules: BTreeSet<String> = want.keys().filter_map(|rel| rel.strip_suffix(".luau")).map(zeron_plugin_guard::path::fold).collect();
+    changed += settle_folders(to, to, &folders, &modules)?;
+    Ok(changed)
+}
+
+/// Where a lay-down moves a folder that stands for a module and still holds
+/// something: `<to>/.zeron-set-aside/<seconds>/<its path>`, never read.
+pub const SET_ASIDE: &str = ".zeron-set-aside";
+
+/// Under `dir` (in `to`), each folder (not a dot folder) none of `folders`:
+/// removed if empty once its own are settled, moved to [`SET_ASIDE`] if it
+/// still holds something and stands for one of `modules` (folded paths
+/// without `.luau`), else left. How many it removed or moved.
+fn settle_folders(to: &Path, dir: &Path, folders: &BTreeSet<&str>, modules: &BTreeSet<String>) -> std::io::Result<usize> {
+    let mut changed = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(0) };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(to) else { continue };
+        let rel = rel_path(rel);
+        changed += settle_folders(to, &path, folders, modules)?;
+        if folders.contains(rel.as_str()) {
+            continue;
+        }
+        if std::fs::remove_dir(&path).is_ok() {
+            changed += 1;
+        } else if modules.contains(&zeron_plugin_guard::path::fold(&rel)) {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mut aside = to.join(SET_ASIDE).join(secs.to_string()).join(&rel);
+            for n in 1.. {
+                if !aside.exists() {
+                    break;
+                }
+                aside = to.join(SET_ASIDE).join(format!("{secs}-{n}")).join(&rel);
+            }
+            if let Some(parent) = aside.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&path, &aside)?;
+            eprintln!("zeron-zgx: {rel}/ stood for the module {rel}.luau and still held files: moved to {}", aside.display());
             changed += 1;
         }
     }
@@ -242,8 +347,14 @@ pub fn set_active(templates: &Path, id: &str) -> std::io::Result<bool> {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Overlay {
     pub template: String,
-    /// Files the template supplies (its own, or its version of Zeron's).
+    /// Files the template supplies (its own, or its version of Zeron's), by
+    /// their paths in `.live`.
     pub from_template: BTreeSet<String>,
+    /// A template file laid at another path in `.live` than its own (its
+    /// `ds/tokens.luau`, as `ds/tokens_template.luau`): `.live`'s → its own.
+    pub laid_as: BTreeMap<String, String>,
+    /// The template's files left out for their path (`ZeronShape::clashes`).
+    pub clashing: BTreeSet<String>,
 }
 
 /// `.live` as `.zeron` with template `id` on top, leaving out the template's
@@ -259,14 +370,30 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
 /// the overlay that is: folders listed, nothing read.
 pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
+    let shape = ZeronShape::of(want.keys());
     let mut from_template = BTreeSet::new();
+    let mut laid_as = BTreeMap::new();
+    let mut clashing = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
         // Each file is written under one spelling: a template's `App.luau`
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
         for (rel, path) in files(&templates.join(id), |_| true) {
-            if !composed(&rel) || failed.contains(&rel) {
+            if !composed(&rel) || failed.contains(&rel) || laid_by_zeron(&rel) {
+                continue;
+            }
+            if shape.clashes(&rel) {
+                clashing.insert(rel);
+                continue;
+            }
+            // Its tokens beside Zeron's, never over them: Zeron's run first
+            // and then its (ds/tokens.luau), so a token it doesn't name is
+            // this Zeron's, the ones added since it was made too.
+            if zeron_plugin_guard::path::fold(&rel) == zeron_plugin_guard::path::fold(TOKENS) {
+                from_template.insert(TEMPLATE_TOKENS.to_string());
+                laid_as.insert(TEMPLATE_TOKENS.to_string(), rel);
+                want.insert(TEMPLATE_TOKENS.to_string(), path);
                 continue;
             }
             if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
@@ -279,7 +406,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
             want.insert(rel, path);
         }
     }
-    (want, Overlay { template: id.to_string(), from_template })
+    (want, Overlay { template: id.to_string(), from_template, laid_as, clashing })
 }
 
 /// Beside the templates: what a launch last laid `.live` down from, and
@@ -389,9 +516,11 @@ pub fn named(error: &str, templates: &Path) -> Vec<String> {
 
 /// Whom an error is on: the first file it names that the template supplies
 /// (a template file required by Zeron's, or Zeron's called from the
-/// template's), else none (Zeron's own error).
+/// template's), else none (Zeron's own error). By the template's own path
+/// (its tokens' `ds/tokens.luau`, though `.live` has them beside Zeron's).
 pub fn blame(error: &str, templates: &Path, overlay: &Overlay) -> Option<String> {
-    named(error, templates).into_iter().find(|rel| overlay.from_template.contains(rel))
+    let rel = named(error, templates).into_iter().find(|rel| overlay.from_template.contains(rel))?;
+    Some(overlay.laid_as.get(&rel).cloned().unwrap_or(rel))
 }
 
 /// A file as it stands, without reading it: its size and the time it was
@@ -1059,6 +1188,129 @@ mod tests {
         assert_eq!(blame("app.luau: runtime error: ds/tokens.luau:3: oops", &t, &overlay), None);
     }
 
+    /// A template's tokens go beside Zeron's, never over them (Zeron's run
+    /// theirs first, then its), and an error in them is its `ds/tokens.luau`'s.
+    #[test]
+    fn a_template_s_tokens_are_laid_beside_zeron_s() {
+        let t = setup("tokens");
+        write(&t.join(ZERON), "ds/tokens_template.luau", "-- zeron's stub");
+        write(&t, "t/ds/tokens.luau", "-- t tokens");
+        write(&t, "t/ds/tokens_template.luau", "-- t's, never laid");
+        write(&t, "t/ds/tokens_template/init.luau", "-- t's folder, never laid");
+        write(&t, "t/ds/tokens/init.luau", "-- t's folder over Zeron's tokens, never laid");
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        let live = t.join(LIVE);
+        assert!(!live.join("ds/tokens_template").exists(), "a template's folder of that name is never laid");
+        assert!(!live.join("ds/tokens").exists(), "nor one that would stand for Zeron's tokens");
+        assert_eq!(read(&live, "ds/tokens.luau"), "-- zeron tokens");
+        assert_eq!(read(&live, "ds/tokens_template.luau"), "-- t tokens");
+        assert!(overlay.from_template.contains("ds/tokens_template.luau") && !overlay.from_template.contains("ds/tokens.luau"));
+
+        // Blamed by its own path; Zeron's tokens' own error is nobody's.
+        let shown = live.display().to_string();
+        let e = format!("app.luau: runtime error: {shown}/ds/tokens.luau:850: in require\n\t{shown}/ds/tokens_template.luau:12: attempt to index nil");
+        assert_eq!(blame(&e, &t, &overlay).as_deref(), Some("ds/tokens.luau"));
+        assert_eq!(blame("app.luau: runtime error: ds/tokens_template.luau:3: oops", &t, &overlay).as_deref(), Some("ds/tokens.luau"));
+        assert_eq!(blame(&format!("{shown}/ds/tokens.luau:4: oops"), &t, &overlay), None);
+
+        // Failed, Zeron's stub shows in its place; Zeron's own are never touched.
+        let failed = BTreeSet::from(["ds/tokens.luau".to_string()]);
+        let (_, overlay) = compose(&t, "t", &failed, false).unwrap();
+        assert_eq!(read(&live, "ds/tokens_template.luau"), "-- zeron's stub");
+        assert_eq!(read(&live, "ds/tokens.luau"), "-- zeron tokens");
+        assert!(overlay.laid_as.is_empty());
+
+        // Folders `.live` is left with (an older Zeron laid a template's
+        // `ds/tokens_template/init.luau`; anyone may have written here):
+        // - emptied once the strays go: removed, however deep;
+        // - holding something still, and standing for a wanted module (Luau
+        //   would take it for `ds/tokens_template.luau`): moved aside whole;
+        // - holding something, standing for nothing: left as it is.
+        // A dot folder (zgx's own) is never touched.
+        write(&live, "ds/tokens_template/init.luau", "-- stray");
+        write(&live, "ds/tokens_template/.cache/x", "kept");
+        std::fs::create_dir_all(live.join("screens/emptied/deeper")).unwrap();
+        write(&live, "notes/.git/HEAD", "mine");
+        write(&live, ".zgx/types.d.luau", "");
+        let (changed, _) = compose(&t, "t", &failed, false).unwrap();
+        assert!(changed >= 3, "{changed}");
+        assert!(!live.join("ds/tokens_template").exists() && !live.join("screens/emptied").exists());
+        assert_eq!(read(&live, "ds/tokens_template.luau"), "-- zeron's stub");
+        let aside: Vec<PathBuf> = std::fs::read_dir(live.join(SET_ASIDE)).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(read(&aside[0], "ds/tokens_template/.cache/x"), "kept", "moved whole, never deleted");
+        assert!(!aside[0].join("ds/tokens_template/init.luau").exists(), "(the stray file went as strays do)");
+        assert_eq!(read(&live, "notes/.git/HEAD"), "mine");
+        assert!(live.join("screens/shell/sidebar.luau").is_file() && live.join(".zgx/types.d.luau").is_file());
+        // Laid again: nothing more moves.
+        let (again, _) = compose(&t, "t", &failed, false).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(std::fs::read_dir(live.join(SET_ASIDE)).unwrap().count(), 1);
+
+        // Another spelling of either is the same file.
+        std::fs::remove_dir_all(t.join("t/ds")).unwrap();
+        write(&t, "t/DS/Tokens.luau", "-- t tokens, spelt");
+        write(&t, "t/DS/Tokens_Template.luau", "-- t's, never laid");
+        let (want, overlay) = plan(&t, "t", &BTreeSet::new(), false);
+        assert!(want["ds/tokens.luau"].starts_with(t.join(ZERON)));
+        assert_eq!(std::fs::read_to_string(&want["ds/tokens_template.luau"]).unwrap(), "-- t tokens, spelt");
+        assert_eq!(want.keys().filter(|k| k.to_lowercase().starts_with("ds/tokens")).count(), 2, "{want:?}");
+        assert_eq!(overlay.laid_as["ds/tokens_template.luau"], "DS/Tokens.luau");
+    }
+
+    /// A template's file laid across Zeron's (a folder of Zeron's by its
+    /// name, or its path through a file of Zeron's) is left out, and said;
+    /// the rest of the template is laid as ever, and the lay-down doesn't
+    /// fail part-way.
+    #[test]
+    fn a_template_s_file_across_zeron_s_is_left_out_and_said() {
+        let t = setup("clash");
+        write(&t, "c/zeron-template.json", r#"{"id":"c"}"#);
+        write(&t, "c/app.luau/x.luau", "-- through Zeron's file");
+        write(&t, "c/screens/shell", "-- where Zeron has a folder");
+        write(&t, "c/screens/extra.luau", "-- c's own");
+        let (_, overlay) = compose(&t, "c", &BTreeSet::new(), false).expect("laid whole");
+        let live = t.join(LIVE);
+        assert_eq!(read(&live, "app.luau"), "-- zeron app");
+        assert_eq!(read(&live, "screens/shell/sidebar.luau"), "-- zeron sidebar");
+        assert_eq!(read(&live, "screens/extra.luau"), "-- c's own");
+        let mut clashing: Vec<_> = overlay.clashing.iter().map(|r| r.to_lowercase()).collect();
+        clashing.sort();
+        assert_eq!(clashing, ["app.luau/x.luau", "screens/shell"]);
+        assert!(!overlay.from_template.iter().any(|r| r.starts_with("app.luau/") || r.eq_ignore_ascii_case("screens/shell")));
+        // And a file beside, not across: laid.
+        let shape = ZeronShape::of([String::from("ds/button.luau"), String::from("screens/a/b.luau")].iter());
+        for (rel, clashes) in [("ds/button.luau/x.luau", true), ("screens/a", true), ("SCREENS", true), ("ds/button.luau", false), ("ds/button.luaux/x.luau", false), ("screens/a/c.luau", false), ("screens/ab", false)] {
+            assert_eq!(shape.clashes(rel), clashes, "{rel}");
+        }
+    }
+
+    /// The app's own refusal, whatever the guard: where Zeron lays a
+    /// template's tokens, and a folder that would stand for Zeron's, is
+    /// never a file of the template's.
+    #[test]
+    fn where_zeron_lays_a_template_s_tokens_is_never_its_own() {
+        for (rel, zeron_s) in [
+            ("ds/tokens_template.luau", true),
+            ("DS/Tokens_Template.luau", true),
+            ("ds/tokens_template/init.luau", true),
+            ("ds/Tokens_Template/deep/a.luau", true),
+            ("ds/tokens_template./init.luau", true),
+            ("ds/tokens/init.luau", true),
+            ("DS/Tokens./init.luau", true),
+            ("ds/tokens/deep/x.luau", true),
+            ("ds/tokens.luau", false),
+            ("ds/tokens", false),
+            ("ds/tokensx/init.luau", false),
+            ("ds/tokens_templates.luau", false),
+            ("ds/tokens_templates/init.luau", false),
+            ("ds/tokens_template", false),
+            ("screens/ds/tokens_template.luau", false),
+        ] {
+            assert_eq!(laid_by_zeron(rel), zeron_s, "{rel}");
+        }
+    }
+
     /// R12: safe mode runs Zeron's own whatever `.active` says, so a
     /// template re-selecting itself (from a timer, a terminal, an agent)
     /// changes nothing until you pick one on the Templates page.
@@ -1106,6 +1358,21 @@ mod tests {
         assert!(!ZERON_VERSION.is_empty() && root.contains(&format!("version = \"{ZERON_VERSION}\"")));
         assert_eq!(manifest["zeron_version"], ZERON_VERSION);
         assert_eq!(sync_zeron(&ui, &t).unwrap(), 0, "nothing new, nothing written");
+        // `.zeron` keeps to the same rule as `.live`: an emptied folder goes,
+        // one holding something stays, and one that stands for a module of
+        // Zeron's is moved aside whole.
+        std::fs::create_dir_all(z.join("screens/gone/deeper")).unwrap();
+        write(&z, "screens/gone/stray.luau", "-- stray");
+        write(&z, "mine/.notes", "mine");
+        write(&z, "screens/shell/.DS_Store", "kept");
+        write(&z, "ds/tokens/.swp", "kept");
+        assert!(sync_zeron(&ui, &t).unwrap() >= 3);
+        assert!(!z.join("screens/gone").exists());
+        assert_eq!(read(&z, "mine/.notes"), "mine");
+        assert_eq!(read(&z, "screens/shell/.DS_Store"), "kept");
+        assert!(!z.join("ds/tokens").exists() && z.join("ds/tokens.luau").is_file());
+        let aside = std::fs::read_dir(z.join(SET_ASIDE)).unwrap().flatten().next().unwrap().path();
+        assert_eq!(read(&aside, "ds/tokens/.swp"), "kept");
     }
 
     #[test]
