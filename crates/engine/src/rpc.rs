@@ -3593,9 +3593,10 @@ impl crate::remote_terminals::Relay for EngineRpc {
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // What's only this device's, asked for another: never done here in
-        // its place.
+        // its place. (An API key's says so itself, and where to add it.)
         if zeron_rpc::local_only(method)
-            && let Some(target) = params.get("targetDeviceId").filter(|t| !t.is_null())
+            && method != methods::ADD_AGENT_API_KEY
+            && let Some(target) = params.get("targetDeviceId").filter(|t| !t.is_null() && *t != "")
             && target.as_str() != Some(self.doc_host.device_id())
         {
             return Err(only_here(method, target));
@@ -7241,9 +7242,14 @@ mod tests {
         assert!(zeron_rpc::LOCAL_ONLY.len() > 70);
         for method in zeron_rpc::LOCAL_ONLY {
             assert!(!forwardable(method) && zeron_rpc::local_only(method), "{method} isn't both");
+            // (A key's, in words of its own: never added here for another.)
+            if *method == methods::ADD_AGENT_API_KEY {
+                let error = rpc.handle(method, serde_json::json!({ "harness": "pi", "provider": "openrouter", "key": "k", "targetDeviceId": "other-device" })).await.err();
+                assert!(error.as_ref().is_some_and(|e| e.to_string().contains("device that runs the agent")), "{error:?}");
+                continue;
+            }
             for (params, named) in [
                 (serde_json::json!({ "targetDeviceId": "other-device", "id": "midnight" }), "other-device"),
-                (serde_json::json!({ "targetDeviceId": "", "id": "midnight" }), ""),
                 (serde_json::json!({ "targetDeviceId": ["other-device"], "id": "midnight" }), "other-device"),
             ] {
                 for caller in [zeron_rpc::Caller::Local, zeron_rpc::Caller::Agent { chat: None }] {
@@ -7253,10 +7259,10 @@ mod tests {
             }
         }
         assert!(!templates.join(".active").exists(), "nothing was done here");
-        // Its own id, or none, is itself; a target that's long or odd is said
+        // Its own id, or none named, is itself; a target that's long or odd is said
         // short and plainly.
         let own = core.doc_host.device_id().to_owned();
-        for params in [serde_json::json!({}), serde_json::json!({ "targetDeviceId": own }), serde_json::json!({ "targetDeviceId": null })] {
+        for params in [serde_json::json!({}), serde_json::json!({ "targetDeviceId": own }), serde_json::json!({ "targetDeviceId": null }), serde_json::json!({ "targetDeviceId": "" })] {
             assert!(rpc.handle(methods::LIST_TEMPLATES, params.clone()).await.is_ok(), "{params}");
         }
         let odd = format!("{}\n\u{1b}[31m", "d".repeat(500));
