@@ -326,6 +326,12 @@ local function Session(id: Id?): Node
 								store.retry(s, message)
 							end
 						end,
+						on_discard = function(message: string)
+							local s = which()
+							if s then
+								store.discard(s, message)
+							end
+						end,
 						on_attach = shared.attach_quote,
 						pictures = pictures,
 						sent_pictures = sent_pictures,

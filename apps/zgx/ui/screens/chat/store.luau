@@ -247,6 +247,12 @@ function M.retry(id: string, message: string)
 	quietly(ui.call("chat.retry", { id = id, message = message }))
 end
 
+-- A prompt that wasn't delivered, let go unsent (taken out of this device's
+-- outbox too, if it's held there).
+function M.discard(id: string, message: string)
+	quietly(ui.call("chat.discard", { id = id, message = message }))
+end
+
 function M.interrupt(id: string)
 	quietly(ui.call("chat.interrupt", id))
 end

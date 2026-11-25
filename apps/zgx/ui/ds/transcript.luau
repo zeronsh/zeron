@@ -100,6 +100,9 @@ export type Message = {
 	-- reply's place.
 	waiting: ("sending" | "working" | "failed")?,
 	since: number?,
+	-- Not delivered, why, when that's known ("too_large": a file over the
+	-- 24 MB a message may carry).
+	failure: string?,
 	-- Its blocks laid out compact (Settings' compact transcript): its work
 	-- folded into one group, the reply it ends on shown.
 	compact: { Block }?,
@@ -131,6 +134,9 @@ export type Props = {
 	on_attach: ((q: Quote.Quote) -> ())?,
 	-- A prompt that wasn't delivered, sent again (by its id).
 	on_retry: ((id: string) -> ())?,
+	-- A prompt that wasn't delivered, let go unsent (by its id). With none,
+	-- its line offers only to send it again.
+	on_discard: ((id: string) -> ())?,
 	-- What an unfinished turn's foot says in its working word's place, when
 	-- there's no turn to speak of (its host gone, its machine asleep): the
 	-- caller's, for a message (nil: the working word). `sending`: a prompt
@@ -533,9 +539,9 @@ end
 -- Under a person's newest prompt while its reply hasn't begun, in that
 -- reply's place: "Sending…" while it is on its way, then the turn's working
 -- word and clock, as Zeron's working trailer (transcript.rs); not
--- delivered, a line to send it again. The reply's own row takes over once
--- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
+-- delivered, a line to send it again or let it go, and why when that's
+-- known. The reply's own row takes over once it comes.
+local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, on_discard: ((id: string) -> ())?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
 	local function said(): TurnLine?
 		local m = row:get()
 		return if turn_state and m.waiting and m.waiting ~= "failed" then turn_state(m, m.waiting == "sending") else nil
@@ -582,26 +588,46 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 			}
 		end
 		if kind == "failed" then
-			return ui.button {
-				label = locale.t("ds.transcript.not_delivered"),
+			-- A word that acts, in the line's ink: underlined under the pointer.
+			local function link(key: string, color: string, act: ((id: string) -> ())?): Node
+				return ui.button {
+					label = locale.t(key),
+					p = 0,
+					bg = "#00000000",
+					active = { bg = "#00000000" },
+					hover = { bg = "#00000000", underline = true },
+					cursor = "pointer",
+					selectable = false,
+					text_size = "$font.size.sm",
+					color = color,
+					on_click = function()
+						if act then
+							act(row:peek().id)
+						end
+					end,
+					on_press = function() end,
+					on_release = function() end,
+					locale.t(key),
+				}
+			end
+			return ui.row {
 				self = "start",
 				mt = "$space.4",
-				p = 0,
-				bg = "#00000000",
-				active = { bg = "#00000000" },
-				hover = { bg = "#00000000", underline = true },
-				cursor = "pointer",
-				selectable = false,
-				text_size = "$font.size.sm",
-				color = "$danger",
-				on_click = function()
-					if on_retry then
-						on_retry(row:peek().id)
-					end
-				end,
-				on_press = function() end,
-				on_release = function() end,
-				locale.t("ds.transcript.not_delivered"),
+				gap = "$space.3",
+				items = "center",
+				link("ds.transcript.not_delivered", "$danger", on_retry),
+				-- Why, when that's known: sent again as it is, it fails again.
+				ui.show(function(): boolean
+					return row:get().failure == "too_large"
+				end, ui.text {
+					locale.t("ds.transcript.too_large"),
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				}),
+				ui.show(function(): boolean
+					return on_discard ~= nil
+				end, link("ds.transcript.discard", "$text.tertiary", on_discard)),
 			}
 		end
 		return ui.row {
@@ -2628,7 +2654,7 @@ local function Transcript(props: Props): Node
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
 						strip(m, state, hovered),
-						waiting_line(state, props.on_retry, props.turn_state),
+						waiting_line(state, props.on_retry, props.on_discard, props.turn_state),
 					}
 					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
 			},

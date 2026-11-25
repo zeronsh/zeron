@@ -748,6 +748,8 @@
       "switched": "Switched from {from} to {to}",
       "message_from": "Message from",
       "not_delivered": "Not delivered — send again",
+      "too_large": "A file is over 24 MB",
+      "discard": "Discard",
       "reply": "Reply",
       "you": "You",
       "agent": "Agent",
