@@ -1811,7 +1811,9 @@ impl Bridge {
         };
         // A switch you didn't make here (an agent's use_template, a file
         // written by hand): said by the host, whatever the template shows.
-        if was != id && !self.chose.replace(false) {
+        // (After a lay-down that failed, what ran before is unknown, `was`
+        // empty: no switch to tell of, though what you chose is used up.)
+        if was != id && !self.chose.replace(false) && !was.is_empty() {
             let by_chat = std::fs::read(root.join(".active.by.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Json>(&b).ok())
