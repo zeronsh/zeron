@@ -1,5 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { cacheKey, openCache, purge } from "../../src/store/cache";
+import { itemKey, statsKey, takedownsKey, versionKey, versionsPageKey } from "../../src/store/catalog";
 import { packageBytesKey, packageStateKey } from "../../src/store/serve";
 import { publisherId } from "../../src/store/cards";
 import { PNG, author, call, listed, makePackage, publish, randomLetters, uniqueId, adminCall } from "./store-helpers";
@@ -409,6 +411,50 @@ describe("store packages and files", () => {
       expect([400, 404], p).toContain(res.status);
     }
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/9.9.9/icon.svg`)).status).toBe(404);
+  });
+
+  it("answers a cached one as it answers a fresh one, whatever the zone wrote on it, and for what's left of its minute", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const cache = await openCache();
+    const routes: [string, string][] = [
+      ["/store/v1/plugins?sort=new&limit=1", cacheKey(["plugins"], { sort: "new", limit: "1" })],
+      [`/store/v1/plugins/${id}`, itemKey("plugin", id)],
+      [`/store/v1/plugins/${id}/versions`, versionsPageKey("plugin", id)],
+      [`/store/v1/plugins/${id}/versions/1.0.0`, versionKey("plugin", id, "1.0.0")],
+      ["/store/v1/stats", statsKey("plugin")],
+      ["/store/v1/takedowns?after=0", takedownsKey(0)]
+    ];
+    const headers = (res: Response) => Object.fromEntries([...res.headers].filter(([k]) => k !== "content-length"));
+    for (const [path, key] of routes) {
+      await purge([key]);
+      const fresh = await call(undefined, "GET", path);
+      const body = await fresh.text();
+      expect([fresh.status, fresh.headers.get("cache-control")], path).toEqual([200, "public, max-age=60"]);
+      const stored = (await cache.match(key))!;
+      expect(stored, path).toBeDefined();
+      // As a zone with a four-hour browser TTL hands it back.
+      const rewritten = async (at?: number) => {
+        const res = new Response(body, { headers: stored.headers });
+        for (const [k, v] of [["cache-control", "public, max-age=14400"], ["last-modified", "Wed, 25 Nov 2026 10:33:51 GMT"], ["expires", "Wed, 25 Nov 2026 14:33:51 GMT"], ["age", "0"], ["cf-cache-status", "HIT"], ["x-store-cached-at", at === undefined ? "" : String(at)]] as const) res.headers.set(k, v);
+        if (at === undefined) res.headers.delete("x-store-cached-at");
+        await cache.put(key, res);
+      };
+      for (const [at, left] of [[Date.now() + 400, 60], [Date.now() - 49_500, 11], [Date.now() - 90_000, 0], [undefined, 60]] as const) {
+        await rewritten(at);
+        const hit = await call(undefined, "GET", path);
+        expect(await hit.text(), path).toBe(body);
+        const sent = headers(hit);
+        expect(Object.keys(sent).sort(), path).toEqual(Object.keys(headers(fresh)).sort());
+        expect(sent["content-type"]).toBe(fresh.headers.get("content-type"));
+        const age = Number(/^public, max-age=(\d+)$/.exec(sent["cache-control"]!)![1]);
+        expect(age, `${path} ${left}`).toBeGreaterThanOrEqual(Math.max(left - 1, 0));
+        expect(age, `${path} ${left}`).toBeLessThanOrEqual(left);
+        const head = await call(undefined, "HEAD", path);
+        expect([head.status, await head.text(), Object.keys(headers(head)).sort()], path).toEqual([200, "", Object.keys(headers(fresh)).sort()]);
+      }
+    }
   });
 
   it("checks a version's state before serving it: a takedown lands within the state's TTL, with the bytes still cached", async () => {
