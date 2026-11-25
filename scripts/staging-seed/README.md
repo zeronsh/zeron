@@ -118,8 +118,9 @@ The seed reads the store's public version lists to skip what is already
 there, so a run that stopped part way picks up where it was. Those lists are
 cached for up to 60 s, so wait a minute before running it again.
 
-`--only 1,3` seeds some authors only. `--dry-run` checks and packs every
-version without sending anything.
+`--only 1,3` seeds some authors only. `--dry-run` checks every version with
+`zeron plugin check`, in folders of its own: it sends nothing and writes in no
+Zeron's folder (it still asks each Zeron for its session first).
 
 Exit codes:
 - 0: everything is published;

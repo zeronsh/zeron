@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PLUGINS, files, manifestFields } from "./catalog.mjs";
 import { whyNotTheirs } from "./ipc.mjs";
+import { quiet } from "./quiet.mjs";
 import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 const MANIFEST = "zeron-plugin.json";
@@ -59,6 +60,8 @@ const edge = flag("--edge")?.replace(/\/$/, "");
 const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
 // (What an author's Zeron publishes goes to its own edge, whatever this is
 // told: the file says which that is.)
+const refusedFileEdge = whyNotSeeded(accounts.edge, process.env.SEED_ALLOWED_EDGES);
+if (!refusedEdge && typeof accounts.edge === "string" && refusedFileEdge) usage(`the accounts file's edge: ${refusedFileEdge}`);
 if (!refusedEdge && (typeof accounts.edge !== "string" || accounts.edge.replace(/\/$/, "") !== edge)) usage("the accounts file's edge isn't --edge");
 const refusedWorkos = whyNotItsWorkos(accounts.workos_client_id);
 if (!refusedEdge && refusedWorkos) usage(refusedWorkos);
@@ -103,7 +106,7 @@ const listed = async (id) => {
 };
 
 const failed = (what, ran) => {
-  const said = (ran.err || ran.out).trim();
+  const said = quiet((ran.err || ran.out).trim());
   console.error(`FAIL ${what} (exit ${ran.code})\n${said}`);
   // (An account's versions an hour and a day are the store's limit, not a fault.)
   if (said.includes("rate_limited")) console.error("The store takes 10 versions an account an hour, 50 a day: run this again later; it picks up where it stopped.");
@@ -124,6 +127,34 @@ const write = (dir, plugin, i) => {
   delete manifest.network;
   delete manifest.commands;
   writeFileSync(path, `${JSON.stringify({ ...manifest, ...manifestFields(plugin, i) }, null, 2)}\n`);
+};
+
+/** A CI job's environment: the edge and what it's given, and nothing else (no
+ * Zeron running, no sign-in; a port no Zeron listens on). */
+const inCi = async (argv, extra = {}) => {
+  const scratch = mkdtempSync(join(tmpdir(), "seed-ci-"));
+  try {
+    return await cli(argv, { HOME: scratch, ZERON_DATA_DIR: join(scratch, "data"), ZERON_IPC_PORT: "1", ZERON_EDGE_URL: edge, ...extra });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+};
+
+/** Check version `i` of `plugin` and nothing more: built in a folder of this
+ * run's own (over a copy of `dir` where there is one, else over the least
+ * `zeron plugin new` makes), never in a Zeron's. */
+const checkVersion = async (dir, plugin, i) => {
+  const at = existsSync(dir) ? checkout(dir) : mkdtempSync(join(tmpdir(), "seed-checkout-"));
+  try {
+    if (!existsSync(join(at, MANIFEST))) {
+      writeFileSync(join(at, MANIFEST), JSON.stringify({ id: plugin.id, name: plugin.name, entry: "init.luau" }));
+      writeFileSync(join(at, "init.luau"), "return {}\n");
+    }
+    write(at, plugin, i);
+    return await inCi(["check", at]);
+  } finally {
+    rmSync(at, { recursive: true, force: true });
+  }
 };
 
 /** A CI job's checkout of `dir`: its files, without dot files. */
@@ -147,6 +178,11 @@ const publishVersion = async (a, plugin, i, have) => {
   if (there) {
     skipped++;
     console.log(`have ${what} (${there.status})`);
+  } else if (dryRun) {
+    const ran = await checkVersion(dir, plugin, i);
+    if (ran.code !== 0) failed(`checking ${what}`, ran);
+    wrote++;
+    console.log(`ready ${what} (${version.by})`);
   } else {
     if (!existsSync(dir)) {
       if (version.by !== "device") usage(`${plugin.id}'s first version must be the device's`);
@@ -159,27 +195,17 @@ const publishVersion = async (a, plugin, i, have) => {
     if (version.by === "device") {
       // (The author's Zeron signs a plugin it made again as it's saved: let it settle.)
       await sleep(1000);
-      const ran = await cli(["publish", plugin.id, ...(dryRun ? ["--dry-run"] : [])], own);
+      const ran = await cli(["publish", plugin.id], own);
       if (ran.code !== 0) failed(`publishing ${what} from author ${a.slot}'s Zeron`, ran);
     } else {
       const ci = checkout(dir);
-      const scratch = mkdtempSync(join(tmpdir(), "seed-ci-"));
-      // A CI job's environment: the edge and the token, and nothing else
-      // (no Zeron running, no sign-in; a port no Zeron listens on).
-      const ran = await cli(["publish", ci, ...(dryRun ? ["--dry-run"] : [])], {
-        HOME: scratch,
-        ZERON_DATA_DIR: join(scratch, "data"),
-        ZERON_IPC_PORT: "1",
-        ZERON_EDGE_URL: edge,
-        ZERON_DEPLOY_TOKEN: process.env[a.token_env]
-      });
+      const ran = await inCi(["publish", ci], { ZERON_DEPLOY_TOKEN: process.env[a.token_env] });
       rmSync(ci, { recursive: true, force: true });
-      rmSync(scratch, { recursive: true, force: true });
       if (ran.code !== 0) failed(`publishing ${what} with author ${a.slot}'s deploy token`, ran);
     }
     wrote++;
-    console.log(`${dryRun ? "ready" : "published"} ${what} (${version.by})`);
-    if (!dryRun) await sleep(PACE_MS);
+    console.log(`published ${what} (${version.by})`);
+    await sleep(PACE_MS);
   }
   if (version.yank && !dryRun && (there?.status ?? "listed") !== "yanked") {
     const ran = await cli(["yank", plugin.id, version.v], own);
@@ -190,8 +216,8 @@ const publishVersion = async (a, plugin, i, have) => {
   }
 };
 
-// Each author's Zeron is this edge's, before anything is asked of it (a dry
-// run makes the plugins' folders in it too).
+// Each author's Zeron is this edge's, before anything else (a dry run's too,
+// though it writes in none of them).
 for (const a of authors) {
   const why = await whyNotTheirs(a, accounts.workos_client_id);
   if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
@@ -222,4 +248,4 @@ for (const a of authors) {
 }
 
 const stats = await (await fetch(`${edge}/store/v1/stats`)).json().catch(() => ({}));
-console.log(`done: ${wrote} written, ${skipped} already there; the store lists ${stats.plugins ?? "?"} plugins (${stats.verified ?? "?"} verified)`);
+console.log(`done: ${wrote} ${dryRun ? "checked" : "written"}, ${skipped} already there; the store lists ${stats.plugins ?? "?"} plugins (${stats.verified ?? "?"} verified)`);
