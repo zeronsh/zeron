@@ -183,4 +183,4 @@ Publishing is the person's act: in Zeron, on its Templates pages, or on the comm
 - **From CI:** with a deploy token in `ZERON_DEPLOY_TOKEN`, `zeron template publish <folder>` sends it with no Zeron running. The same tokens publish plugins and templates (`zeron plugin token create --plugins <id>`, an id of either; `--all --templates` for all of both); a template's first version comes from your machine. The GitHub Action (`zeronsh/zeron/actions/publish-plugin`) publishes a template from a folder with `zeron-template.json`.
 - **Yank** a version with `zeron template yank <id> <version>` (`unyank` undoes it), and see each version's state with `zeron template store [id]`. (`zeron template status <id>` is how one is on this device.)
 
-A copy of another template is yours to publish only if its author lets you; a copy of one that was taken down can't be published at all.
+A copy of another template is yours to publish only if its author lets you; Zeron won't publish a copy of one that was taken down.

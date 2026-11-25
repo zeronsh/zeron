@@ -26,7 +26,7 @@ use zeron_engine::plugins::listing::Problem;
 use zeron_engine::plugins::store::client::{Caller, Kind, StoreClient};
 use zeron_engine::plugins::store::deploy_token::{self, DeployToken};
 use zeron_engine::plugins::store::publish::{self, Prepared, PreparedTemplate};
-use zeron_engine::plugins::{PLUGINS_DIR, TEMPLATES_DIR, listing, manifest};
+use zeron_engine::plugins::{PLUGINS_DIR, TEMPLATES_DIR, listing, manifest, template_blocks};
 use zeron_rpc::methods;
 
 /// `println!`, the line [`listing::escaped`]: words from a plugin or the
@@ -152,7 +152,7 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
 pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> anyhow::Result<Option<TemplateCommand>> {
     match command {
         TemplateCommand::Check { target } => {
-            let prepared = read_template(&template_folder(&target, data_dir)?)?;
+            let prepared = read_template(&template_folder(&target, data_dir)?, data_dir)?;
             let checked = Checked::from(&prepared);
             say(&checked);
             if !checked.problems.is_empty() {
@@ -168,7 +168,7 @@ pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> a
         }
         TemplateCommand::Publish { target, dry_run } => {
             let Some(token) = deploy_token()? else { return Ok(Some(TemplateCommand::Publish { target, dry_run })) };
-            let prepared = read_template(&template_folder(&target, data_dir)?)?;
+            let prepared = read_template(&template_folder(&target, data_dir)?, data_dir)?;
             publish_with(token, Kind::Template, Checked::from(&prepared), || prepared.pack(None), dry_run).await?;
             Ok(None)
         }
@@ -333,7 +333,16 @@ fn template_folder(target: &str, data_dir: &Path) -> anyhow::Result<PathBuf> {
     Err(exit(SETUP, format!("{target}: there's no template folder there")))
 }
 
-fn read_template(dir: &Path) -> anyhow::Result<PreparedTemplate> {
+/// (One in Zeron's own templates folder that was taken down there, or copied
+/// from one that was, is refused, as through the running Zeron. A folder
+/// anywhere else has no list to ask.)
+fn read_template(dir: &Path, data_dir: &Path) -> anyhow::Result<PreparedTemplate> {
+    let templates = data_dir.join(TEMPLATES_DIR);
+    if let (Ok(at), Ok(root)) = (std::fs::canonicalize(dir), std::fs::canonicalize(&templates))
+        && at.starts_with(&root)
+    {
+        template_blocks::refuse(&root, &at, "published").map_err(|e| exit(RULES, e))?;
+    }
     publish::read_template(dir).map_err(|e| exit(if install::reason_of(&e) == Some("no_manifest") { SETUP } else { RULES }, e))
 }
 

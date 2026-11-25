@@ -278,6 +278,50 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     }
 }
 
+/// A template of Zeron's own folder that was taken down, or copied from one,
+/// is neither checked nor published from here, with a token or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_of_a_template_taken_down_is_not_published_from_here() {
+    let store = FakeStore::start().await;
+    let run = Run::new();
+    let secret = store.add_deploy_token("ada", "CI", Scope::plugins(&["midnight-copy".into()]).unwrap());
+    store.state.lock().unwrap().templates.insert("midnight-copy".into(), ("ada".into(), vec!["0.9.0".into()]));
+    let templates = run.home.join("data/templates");
+    let make = |folder: &std::path::Path| {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("zeron-template.json"), json!({ "id": "midnight-copy", "name": "Midnight", "description": "Dark.", "version": "1.0.0", "zeron_version": "0.3.16" }).to_string()).unwrap();
+        for (rel, bytes) in [("app.luau", &b"return 1"[..]), ("README.md", b"# Midnight"), ("preview.png", b"\x89PNG\r\n\x1a\n"), (".lineage.json", json!([{ "id": "bad", "version": "1.0.0", "hash": "a".repeat(64) }]).to_string().as_bytes())] {
+            std::fs::write(folder.join(rel), bytes).unwrap();
+        }
+    };
+    let own = templates.join("midnight-copy");
+    make(&own);
+    let list = |text: &str| std::fs::write(templates.join(".blocked.json"), text).unwrap();
+    let linked = run.home.join("linked");
+    std::os::unix::fs::symlink(&own, &linked).unwrap();
+    let (by_path, by_link) = (own.display().to_string(), linked.display().to_string());
+    let down = json!({ "format": "zeron-template-blocks:v1", "blocks": [{ "id": "bad", "version": "1.0.0", "hash": "a".repeat(64), "reason": "Bad.", "at": 4_000_000_000u64 }] }).to_string();
+    for (listed, word) in [(down.as_str(), "taken_down"), ("nope", "blocks_unreadable")] {
+        list(listed);
+        for target in ["midnight-copy", &by_path, &by_link] {
+            for (token, args) in [(None, vec!["check", target]), (Some(secret.as_str()), vec!["publish", target]), (Some(secret.as_str()), vec!["publish", target, "--dry-run"])] {
+                let out = run.run(&store, token, "template", &args).await;
+                assert!(out.status.code() == Some(1) && text(&out).contains(word), "{args:?}: {}", text(&out));
+            }
+        }
+    }
+    assert!(store.state.lock().unwrap().requests.is_empty(), "nothing was sent");
+    // One that nothing blocks, there or in a checkout elsewhere, is as before.
+    list(r#"{"format":"zeron-template-blocks:v1","blocks":[]}"#);
+    let out = run.run(&store, None, "template", &["check", "midnight-copy"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    list(&down);
+    let elsewhere = run.home.join("checkout");
+    make(&elsewhere);
+    let out = run.run(&store, Some(&secret), "template", &["publish", &elsewhere.display().to_string()]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+}
+
 /// A release's own template files, from its source: JSON alone on stdout (a
 /// file is made of it), or nothing.
 #[tokio::test(flavor = "multi_thread")]
