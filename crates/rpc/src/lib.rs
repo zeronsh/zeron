@@ -635,8 +635,9 @@ pub mod methods {
     /// first. "out_of_date":
     /// its `zeron_version` isn't this Zeron's (a real update since it was made).
     pub const LIST_TEMPLATES: &str = "ListTemplates";
-    /// `{id, name?, from?}` → `{id, dir, files: [rel], map}`: a full copy of
-    /// Zeron's app (overlaid with `from`'s files) to edit.
+    /// `{id, name?, from?}` → `{id, dir, files: [rel], map}`: a copy of
+    /// Zeron's app but its tokens and theme files (overlaid with `from`'s
+    /// files) to edit.
     pub const CREATE_TEMPLATE: &str = "CreateTemplate";
     /// `{id}` → `{active}`: the template the window runs (the app switches
     /// live).

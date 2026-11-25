@@ -55,12 +55,18 @@ app.luau is the root: it builds the window from the rest.
 screens/shell is the window: sidebar.luau, title_bar.luau, page.luau, settings.luau.
 screens/chat is a chat and the composer.
 screens/files is the files pane.
-ds/ is the design system: tokens.luau, themes/*.json, and the components.
+ds/ is the design system: tokens.luau, themes/*.json, and the components. A new template has none of Zeron's tokens or theme files: they're in the templates folder's .zeron/ds to read, and the guide says how to change one.
 assets/ holds icons and art.
 Elements are named by id and class (id = \"…\", class = \"…\"): plugins place their nodes by those (describe_elements lists them), so keep the names to keep plugins working.
 screens/plugins and account/ always load Zeron's own, whatever the template has.
 Each saved edit shows live while Zeron is open and this template is in use.
 A file with an error falls back to Zeron's own for that file; template_status gives the error.";
+
+/// Zeron's files a template's own are laid over, token by token, not put in
+/// place of. A new template is given none of Zeron's: a copy would hold
+/// every token to what Zeron's was that day, the template's own palette
+/// hidden under it.
+const LAID_OVER: [&str; 3] = ["ds/tokens.luau", "ds/themes/zeron-dark.json", "ds/themes/zeron-light.json"];
 
 #[derive(Debug, Default, Deserialize)]
 struct Manifest {
@@ -571,13 +577,16 @@ fn copy_file(from_root: &Path, to_root: &Path, rel: &str) -> Result<(), String> 
     std::fs::write(&to, bytes).map_err(|e| format!("Couldn't copy {rel}: {e}"))
 }
 
-/// Writes a new template into `tmp`: Zeron's files, then `from`'s, its
-/// manifest and its `.base.json`.
+/// Writes a new template into `tmp`: Zeron's files (but [`LAID_OVER`]), then
+/// `from`'s, its manifest and its `.base.json`.
 fn fill(tmp: &Path, zeron: &Path, from: Option<&Path>, id: &str, name: &str, guide: &Path) -> Result<(), String> {
     let zeron_manifest: Manifest = read_json(&zeron.join(MANIFEST));
     let hashes: BTreeMap<String, String> = read_json(&zeron.join(HASHES));
     let mut base = BTreeMap::new();
     for rel in zeron_files(zeron) {
+        if LAID_OVER.contains(&rel.as_str()) {
+            continue;
+        }
         copy_file(zeron, tmp, &rel)?;
         if let Some(hash) = hashes.get(&rel) {
             base.insert(rel, hash.clone());
@@ -611,8 +620,8 @@ fn fill(tmp: &Path, zeron: &Path, from: Option<&Path>, id: &str, name: &str, gui
         .map_err(|e| format!("Couldn't write {}: {e}", super::guides::README))
 }
 
-/// `CreateTemplate`: a full copy of Zeron's app (overlaid with `from`'s
-/// files) as a new template. `{id, dir, files, map}`.
+/// `CreateTemplate`: a copy of Zeron's app but its tokens and theme files
+/// ([`LAID_OVER`]), overlaid with all of `from`'s, as a new template. `{id, dir, files, map}`.
 pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path) -> Result<Value, String> {
     if !valid_id(id) {
         return Err(format!(
@@ -819,6 +828,9 @@ mod tests {
         write(&z.join("screens/shell/sidebar.luau"), "-- sidebar");
         write(&z.join("screens/chat/init.luau"), "-- chat");
         write(&z.join("ds/tokens.luau"), "-- tokens");
+        write(&z.join("ds/themes/zeron-dark.json"), "{}");
+        write(&z.join("ds/themes/zeron-light.json"), "{}");
+        write(&z.join("ds/button.luau"), "-- button");
         write(&z.join("ds/.DS_Store"), "junk");
         write(
             &z.join(MANIFEST),
@@ -826,7 +838,7 @@ mod tests {
         );
         write(
             &z.join(HASHES),
-            r#"{"app.luau":"a1",".luaurc":"r1","screens/shell/sidebar.luau":"s1","screens/chat/init.luau":"c1","ds/tokens.luau":"t1"}"#,
+            r#"{"app.luau":"a1",".luaurc":"r1","screens/shell/sidebar.luau":"s1","screens/chat/init.luau":"c1","ds/tokens.luau":"t1","ds/themes/zeron-dark.json":"d1","ds/themes/zeron-light.json":"l1","ds/button.luau":"b1"}"#,
         );
         write(
             &z.join(CATALOG),
@@ -918,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn plugins_templates_create_from_zeron_is_a_full_copy() {
+    fn plugins_templates_create_from_zeron_copies_all_but_its_tokens_and_themes() {
         let d = with_zeron("create");
         let made = create(&d, "mine", "Mine", None, Path::new("docs/templates.md")).unwrap();
         let t = d.join("mine");
@@ -929,7 +941,7 @@ mod tests {
             json!([
                 ".luaurc",
                 "app.luau",
-                "ds/tokens.luau",
+                "ds/button.luau",
                 "screens/chat/init.luau",
                 "screens/shell/sidebar.luau"
             ])
@@ -958,6 +970,13 @@ mod tests {
         assert_eq!(base["app.luau"], "a1");
         assert_eq!(base["screens/shell/sidebar.luau"], "s1");
         assert_eq!(base.as_object().unwrap().len(), 5);
+        // Zeron's tokens and theme files aren't its own: a template's are laid
+        // over them.
+        for rel in LAID_OVER {
+            assert!(d.join(ZERON_DIR).join(rel).is_file(), "{rel}");
+            assert!(!t.join(rel).exists() && base.get(rel).is_none(), "{rel}");
+        }
+        assert!(!t.join("ds/themes").exists());
         // No temp folder is left behind.
         let left: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
@@ -978,6 +997,9 @@ mod tests {
         let first = d.join("first");
         write(&first.join("app.luau"), "-- first's app");
         write(&first.join("screens/extra.luau"), "-- extra");
+        // Tokens and a theme file of its own go with it.
+        write(&first.join("ds/tokens.luau"), "-- first's tokens");
+        write(&first.join("ds/themes/zeron-dark.json"), "{\"first\":1}");
         write(&first.join(PREVIEW), "png");
         // first's copy of the sidebar was taken from an older Zeron.
         let mut base: BTreeMap<String, String> = read_json(&first.join(BASE));
@@ -998,15 +1020,18 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(),
-            "-- tokens"
+            "-- first's tokens"
         );
+        assert_eq!(std::fs::read_to_string(t.join("ds/themes/zeron-dark.json")).unwrap(), "{\"first\":1}");
+        assert!(!t.join("ds/themes/zeron-light.json").exists());
         assert!(!t.join(PREVIEW).exists());
         let manifest: Value =
             serde_json::from_slice(&std::fs::read(t.join(MANIFEST)).unwrap()).unwrap();
         assert_eq!(manifest["id"], "second");
         let base: BTreeMap<String, String> = read_json(&t.join(BASE));
         assert_eq!(base["screens/shell/sidebar.luau"], "s0");
-        assert_eq!(base["ds/tokens.luau"], "t1");
+        assert_eq!(base["ds/button.luau"], "b1");
+        assert!(LAID_OVER.iter().all(|rel| !base.contains_key(*rel)));
         // A file of first's own has no Zeron original.
         assert!(!base.contains_key("screens/extra.luau"));
 
@@ -1090,17 +1115,17 @@ mod tests {
             r#"{"id":"slim","name":"Slim","author":"you","version":"1.0.0","zeron_version":"0.8.0"}"#,
         );
         // slim keeps only two files and inherits the rest.
-        for rel in ["ds/tokens.luau", "screens/chat/init.luau", ".luaurc"] {
+        for rel in ["ds/button.luau", "screens/chat/init.luau", ".luaurc"] {
             std::fs::remove_file(d.join("slim").join(rel)).unwrap();
         }
         write(
             &d.join(STATUS),
             r#"{"mine":{"files":{"screens/shell/sidebar.luau":"sidebar.luau:3: attempt to index nil"}},"dead":{"root":"app.luau:1: syntax error"}}"#,
         );
-        // Zeron's sidebar and tokens changed since; its chat was dropped.
+        // Zeron's sidebar and button changed since; its chat was dropped.
         zeron_hashes(
             &d,
-            r#"{"app.luau":"a1",".luaurc":"r1","screens/shell/sidebar.luau":"s2","ds/tokens.luau":"t2"}"#,
+            r#"{"app.luau":"a1",".luaurc":"r1","screens/shell/sidebar.luau":"s2","ds/button.luau":"b2"}"#,
         );
 
         let mine = status(&d, "mine").unwrap();
@@ -1112,17 +1137,17 @@ mod tests {
         );
         assert_eq!(
             mine["out_of_date"],
-            json!(["ds/tokens.luau", "screens/shell/sidebar.luau"])
+            json!(["ds/button.luau", "screens/shell/sidebar.luau"])
         );
         assert_eq!(mine["files"], 5);
-        assert_eq!(mine["inherits"], 0);
+        assert_eq!(mine["inherits"], 3);
         assert!(mine.get("root_error").is_none());
 
         let slim = status(&d, "slim").unwrap();
         assert_eq!(slim["active"], false);
         assert_eq!(slim["files"], 2);
-        assert_eq!(slim["inherits"], 3);
-        // Its tokens are Zeron's again, so they can't be out of date.
+        assert_eq!(slim["inherits"], 6);
+        // Its button is Zeron's again, so it can't be out of date.
         assert_eq!(slim["out_of_date"], json!(["screens/shell/sidebar.luau"]));
 
         assert_eq!(
@@ -1132,7 +1157,7 @@ mod tests {
         let zeron = status(&d, "zeron").unwrap();
         assert_eq!(
             (zeron["files"].as_u64(), zeron["inherits"].as_u64()),
-            (Some(5), Some(0))
+            (Some(8), Some(0))
         );
         assert!(status(&d, "nope").is_err());
 
@@ -1162,7 +1187,7 @@ mod tests {
         assert_eq!(of("fresh")["status"], "ok");
         assert_eq!(
             status(&d, "fresh").unwrap()["out_of_date"],
-            json!(["ds/tokens.luau", "screens/shell/sidebar.luau"])
+            json!(["ds/button.luau", "screens/shell/sidebar.luau"])
         );
         assert_eq!(of("zeron")["status"], "ok");
         assert!(version_out_of_date("0.8.0", "0.9.0"));

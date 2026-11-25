@@ -32,7 +32,7 @@ The line this holds is agents that reach Zeron only through its MCP tools, and a
 
 ## The folder
 
-`create_template` copies all of Zeron's app into the new folder. Keep what you change and delete the rest to inherit Zeron's (smaller templates stay current as Zeron updates).
+`create_template` copies Zeron's app into the new folder, all but its tokens and theme files (`ds/tokens.luau`, `ds/themes/zeron-dark.json`, `ds/themes/zeron-light.json`): a copy of those would hold every value to what it was that day. Zeron's are in `.zeron/ds/` to read, and Two examples shows how to change one. Keep what you change and delete the rest to inherit Zeron's (smaller templates stay current as Zeron updates). With `from`, all of that template's own files come too.
 
 ```
 zeron-template.json    id, name, description, author, version, zeron_version
@@ -82,7 +82,7 @@ Zeron's built-in themes used to be templates (`theme-<key>`, colour-only). They 
 
 ## The loop
 
-1. **`create_template { id, name, from? }`**: a copy of Zeron's app (or of another template). Its reply gives the folder, its files, a short map, and a link to this guide.
+1. **`create_template { id, name, from? }`**: a copy of Zeron's app but its tokens and theme files (with `from`, that template's own files over it). Its reply gives the folder, its files, a short map, and a link to this guide.
 2. **`use_template { id }`**: the window switches to it, live, as a preview (see above): ask the person to keep it when it's ready, or before it needs what a preview can't do.
 3. **Edit and save.** Each save shows at once in the window.
 4. **`template_status { id }`**:
@@ -125,7 +125,7 @@ Keep the `zeron_version` that `create_template` wrote. A file like this needs a 
 
 Every flat selection follows, and what's defined by it. It shows wherever no theme is worn (see Colours and themes).
 
-Keep only the files you changed in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. (A file you copy whole, a theme's, a component or a screen, is yours until you copy it again: `out_of_date` in `template_status` says when Zeron's has changed.) For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
+Keep only the files you changed in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. (A file you copy whole is yours until you copy it again. `out_of_date` in `template_status` says when Zeron's has changed, for the files `create_template` copied, not for a theme file you copied yourself.) For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
 
 ### Put words on the new-chat page
 

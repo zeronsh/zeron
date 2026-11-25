@@ -272,7 +272,7 @@ pub enum TemplateCommand {
     /// Run Zeron's window with a template. `zeron template use zeron` puts
     /// Zeron's own back, even with Zeron closed.
     Use { id: String },
-    /// Make a new template: a full copy of Zeron's interface to rewrite.
+    /// Make a new template: a copy of Zeron's interface to rewrite.
     Create {
         /// Its id: lowercase letters, digits and dashes.
         id: String,
