@@ -301,6 +301,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         var state = CompanionStrip.State()
         state.agents = agents.count
         state.runningAgents = agents.filter { $0.state == .running }.count
+        // A delegated child's ask shows on its row, not here: the chip and
+        // badge say one needs you.
+        state.askingAgents = agents.filter { $0.asks && $0.state == .running }.count
         state.sideChats = sides
         state.terminals = tabs.count
         state.liveTerminals = tabs.filter(\.isLive).count
@@ -310,7 +313,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             if wasEmpty != state.isEmpty { render(animated: animated) }
         }
         // Violet like the working glyphs: a running agent isn't an alert.
-        companionsItem.badge = state.runningAgents > 0 ? {
+        // One that needs you is: amber, with how many ask.
+        companionsItem.badge = state.askingAgents > 0 ? {
+            var badge = UIBarButtonItem.Badge.count(state.askingAgents)
+            badge.backgroundColor = Palette.warning
+            badge.foregroundColor = .white
+            return badge
+        }() : state.runningAgents > 0 ? {
             var badge = UIBarButtonItem.Badge.count(state.runningAgents)
             badge.backgroundColor = Palette.accent
             badge.foregroundColor = .white
@@ -319,7 +328,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         if parentId != nil, navigationItem.subtitle == nil {
             let parent = parentId.flatMap { app.row($0)?.title } ?? ""
             navigationItem.titleView = nil
-            navigationItem.title = "Side chat"
+            navigationItem.title = app.row(chatId)?.delegated == true ? "Subagent" : "Side chat"
             navigationItem.subtitle = parent
         }
     }

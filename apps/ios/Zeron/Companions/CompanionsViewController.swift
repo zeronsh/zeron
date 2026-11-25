@@ -24,6 +24,8 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     private enum Item: Hashable {
         case header(Section)
         case agent(String)
+        /// A chat the session's agent delegated to, by its chat id.
+        case delegated(String)
         case sideChat(String)
         case terminal(ObjectIdentifier)
         case action(Action)
@@ -44,6 +46,12 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Section, Item>!
     private var agents: [String: SubagentRow] = [:]
+    private var delegated: [String: SubagentRow] = [:]
+    /// What each asking delegated child asks, read from its own handle,
+    /// held only while it asks.
+    private var askers: [String: Asker] = [:]
+    /// Answered (request id, when): its buttons wait for the ask to clear.
+    private var held: [String: (requestId: String, at: Date)] = [:]
     private var sides: [String: SessionRowVM] = [:]
     private var terminals: [ObjectIdentifier: TerminalTab] = [:]
     private var tokens: [AnyObject] = []
@@ -91,6 +99,13 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
             guard let row = self?.agents[id] else { return }
             cell.configure(agent: row)
         }
+        let delegatedCell = UICollectionView.CellRegistration<DelegatedAgentCell, String> { [weak self] cell, _, id in
+            guard let self, let row = self.delegated[id] else { return }
+            let ask = self.askers[id]?.ask
+            cell.configure(row, ask: ask, held: ask != nil && self.held[id]?.requestId == ask?.requestId)
+            cell.onAnswer = { [weak self] answer in self?.answer(id, answer) }
+            cell.onStop = { [weak self] in self?.stopDelegated(id) }
+        }
         let side = UICollectionView.CellRegistration<SessionCell, String> { [weak self] cell, _, id in
             guard let vm = self?.sides[id] else { return }
             cell.configure(vm)
@@ -122,6 +137,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
             switch item {
             case let .header(s): cv.dequeueConfiguredReusableCell(using: header, for: path, item: s)
             case let .agent(id): cv.dequeueConfiguredReusableCell(using: agent, for: path, item: id)
+            case let .delegated(id): cv.dequeueConfiguredReusableCell(using: delegatedCell, for: path, item: id)
             case let .sideChat(id): cv.dequeueConfiguredReusableCell(using: side, for: path, item: id)
             case let .terminal(id): cv.dequeueConfiguredReusableCell(using: terminal, for: path, item: id)
             case let .action(a): cv.dequeueConfiguredReusableCell(using: action, for: path, item: a)
@@ -171,6 +187,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     private func tick() {
         var s = dataSource.snapshot()
         let live = agents.values.filter { $0.state == .running }.map { Item.agent($0.id) }
+            + delegated.filter { $0.value.state == .running }.map { Item.delegated($0.key) }
         guard !live.isEmpty else { return }
         s.reconfigureItems(live.filter { s.indexOfItem($0) != nil })
         dataSource.apply(s, animatingDifferences: false)
@@ -217,8 +234,11 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     }
 
     private func reload(animated: Bool = true) {
-        let agentRows = app.sessionSubagents(chatId)
-        // Live first, then newest.
+        let allAgents = app.sessionSubagents(chatId)
+        // Spawned in its own runtime: live first, then newest. Delegated
+        // chats follow, oldest first (as the core lists them).
+        let agentRows = allAgents.filter { $0.chatId == nil }
+        let delegatedRows = allAgents.filter { $0.chatId != nil }
         let ordered = agentRows.enumerated().sorted { a, b in
             let (ra, rb) = (a.element.state == .running, b.element.state == .running)
             return ra != rb ? ra : a.offset > b.offset
@@ -229,6 +249,10 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         let oldAgents = agents
         agents = Dictionary(agentRows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         changed += agents.filter { oldAgents[$0.key] != $0.value }.map { .agent($0.key) }
+        let oldDelegated = delegated
+        delegated = Dictionary(delegatedRows.compactMap { r in r.chatId.map { ($0, r) } }, uniquingKeysWith: { a, _ in a })
+        changed += syncAskers().map { .delegated($0) }
+        changed += delegated.filter { oldDelegated[$0.key] != $0.value }.map { .delegated($0.key) }
         let oldSides = sides
         sides = Dictionary(sideRows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         changed += sides.filter { oldSides[$0.key] != $0.value }.map { .sideChat($0.key) }
@@ -236,9 +260,9 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         changed += tabs.map { .terminal(ObjectIdentifier($0)) }
 
         var s = NSDiffableDataSourceSnapshot<Section, Item>()
-        if !ordered.isEmpty {
+        if !ordered.isEmpty || !delegatedRows.isEmpty {
             s.appendSections([.agents])
-            s.appendItems([.header(.agents)] + ordered.map { .agent($0.id) }, toSection: .agents)
+            s.appendItems([.header(.agents)] + ordered.map { .agent($0.id) } + delegatedRows.compactMap { $0.chatId.map(Item.delegated) }, toSection: .agents)
         }
         s.appendSections([.sideChats])
         s.appendItems([.header(.sideChats)] + (sideRows.isEmpty ? [.empty(.sideChats)] : sideRows.map { .sideChat($0.id) }), toSection: .sideChats)
@@ -248,14 +272,115 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         s.appendSections([.terminals])
         s.appendItems([.header(.terminals)] + (tabs.isEmpty ? [.empty(.terminals), .action(.newTerminal)] : tabs.map { .terminal(ObjectIdentifier($0)) }), toSection: .terminals)
         let existing = Set(s.itemIdentifiers)
+        // (Once each: a repeated identifier is an assertion failure.)
+        changed = Array(Set(changed))
         s.reconfigureItems(changed.filter { existing.contains($0) && dataSource.snapshot().indexOfItem($0) != nil })
         dataSource.apply(s, animatingDifferences: animated && view.window != nil)
-        updateSheetTitle(agentRows: agentRows)
+        updateSheetTitle(agentRows: allAgents)
     }
 
     private func updateSheetTitle(agentRows: [SubagentRow]) {
+        let asking = agentRows.filter { $0.asks && $0.state == .running }.count
         let running = agentRows.filter { $0.state == .running }.count
-        navigationItem.subtitle = running > 0 ? "\(running) agent\(running == 1 ? "" : "s") working" : "Agents, side chats & terminals"
+        navigationItem.subtitle = asking > 0 ? "\(asking) need\(asking == 1 ? "s" : "") you"
+            : running > 0 ? "\(running) agent\(running == 1 ? "" : "s") working" : "Agents, side chats & terminals"
+    }
+
+    // MARK: Delegated subagents (their asks, Stop)
+
+    /// A delegated child's handle while it asks, and what it asks.
+    private final class Asker {
+        let handle: SessionHandle
+        /// Opened here (not already open elsewhere): closed when let go.
+        let opened: Bool
+        var ask: DelegatedAsk?
+        var token: AnyObject?
+        init(handle: SessionHandle, opened: Bool) {
+            self.handle = handle
+            self.opened = opened
+        }
+    }
+
+    /// Hold a handle on each child that asks and read its ask; let go of the
+    /// rest. Returns the children whose ask changed.
+    private func syncAskers() -> [String] {
+        var changed: [String] = []
+        let asking = Set(delegated.filter { $0.value.asks && $0.value.state == .running }.keys)
+        for id in askers.keys where !asking.contains(id) {
+            release(id)
+            changed.append(id)
+        }
+        for id in asking {
+            if askers[id] == nil {
+                guard let client = app.client else { continue }
+                let existing = client.session(chatId: id)
+                guard let handle = existing ?? (try? client.openSession(chatId: id)) else { continue }
+                let asker = Asker(handle: handle, opened: existing == nil)
+                asker.token = app.observeSession(id) { [weak self] in self?.scheduleReload() }
+                askers[id] = asker
+            }
+            guard let asker = askers[id] else { continue }
+            let ask = DelegatedAsk(asker.handle.composer().openInput)
+            if ask != asker.ask {
+                asker.ask = ask
+                changed.append(id)
+            }
+            // Answered and cleared (or asking something new): buttons back.
+            if let h = held[id], h.requestId != ask?.requestId { held[id] = nil }
+        }
+        return changed
+    }
+
+    private func release(_ id: String) {
+        guard let asker = askers.removeValue(forKey: id) else { return }
+        held[id] = nil
+        if asker.opened, SessionViewController.live(id) == nil {
+            app.client?.closeSession(chatId: id)
+        }
+    }
+
+    private func answer(_ id: String, _ answer: DelegatedAgentCell.Answer) {
+        if case .openChat = answer { return openSideChat?(id) ?? () }
+        guard let asker = askers[id], let ask = asker.ask, held[id] == nil else { return }
+        let label: String = switch answer {
+        case .allow: "Yes"
+        case .deny: "No"
+        case let .option(o): o
+        case .openChat: ""
+        }
+        do {
+            try asker.handle.respondInput(requestId: ask.requestId, answers: [UserInputAnswer(questionId: ask.questionId, labels: [label])])
+        } catch {
+            NSLog("answer subagent failed: \(error)")
+            return Toast.show("Couldn't answer it", in: view.window)
+        }
+        held[id] = (ask.requestId, Date())
+        reconfigure(.delegated(id))
+        // Still asking a few seconds on (an answer that didn't land): the
+        // buttons come back.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, let h = self.held[id], h.requestId == ask.requestId else { return }
+            self.held[id] = nil
+            self.reconfigure(.delegated(id))
+        }
+    }
+
+    private func stopDelegated(_ id: String) {
+        guard let client = app.client else { return }
+        let handle = askers[id]?.handle ?? client.session(chatId: id) ?? (try? client.openSession(chatId: id))
+        do {
+            guard let handle else { throw CoreError.Closed }
+            try handle.interrupt()
+        } catch {
+            NSLog("stop subagent failed: \(error)")
+            Toast.show("Couldn't stop it", in: view.window)
+        }
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            for id in askers.keys { release(id) }
+        }
     }
 
     // MARK: Selection
@@ -264,6 +389,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         switch dataSource.itemIdentifier(for: indexPath) {
         case .header, .empty, nil: false
         case let .agent(id): agents[id]?.docId != nil
+        case .delegated: true
         default: true
         }
     }
@@ -276,6 +402,9 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         case let .agent(id):
             guard let row = agents[id], let doc = row.docId else { return }
             open?(SubagentViewController(app: app, parentId: chatId, docId: doc, title: row.title, running: row.state == .running))
+        case let .delegated(id):
+            // A normal chat: it opens as one (its header says Subagent).
+            openSideChat?(id)
         case let .sideChat(id):
             openSideChat?(id)
         case let .terminal(id):

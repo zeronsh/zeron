@@ -630,6 +630,8 @@ final class AppModel {
             sendFailed: r.sendState == .failed,
             waiting: r.indicator == .waiting,
             canStopWaiting: r.waitsOnProcess,
+            waitingOn: r.waitingOn.first,
+            waitingMore: max(0, r.waitingOn.count - 1),
             sleepUntil: r.sleepUntilMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
             wokeAt: r.wokeAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
             lastActivity: Date(timeIntervalSince1970: TimeInterval(r.lastActivityMs) / 1000)
@@ -745,12 +747,14 @@ final class AppModel {
 
     // MARK: Companions (side chats, subagents)
 
-    /// A session's side chats, newest first.
+    /// A session's side chats, newest first (the chats its agent delegated
+    /// to are its subagents, not side chats).
     func sideChats(of chatId: String) -> [SessionRowVM] {
-        (client?.childSessions(parentId: chatId) ?? []).filter { !$0.archived }.map(Self.vm)
+        (client?.childSessions(parentId: chatId) ?? []).filter { !$0.archived && !$0.delegated }.map(Self.vm)
     }
 
-    /// The subagents a session's agent spawned (its open transcript).
+    /// A session's subagents: those its agent spawned (its open transcript),
+    /// then the chats it delegated to.
     func sessionSubagents(_ chatId: String) -> [SubagentRow] {
         guard let client, !chatId.contains("--sub--") else { return [] }
         return (client.session(chatId: chatId) ?? (try? client.openSession(chatId: chatId)))?.subagents() ?? []
