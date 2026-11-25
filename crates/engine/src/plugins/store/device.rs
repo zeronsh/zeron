@@ -1118,10 +1118,12 @@ impl Plugins {
     /// The newest verified version of `id` this Zeron can run, other than
     /// `asked` (whose asks are `asks`), for a sheet's "instead": its record
     /// says verified, it's listed, and its package (fetched and checked as
-    /// any install's) asks `added` and `removed` against `asked`. None when
+    /// any install's) asks `added` and `removed` against `asked`. A
+    /// pre-release only where this device takes them of it. None when
     /// there's none, or the store can't say.
     async fn verified_alternative(&self, client: &StoreClient, caller: &Caller, id: &str, asked: &str, asks: &[String], publisher: &client::Publisher) -> Option<install::Alternative> {
         let zeron = version::zeron();
+        let prereleases = lock(&self.inner.state).prerelease.contains(id);
         let mut cursor: Option<String> = None;
         for _ in 0..ALTERNATIVE_PAGES {
             let page = client.versions(id, cursor.as_deref(), Some(50), caller).await.ok()?;
@@ -1130,6 +1132,7 @@ impl Plugins {
                     && v["status"] == "listed"
                     && v["yanked"] != true
                     && v["version"].as_str().is_some_and(|x| !same_version(x, asked))
+                    && v["version"].as_str().is_some_and(|x| prereleases || Version::parse(x).is_ok_and(|x| !x.is_prerelease()))
                     && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
             });
             if let Some(found) = found {

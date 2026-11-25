@@ -2142,6 +2142,34 @@ async fn a_first_install_s_sheet_offers_the_verified_version_instead_and_install
     assert!(instead["plugin"]["source"].get("verified_alternative").is_none());
 }
 
+/// The verified version instead is a release; a pre-release only for someone
+/// who takes them of it.
+#[tokio::test]
+async fn the_verified_version_instead_is_a_pre_release_only_for_who_takes_them() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let add = |id: &str, version: &str, state: &str| store.add("ada", &package_of(&key, id, version, &["ui.add"], &format!("return '{version}'"), json!({})), state, "");
+    // A verified release, and a newer verified pre-release.
+    add("focus", "1.0.0", "verified");
+    add("focus", "1.1.0", "listed");
+    add("focus", "1.2.0-beta.1", "verified");
+    // No verified release.
+    add("notes", "1.0.0", "listed");
+    add("notes", "1.1.0-beta.1", "verified");
+    let d = device(&store, Some("bob"));
+    let alternative = async |id: &str, version: &str| d.call(methods::INSTALL_PLUGIN, json!({ "store": id, "version": version })).await.unwrap()["plugin"]["source"]["verified_alternative"]["version"].clone();
+    assert_eq!(alternative("focus", "1.1.0").await, "1.0.0");
+    assert_eq!(alternative("notes", "1.0.0").await, Value::Null);
+    let hash = d.item("notes").await["hash"].clone();
+    let refused = d.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": "notes", "hash": hash })).await.unwrap_err();
+    assert_eq!(word(&refused), "not_verified", "{refused}");
+    for id in ["focus", "notes"] {
+        d.call(methods::SET_PLUGIN_PRERELEASES, json!({ "id": id, "on": true })).await.unwrap();
+    }
+    assert_eq!(alternative("focus", "1.1.0").await, "1.2.0-beta.1");
+    assert_eq!(alternative("notes", "1.0.0").await, "1.1.0-beta.1");
+}
+
 #[tokio::test]
 async fn an_update_s_sheet_installs_its_verified_alternative_by_the_engine_s_own_word() {
     let store = FakeStore::start().await;
