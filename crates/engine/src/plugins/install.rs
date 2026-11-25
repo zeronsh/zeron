@@ -1150,6 +1150,13 @@ pub fn found(plugins_dir: &Path, id: &str, hash: &str) -> Option<Found> {
     (found.from == hash).then_some(found)
 }
 
+/// Held while what's found for a plugin by what updates of it are taken is
+/// kept, or forgotten as that changes.
+pub(super) fn finding() -> std::sync::MutexGuard<'static, ()> {
+    static FINDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    FINDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub fn forget_found(plugins_dir: &Path, id: &str) {
     let _ = std::fs::remove_file(found_path(plugins_dir, id));
     let _ = std::fs::remove_file(found_package_path(plugins_dir, id));

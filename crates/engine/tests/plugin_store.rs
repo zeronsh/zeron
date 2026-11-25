@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use serde_json::{Value, json};
 
 use fake_store::FakeStore;
@@ -1314,6 +1315,71 @@ async fn a_changed_choice_forgets_what_was_found_by_the_other() {
     }
 }
 
+/// A plugin's the same.
+#[tokio::test]
+async fn a_changed_choice_forgets_a_plugin_s_update_found_by_the_other() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let add = |id: &str, version: &str, state: &str| store.add("ada", &package_of(&key, id, version, &["ui.add"], &format!("return '{version}'"), json!({})), state, "");
+    let d = device(&store, Some("bob"));
+    for id in ["focus", "notes"] {
+        add(id, "1.0.0", "verified");
+        d.call(methods::INSTALL_PLUGIN, json!({ "store": id })).await.unwrap();
+        assert_eq!(d.allow(id).await["status"], "on");
+        add(id, "1.1.0", "listed");
+    }
+    add("focus", "2.0.0-rc.1", "listed");
+    let set = |method: &'static str, params: Value| d.call(method, params);
+    let found = async |id: &str| d.item(id).await["update"]["version"].clone();
+    set(methods::SET_PLUGIN_PRERELEASES, json!({ "id": "focus", "on": true })).await.unwrap();
+    d.check().await;
+    assert_eq!((found("focus").await, found("notes").await), (json!("2.0.0-rc.1"), json!("1.1.0")));
+    // The same again, or what changes nothing of it, forgets nothing.
+    set(methods::SET_PLUGIN_PRERELEASES, json!({ "id": "focus", "on": true })).await.unwrap();
+    set(methods::SET_PLUGIN_UPDATES, json!({ "id": "focus", "prefer": "newest" })).await.unwrap();
+    assert_eq!(found("focus").await, "2.0.0-rc.1");
+    // The device's: what goes by it, not what has its own. Who watches the
+    // list is told.
+    let RpcReply::Stream(mut watched) = d.plugins.dispatch(methods::WATCH_PLUGINS, json!({})).await.unwrap() else { unreachable!() };
+    let of_notes = |list: Value| list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "notes").unwrap()["update"]["version"].clone();
+    assert_eq!(of_notes(watched.next().await.unwrap()), "1.1.0");
+    set(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "verified" })).await.unwrap();
+    let told = tokio::time::timeout(Duration::from_secs(2), watched.next()).await.expect("told").unwrap();
+    assert_eq!(of_notes(told), Value::Null);
+    assert_eq!((found("focus").await, found("notes").await), (json!("2.0.0-rc.1"), Value::Null));
+    // Off: the pre-release found isn't brought.
+    set(methods::SET_PLUGIN_PRERELEASES, json!({ "id": "focus", "on": false })).await.unwrap();
+    let kept = d._dir.path().join("plugins/.updates");
+    assert_eq!((found("focus").await, std::fs::read_dir(&kept).unwrap().count()), (Value::Null, 0), "{kept:?}");
+    let taken = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!(taken["plugin"]["version"], "1.1.0", "{taken}");
+    // Being looked for as it's chosen: not kept.
+    for (asked, next) in [("newest", "verified"), ("verified", "newest")] {
+        set(methods::SET_PLUGIN_UPDATES, json!({ "id": "notes", "prefer": asked })).await.unwrap();
+        store.state.lock().unwrap().slow_updates = Some(std::time::Duration::from_secs(1));
+        let asks = store.state.lock().unwrap().asks.len();
+        let chosen = async {
+            while store.state.lock().unwrap().asks.len() == asks {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            set(methods::SET_PLUGIN_UPDATES, json!({ "id": "notes", "prefer": next })).await.unwrap();
+        };
+        let (checked, ()) = tokio::join!(d.check(), chosen);
+        store.state.lock().unwrap().slow_updates = None;
+        let of_notes = |list: &str| checked[list].as_array().unwrap().iter().filter(|u| u["id"] == "notes").count();
+        assert_eq!((of_notes("updates"), of_notes("errors")), (0, 1), "{asked}: {checked}");
+        assert_eq!(found("notes").await, Value::Null, "{asked}");
+    }
+    // One that just started, asked before anything else.
+    d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "notes", "prefer": null })).await.unwrap();
+    set(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "newest" })).await.unwrap();
+    d.check().await;
+    let kept_of_notes = || std::fs::read_dir(&kept).unwrap().flatten().any(|f| f.file_name() == "notes.json");
+    assert!(kept_of_notes());
+    Plugins::new(d._dir.path(), "dev-1").dispatch(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "verified" })).await.unwrap();
+    assert!(!kept_of_notes());
+}
+
 /// The verified version instead, over one that's here: newer than a verified
 /// one; or, over one that isn't, the newest verified though it's older, by
 /// the person's own choice alone, and over the very one its window names.
@@ -2256,8 +2322,14 @@ async fn with_the_store_unreachable_nothing_unverified_gets_through() {
     store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
     let held = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap_err();
     assert_eq!(word(&held), "not_verified", "{held}");
-    // (b) An update-all doesn't take it either.
+    // (b) An update-all doesn't take it either. (What was found by the other
+    // choice is forgotten: found again.)
     d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "focus", "prefer": null })).await.unwrap();
+    let unfound = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap_err();
+    assert_eq!(word(&unfound), "store_unreachable", "{unfound}");
+    store.offline.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
     let bulk = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus", "verified_only": true })).await.unwrap_err();
     assert_eq!(word(&bulk), "not_verified", "{bulk}");
     // (c) An agent can do nothing with it: not update, not install over it,

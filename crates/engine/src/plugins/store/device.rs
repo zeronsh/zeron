@@ -315,6 +315,10 @@ struct Candidate {
     prefer: UpdatePreference,
 }
 
+/// What's said of a check whose plugin or template had other updates chosen
+/// for it meanwhile.
+const CHOSEN_ANEW: &str = "You chose other updates of it while Zeron looked; check again";
+
 /// What a full check of the store found.
 struct StoreCheck {
     updates: Vec<Value>,
@@ -623,13 +627,14 @@ impl Plugins {
                 if entry.store.is_none() {
                     return Err(failed("Only a plugin installed from the store has pre-releases to take"));
                 }
-                self.update_state(|state| {
+                self.choose_updates(|state| {
                     if p.on {
                         state.prerelease.insert(p.id.clone());
                     } else {
                         state.prerelease.remove(&p.id);
                     }
-                })?;
+                })
+                .await?;
                 self.rescan().await;
                 self.item(&p.id)
             }
@@ -1440,14 +1445,27 @@ impl Plugins {
         tokio::task::spawn_blocking(move || template_packages::update_from_store(&dir, &id, &now, alternative)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
     }
 
-    /// `change` what updates this device takes. What was found for a template
-    /// by another choice than its own now is forgotten: the next check, or
-    /// its update, looks by this one.
+    /// `change` what updates this device takes. What was found for a plugin
+    /// or a template by another choice than its own now is forgotten: the
+    /// next check, or its update, looks by this one.
     async fn choose_updates(&self, change: impl FnOnce(&mut State)) -> Result<(), RpcError> {
+        self.ensure_scanned().await;
         let before = lock(&self.inner.state).clone();
         let saved = self.update_state(change);
+        let plugins: Vec<String> = {
+            let now = lock(&self.inner.state).clone();
+            let entries = lock(&self.inner.entries);
+            entries.iter().filter(|e| e.store.is_some() && before.choice(&e.item.id) != now.choice(&e.item.id)).map(|e| e.item.id.clone()).collect()
+        };
         let (this, dir) = (self.clone(), self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR));
+        let forgotten = !plugins.is_empty();
         tokio::task::spawn_blocking(move || {
+            {
+                let _finding = install::finding();
+                for id in &plugins {
+                    install::forget_found(&this.inner.plugins_dir, id);
+                }
+            }
             let _changing = template_packages::changing();
             let now = lock(&this.inner.state).clone();
             for (folder, store) in template_packages::from_store(&dir) {
@@ -1458,7 +1476,18 @@ impl Plugins {
         })
         .await
         .map_err(|_| failed("Couldn't reach the templates folder"))?;
+        if forgotten {
+            self.rescan().await;
+        }
         saved
+    }
+
+    /// Whether this device still takes what a check of `c` looked by.
+    fn chosen_still(&self, c: &Candidate) -> Result<(), String> {
+        match lock(&self.inner.state).choice(&c.id) == (c.prefer, c.prerelease) {
+            true => Ok(()),
+            false => Err(CHOSEN_ANEW.into()),
+        }
     }
 
     /// Keep what a check by `choice` found for store template `t` (none:
@@ -1469,7 +1498,7 @@ impl Plugins {
         tokio::task::spawn_blocking(move || {
             let _changing = template_packages::changing();
             if lock(&this.inner.state).template_choice(&store_id) != choice {
-                return Err("You chose other updates of it while Zeron looked; check again".into());
+                return Err(CHOSEN_ANEW.into());
             }
             match found {
                 Some(found) => template_packages::keep_found(&dir, &id, &found, package.as_ref()),
@@ -2180,6 +2209,10 @@ impl Plugins {
             let Some(staged) = staged else {
                 // Only unverified updates, and this device stages verified
                 // ones: said, not kept.
+                if let Err(error) = self.chosen_still(c) {
+                    errors.push(said(c, &error));
+                    continue;
+                }
                 install::forget_found(&plugins_dir, &c.id);
                 updates.push(json!({
                     "id": c.id, "name": c.name, "version": offer.version, "verified": false, "held": true,
@@ -2305,6 +2338,8 @@ impl Plugins {
             held: false,
         };
         let keep = found.refused.is_none().then_some(&package);
+        let _finding = install::finding();
+        self.chosen_still(c)?;
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;
         Ok(found)
     }

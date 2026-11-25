@@ -111,8 +111,13 @@ impl State {
         self.template_updates_for.get(id).copied().unwrap_or(self.device_updates())
     }
 
-    /// What updates of store template `id` this device takes: which, and
+    /// What updates of store plugin `id` this device takes: which, and
     /// whether pre-releases.
+    pub fn choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.updates_for(id), self.prerelease.contains(id))
+    }
+
+    /// [`Self::choice`], of store template `id`.
     pub fn template_choice(&self, id: &str) -> (UpdatePreference, bool) {
         (self.template_updates(id), self.template_prerelease.contains(id))
     }
