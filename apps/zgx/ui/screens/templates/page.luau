@@ -160,8 +160,8 @@ end
 local OWN_FAILURES: { [string]: boolean } = { not_in_store = true, store_mismatch = true, not_verified = true, needs_person = true, taken_down = true }
 local function failure(message: string): string
 	local reason = string.match(message, "^([%l_]+): ") or string.match(message, "^([%l_]+)$")
-	-- (The engine says taken_down of a list it can't read too: its own words
-	-- for that, which never say a version was taken down.)
+	-- (An engine from before `blocks_unreadable` says taken_down of a list it
+	-- can't read too: its own words for that, which never say a version was.)
 	if reason == "taken_down" and not string.find(message, "was taken down", 1, true) then
 		return string.match(message, "^[%l_]+: (.+)$") or message
 	end
