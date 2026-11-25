@@ -1692,6 +1692,7 @@ fn file_name_cases() -> Value {
         "init.luau", "ui/Badge.luau", "~1", "a~", "~", "a~~1", "a~/1.luau", "x~9/y", "\u{e9}.luau", "e\u{301}.luau", "\u{17f}creens/plugins/x.luau", "\u{212a}.luau",
         "a./b", "a\u{fe0f}./b", "a.\u{fe0f}/b", "\u{fe0f}/a", "\u{1f468}\u{200d}\u{1f4bb}.png", "\u{8bbe}\u{7f6e}.luau", "\u{180e}.luau", "\u{e0fff}", "\u{e1000}",
         "ds/tokens.luau", "ds/tokens_template.luau", "DS/Tokens_Template.luau", "ds/tokens_template\u{fe0f}.luau", "ds/tokens_templates.luau", "ds/tokens_template", "ds/tokens_template/init.luau", "ds/Tokens_Template./deep/a.luau", "ds/tokens_templates/init.luau", "ds/tokens/init.luau", "DS/Tokens/colors.luau", "ds/tokens",
+        "ds/themes/zeron-dark.json", "ds/themes/template-dark.json", "DS/Themes/Template-Light.json", "ds/themes/template-light.json/x.json", "ds/themes/template-dim.json",
     ]);
     let mut seen = std::collections::BTreeSet::new();
     paths.retain(|rel| seen.insert(*rel));

@@ -22,10 +22,10 @@ pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
 
 /// Paths no template replaces: allowing plugins, your account and signing
 /// in, the aliases every module resolves by, where Zeron lays a template's
-/// `ds/tokens.luau` beside its own, and a folder of tokens, which would stand
-/// in for Zeron's own. It only grows. (With [`folder_of`] each: see
+/// `ds/tokens.luau` and its theme files beside its own, and a folder of
+/// tokens, which would stand in for Zeron's own. It only grows. (With [`folder_of`] each: see
 /// [`never_templated`].)
-pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens/"];
+pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens/", "ds/themes/template-dark.json", "ds/themes/template-light.json"];
 
 /// The folder that's the same module as `file`, a `.luau` one: zgx takes a
 /// folder's `init.luau` over the file beside it, so a template's
@@ -211,6 +211,11 @@ mod tests {
             ("ds/Tokens_Template./deep/a.luau", false, false, true, false, false, false),
             ("ds/tokens/init.luau", false, false, true, false, false, false),
             ("DS/Tokens/colors.luau", false, false, true, false, false, false),
+            ("ds/themes/zeron-dark.json", false, false, false, false, true, true),
+            ("ds/themes/template-dark.json", false, false, true, false, false, false),
+            ("DS/Themes/Template-Light.json", false, false, true, false, false, false),
+            ("ds/themes/template-light.json/x.json", false, false, true, false, false, false),
+            ("ds/themes/template-dim.json", false, false, false, false, true, true),
             ("ds/tokens_templates.luau", false, false, false, false, true, true),
             ("ds/tokens_templates/init.luau", false, false, false, false, true, true),
             ("screens/TEMPLA~1/page.luau", false, false, false, true, false, true),
@@ -240,7 +245,7 @@ mod tests {
 
     #[test]
     fn what_s_protected_only_grows() {
-        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/", "ds/tokens/"] {
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/", "ds/tokens/", "ds/themes/template-dark.json", "ds/themes/template-light.json"] {
             assert!(never_templated().iter().any(|p| p == released), "{released}");
         }
     }
@@ -275,7 +280,7 @@ mod tests {
         let vector = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
         assert_eq!(digest(&files), vector);
         // None of these is any part of it.
-        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", "ds/tokens/init.luau", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
+        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", "ds/tokens/init.luau", "ds/themes/template-dark.json", "ds/themes/template-light.json", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
             files.insert(rel.to_owned(), b"x");
         }
         assert_eq!(digest(&files), vector);

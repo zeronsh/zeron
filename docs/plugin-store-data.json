@@ -2341,7 +2341,9 @@
     ".luaurc",
     "ds/tokens_template.luau",
     "ds/tokens_template/",
-    "ds/tokens/"
+    "ds/tokens/",
+    "ds/themes/template-dark.json",
+    "ds/themes/template-light.json"
   ],
   "template_readme_stub": "This README isn't part of the interface.",
   "template_refused_members": [
