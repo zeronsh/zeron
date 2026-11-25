@@ -485,8 +485,16 @@ pub fn trusted(templates: &Path, id: &str) -> bool {
 /// digest, by which what you kept is asked (`kept`). What's judged is what's
 /// laid: no edit of the folder comes between.
 pub fn judged(id: &str, copy: &Path, plain: bool) -> (bool, String) {
-    let official = id != live::BUILTIN && plain && super::official::verified(copy).is_some();
+    // (Each copy a path of its own: asked straight, never cached by path.)
+    let official = id != live::BUILTIN && plain && super::official::verified_at(&crate::ui_dir(), copy).is_some();
     (official, digest(copy))
+}
+
+/// Where how what's laid was judged is kept (`live::Judged`): beside what
+/// you kept, out of the templates' folder (which agents write to, and whose
+/// changes wake a look).
+pub fn judged_record() -> Option<PathBuf> {
+    approvals_path().map(|p| p.with_file_name("laid-judged.json"))
 }
 
 /// Whether you kept template `id` as it was when its digest was `digest`.
@@ -1370,6 +1378,7 @@ return ui.column { ui.text { "its app" } }"#;
     struct Laying {
         root: PathBuf,
         laid: std::cell::RefCell<live::Laid>,
+        trust: std::cell::RefCell<Option<live::Judged>>,
         overlay: std::cell::RefCell<live::Overlay>,
         app: zgx_script::testing::TestApp,
         answered: std::rc::Rc<std::cell::Cell<u32>>,
@@ -1380,8 +1389,8 @@ return ui.column { ui.text { "its app" } }"#;
             let root = dir(name).join("templates");
             write(&root.join(live::ZERON), "app.luau", ZERONS_APP);
             write(&root.join(live::ZERON), "screens/shell/sidebar.luau", "return {}");
-            let (laid, overlay) = (std::cell::RefCell::default(), std::cell::RefCell::default());
-            block_on(super::super::lay_down(&root, live::BUILTIN.into(), None, std::collections::BTreeSet::new(), false, Self::laid_as(live::BUILTIN), None, &laid, &overlay)).unwrap();
+            let (laid, trust, overlay) = (std::cell::RefCell::default(), std::cell::RefCell::default(), std::cell::RefCell::default());
+            block_on(super::super::lay_down(&root, live::BUILTIN.into(), None, std::collections::BTreeSet::new(), false, Self::laid_as(live::BUILTIN), None, &laid, &trust, &overlay)).unwrap();
             let entry = root.join(live::LIVE).join("app.luau");
             let answered = std::rc::Rc::new(std::cell::Cell::new(0));
             let a = answered.clone();
@@ -1393,16 +1402,23 @@ return ui.column { ui.text { "its app" } }"#;
                 host.action("plugin.k.run", |_| {});
                 host
             });
-            Self { root, laid, overlay, app, answered }
+            Self { root, laid, trust, overlay, app, answered }
         }
 
         fn laid_as(id: &str) -> live::Laid {
             live::Laid { id: id.into(), ui_stamp: "ui".into(), ..Default::default() }
         }
 
-        /// Template `id` laid, as a look lays it: Ok or not.
+        /// Template `id` laid, as a look lays it, from a copy taken now: Ok
+        /// or not.
         fn lay(&self, id: &str) -> bool {
-            block_on(super::super::lay_down(&self.root, id.into(), None, std::collections::BTreeSet::new(), false, Self::laid_as(id), None, &self.laid, &self.overlay)).is_ok()
+            let copy = (id != live::BUILTIN).then(|| live::snapshot(&self.root, id).unwrap().0);
+            self.lay_from(id, copy)
+        }
+
+        /// Template `id` laid from `copy`.
+        fn lay_from(&self, id: &str, copy: Option<PathBuf>) -> bool {
+            block_on(super::super::lay_down(&self.root, id.into(), copy, std::collections::BTreeSet::new(), false, Self::laid_as(id), None, &self.laid, &self.trust, &self.overlay)).is_ok()
         }
 
         /// A template whose app is `ITS_APP` and, with `across`, a file
@@ -1488,6 +1504,47 @@ return ui.column { ui.text { "kept" } }"#;
         assert!(reload_owed());
         w.app.frames(6);
         assert_eq!(w.answered.get(), 0, "nothing of the preview before answered");
+        set(None);
+    }
+
+    /// Keep of a preview with an app of its own, nothing new to lay: what's
+    /// laid again after Zeron's own is the copy it was judged by, never the
+    /// folder as it is then (rewritten as the window turns to Zeron's own):
+    /// nothing of the rewrite is laid or answered. A template is never laid
+    /// without a copy.
+    #[test]
+    fn keep_lays_again_from_the_copy_it_judged() {
+        const KEPTS_APP: &str = r#"pcall(ui.invoke, "plugin.k.run", 1)
+return ui.column { ui.text { "kept" } }"#;
+        let w = Laying::new("keep-copy");
+        w.template_of("x", KEPTS_APP, false);
+        assert!(w.lay("x"));
+        set(Some(named("x")));
+        w.app.host.reload().unwrap();
+        w.app.frames(2);
+        // Keep: copied (as `looked` does when a switch lays it again), judged,
+        // laid from the copy.
+        let (copy, _) = live::snapshot(&w.root, "x").unwrap();
+        let switch = Switch::begin(None, true);
+        assert!(w.lay_from("x", Some(copy.clone())));
+        let lay = |which: Lay| {
+            let ok = if which == Lay::ZeronsOwn {
+                let ok = w.lay(live::BUILTIN);
+                // (The folder rewritten as the window turns to Zeron's own.)
+                write(&w.root.join("x"), "app.luau", ITS_APP);
+                ok
+            } else {
+                w.lay_from("x", Some(copy.clone()))
+            };
+            w.app.host.reload_if_changed();
+            std::future::ready(ok)
+        };
+        assert_eq!(now_or_block(switch.finish(true, true, true, &w.app.host, KEEP, lay)), Finished::Settled);
+        w.app.frames(6);
+        assert_eq!(w.live_app(), KEPTS_APP, "the copy, not the rewrite");
+        assert_eq!((current(), w.answered.get()), (None, 0), "nothing of the rewrite answered");
+        // And no copy, no lay-down of a template.
+        assert!(!w.lay_from("x", None));
         set(None);
     }
 
@@ -1593,6 +1650,17 @@ return ui.column { ui.text { "moves at load" } }"#;
         }
         // One copy at a time: the earlier ones go.
         assert_eq!(std::fs::read_dir(root.join(live::SNAPSHOTS)).unwrap().count(), 1);
+
+        // A dot folder (`.git`) isn't copied, and such a copy isn't plain.
+        write(&root.join("g"), "zeron-template.json", r#"{"id":"g","name":"g"}"#);
+        write(&root.join("g"), ".git/HEAD", "ref: refs/heads/main");
+        let (copy, plain) = live::snapshot(&root, "g").unwrap();
+        assert!(!plain && !copy.join(".git").exists() && copy.join("zeron-template.json").is_file());
+
+        // A copy gone before it's laid (another Zeron on this data folder):
+        // nothing laid, never Zeron's own taken for the template's.
+        std::fs::remove_dir_all(&copy).unwrap();
+        assert!(live::compose_from(&root, "g", &copy, &std::collections::BTreeSet::new(), false).is_err());
     }
 
     fn files_under(dir: &Path) -> Vec<PathBuf> {

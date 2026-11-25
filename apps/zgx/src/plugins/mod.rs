@@ -803,24 +803,33 @@ pub(crate) async fn lay_down(
     then: live::Laid,
     judged: Option<live::Judged>,
     laid: &RefCell<live::Laid>,
+    trust: &RefCell<Option<live::Judged>>,
     overlay: &RefCell<live::Overlay>,
 ) -> Result<usize, String> {
+    // (A template is laid from the copy it was judged by, never its folder.)
+    let source = match source {
+        Some(source) => source,
+        None if id == live::BUILTIN || whole => root.join(&id),
+        None => return Err("no copy to lay from".into()),
+    };
     *laid.borrow_mut() = live::Laid::default();
-    live::Judged::forget(root);
+    *trust.borrow_mut() = None;
+    let record = preview::judged_record();
+    if let Some(at) = &record {
+        live::Judged::forget(at);
+    }
     let at = root.to_path_buf();
-    let laying = off_thread(move || {
-        let source = source.unwrap_or_else(|| at.join(&id));
-        live::compose_from(&at, &id, &source, &failed, whole).map_err(|e| e.to_string())
-    });
+    let laying = off_thread(move || live::compose_from(&at, &id, &source, &failed, whole).map_err(|e| e.to_string()));
     match laying.await {
         Some(Ok((changed, laid_now))) => {
             *overlay.borrow_mut() = laid_now;
             *laid.borrow_mut() = then;
-            // (How what's laid now was judged, for a launch that runs it as
-            // it is.)
-            if let Some(judged) = judged {
-                let _ = judged.write(root);
+            // (How what's laid now was judged, with it; and kept, for a launch
+            // that runs it as it is.)
+            if let (Some(judged), Some(at)) = (&judged, &record) {
+                let _ = judged.write(at, root);
             }
+            *trust.borrow_mut() = judged;
             Ok(changed)
         }
         Some(Err(error)) => Err(error),
@@ -838,7 +847,7 @@ pub fn prepare_live() -> PathBuf {
     // The per-screen templates' copies (Oct 31, development only), and a
     // look's copy a crash left (`live::snapshot`): gone.
     let _ = std::fs::remove_dir_all(root.join(".loaded"));
-    let _ = std::fs::remove_dir_all(root.join(live::SNAPSHOTS));
+    live::clear_snapshots(&root);
     // Safe mode (preview.rs): as Zeron last closed, ⌥ held now, or a
     // template that crashed the last two launches. `--zeron-template` is
     // the same, asked on the command line.
@@ -867,7 +876,8 @@ pub fn prepare_live() -> PathBuf {
     // it runs as it is (live::LaunchStamp), nothing read or written, judged
     // as it was laid. With no record of that, it's laid again.
     let stamp = live::LaunchStamp::now(&ui, &root, &id);
-    let recorded = live::Judged::read(&root).filter(|j| j.id == id);
+    let record = preview::judged_record();
+    let recorded = record.as_ref().and_then(|at| live::Judged::read(at, &root)).filter(|j| j.id == id);
     if stamp.still_laid(&ui, &root) && (id == live::BUILTIN || recorded.is_some()) {
         gate(recorded.as_ref());
         LIVE_JUDGED.with(|j| *j.borrow_mut() = recorded);
@@ -882,7 +892,10 @@ pub fn prepare_live() -> PathBuf {
         return fallback;
     }
     zgx::profile::mark("Zeron's own interface copied");
-    // The template copied once, judged, and laid from that copy.
+    // The template copied once, judged, and laid from that copy. (Its stamp
+    // as it was before the copy, for the next launch: an edit after it is
+    // laid then.)
+    let template_before = live::LaunchStamp::now(&ui, &root, &id).template;
     let copy = if id == live::BUILTIN {
         None
     } else {
@@ -903,12 +916,14 @@ pub fn prepare_live() -> PathBuf {
         None => Some(live::Judged { id: id.clone(), ..Default::default() }),
     };
     gate(judged.as_ref());
-    live::Judged::forget(&root);
+    if let Some(at) = &record {
+        live::Judged::forget(at);
+    }
     let source = copy.map_or_else(|| root.join(&id), |(at, _)| at);
     match live::compose_from(&root, &id, &source, &Default::default(), false) {
         Ok((_, overlay)) => {
-            if let Some(judged) = &judged {
-                let _ = judged.write(&root);
+            if let (Some(judged), Some(at)) = (&judged, &record) {
+                let _ = judged.write(at, &root);
             }
             LIVE_JUDGED.with(|j| *j.borrow_mut() = judged);
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
@@ -917,7 +932,8 @@ pub fn prepare_live() -> PathBuf {
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
             // What the next launch can run as it is: `.live` as this left it.
-            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            let mut laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            laid_now.template = template_before;
             if let Err(error) = laid_now.write(&root) {
                 eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
             }
@@ -1770,28 +1786,37 @@ impl Bridge {
         // off this thread), that copy judged, and laid from (here and in the
         // switch's own lay-downs): no edit comes between. Else what was laid
         // is judged again against what you kept now.
-        let copy = if id != live::BUILTIN && compose {
+        // (Also when there's nothing new to lay but a switch from a preview
+        // to one with an app of its own lays it again: from a copy, judged.)
+        // (What runs now, read once for this look: the switch's own.)
+        let was_previewing = preview::current();
+        let lays_again = was_previewing.is_some() && {
+            let o = self.overlay.borrow();
+            o.template == id && o.from_template.iter().any(|rel| zeron_plugin_guard::path::fold(rel) == "app.luau")
+        };
+        let copy = if id != live::BUILTIN && (compose || lays_again) {
             let (at, of) = (root.to_path_buf(), id.clone());
             off_thread(move || live::snapshot(&at, &of).ok()).await.flatten()
         } else {
             None
         };
-        if let Some((at, plain)) = &copy {
-            let (at, plain, of) = (at.clone(), *plain, id.clone());
-            let judged = off_thread(move || preview::judged(&of, &at, plain)).await;
-            *self.trust.borrow_mut() = judged.map(|(official, digest)| live::Judged { id: id.clone(), official, digest });
-        } else if id != live::BUILTIN && compose {
-            // (No copy: nothing laid, nothing judged.)
-            *self.trust.borrow_mut() = None;
-        }
-        let judged = self.trust.borrow().clone().filter(|j| j.id == id);
+        // A copy is laid (here, and in the switch's own lay-downs).
+        let compose = compose || copy.is_some();
+        let judged = match &copy {
+            Some((at, plain)) => {
+                let (at, plain, of) = (at.clone(), *plain, id.clone());
+                off_thread(move || preview::judged(&of, &at, plain)).await.map(|(official, digest)| live::Judged { id: id.clone(), official, digest })
+            }
+            // (Nothing to lay: what was laid, judged then.)
+            None if !compose => self.trust.borrow().clone().filter(|j| j.id == id),
+            None => None,
+        };
         let trusted = id == live::BUILTIN || judged.as_ref().is_some_and(|j| j.official || preview::kept(&j.id, &j.digest));
         let was = self.laid.borrow().id.clone();
         let name = template_name(root, &id);
         // What a preview saved is kept with it, or goes with it; what failed
         // only because it was one is tried again (`Bridge::blame_as`).
         // (Kept or let go as what comes next loads: `Switch::finish`.)
-        let was_previewing = preview::current();
         let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
         let dropped = !kept && was_previewing.as_ref().is_some_and(|p| trusted || p.id != id);
         let held_state = move |host: &ScriptHost| {
@@ -1827,7 +1852,7 @@ impl Bridge {
         let laid_judged = if id == live::BUILTIN { Some(live::Judged { id: id.clone(), ..Default::default() }) } else { judged.clone() };
         if compose && (id == live::BUILTIN || source.is_some()) {
             let (id, failed, whole) = (want.id.clone(), want.failed.clone(), want.whole_failed);
-            match lay_down(root, id, source.clone(), failed, whole, want, laid_judged.clone(), &self.laid, &self.overlay).await {
+            match lay_down(root, id, source.clone(), failed, whole, want, laid_judged.clone(), &self.laid, &self.trust, &self.overlay).await {
                 Ok(n) => changed = n,
                 Err(error) => {
                     was_laid = false;
@@ -1880,7 +1905,7 @@ impl Bridge {
         } else {
             (live::Laid::default(), None, Some(live::Judged { id: live::BUILTIN.into(), ..Default::default() }))
         };
-        match lay_down(&root, id, source, failed, whole, then, judged, &self.laid, &self.overlay).await {
+        match lay_down(&root, id, source, failed, whole, then, judged, &self.laid, &self.trust, &self.overlay).await {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
