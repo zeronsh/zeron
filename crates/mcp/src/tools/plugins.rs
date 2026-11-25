@@ -36,6 +36,28 @@ pub(super) const SEARCH_PLUGINS: &str = "search_plugins";
 pub(super) const GET_STORE_PLUGIN: &str = "get_store_plugin";
 pub(super) const CHECK_PLUGIN: &str = "check_plugin";
 
+/// Every plugin and template tool.
+pub(super) const NAMES: [&str; 18] = [
+    CREATE_PLUGIN,
+    LIST_PLUGINS,
+    LIST_TEMPLATES,
+    CREATE_TEMPLATE,
+    USE_TEMPLATE,
+    TEMPLATE_STATUS,
+    DELETE_TEMPLATE,
+    DESCRIBE_APP,
+    EXPORT_TEMPLATE,
+    IMPORT_TEMPLATE,
+    DESCRIBE_ELEMENTS,
+    PLUGIN_STATUS,
+    INSTALL_PLUGIN,
+    UPDATE_PLUGIN,
+    EXPORT_PLUGIN,
+    SEARCH_PLUGINS,
+    GET_STORE_PLUGIN,
+    CHECK_PLUGIN,
+];
+
 /// How long a listing waits for the engine's plugin tools before it goes
 /// out with the static tools only.
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
