@@ -852,6 +852,14 @@ function M.setup()
 			},
 		}
 	end)
+	-- Then the active template's (ds/tokens_template, its ds/tokens.luau laid
+	-- beside this): a token it names wins, and any it doesn't stays Zeron's.
+	-- (Not when this is that one: a template's copy of this file, laid there,
+	-- would run itself again.)
+	local template = require("@self/tokens_template")
+	if template ~= M then
+		template.setup()
+	end
 end
 
 return M

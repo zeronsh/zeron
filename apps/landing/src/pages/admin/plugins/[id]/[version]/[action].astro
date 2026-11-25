@@ -10,7 +10,7 @@ import Icon from "../../../../../components/look/Icon.astro";
 import Store from "../../../../../layouts/Store.astro";
 import "../../../../../styles/look/account.css";
 import "../../../../../styles/look/staff.css";
-import { isVersionAction, toWeigh, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
+import { isVersionAction, restoredSaid, toWeigh, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { kindOf, kindOfItem } from "../../../../../lib/store/kind.ts";
@@ -45,7 +45,7 @@ if (Astro.request.method === "POST") {
   const result = await Astro.locals.edge.admin(request.path, request.body, session.csrf);
   // (Every decision changes what the public sees: verified, or the version gone, or which one is the newest verified.)
   if (result.ok) await purge(Astro, id);
-  return done(Astro, flashFor(result, VERSION_FLASH[action]), back);
+  return done(Astro, result.ok && action === "restore" ? restoredSaid(version, result.data) : flashFor(result, VERSION_FLASH[action]), back);
 }
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 privatePage(Astro);
