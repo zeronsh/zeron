@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pictures } from "./pictures.mjs";
+import { quiet, secretsOf } from "./quiet.mjs";
 import { TEMPLATES, ZERON } from "./templates.mjs";
 import { whyNotItsSession, whyNotSeeded } from "./where.mjs";
 
@@ -75,6 +76,18 @@ let edge;
       ["https://edge.zeron.sh.example.com", "https://notzeron.sh", "https://x-staging.any.workers.dev"].every((e) => !refused(e, e)));
   const jwt = (iss) => `x.${Buffer.from(JSON.stringify({ iss })).toString("base64url")}.y`;
   check("and a Zeron signed in to another WorkOS", whyNotItsSession(jwt("https://w/client_a"), "client_a") === undefined && [whyNotItsSession(jwt("https://w/client_ab"), "client_a"), whyNotItsSession(jwt("https://w/client_a"), undefined), whyNotItsSession("", "client_a")].every((w) => typeof w === "string"));
+}
+
+// What's printed.
+{
+  const login = { username: "ann-author", email: "ann@mail.example.net", user_id: "user_01ANN", password: 'p"a/ss word+1' };
+  const raw = [`fill(${JSON.stringify(login.password)})`, login.password, encodeURIComponent(login.password), "Signed in as ann@mail.example.net (@ann-author, ann-author)", "user_01ANN", `zdt_${"a".repeat(49)}`, "eyJhbGciOi.eyJzdWIi.c2ln", "someone.else@mail.example.org", "by @other-name"].join("\n");
+  const out = quiet(raw, secretsOf(login));
+  check("nothing printed names an account or shows a secret", !/p.?"?a\/ss|word|ann|user_01|zdt_a|eyJ|someone|other-name|mail\.example/i.test(out) && quiet("publishing focus-timer 1.0.0 (exit 3): bad_listing") === "publishing focus-timer 1.0.0 (exit 3): bad_listing", out);
+  const bad = join(work, "logins.json");
+  writeFileSync(bad, '[{"username":"ann-author","password":"p4ss');
+  const ran = await run(process.execPath, [join(here, "sessions.mjs"), "up", "--zeron", zeron, "--edge", "http://127.0.0.1:9", "--client-id", "client_x", "--logins", bad, "--dir", join(work, "none"), "--playwright", playwright], { env: { ...process.env, SEED_ALLOWED_EDGES: "http://127.0.0.1:9" } });
+  check("a broken logins file isn't quoted", ran.code === 2 && !/ann|p4ss/.test(ran.out + ran.err), (ran.err || ran.out).trim().split("\n")[0]);
 }
 
 try {
@@ -190,6 +203,11 @@ try {
     const script = join(copy, "scripts/staging-seed/seed-templates.mjs");
     mkdirSync(join(copy, "edge"), { recursive: true });
     writeFileSync(join(copy, "edge/wrangler.jsonc"), `// its config\n${JSON.stringify({ vars: { WORKOS_CLIENT_ID: edge.clientId } })}`);
+    // (A hand-made file as a person could write it: production's WorkOS, a
+    // Zeron of production's, no edge, and --edge one that's allowed.)
+    const { edge: _none, ...handMade } = right;
+    const byHand = await refused(script, handMade);
+    check("a hand-made file for production's Zeron is refused", byHand.startsWith("seed"), byHand);
     const named = await refused(script, right);
     check("production's WorkOS is refused, though the accounts file names it", named.includes("production's"), named);
     const signedIn = await refused(script, { ...right, workos_client_id: "client_other" }, []);
@@ -200,7 +218,7 @@ try {
     const { edge: _edge, ...edgeless } = right;
     const none = await refused(join(here, "seed-templates.mjs"), edgeless);
     const other = await refused(join(here, "seed-templates.mjs"), { ...right, edge: "https://other.example.com" });
-    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("isn't --edge"), `${none} / ${other}`);
+    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("SEED_ALLOWED_EDGES"), `${none} / ${other}`);
   }
   // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
   // before it publishes anything.

@@ -34,6 +34,7 @@ import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { join, resolve } from "node:path";
 import { PLUGINS } from "./catalog.mjs";
 import { TEMPLATES } from "./templates.mjs";
+import { quiet, secretsOf } from "./quiet.mjs";
 import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 
@@ -95,8 +96,23 @@ if (refusedWorkos) {
   console.error(`sessions: ${refusedWorkos}`);
   process.exit(2);
 }
-const logins = JSON.parse(readFileSync(need("--logins"), "utf8"));
-if (!Array.isArray(logins)) throw new Error("sessions: the logins file is a list of accounts");
+const loginsFile = need("--logins");
+/** The logins file's accounts (a JSON error would quote the file). */
+const readLogins = () => {
+  try {
+    const list = JSON.parse(readFileSync(loginsFile, "utf8"));
+    return Array.isArray(list) ? list : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const logins = readLogins();
+if (!logins) {
+  console.error("sessions: the logins file isn't a JSON list of accounts");
+  process.exit(2);
+}
+/** `text` as it may be printed: no account named, no secret shown. */
+const said = (text) => quiet(text, logins.flatMap(secretsOf));
 for (const slot of only) {
   const l = logins[slot - 1] ?? {};
   for (const key of ["username", "email", "user_id", "password"]) if (typeof l[key] !== "string" || !l[key]) throw new Error(`sessions: account ${slot} of the logins file has no ${key}`);
@@ -239,7 +255,7 @@ try {
         child.stderr.on("data", (x) => (err += x));
         child.on("close", (code) => res({ code, err }));
       });
-      if (status.code !== 0) throw new Error(`author ${slot}: \`zeron plugin status\` says ${status.err.trim().split("\n").pop()}`);
+      if (status.code !== 0) throw new Error(`author ${slot}: \`zeron plugin status\` exits ${status.code}`);
       console.log(`author ${slot}: signed in, in a workspace, signing key ${key?.registered ? "registered" : "NOT registered"}, engine on ${ipcPort(slot)}`);
       accounts.push({ slot, home: d.env.HOME, data_dir: d.env.ZERON_DATA_DIR, ipc_port: ipcPort(slot), token_env: `SEED_TOKEN_${slot}` });
     } else {
@@ -284,6 +300,11 @@ try {
     writeFileSync(join(dir, name), `${JSON.stringify({ edge, workos_client_id: clientId, zeron, authors: accounts }, null, 2)}\n`);
     console.log(`accounts for the seed: ${join(dir, name)}`);
   }
+} catch (error) {
+  // (The browser's errors quote what it typed, and the engine's and the CLI's
+  // may name an account: none of it is printed as it came.)
+  console.error(`sessions: ${said(error.message)}`);
+  process.exitCode = 1;
 } finally {
   await browser.close();
 }
