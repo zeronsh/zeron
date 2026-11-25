@@ -385,30 +385,6 @@ pub struct Judged {
     pub id: String,
     pub official: bool,
     pub digest: String,
-    /// The template's files as they were laid in `.live` (`laid_digest`): a
-    /// launch that runs `.live` as it is runs it only while they still are.
-    pub laid: String,
-}
-
-/// The template's files as `.live` holds them (`overlay`'s), path and bytes:
-/// what a launch finds there against what was laid (`Judged::laid`). One gone
-/// or unreadable counts as such.
-pub fn laid_digest(templates: &Path, overlay: &Overlay) -> String {
-    use sha2::{Digest, Sha256};
-    let live = templates.join(LIVE);
-    let mut h = Sha256::new();
-    for rel in &overlay.from_template {
-        h.update((rel.len() as u64).to_le_bytes());
-        h.update(rel.as_bytes());
-        match std::fs::read(live.join(rel)) {
-            Ok(bytes) => {
-                h.update((bytes.len() as u64).to_le_bytes());
-                h.update(&bytes);
-            }
-            Err(_) => h.update(u64::MAX.to_le_bytes()),
-        }
-    }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl Judged {
@@ -417,16 +393,11 @@ impl Judged {
     pub fn read(at: &Path, templates: &Path) -> Option<Self> {
         let v = read_json(at);
         (v["templates"].as_str()? == templates.to_string_lossy()).then_some(())?;
-        Some(Self {
-            id: v["id"].as_str()?.to_string(),
-            official: v["official"].as_bool()?,
-            digest: v["digest"].as_str()?.to_string(),
-            laid: v["laid"].as_str()?.to_string(),
-        })
+        Some(Self { id: v["id"].as_str()?.to_string(), official: v["official"].as_bool()?, digest: v["digest"].as_str()?.to_string() })
     }
 
     pub fn write(&self, at: &Path, templates: &Path) -> std::io::Result<bool> {
-        let v = serde_json::json!({ "templates": templates.to_string_lossy(), "id": self.id, "official": self.official, "digest": self.digest, "laid": self.laid });
+        let v = serde_json::json!({ "templates": templates.to_string_lossy(), "id": self.id, "official": self.official, "digest": self.digest });
         if let Some(dir) = at.parent() {
             std::fs::create_dir_all(dir)?;
         }

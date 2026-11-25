@@ -1556,37 +1556,14 @@ return ui.column { ui.text { "kept" } }"#;
     #[test]
     fn a_preview_left_as_it_is_isn_t_copied_again() {
         let overlay = live::Overlay { template: "x".into(), from_template: ["app.luau".to_string()].into() };
-        let unapproved = live::Judged { id: "x".into(), official: false, digest: "not kept".into(), ..Default::default() };
-        let official = live::Judged { id: "x".into(), official: true, digest: String::new(), ..Default::default() };
+        let unapproved = live::Judged { id: "x".into(), official: false, digest: "not kept".into() };
+        let official = live::Judged { id: "x".into(), official: true, digest: String::new() };
         assert!(!super::super::lays_again(true, &overlay, Some(&unapproved), "x"), "nothing changed: nothing laid");
         assert!(!super::super::lays_again(true, &overlay, None, "x"));
         assert!(super::super::lays_again(true, &overlay, Some(&official), "x"), "approved: laid again");
         assert!(!super::super::lays_again(false, &overlay, Some(&official), "x"), "no preview standing");
         let zerons_app = live::Overlay { template: "x".into(), from_template: ["screens/a.luau".to_string()].into() };
         assert!(!super::super::lays_again(true, &zerons_app, Some(&official), "x"), "Zeron's app: one lay-down");
-    }
-
-    /// A launch runs `.live` as it is only while the template's files there
-    /// are as they were laid: one written in `.live` since (between launches,
-    /// by anyone) differs from the record, so it's all laid again; laid again,
-    /// it's as recorded. The record holds it, beside the approvals.
-    #[test]
-    fn a_file_written_in_live_since_it_was_laid_is_laid_again() {
-        let w = Laying::new("as-laid");
-        w.template("x", false);
-        assert!(w.lay("x"));
-        let overlay = w.overlay.borrow().clone();
-        let laid = live::laid_digest(&w.root, &overlay);
-        let record = dir("as-laid-record").join("laid-judged.json");
-        live::Judged { id: "x".into(), official: false, digest: "d".into(), laid: laid.clone() }.write(&record, &w.root).unwrap();
-        assert_eq!(live::Judged::read(&record, &w.root).map(|j| j.laid), Some(laid.clone()), "kept with the record");
-        assert_eq!(live::Judged::read(&record, &dir("elsewhere")), None, "of these templates only");
-
-        // Written in `.live` since: not as laid.
-        write(&w.root.join(live::LIVE), "app.luau", "-- written in .live since");
-        assert_ne!(live::laid_digest(&w.root, &overlay), laid, "so the launch lays it again");
-        assert!(w.lay("x"));
-        assert_eq!(live::laid_digest(&w.root, &overlay), laid, "laid again: as recorded");
     }
 
     /// `now`, for a finish whose lay closure is already ready.
