@@ -269,7 +269,9 @@ pub struct Bridge {
     /// What the engine last said of the templates (`ListTemplates`), and
     /// whether it's being asked.
     templates_said: RefCell<Json>,
-    asking_templates: Cell<bool>,
+    template_asks: RefCell<store_rows::Asks>,
+    /// The templates here as last published, for it.
+    templates_here: RefCell<Json>,
     /// Plugins that failed, kept out until they change.
     failed_plugins: RefCell<recovery::Failures>,
     ui: zgx::widgets::WeakUi,
@@ -640,7 +642,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         broken: RefCell::default(),
         fallbacks: RefCell::default(),
         templates_said: RefCell::default(),
-        asking_templates: Cell::new(false),
+        template_asks: RefCell::default(),
+        templates_here: RefCell::default(),
         templates_page: host.shared("templates", Value::record([("state", Value::from("loading"))])),
         failed_plugins: RefCell::default(),
         ui: cx.ui.downgrade(),
@@ -1968,6 +1971,8 @@ impl Bridge {
         let active = self.overlay.borrow().template.clone();
         let mut list = Vec::new();
         let mut from_store = false;
+        // What the engine's answer is of: moved, it's asked again.
+        let mut here = vec![json!([active, self.laid.borrow().template_stamp])];
         let mut status = serde_json::Map::new();
         let installed = live::installed(&root);
         // Each template's own theme (its theme.luau, as data), for the Themes
@@ -1987,6 +1992,7 @@ impl Bridge {
                 .collect();
             let blocked = blocks::blocked(&root, &t.id);
             from_store |= root.join(&t.id).join(".lineage.json").exists();
+            here.push(json!([t.id, t.imported, blocked.as_ref().map(blocks::row)]));
             let (state, error) = if blocked.is_some() {
                 ("blocked", None)
             } else if let Some(why) = &broken {
@@ -2058,6 +2064,7 @@ impl Bridge {
         // or one brought in here). `here`: its window opened as it came, so
         // the app gives it no notice as well (screens/plugins/waiting).
         let mut pending = live::pending(&root);
+        here.push(json!(pending));
         for p in &mut pending {
             let name = p["pending"].as_str().unwrap_or("").to_string();
             p["here"] = json!(self.told.borrow().contains(&format!("template:{name}")));
@@ -2072,23 +2079,26 @@ impl Bridge {
             ("list", vlist(list)),
             ("pending", vlist(pending.iter().map(json_value).collect())),
         ]));
+        *self.templates_here.borrow_mut() = Json::Array(here);
         if from_store {
             self.ask_templates();
         }
     }
 
-    /// What the engine says of the templates from the store, asked again; the
-    /// page brought up to date if it's anything new.
+    /// What the engine says of the templates from the store, asked again if
+    /// what's here moved since it answered (`store_rows::Asks`); the page
+    /// brought up to date if it's anything new.
     fn ask_templates(&self) {
-        if cfg!(test) || self.asking_templates.replace(true) {
+        if cfg!(test) || !self.template_asks.borrow_mut().due(&self.templates_here.borrow(), Instant::now()) {
             return;
         }
         let me = Rc::downgrade(&self.me());
         self.tasks.spawn(async move {
             let said = template_call("ListTemplates", json!({})).await;
             let Some(b) = me.upgrade() else { return };
-            // (Not answered: what it last said stays; asked at the next look.
-            // The page it makes isn't asked about again: once a look.)
+            // (Not answered: what it last said stays, and it's asked again at a
+            // look in a while.)
+            let answered = said.is_ok();
             if let Ok(said) = said {
                 // (One the engine says is taken down, at once: blocks.rs.)
                 if let Some(root) = b.templates_dir()
@@ -2102,7 +2112,9 @@ impl Bridge {
                     b.publish_templates();
                 }
             }
-            b.asking_templates.set(false);
+            if b.template_asks.borrow_mut().done(answered, Instant::now()) {
+                b.ask_templates();
+            }
         });
     }
 
@@ -3976,7 +3988,9 @@ impl Bridge {
             let me = me.clone();
             move |_| {
                 if let Some(b) = me.upgrade() {
-                    b.ask_templates();
+                    b.template_asks.borrow_mut().want();
+                    // (Asked only with something of the store's here.)
+                    b.publish_templates();
                 }
             }
         });
@@ -3987,6 +4001,7 @@ impl Bridge {
                 async move {
                     let reply = template_call("CheckTemplateUpdates", json!({})).await?;
                     if let Some(b) = me.upgrade() {
+                        b.template_asks.borrow_mut().want();
                         b.look();
                     }
                     Ok(json_value(&reply))

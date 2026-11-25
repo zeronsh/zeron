@@ -5,7 +5,56 @@
 //! here, and the update found for it. The engine hashes the files each time
 //! it's asked; nothing of that is worked out, or kept, here.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value as Json, json};
+
+/// How long one that wasn't answered is left before it's asked again.
+const AGAIN: Duration = Duration::from_secs(30);
+
+/// When the engine is asked of the templates (`ListTemplates`, which reads
+/// their files): as what's here moves (`of`, the folders' records and what
+/// waits), or when it's plainly wanted (the page opens, updates looked for);
+/// never again for the same. A look is every two seconds where there's
+/// nothing to watch with.
+#[derive(Default)]
+pub struct Asks {
+    /// What the last answer was of.
+    answered: Option<Json>,
+    /// What's on its way, and whether it's wanted again by now.
+    asking: Option<Json>,
+    again: bool,
+    failed: Option<Instant>,
+}
+
+impl Asks {
+    /// Whether to ask now, of what's here (`of`).
+    pub fn due(&mut self, of: &Json, now: Instant) -> bool {
+        if let Some(asking) = &self.asking {
+            self.again |= asking != of;
+            return false;
+        }
+        if self.answered.as_ref() == Some(of) || self.failed.is_some_and(|at| now.duration_since(at) < AGAIN) {
+            return false;
+        }
+        self.asking = Some(of.clone());
+        true
+    }
+
+    /// Wanted, whatever was answered.
+    pub fn want(&mut self) {
+        (self.answered, self.failed, self.again) = (None, None, self.asking.is_some());
+    }
+
+    /// The answer came, or didn't: whether it's wanted again at once.
+    pub fn done(&mut self, answered: bool, now: Instant) -> bool {
+        let asked = self.asking.take();
+        let again = std::mem::take(&mut self.again);
+        self.failed = (!answered).then_some(now);
+        self.answered = if answered && !again { asked } else { None };
+        answered && again
+    }
+}
 
 /// Of `source`, what the page may have of where a template came from: never a
 /// local path; from the store, its id there and who published it, and the
@@ -99,6 +148,37 @@ mod tests {
         assert!(row(&said, "midnight-2", &json!({})).is_none());
         assert!(row(&said, "gone", &imported).is_none());
         assert!(row(&Json::Null, "midnight-2", &imported).is_none());
+    }
+
+    #[test]
+    fn the_engine_is_asked_as_what_s_here_moves_and_never_for_the_same() {
+        let (mut asks, t) = (Asks::default(), Instant::now());
+        let (one, two) = (json!(["one"]), json!(["two"]));
+        assert!(asks.due(&one, t));
+        assert!(!asks.due(&one, t), "on its way");
+        assert!(!asks.done(true, t));
+        for s in 0..100 {
+            assert!(!asks.due(&one, t + Duration::from_secs(2 * s)), "a look a moment, nothing moved");
+        }
+        assert!(asks.due(&two, t), "moved");
+        // Moved again while it was on its way: asked once more.
+        assert!(!asks.due(&one, t));
+        assert!(asks.done(true, t));
+        assert!(asks.due(&one, t));
+        assert!(!asks.done(true, t));
+        // The page opens, or updates were looked for.
+        asks.want();
+        assert!(asks.due(&one, t));
+        asks.want();
+        assert!(asks.done(true, t), "wanted as one was on its way");
+        assert!(asks.due(&one, t) && !asks.done(true, t));
+        // Not answered: again, not at once.
+        assert!(asks.due(&two, t) && !asks.done(false, t));
+        assert!(!asks.due(&two, t + Duration::from_secs(2)));
+        assert!(asks.due(&two, t + AGAIN));
+        asks.done(false, t);
+        asks.want();
+        assert!(asks.due(&two, t), "wanted: at once");
     }
 
     #[test]
