@@ -1960,6 +1960,40 @@ mod tests {
         }
     }
 
+    /// Where a template's tokens are laid beside Zeron's is no template's to
+    /// fill: refused at publish, never exported, and left out of an import, of
+    /// a store's install and of what's put in its folder, each named.
+    #[test]
+    fn plugins_template_packages_no_one_brings_where_tokens_are_laid() {
+        let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "", "version": "1.0.0", "zeron_version": "0.3.16" });
+        let rels = ["DS/Tokens_Template.luau", "ds/tokens_template.luau", "ds/tokens_template/deep/a.luau", "ds/tokens_template/init.luau"];
+        let mut files = BTreeMap::from([("app.luau".to_owned(), b"return 1".to_vec()), ("ds/tokens.luau".to_owned(), b"return {}".to_vec())]);
+        files.extend(rels.map(|rel| (rel.to_owned(), b"planted".to_vec())));
+        // At publish, each by name.
+        let (problems, _) = listing::check_template(&manifest, &files);
+        let refused: Vec<&str> = problems.iter().filter(|p| p.rule == listing::rule::PROTECTED_FILE).filter_map(|p| p.path.as_deref()).collect();
+        assert_eq!(refused, rels);
+        // As a file's or a link's, signed; and as the store's, its record's too.
+        let d = dir("tokens-laid");
+        for (signer, from_store) in [(Some(key()), false), (Some(key()), true), (None, true)] {
+            let raw = pack(&manifest, &files, signer.as_ref()).unwrap();
+            let package = if from_store { parse_from_store(raw.clone(), signer.is_some()) } else { parse(raw.clone()) }.unwrap();
+            assert_eq!((package.ignored.iter().map(String::as_str).collect::<Vec<_>>(), package.files.keys().map(String::as_str).collect::<Vec<_>>()), (rels.to_vec(), vec!["app.luau", "ds/tokens.luau"]));
+            let id = install(&d, &package, &Author::You, None).unwrap();
+            let t = d.join(&id);
+            assert!(t.join("ds/tokens.luau").is_file());
+            assert!(rels.iter().all(|rel| !t.join(rel).exists()), "{id}");
+            // Put there by hand, it's never sent, and said.
+            for rel in &rels[1..] {
+                write(&t.join(rel), "planted");
+            }
+            let (_, sent) = contents(&t, &id).unwrap();
+            assert!(sent.keys().all(|rel| !rel.contains("tokens_template")), "{sent:?}");
+            let left = left_out(&t, &sent);
+            assert!(rels[1..].iter().all(|rel| left.files.iter().any(|(left, _)| left == rel)), "{:?}", left.files);
+        }
+    }
+
     /// A template is for the Zeron it was made from and later.
     #[test]
     fn plugins_template_packages_compatible_from_their_zeron_version() {
