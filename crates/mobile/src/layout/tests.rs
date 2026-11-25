@@ -267,6 +267,56 @@ fn work_handed_over_shows_a_line_per_chat() {
     assert_eq!(frame.display(1).unwrap().text, "Couldn't delegate to \u{2060} Draft the notes");
 }
 
+#[test]
+fn work_handed_over_says_how_each_chat_stands() {
+    let dir = std::env::temp_dir().join(format!("zeron-layout-demo-{}", std::process::id()));
+    let mut config = zeron_client::ClientConfig::new("https://edge.invalid", &dir);
+    config.device_id = "layout-test".into();
+    let client = zeron_client::Client::new(
+        config,
+        zeron_client::Credentials::Demo(Default::default()),
+        Arc::new(zeron_client::events::NullListener),
+    )
+    .unwrap();
+    let mut w = worker(390.0);
+    let call = zeron_proto::ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "create_chats".into(),
+        input: Some(serde_json::json!({ "requests": [
+            { "title": "Audit the parser", "harness": "codex" },
+            { "title": "Draft the release notes" },
+            { "title": "Time the benchmark" },
+        ] })),
+    };
+    let mut parts = Vec::new();
+    zeron_doc::fold_event_into_parts(&mut parts, &zeron_proto::AgentEvent::ToolCall { id: "k".into(), call });
+    let MessagePart::Tool { resolved, chats, .. } = &mut parts[0] else { panic!("{parts:?}") };
+    *resolved = true;
+    *chats = vec!["chat-release-audit".into(), "chat-release-notes".into(), "chat-release-bench".into()];
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        workspace: Some(client.workspace()),
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 3);
+    assert_eq!(frame.display(0).unwrap().text, "Delegated to \u{2060} Audit the parser · Needs you");
+    assert_eq!(frame.display(1).unwrap().text, "Delegated to \u{2060} Draft the release notes · Working");
+    // Done says nothing.
+    assert_eq!(frame.display(2).unwrap().text, "Delegated to \u{2060} Time the benchmark");
+    drop(client);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }

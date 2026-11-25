@@ -350,6 +350,7 @@ impl RowBuilder {
                     });
                     for chat in chats {
                         recipient_chat(chat, workspace).hash(h);
+                        delegated_state(chat, workspace).hash(h);
                     }
                 }
                 for message in zeron_proto::agent_messages::outgoing_messages(call).into_iter().flatten() {
@@ -939,16 +940,36 @@ fn delegated_row_core(
         Some((title, harness, Some(_))) => (title, harness),
         _ => (called.unwrap_or_else(|| "a subagent".into()), one.harness.clone()),
     };
+    // How its chat stands, said where it's worth saying (the desktop's word
+    // after a delegated row's name): it's at work, it needs the person, or
+    // it failed. Done says nothing.
+    let note = opens.as_deref().and_then(|id| delegated_state(id, workspace));
+    let copy = match note {
+        Some((word, _)) => format!("{lead} {title} · {word}"),
+        None => format!("{lead} {title}"),
+    };
     RowCore {
         key: row_key(&format!("{entry_id}#{part}")),
         version: next_version(),
         kind: RowKind::Markdown,
         entry_id: Arc::from(entry_id),
         content: Content::Caption {
-            text: chat_caption(ctx, lead, &title, harness.as_deref(), opens.as_deref()),
+            text: chat_caption_with(ctx, lead, &title, harness.as_deref(), opens.as_deref(), note),
             pending,
         },
-        copy_text: format!("{lead} {title}"),
+        copy_text: copy,
+    }
+}
+
+/// A chat work was handed to, as it stands now: a word and its ink, or
+/// nothing once it's done (or isn't listed).
+fn delegated_state(chat: &str, workspace: Option<&WorkspaceSnapshot>) -> Option<(&'static str, ColorRole)> {
+    let row = workspace?.session(chat)?;
+    match row.indicator {
+        zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => Some(("Working", ColorRole::TextTertiary)),
+        zeron_proto::ChatIndicator::AwaitingInput => Some(("Needs you", ColorRole::Warning)),
+        zeron_proto::ChatIndicator::Errored => Some(("Failed", ColorRole::Danger)),
+        zeron_proto::ChatIndicator::Completed | zeron_proto::ChatIndicator::Idle => None,
     }
 }
 
@@ -998,6 +1019,18 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
 /// chats, the chat's provider mark (a chat glyph when unknown) beside its
 /// title, which opens chat `open`.
 fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, open: Option<&str>) -> PText {
+    chat_caption_with(ctx, lead, title, harness, open, None)
+}
+
+/// [`chat_caption`], then ` · {note}` in its own ink (how the chat stands).
+fn chat_caption_with(
+    ctx: &mut Ctx,
+    lead: &str,
+    title: &str,
+    harness: Option<&str>,
+    open: Option<&str>,
+    note: Option<(&str, ColorRole)>,
+) -> PText {
     let (size, lh) = TYPE.small;
     let regular = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
     let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
@@ -1005,15 +1038,28 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
     let mark = ctx.typo.px(14.0);
     // The mark rides a zero-width word joiner's padding, with a space on
     // either side, so it sits as far from the title as from the lead.
-    let text = format!("{lead} \u{2060} {title}");
+    let mut text = format!("{lead} \u{2060} {title}");
     let split = lead.len() + 1;
-    let spans = vec![
+    let named = text.len();
+    if let Some((word, _)) = note {
+        text.push_str(" · ");
+        text.push_str(word);
+    }
+    let mut spans = vec![
         zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
-        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
+        zeron_text::Span { range: split..named, style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
     ];
+    if note.is_some() {
+        spans.push(zeron_text::Span { range: named..text.len(), style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None });
+    }
     let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
     // One link (one tap target, one accessibility element): the chat.
-    let paint = |link| super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
+    let paint_in = |color, link| super::markdown::SpanPaint { color, decoration: super::display::Decoration::None, link, chip: false };
+    let paint = |link| paint_in(ColorRole::TextSecondary, link);
+    let mut paints = vec![paint(None), paint(open.map(|_| 0))];
+    if let Some((_, ink)) = note {
+        paints.push(paint_in(ink, None));
+    }
     let p = zeron_text::prepare(
         &ctx.typo.book,
         ctx.cache,
@@ -1025,7 +1071,7 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
         p,
         lh,
         base: super::style::baseline(lh, regular),
-        paints: vec![paint(None), paint(open.map(|_| 0))],
+        paints,
         links: open.map(|id| format!("{OPEN_CHAT_SCHEME}://open?id={id}")).into_iter().collect(),
         chip: (0.0, 0.0),
         badges: Vec::new(),

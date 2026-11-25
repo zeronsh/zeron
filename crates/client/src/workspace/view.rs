@@ -504,7 +504,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     // A delegated child isn't listed: what it asks the person shows on its
     // parent, unless that is at work (it answers what it can).
     let child_asks = rc.asking_under.contains(chat.id.as_str());
-    let indicator = match display_status(chat, session, cx.now) {
+    let own = display_status(chat, session, cx.now);
+    let indicator = match own {
         ChatIndicator::Waiting | ChatIndicator::Completed | ChatIndicator::Idle if child_asks => {
             ChatIndicator::AwaitingInput
         }
@@ -518,7 +519,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let waits_on_process = indicator == ChatIndicator::Waiting
         && zeron_proto::view::waiting(session, cx.now)
             .is_some_and(|w| w.on.iter().any(|on| on.kind == WaitingKind::Process));
-    let waiting = session.filter(|_| indicator == ChatIndicator::Waiting);
+    // (Still waiting while a child's ask shows over it.)
+    let waiting = session.filter(|_| own == ChatIndicator::Waiting);
     let waiting_on = waiting
         .and_then(|s| zeron_proto::view::waiting(Some(s), cx.now))
         .map(|w| w.on.iter().map(|on| waiting_line(on, chat, rc)).collect())

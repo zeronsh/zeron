@@ -63,6 +63,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ids(&ws.front.recent),
         [
             "chat-visuals",
+            "chat-release",
             "chat-cjk",
             "chat-home",
             "chat-deploy",
@@ -684,4 +685,51 @@ fn activity_sleep_wake_and_stop_waiting() {
     });
     let again = zeron_client::runtime::shared().block_on(client.stop_waiting("chat-ios-keyboard")).unwrap();
     assert!(!again, "nothing left to stop");
+}
+
+#[test]
+fn delegation_lists_its_children_as_subagents_and_answers_them_in_their_own_chats() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    // The parent waits on the two still at work, and wears its child's ask.
+    let parent = ws.session("chat-release").unwrap().clone();
+    assert!(parent.child_asks);
+    assert_eq!(parent.indicator, ChatIndicator::AwaitingInput);
+    assert_eq!(parent.waiting_on.len(), 2, "{:?}", parent.waiting_on);
+    assert!(parent.waiting_on[0].starts_with("Codex · "), "another device, named: {:?}", parent.waiting_on);
+    assert!(parent.waiting_on.iter().any(|w| w.ends_with("Draft the release notes")));
+    // Its children are delegated; the old side chats aren't.
+    let children = ws.children("chat-release");
+    assert_eq!(children.len(), 3);
+    assert!(children.iter().all(|c| c.delegated));
+    assert!(ws.children("chat-veil").iter().all(|c| !c.delegated));
+    // Never top-level.
+    assert!(!ws.front.recent.iter().any(|r| r.id.starts_with("chat-release-")));
+
+    // The parent's subagents: the three, oldest first, the asking one marked.
+    let session = client.open_session("chat-release").unwrap();
+    let subagents = session.subagents();
+    let listed: Vec<(&str, bool)> = subagents
+        .iter()
+        .filter_map(|s| match &s.origin {
+            zeron_client::SubagentOrigin::Delegated { chat_id, asks, .. } => Some((chat_id.as_str(), *asks)),
+            zeron_client::SubagentOrigin::Native => None,
+        })
+        .collect();
+    assert_eq!(listed, [("chat-release-audit", true), ("chat-release-notes", false), ("chat-release-bench", false)]);
+    assert!(matches!(&subagents[0].origin, zeron_client::SubagentOrigin::Delegated { device_name: Some(_), .. }));
+    assert_eq!(subagents[2].state, zeron_client::SubagentState::Done);
+
+    // The ask is the child's own: an approval, answered in its chat.
+    let child = client.open_session("chat-release-audit").unwrap();
+    wait_for("the child's ask", Duration::from_secs(10), || child.composer().open_input.is_some());
+    let input = child.composer().open_input.clone().unwrap();
+    assert!(zeron_proto::is_approval(&input.questions));
+    child
+        .respond_input(&input.request_id, vec![zeron_proto_answer(&input.questions[0].id, "Yes")])
+        .unwrap();
+    wait_for("answered", Duration::from_secs(10), || child.composer().open_input.is_none());
+
+    // Waiting, the parent can be stopped (which ends its subagents).
+    assert!(session.composer().live.can_interrupt);
 }
