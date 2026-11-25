@@ -339,6 +339,25 @@ describe("the catalog, from the edge's real listing", () => {
   });
 });
 
+describe("a version taken down, then restored", () => {
+  test("the flash says what the edge did: listed again; or, with a newer one there, no new installs", async () => {
+    // (Its own author: an account claims five new ids a week, and ada has.)
+    const ivy = await Publisher.signIn(edge.url, "user_ivy", "ivywren");
+    await ivy.publish("twice-told", "1.2.0");
+    await ivy.publish("twice-told", "1.3.0");
+    const page = "/admin/plugins/twice-told";
+    const csrf = await grace.token(page);
+    for (const [version, flash, message] of [
+      ["1.2.0", "version_replaced~1.2.0~1.3.0", "Restored, not verified. 1.3.0 is newer, so 1.2.0 takes no new installs."],
+      ["1.3.0", "version_restored", "Restored: listed again, not verified."],
+    ] as const) {
+      for (const action of ["take_down", "restore"]) expect((await grace.post(`${page}/${version}/${action}`, { csrf, reason: "A test." })).status, `${action} ${version}`).toBe(303);
+      expect(grace.cookies.get("__Host-zeron_flash")).toBe(flash);
+      expect((await grace.get(page)).body).toContain(message);
+    }
+  });
+});
+
 describe("what the site's pages ask of the catalog (ac4fc5d3f), from the edge", () => {
   test("a category's top, new this week, keywords: each the lists' own answer", async () => {
     // (The site's client, its binding the edge's own address: public reads only, as the pages make them.)

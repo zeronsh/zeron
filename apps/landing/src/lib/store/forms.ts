@@ -4,7 +4,7 @@
 // back to a page with 303 so a reload never posts again.
 import type { AstroGlobal } from "astro";
 import type { Result } from "./edge.ts";
-import { setFlash, type FlashWord } from "./flash.ts";
+import { setFlash, type FlashWord, type Said } from "./flash.ts";
 import type { WebSession } from "./types.ts";
 import { sitePath } from "./urls.ts";
 
@@ -105,9 +105,9 @@ export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {
   }
 }
 
-/** Says `word` on the page at `to` (a path on this site), and goes there. */
-export function done(astro: Pick<AstroGlobal, "cookies" | "redirect">, word: FlashWord, to: string): Response {
-  setFlash(astro.cookies, word);
+/** Says `said` on the page at `to` (a path on this site), and goes there. */
+export function done(astro: Pick<AstroGlobal, "cookies" | "redirect">, said: Said, to: string): Response {
+  setFlash(astro.cookies, said);
   return astro.redirect(sitePath(to), 303);
 }
 

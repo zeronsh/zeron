@@ -2,11 +2,12 @@
 // after. Every one is a post with the session's token; the destructive
 // ones ask first.
 import type { Ask } from "./actions.ts";
-import type { FlashWord } from "./flash.ts";
+import type { FlashWord, Said } from "./flash.ts";
 import { count } from "./format.ts";
 import type { Kind } from "./kind.ts";
+import { isVersion } from "./names.ts";
 import { compared, together } from "./permissions.ts";
-import type { Submission } from "./types.ts";
+import type { Submission, VersionInfo } from "./types.ts";
 
 /** Why a version isn't verified: the words the author reads beside the reviewer's own (staff's too; the public reads only that it isn't). */
 export const DECLINE_REASONS = [
@@ -31,6 +32,19 @@ export const isPluginAction = (v: unknown): v is PluginAction => v === "suspend"
 export const VERSION_FLASH: Record<VersionAction, FlashWord> = { verify: "verified", decline: "declined", take_down: "taken_down", remove: "removed", restore: "version_restored" };
 export const PLUGIN_FLASH: Record<PluginAction, FlashWord> = { suspend: "suspended", restore: "restored", feature: "featured", unfeature: "unfeatured", transfer: "transferred" };
 
+/**
+ * What a restore did, from the edge's answer to it: the version as it is
+ * now. Listed again; or superseded at once, when its plugin has a newer one
+ * (listed, or stopped itself: either way it takes no new installs). An
+ * answer that says neither gets neither claim.
+ */
+export function restoredSaid(version: string, answer: unknown): Said {
+  const now = (answer as { version?: Partial<VersionInfo> } | null | undefined)?.version;
+  if (now?.status === "listed") return "version_restored";
+  if (now?.status === "yanked" && now.yanked_by === "superseded" && isVersion(now.superseded_by)) return ["version_replaced", version, now.superseded_by];
+  return "version_back";
+}
+
 /** What a reviewer's action on one version asks first: in its dialog, and as a page. */
 export function versionAsk(action: VersionAction, name: string, version: string): Ask {
   const flash = VERSION_FLASH[action];
@@ -44,7 +58,7 @@ export function versionAsk(action: VersionAction, name: string, version: string)
     case "remove":
       return { title: `Remove ${name} ${version}?`, words: ["For a version that shouldn't be in the store but isn't harmful: nobody can install it again; those who have it keep it."], confirm: "Remove", tone: "danger", flash };
     case "restore":
-      return { title: `Restore ${name} ${version}?`, words: ["It's listed again, not verified, and the devices that turned it off may turn it back on. If a newer version is listed, it takes no new installs."], confirm: "Restore", tone: "primary", flash };
+      return { title: `Restore ${name} ${version}?`, words: ["It's listed again, not verified, and the devices that turned it off may turn it back on. If there's a newer version, this one takes no new installs."], confirm: "Restore", tone: "primary", flash };
   }
 }
 

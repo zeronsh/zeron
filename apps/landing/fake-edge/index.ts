@@ -626,14 +626,14 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
         v.yanked_by = null;
       }
       log(who.user, "version.verify", p.id, v.version, null);
-      return json(versionInfo(v, true));
+      return json({ version: versionInfo(v, true) });
     }
     if (parts[3] === "decline") {
       if (v.review.decided) return fail(409, "invalid_state", "A reviewer already decided.");
       if (!text("reason") || !text("message")) return fail(400, "bad_request", "A reason and a message for the author are needed.");
       v.review = { decided: true, decision: "declined", reason: text("reason"), message: text("message"), decided_at: Date.now() };
       log(who.user, "version.decline", p.id, v.version, { reason: text("reason") });
-      return json(versionInfo(v, true));
+      return json({ version: versionInfo(v, true) });
     }
     return notFound();
   }
@@ -642,7 +642,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
     const p = itemOf(parts[0] === "plugins" ? "plugin" : "template", parts[1]!);
     if (!p) return notFound();
     if (parts[2] === "versions" && parts[4] === "restore") {
-      // (A taken-down version back to listed, unverified, its block lifted; superseded again if anything newer on its line is listed.)
+      // (A taken-down version back to listed, unverified, its block lifted; superseded at once if anything newer on its line is listed or stopped.)
       const v = p.versions.find((x) => x.version === parts[3]);
       if (!v) return notFound();
       if (v.status !== "taken_down") return fail(409, "invalid_state", `It's ${v.status}.`);
@@ -653,14 +653,14 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
       v.verified = false;
       v.verified_at = null;
       v.review = { decided: false, decision: null };
-      const newer = p.versions.find((x) => x !== v && x.status === "listed" && x.published_at > v.published_at && (!prerelease(x) || prerelease(v)));
+      const newer = p.versions.find((x) => x !== v && shown(x) && x.published_at > v.published_at && (!prerelease(x) || prerelease(v)));
       if (newer) {
         v.status = "yanked";
         v.yanked_by = "superseded";
         v.superseded = { at: Date.now(), by: newer.version };
       }
       log(who.user, "version.restore", p.id, v.version, { reason: text("reason") });
-      return json(versionInfo(v, true));
+      return json({ version: versionInfo(v, true) });
     }
     if (parts[2] === "versions" && (parts[4] === "take-down" || parts[4] === "remove")) {
       const v = p.versions.find((x) => x.version === parts[3]);
@@ -678,7 +678,7 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
         v.verified_at = null;
       }
       log(who.user, harmful ? "version.take_down" : "version.remove", p.id, v.version, { reason: text("reason") });
-      return json(versionInfo(v, true));
+      return json({ version: versionInfo(v, true) });
     }
     switch (parts[2]) {
       case "suspend":
