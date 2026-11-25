@@ -95,7 +95,7 @@ fn changing() -> MutexGuard<'static, ()> {
 
 /// Whether `a` and `b` are one version: by precedence when both are strict,
 /// else as written.
-fn same_version(a: &str, b: &str) -> bool {
+pub(in crate::plugins) fn same_version(a: &str, b: &str) -> bool {
     match (Version::parse(a), Version::parse(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,

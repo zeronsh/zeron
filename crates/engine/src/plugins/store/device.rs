@@ -913,7 +913,7 @@ impl Plugins {
                 // at the next check, not an idle hour on.
                 *lock(&self.inner.publishes_checked) = None;
                 // (Live at once: its page on the store's website.)
-                reply["url"] = json!(client.page_url(id));
+                reply["url"] = json!(client.published_page(id, &reply));
                 reply
             }
             Err((error, fields)) => refused(&error, &fields),
@@ -928,7 +928,7 @@ impl Plugins {
         tokio::task::spawn_blocking(move || {
             let folder = crate::plugins::templates::own_dir(&dir, &id)?;
             template_blocks::refuse(&dir, &folder, "published")?;
-            let prepared = publish::read_template(&folder)?;
+            let prepared = publish::read_template(&folder)?.against(&dir);
             // (Here a template is its folder's id; published elsewhere, its
             // manifest's: one that says both is no surprise.)
             if prepared.id() != id {
@@ -975,7 +975,7 @@ impl Plugins {
             Ok(mut reply) => {
                 reply["ok"] = json!(true);
                 *lock(&self.inner.publishes_checked) = None;
-                reply["url"] = json!(client.page_url(&item));
+                reply["url"] = json!(client.published_page(&item, &reply));
                 reply
             }
             Err((error, fields)) => refused(&error, &fields),
@@ -1604,7 +1604,27 @@ impl Plugins {
                 Err(error) => errors.push(said(t, &error)),
             }
         }
+        self.mark_templates(&client, &caller, here).await;
         (updates, errors)
+    }
+
+    /// Each store template of `here` installed unverified whose own record,
+    /// read now, says verified of the same contents and signer: its install
+    /// record says so from now on, as a plugin's (`catch_up_verified`). Only
+    /// ever that way.
+    async fn mark_templates(&self, client: &StoreClient, caller: &Caller, here: Vec<template_packages::Installed>) {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        for t in here.into_iter().filter(|t| !t.store.verified) {
+            let since = template_packages::unmarked(&dir);
+            let Ok((_, record)) = client.version(&t.store.id, &t.version, caller).await else { continue };
+            if !record.verified || !record.hash.eq_ignore_ascii_case(&t.store.hash) || record.key != t.store.key {
+                continue;
+            }
+            let (dir, id) = (dir.clone(), t.id.clone());
+            if tokio::task::spawn_blocking(move || template_packages::mark(&dir, &t, record.verified_at, since)).await.unwrap_or_default() {
+                tracing::info!(template = %id, "store: the version installed is verified now");
+            }
+        }
     }
 
     /// `offer` as the update found for store template `t`: its package
@@ -1868,8 +1888,12 @@ impl Plugins {
                     _ => None,
                 })
                 .collect();
-            let templates_kept = match self.apply_template_changes(&templates_dir, changes).await {
-                Ok(()) => true,
+            let applied = self.apply_template_changes(&templates_dir, changes).await;
+            // (After what's blocked: a mark its check puts on meanwhile goes too.)
+            // Taken down or restored, in whatever order: no mark.
+            let unmarked = self.unmark_templates(events.iter().filter(|e| e.item_kind == Some(client::Kind::Template) && matches!(e.kind.as_str(), "take_down" | "restore")).map(|e| (e.id.clone(), e.version.clone())).collect()).await;
+            let templates_kept = match applied {
+                Ok(()) => unmarked,
                 Err(error) => {
                     tracing::warn!(%error, "store: a template's take-down couldn't be kept");
                     if template_blocks::read(&templates_dir).is_err() {
@@ -1980,6 +2004,24 @@ impl Plugins {
                 notify("zeron", title, &words, None);
             }
         }
+    }
+
+    /// Each template here that's one of `versions` (a store id and version) is
+    /// no longer verified here: its install record says so. Whether each one's
+    /// does.
+    async fn unmark_templates(&self, versions: Vec<(String, String)>) -> bool {
+        if versions.is_empty() {
+            return true;
+        }
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let (changed, all) = tokio::task::spawn_blocking(move || template_packages::unmark(&dir, &versions)).await.unwrap_or_default();
+        for folder in changed {
+            tracing::info!(template = %folder, "store: the version installed is no longer verified");
+        }
+        if !all {
+            tracing::warn!("store: a template's mark couldn't be taken off its record");
+        }
+        all
     }
 
     /// Make `changes` to what's blocked of templates, and say which of those
@@ -2165,9 +2207,12 @@ impl Plugins {
         if held.is_some() {
             let whole = settled.len() == templates.len();
             let dir = templates_dir.clone();
-            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await {
+            let downs: Vec<(String, String)> = template_downs.iter().map(|b| (b.id.clone(), b.version.clone())).collect();
+            let kept = self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await;
+            let unmarked = self.unmark_templates(downs).await;
+            match kept {
                 Ok(whole) => {
-                    check.templates_settled = whole;
+                    check.templates_settled = whole && unmarked;
                     if !whole {
                         tracing::warn!(asked = templates.len(), "store: not every template here was answered about");
                     }
@@ -2425,6 +2470,22 @@ impl Plugins {
                 self.unmark(c);
             }
         }
+        // A template's the same.
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let here = tokio::task::spawn_blocking(move || template_packages::installed_from_store(&dir, None)).await.unwrap_or_default();
+        let client = client.of(Kind::Template);
+        let mut marked: Vec<(String, String)> = here.into_iter().filter(|t| t.store.verified).map(|t| (t.store.id, t.version)).collect();
+        marked.sort();
+        marked.dedup();
+        let mut ended = Vec::new();
+        for (id, version) in marked {
+            if let Ok((_, record)) = client.version(&id, &version, caller).await
+                && !record.verified
+            {
+                ended.push((id, version));
+            }
+        }
+        let _ = self.unmark_templates(ended).await;
     }
 
     fn block_one(&self, c: &Candidate, reason: &str) {

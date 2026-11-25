@@ -247,12 +247,17 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     for output in [&dry, &first, &published] {
         assert!(!text(output).contains(&secret[12..]), "the token is never said back");
     }
+    // Its page is where the store says it is, on the store's own site alone.
+    store.state.lock().unwrap().site = Some("https://site.example.org".into());
+    version("1.1.0");
+    let paged = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
+    assert!(paged.status.code() == Some(0) && text(&paged).contains("/templates/midnight") && !text(&paged).contains("example.org"), "{}", text(&paged));
     // An older version: refused before it's sent, by its public versions.
     version("0.9.5");
     let older = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
     assert_eq!(older.status.code(), Some(1), "{}", text(&older));
     assert!(text(&older).contains("error: not_newer (version)"), "{}", text(&older));
-    assert_eq!(store.state.lock().unwrap().submitted_templates.len(), 1);
+    assert_eq!(store.state.lock().unwrap().submitted_templates.len(), 2);
     // What it leaves out is said, and in no one's way.
     version("1.0.1");
     std::fs::create_dir_all(folder.join("account")).unwrap();
@@ -261,6 +266,17 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     assert_eq!(said.status.code(), Some(0), "{}", text(&said));
     assert!(text(&said).contains("warning: left_out (account/page.luau)"), "{}", text(&said));
     std::fs::remove_dir_all(folder.join("account")).unwrap();
+    // So is what Zeron's own files leave unused, where they're known.
+    write("ds/button.luau/x.luau", b"return {}");
+    let unknown = run.run(&store, None, "template", &["check", &arg]).await;
+    assert!(unknown.status.code() == Some(0) && !text(&unknown).contains("not_used"), "{}", text(&unknown));
+    let own = run.home.join("data/templates/.zeron/ds");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("button.luau"), "return {}").unwrap();
+    let said = run.run(&store, None, "template", &["check", &arg]).await;
+    assert!(said.status.code() == Some(0) && text(&said).contains("warning: not_used (ds/button.luau/x.luau)"), "{}", text(&said));
+    std::fs::remove_dir_all(folder.join("ds")).unwrap();
+    std::fs::remove_dir_all(run.home.join("data/templates/.zeron")).unwrap();
     // The rest is the running Zeron's (2, when none is), never a token's.
     for (token, args, words) in [
         (None, vec!["publish", "midnight"], "Zeron isn't running here"),
