@@ -119,8 +119,7 @@ export function refusalOf(result: Extract<Result<unknown>, { ok: false }>, name:
 }
 
 /** All your plugins, or your templates too: what a token of every one covers, in words. */
-export const BOTH = "All your plugins and templates";
-export const allWords = (scope: { all_kinds?: Kind[] }) => (scope.all_kinds?.includes("template") ? BOTH : store("plugins.store.key.scope.all"));
+export const allWords = (scope: { all_kinds?: Kind[] }) => store(scope.all_kinds?.includes("template") ? "plugins.store.key.scope.all_both" : "plugins.store.key.scope.all");
 
 /** How many it names, by their kind: "3 plugins", "2 templates", "3 chosen" of both (an id no longer yours counts as a plugin). */
 export function howMany(ids: string[], kindOf: (id: string) => Kind | undefined): string {
