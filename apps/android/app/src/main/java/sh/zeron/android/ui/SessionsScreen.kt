@@ -56,7 +56,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -474,21 +473,18 @@ private fun LazyListScope.group(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions: RowActions) {
-    val state = rememberSwipeToDismissBoxState()
-    val scope = rememberCoroutineScope()
+    val state = rememberSwipeRowState()
     val shape = segmentedShapes(index, count).shape
+    val onSwipe = rememberSwipeDismiss(state) { direction ->
+        when (direction) {
+            SwipeToDismissBoxValue.EndToStart -> actions.archive(row)
+            SwipeToDismissBoxValue.StartToEnd -> actions.model.setPinned(row.id, !row.pinned)
+            else -> Unit
+        }
+    }
     SwipeToDismissBox(
         state = state,
-        onDismiss = {
-            when (it) {
-                SwipeToDismissBoxValue.EndToStart -> actions.archive(row)
-                SwipeToDismissBoxValue.StartToEnd -> {
-                    actions.model.setPinned(row.id, !row.pinned)
-                    scope.launch { state.reset() }
-                }
-                else -> Unit
-            }
-        },
+        onDismiss = onSwipe,
         backgroundContent = {
             val pinning = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
             Surface(

@@ -40,7 +40,6 @@ import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -490,7 +489,7 @@ private fun Swipeable(
     destructive: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val state = rememberSwipeToDismissBoxState()
+    val state = rememberSwipeRowState()
     Box(modifier.padding(bottom = ListItemDefaults.SegmentedGap)) {
         SwipeToDismissBox(
             state = state,
