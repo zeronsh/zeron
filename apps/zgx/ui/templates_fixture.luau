@@ -153,6 +153,12 @@ ui.command {
 		settle(true, { pending = "ledger-1700000001", name = "Ledger", needs_consent = true })
 	end,
 }
+local said_failure = ui.state("templates_said_failure", "")
+for name, message in { not_in_store = "not_in_store: midnight 9.9.9 isn't in the store", offline = "offline", other = "Something else" } do
+	ui.command { id = `failure_{name}`, title = name, run = function()
+		said_failure:set(page._failure(message))
+	end }
+end
 ui.command {
 	id = "install_failed",
 	title = "The install fails",

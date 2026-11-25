@@ -155,12 +155,23 @@ local function count(which: string): () -> number
 	end
 end
 
+-- The engine's reason in a template's words where a plugin's would say
+-- "plugin" (the store's refusals), else as every page says it.
+local OWN_FAILURES: { [string]: boolean } = { not_in_store = true, store_mismatch = true, not_verified = true, needs_person = true }
+local function failure(message: string): string
+	local reason = string.match(message, "^([%l_]+): ") or string.match(message, "^([%l_]+)$")
+	return if reason and OWN_FAILURES[reason] then ui.t(`templates.failure.{reason}`):get() else words.failure(message)
+end
+
+-- (Tests.)
+M._failure = failure
+
 -- What went wrong asking the host, said once.
 local function failed(title: string | Message): (err: any) -> ()
 	return function(err: any)
 		ds.toast.show {
 			title = title,
-			body = if type(err) == "table" and err.message then words.failure(tostring(err.message)) else nil,
+			body = if type(err) == "table" and err.message then failure(tostring(err.message)) else nil,
 			tone = "warning",
 		}
 	end

@@ -4620,6 +4620,12 @@
         },
         "missing_readme": "在它的文件夹里写好 README.md：这是模板在商店里的页面。"
       }
+    },
+    "failure": {
+      "not_in_store": "模板商店里没有这个模板或这个版本。",
+      "store_mismatch": "收到的内容与模板商店审核过的不一致，所以没有安装。",
+      "not_verified": "Zeron 尚未验证这个版本，所以不能改为安装它。",
+      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。"
     }
   },
   "themes": {

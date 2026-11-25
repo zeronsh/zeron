@@ -4620,6 +4620,12 @@
         },
         "missing_readme": "Write README.md in its folder: it's the template's page in the store."
       }
+    },
+    "failure": {
+      "not_in_store": "This template, or this version of it, isn't in the template store.",
+      "store_mismatch": "What came isn't what the template store reviewed, so it wasn't installed.",
+      "not_verified": "Zeron hasn't verified this version, so it can't be taken instead.",
+      "needs_person": "Only you can install or update a template from the store, here in Zeron."
     }
   },
   "themes": {
