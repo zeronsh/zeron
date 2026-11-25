@@ -6934,6 +6934,11 @@ async fn run_session(session: Session) {
     // tool or plan). Pi and Devin keep a prompt cancelled before that in
     // their history; Grok drops it, so its preempt re-sends the text.
     let mut progress_seq: u64 = 0;
+    // Antigravity loses a `session/cancel` that arrives before its turn has
+    // shown progress (verified live, 1.5.2: a steer 1.5 s into a Gemini 4
+    // Neon turn went unanswered until the preempt timed out; one at 6 s
+    // settled at once). Its preempt waits for the turn's first progress.
+    let cancel_waits_for_progress = harness == HarnessId::Antigravity;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A turn stop (`TurnControl::stop_turn`) in flight: `session/cancel`
@@ -7366,6 +7371,7 @@ async fn run_session(session: Session) {
                         && !preempt_sent
                         && turn.is_some()
                         && open_tools.is_empty()
+                        && (!cancel_waits_for_progress || progress_seq == prompt_seq)
                     {
                         client.notify("session/cancel", Some(cancel_params(harness, &session_id)));
                         preempt_sent = true;
@@ -7892,6 +7898,7 @@ async fn run_session(session: Session) {
                         if preempt_pending
                             && !preempt_sent
                             && open_tools.is_empty()
+                            && (!cancel_waits_for_progress || progress_seq == prompt_seq)
                         {
                             client.notify("session/cancel", Some(cancel_params(harness, &session_id)));
                             preempt_sent = true;

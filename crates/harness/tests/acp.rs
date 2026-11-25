@@ -3436,6 +3436,97 @@ for raw in sys.stdin:
     );
 }
 
+/// A steer sent before Antigravity's turn shows progress: its cancel would be
+/// lost (Antigravity drops one that early, verified live on 1.5.2), so it
+/// waits for the turn's first update, then preempts and the steer runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_steer_before_progress_preempts_once_the_turn_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-early-cancel.py",
+        r#"#!/usr/bin/env python3
+import json, select, sys, time
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(kind, text):
+    content = {"type": "text", "text": text}
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "sessionId": "agy-early", "update": {"sessionUpdate": kind, "content": content}}})
+
+pending, started, since = None, False, 0.0
+while True:
+    ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+    if pending is not None and not started and time.time() - since > 0.4:
+        # The turn starts: from here a cancel settles it.
+        started = True
+        update("agent_thought_chunk", "thinking")
+    if pending is not None and started and time.time() - since > 8:
+        send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "end_turn"}})
+        pending = None
+    if not ready:
+        continue
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    msg = json.loads(raw)
+    mid, method = msg.get("id"), msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-early"}})
+    elif method == "session/prompt":
+        if "steer me" in json.dumps(msg.get("params")):
+            update("agent_message_chunk", "STEERED")
+            send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        else:
+            pending, started, since = mid, False, time.time()
+    elif method == "session/cancel":
+        # Before the turn starts, a cancel is lost.
+        if pending is not None and started:
+            send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "cancelled"}})
+            pending = None
+"#,
+    );
+    let harness = AcpHarness::antigravity()
+        .with_executable(&script)
+        .with_stop_timeout(Duration::from_millis(1500))
+        .with_graces(Duration::from_millis(100), Duration::from_millis(200));
+    let (controls, steer_tx, _token) = controls();
+    let mut stream = harness.run(request("write an essay"), controls).await.unwrap();
+    // At once: before the turn has shown anything.
+    steer_tx.send(SteerMessage::text("steer me")).await.unwrap();
+    let mut events = Vec::new();
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the steered turn settles")
+    {
+        let ev = item.expect("stream event");
+        let is_done = matches!(ev, AgentEvent::Done { .. });
+        events.push(ev);
+        if is_done {
+            break;
+        }
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("STEERED"), "the steer never ran: {events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Steered { .. })),
+        "missing Steered event: {events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)], "{events:?}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn antigravity_corrupt_resume_recovers_with_prior_history_from_turn_control() {
