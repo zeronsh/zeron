@@ -6,7 +6,7 @@ import { LEAD_VOICE, VOICES } from "../../data/voices.ts";
 <section class="section" id="voices" aria-labelledby="voices-title">
   <div class="wrap">
     <h2 id="voices-title" class="sr-only">What people say about Zeron</h2>
-    <figure class="lead-voice" data-reveal>
+    <figure class="lead-voice">
       <blockquote>“{LEAD_VOICE.text}”</blockquote>
       <figcaption>
         <a href={LEAD_VOICE.url} target="_blank" rel="noopener">
@@ -16,7 +16,7 @@ import { LEAD_VOICE, VOICES } from "../../data/voices.ts";
         </a>
       </figcaption>
     </figure>
-    <ul data-reveal>
+    <ul>
       {
         VOICES.map((voice) => (
           <li>
