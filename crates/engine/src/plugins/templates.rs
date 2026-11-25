@@ -377,14 +377,16 @@ fn entry(
     } else {
         ("ok", None)
     };
+    let said = |text: Option<String>, max| super::listing::shown(&text.unwrap_or_default(), max);
+    let name = said(manifest.name, super::listing::MAX_NAME_LEN);
     let mut out = json!({
         "id": id,
-        "name": manifest.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| id.to_owned()),
-        "description": manifest.description.unwrap_or_default(),
+        "name": if name.is_empty() { id.to_owned() } else { name },
+        "description": said(manifest.description, super::listing::MAX_DESCRIPTION_LEN),
         // (A package's manifest doesn't say whose it is: its record does.)
         "author": manifest.author.filter(|_| !super::template_packages::has_record(folder)).unwrap_or_default(),
-        "version": manifest.version.unwrap_or_default(),
-        "zeron_version": made_for,
+        "version": said(manifest.version, super::version::MAX_LEN),
+        "zeron_version": said(Some(made_for), super::version::MAX_LEN),
         "builtin": builtin,
         "active": id == active,
         "status": status,
@@ -396,7 +398,11 @@ fn entry(
     // Taken down from the store, or a copy of one that was.
     if !builtin && let Some(block) = super::template_blocks::blocked(dir, folder) {
         out["status"] = json!("blocked");
-        out["blocked"] = json!({ "id": block.id, "version": block.version, "reason": block.reason, "at": block.at });
+        out["blocked"] = match block.id.is_empty() {
+            // (It can't be told: there's nothing to name.)
+            true => json!({ "unchecked": true, "reason": block.reason }),
+            false => json!({ "id": block.id, "version": block.version, "reason": block.reason, "at": block.at }),
+        };
         // (A copy of it says whose it is, and that it's a copy.)
         if super::template_blocks::by_lineage(folder, &block) {
             out["blocked"]["via"] = json!("lineage");
@@ -407,8 +413,11 @@ fn entry(
         out["preview"] = json!(preview.display().to_string());
     }
     // Someone's, installed from a package: by whom, as it was signed.
-    if !builtin && let Some(imported) = super::template_packages::imported(folder) {
+    if !builtin && let Some((imported, edited)) = super::template_packages::shown_record(folder) {
         out["imported"] = imported;
+        if edited {
+            out["edited"] = json!(true);
+        }
     }
     out
 }

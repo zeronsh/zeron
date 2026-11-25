@@ -977,6 +977,10 @@ async fn only_a_whole_answer_lifts_or_repairs() {
     let whole = std::fs::read(&file).unwrap();
     let refused = || async { d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.is_err_and(|e| e.contains("taken_down")) };
     assert!(refused().await);
+    let row = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap().clone() };
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    assert_eq!((&row().await["blocked"]["id"], row().await["blocked"].get("unchecked")), (&json!("midnight"), None));
     let offline = |on: bool| store.offline.store(on, std::sync::atomic::Ordering::SeqCst);
     let refuse = |on: bool| store.state.lock().unwrap().refuse_template_asks = on;
     for (state, bytes) in [("there", Some(whole.clone())), ("gone", None), ("unreadable", Some(b"nope".to_vec())), ("cut short", Some(whole[..whole.len() / 2].to_vec()))] {
@@ -998,6 +1002,11 @@ async fn only_a_whole_answer_lifts_or_repairs() {
         d.call(methods::CHECK_PLUGIN_UPDATES, json!({ "id": "focus" })).await.unwrap();
         assert!(same(), "{state}: one plugin");
         assert!(refused().await, "{state}");
+        let blocked = row().await["blocked"].clone();
+        match state {
+            "there" => assert_eq!(blocked["id"], "midnight"),
+            _ => assert!(blocked["unchecked"] == true && blocked["reason"].is_string() && blocked.get("id").is_none() && blocked.get("version").is_none() && blocked.get("at").is_none(), "{state}: {blocked}"),
+        }
         // (A poll that finds it lost asks about everything again.)
         match state {
             "gone" | "unreadable" => d.plugins.check_takedowns().await,

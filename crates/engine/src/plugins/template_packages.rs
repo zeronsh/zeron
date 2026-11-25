@@ -37,9 +37,10 @@ use super::files::{MAX_BYTES, MAX_FILES};
 use super::install::{self, Found, Origin, Source};
 use super::listing;
 use super::package::{self, MAX_PACKAGE_BYTES};
-use super::signing::{self, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
+use super::signing::{self, FileHashes, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
 use super::status::Author;
 use super::templates::{self, MANIFEST, PREVIEW, ZERON, inside, valid_id};
+use super::version;
 
 pub const FORMAT: &str = "zeron-template:v1";
 pub const EXTENSION: &str = "zeron-template";
@@ -89,6 +90,8 @@ pub struct Package {
     pub files: BTreeMap<String, Vec<u8>>,
     /// Files it carried that no template may replace, left out.
     pub ignored: Vec<String>,
+    /// Their sha256s (its content hash is over them too).
+    left_out: FileHashes,
     /// sha256 of the package file as read: what you're shown is what's
     /// installed.
     pub hash: String,
@@ -138,19 +141,26 @@ impl Package {
         super::version::accepts(Some(&range), &super::version::zeron()).map_err(|e| install::failure(install::reason::INCOMPATIBLE, e))
     }
 
-    /// What the consent window and the tools show of it.
+    /// What the consent window and the tools show of it: its words bounded
+    /// as the store bounds them, wherever it came from.
     fn about(&self) -> Value {
         json!({
             "id": self.id(),
-            "name": self.name(),
-            "description": self.text("description"),
-            "version": self.text("version"),
-            "zeron_version": self.text("zeron_version"),
+            "name": listing::shown(&self.name(), listing::MAX_NAME_LEN),
+            "description": listing::shown(&self.text("description"), listing::MAX_DESCRIPTION_LEN),
+            "version": listing::shown(&self.text("version"), version::MAX_LEN),
+            "zeron_version": listing::shown(&self.text("zeron_version"), version::MAX_LEN),
             "key": self.key,
             "files": self.files.len(),
-            "ignored": self.ignored,
+            "ignored": self.ignored.iter().map(|rel| listing::shown(rel, MAX_SHOWN_PATH)).collect::<Vec<_>>(),
             "hash": self.hash,
         })
+    }
+
+    /// What the app keeps it by once you allow it, over the files it
+    /// installs (`zeron_plugin_guard::template::digest`).
+    fn digest(&self) -> String {
+        zeron_plugin_guard::template::digest(&self.files)
     }
 }
 
@@ -329,7 +339,8 @@ fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     if let Some(m) = unsigned.as_object_mut() {
         m.remove("signature");
     }
-    let content_hash = signing::content_hash_of(&unsigned, &package::hashes(&decoded));
+    let hashes = package::hashes(&decoded);
+    let content_hash = signing::content_hash_of(&unsigned, &hashes);
     let id = manifest["id"].as_str().unwrap_or("").trim();
     if !valid_id(id) || id == ZERON {
         return Err(format!("{BAD_ID} ({id:?})."));
@@ -352,11 +363,13 @@ fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     if let Some(clash) = listing::clashes(decoded.keys().map(String::as_str), &[MANIFEST, IMPORTED]).first() {
         return Err(format!("{CLASH}: {}.", clash.words()));
     }
+    let left_out = hashes.into_iter().filter(|(rel, _)| ignored.contains(rel)).collect();
     Ok(Package {
         manifest,
         key,
         files: decoded,
         ignored,
+        left_out,
         hash,
         content_hash,
         raw,
@@ -458,6 +471,10 @@ fn write_folder(dir: &Path, id: &str, package: &Package, author: &Author, source
         });
         if let Some(source) = source {
             imported["source"] = json!(source);
+            // (What its content hash is over besides what's here: `edited`.)
+            if source.store().is_some() && !package.left_out.is_empty() {
+                imported["left_out"] = json!(package.left_out);
+            }
         }
         std::fs::write(tmp.join(IMPORTED), signing::pretty(&imported))
             .map_err(|e| format!("Couldn't write {IMPORTED}: {e}"))
@@ -551,9 +568,15 @@ fn stage_as(dir: &Path, package: &Package, from: &str, source: &Source, update_o
     Ok(name)
 }
 
-/// The packages waiting for you, oldest first (each `{pending, id, name,
-/// description, version, zeron_version, key, files, ignored, hash, at,
-/// source}`; the caller adds who signed it).
+/// The packages waiting for you, oldest first: each `{pending, id, name,
+/// description, version, zeron_version, key, files, ignored, hash, digest,
+/// at, source, from}`, read from the package itself, as it's read again when
+/// it's allowed (one that can't be isn't listed: it can't be allowed); never
+/// what the file beside it says of it. An update says whose (`update_of`, the
+/// folder's id). One from the store says its record's (`store`, `author`);
+/// for an update, that it has a new publisher (`new_owner`) or is over edits
+/// of yours (`replaces_edits`); else, which here have its id from elsewhere
+/// (`also_installed`). The caller adds who signed any other.
 pub fn pending(dir: &Path) -> Vec<Value> {
     let pending_dir = dir.join(PENDING);
     let Ok(entries) = std::fs::read_dir(&pending_dir) else {
@@ -567,17 +590,230 @@ pub fn pending(dir: &Path) -> Vec<Value> {
             if !valid_pending(name) || !templates::is_regular_file(&pending_dir.join(format!("{name}.{EXTENSION}"))) {
                 return None;
             }
-            let mut about: Value = serde_json::from_slice(&templates::read_regular(&e.path())?).ok()?;
-            if let Some(origin) = about.as_object_mut().and_then(|a| a.remove("origin"))
-                && let Ok(source) = serde_json::from_value::<Source>(origin)
-            {
-                about["from"] = source.shown();
-            }
-            (about["pending"].as_str() == Some(name)).then_some(about)
+            let about: Value = serde_json::from_slice(&templates::read_regular(&e.path())?).ok()?;
+            (about["pending"].as_str() == Some(name)).then(|| waiting(dir, name, &about)).flatten()
         })
         .collect();
     out.sort_by_key(|v| (v["at"].as_i64().unwrap_or(0), v["pending"].as_str().unwrap_or("").to_owned()));
     out
+}
+
+/// `value` as where a package came from, with no store's record but one
+/// from the store.
+fn came_from(value: &Value) -> Option<Source> {
+    let mut source: Source = serde_json::from_value(value.clone()).ok()?;
+    if source.kind != install::STORE {
+        source.store = None;
+    }
+    Some(source)
+}
+
+/// One waiting package, as [`pending`] lists it.
+fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
+    let source = came_from(&about["origin"]);
+    let store = source.as_ref().and_then(Source::store);
+    let package = read_waiting(&dir.join(PENDING).join(format!("{name}.{EXTENSION}")), about, store).ok().filter(|p| about["key"] == json!(p.key))?;
+    let mut out = package.about();
+    out["pending"] = json!(name);
+    out["digest"] = json!(package.digest());
+    out["at"] = json!(about["at"].as_i64().unwrap_or(0));
+    out["source"] = json!(listing::shown(about["source"].as_str().unwrap_or(""), MAX_SHOWN_PATH));
+    if let Some(source) = &source {
+        out["from"] = source.shown();
+    }
+    let update_of = match &about["update_of"] {
+        Value::Null => None,
+        id => Some(id.as_str().filter(|id| valid_id(id))?),
+    };
+    if let Some(id) = update_of {
+        out["update_of"] = json!(id);
+    }
+    let Some(store) = store else { return Some(out) };
+    out["store"] = json!({
+        "id": store.id,
+        "version": out["version"],
+        "publisher": listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER),
+        "publisher_id": store.publisher_id,
+        "verified": store.verified,
+        "verified_alternative": store.verified_alternative.as_ref().filter(|_| !store.verified),
+    });
+    if store.verified && let Some(at) = store.verified_at {
+        out["store"]["verified_at"] = json!(at);
+    }
+    out["author"] = json!(super::scan::store_author(store));
+    if let Some(folder) = update_of.and_then(|id| templates::template_dir(dir, id)) {
+        if self::source(&folder).and_then(|s| s.store().map(|was| was.publisher_id != store.publisher_id)) == Some(true) {
+            out["new_owner"] = json!(true);
+        }
+        if edited(&folder) == Some(true) {
+            out["replaces_edits"] = json!(true);
+        }
+    } else {
+        // (Of its id, from anywhere: it comes in beside them.)
+        let others: Vec<Value> = templates::installed(dir)
+            .into_iter()
+            .filter_map(|id| {
+                let folder = dir.join(&id);
+                let imported = imported(&folder)?;
+                let manifest: Value = serde_json::from_slice(&templates::read_regular(&folder.join(MANIFEST))?).ok()?;
+                (manifest["id"].as_str().map(str::trim) == Some(store.id.as_str())).then(|| {
+                    let from = came_from(&imported["source"]).map_or_else(|| json!({ "kind": "file" }), |s| s.shown());
+                    json!({ "id": id, "from": from })
+                })
+            })
+            .collect();
+        if !others.is_empty() {
+            out["also_installed"] = json!(others);
+        }
+    }
+    Some(out)
+}
+
+/// The most of a path or a link, and of a publisher's name, that's shown.
+const MAX_SHOWN_PATH: usize = 1024;
+const MAX_SHOWN_PUBLISHER: usize = 64;
+
+/// Whether the store template in `folder` isn't the store's version any more:
+/// what's there (its manifest, its files, and those its package carried that
+/// were left out) isn't what its record's content hash is of, or can't be
+/// read. `None` for one that isn't from the store. Read and hashed whole.
+pub fn edited(folder: &Path) -> Option<bool> {
+    edited_by(folder, &mut |path, _| templates::read_regular(path).map(|bytes| (bytes.len() as u64, signing::sha256_hex(&bytes))))
+}
+
+/// [`edited`] for a row, asked for at every look: a file that hasn't moved
+/// since it was hashed isn't read again ([`Hashed`]). Never what a consent
+/// window says.
+fn edited_for_row(folder: &Path) -> Option<bool> {
+    let mut known = {
+        let mut all = hashed();
+        all.remove(folder).unwrap_or_default()
+    };
+    let mut now = BTreeMap::new();
+    let edited = edited_by(folder, &mut |path, rel| {
+        let at = Stamp::of(path)?;
+        let sha256 = match known.remove(rel) {
+            Some(was) if was.0 == at => was.1,
+            _ => signing::sha256_hex(&templates::read_regular(path)?),
+        };
+        let len = at.len;
+        // (One written just now could be written again and look the same.)
+        if at.settled() {
+            now.insert(rel.to_owned(), (at, sha256.clone()));
+        }
+        Some((len, sha256))
+    });
+    let mut all = hashed();
+    if all.len() >= MAX_HASHED {
+        all.clear();
+    }
+    all.insert(folder.to_owned(), now);
+    edited
+}
+
+/// Each store template's folder's files, as they were hashed for a row.
+type Hashed = BTreeMap<PathBuf, BTreeMap<String, (Stamp, String)>>;
+
+/// The most folders kept of them.
+const MAX_HASHED: usize = 64;
+
+fn hashed() -> std::sync::MutexGuard<'static, Hashed> {
+    static HASHED: std::sync::Mutex<Hashed> = std::sync::Mutex::new(BTreeMap::new());
+    HASHED.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What moves when a file does: which it is, its size, when it was written
+/// and (where the system says) when anything of it last changed, which no
+/// program sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    written: std::time::SystemTime,
+    changed: Option<(i64, i64)>,
+    file: (u64, u64),
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok().filter(std::fs::Metadata::is_file)?;
+        #[cfg(unix)]
+        let (changed, file) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (Some((meta.ctime(), meta.ctime_nsec())), (meta.dev(), meta.ino()))
+        };
+        #[cfg(not(unix))]
+        let (changed, file) = (None, (0, 0));
+        Some(Self { len: meta.len(), written: meta.modified().ok()?, changed, file })
+    }
+
+    /// Whether it was last written or changed a while ago: later than any
+    /// clock's tick.
+    fn settled(&self) -> bool {
+        let now = std::time::SystemTime::now();
+        let old = |at: std::time::SystemTime| now.duration_since(at).is_ok_and(|d| d > std::time::Duration::from_secs(2));
+        let changed = self.changed.is_none_or(|(secs, _)| u64::try_from(secs).is_ok_and(|s| old(std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))));
+        old(self.written) && changed
+    }
+}
+
+/// [`edited`], each file's size and sha256 as `file_hash` (its path, and its
+/// path in the template) says.
+fn edited_by(folder: &Path, file_hash: &mut dyn FnMut(&Path, &str) -> Option<(u64, String)>) -> Option<bool> {
+    let record = imported(folder)?;
+    let store = came_from(&record["source"])?.store?;
+    let mut hash = || -> Option<String> {
+        let mut manifest: Value = serde_json::from_slice(&templates::read_regular(&folder.join(MANIFEST))?).ok()?;
+        manifest.as_object_mut()?.remove("signature");
+        let mut hashes: FileHashes = match &record["left_out"] {
+            Value::Null => FileHashes::new(),
+            left_out => serde_json::from_value(left_out.clone()).ok()?,
+        };
+        let rels = templates::app_files(folder, &[MANIFEST, templates::BASE]);
+        if rels.len() + hashes.len() > MAX_FILES {
+            return None;
+        }
+        let mut total = 0;
+        for rel in rels {
+            let (len, sha256) = file_hash(&inside(folder, &rel)?, &rel)?;
+            total += len;
+            if total > MAX_BYTES || hashes.insert(rel, sha256).is_some() {
+                return None;
+            }
+        }
+        Some(signing::content_hash_of(&manifest, &hashes))
+    };
+    Some(hash().as_deref() != Some(store.hash.as_str()))
+}
+
+/// What a row says of the record (`.imported.json`) of the template in
+/// `folder`: `{key, author, at, hash, version, ignored, source?}` and whether
+/// it's edited since (the store's alone). Its source as it's shown, the
+/// store's mark only while it's still the store's version; its author, for
+/// one from the store, the record's publisher (the caller says who signed any
+/// other).
+pub fn shown_record(folder: &Path) -> Option<(Value, bool)> {
+    let record = imported(folder)?;
+    let text = |key: &str, max| listing::shown(record[key].as_str().unwrap_or(""), max);
+    let mut out = json!({
+        "key": record["key"].as_str(),
+        "author": Author::unknown("Not signed"),
+        "at": record["at"].as_i64().unwrap_or(0),
+        "hash": text("hash", 64),
+        "version": text("version", version::MAX_LEN),
+        "ignored": record["ignored"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|rel| listing::shown(rel, MAX_SHOWN_PATH)).collect::<Vec<_>>(),
+    });
+    let mut edited = false;
+    if let Some(mut source) = came_from(&record["source"]) {
+        if let Some(store) = &mut source.store {
+            edited = edited_for_row(folder) == Some(true);
+            if edited {
+                store.verified = false;
+            }
+            out["author"] = json!(super::scan::store_author(store));
+        }
+        out["source"] = source.shown();
+    }
+    Some((out, edited))
 }
 
 fn pending_paths(dir: &Path, pending: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -593,7 +829,8 @@ fn pending_paths(dir: &Path, pending: &str) -> Result<(PathBuf, PathBuf), String
 }
 
 /// `DecideTemplate`: a waiting package allowed (checked again, then
-/// installed: `{installed, name, author}`) or not (dropped: `{declined}`).
+/// installed: `{installed, name, author, digest}`, `digest` what the app
+/// keeps it by) or not (dropped: `{declined}`).
 /// `hash` is the package's as you were shown it: a different one isn't
 /// installed.
 pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
@@ -656,11 +893,11 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
         replace(dir, of, &folder, &package, &author, source.as_ref())?;
         forget();
         forget_found(dir, of);
-        return Ok(json!({ "installed": of, "updated": of, "name": package.name(), "author": author }));
+        return Ok(json!({ "installed": of, "updated": of, "name": package.about()["name"], "author": author, "digest": package.digest() }));
     }
     let id = install(dir, &package, &author, source.as_ref())?;
     forget();
-    Ok(json!({ "installed": id, "name": package.name(), "author": author }))
+    Ok(json!({ "installed": id, "name": package.about()["name"], "author": author, "digest": package.digest() }))
 }
 
 /// A waiting package, read and verified again: one the store served
@@ -1041,7 +1278,6 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
 
-    use super::super::signing::FileHashes;
     use super::*;
 
     fn dir(name: &str) -> PathBuf {
@@ -1436,6 +1672,218 @@ mod tests {
         assert_eq!(refusal(&parse(unsigned.clone()).unwrap_err()), Some(install::reason::UNSIGNED));
         assert_eq!(refusal(&parse_from_store(unsigned, true).unwrap_err()), Some(install::reason::UNSIGNED));
         assert!(parse_from_store(signed, true).unwrap().key.is_some());
+    }
+
+    fn store_source(hash: &str, publisher_id: &str, verified: bool) -> Source {
+        let store = install::StoreSource { id: "midnight".into(), publisher: "ada".into(), publisher_id: publisher_id.into(), hash: hash.into(), verified, verified_at: verified.then_some(7), ..Default::default() };
+        Source { kind: install::STORE.into(), url: None, path: None, git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 0, store: Some(store) }
+    }
+
+    const ADA: &str = "pub_0123456789abcdef0123456789abcdef";
+
+    /// A store template, unsigned, with a file no template replaces.
+    fn from_the_store(version: &str) -> Package {
+        let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "Dark.", "version": version, "zeron_version": "0.3.16", "keywords": ["dark"] });
+        let files = [("app.luau", "x"), ("ds/tokens.luau", "t"), ("README.md", "# Midnight"), ("preview.png", "p"), ("screens/plugins/x.luau", "never"), ("screenshots/a.png", "s")];
+        let files = files.map(|(rel, text)| (rel.to_owned(), text.as_bytes().to_vec())).into();
+        parse_from_store(pack(&manifest, &files, None).unwrap(), false).unwrap()
+    }
+
+    /// A row's mark is the store's version's alone: whatever's changed there
+    /// since takes it away, and says so.
+    #[test]
+    fn plugins_template_packages_a_mark_is_the_store_s_version_s() {
+        let d = dir("mark").join("templates");
+        std::fs::create_dir_all(d.join(templates::ZERON_DIR)).unwrap();
+        write(&d.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        let package = from_the_store("1.0.0");
+        assert_eq!(package.ignored, ["screens/plugins/x.luau"]);
+        let source = store_source(&package.content_hash, ADA, true);
+        let t = d.join("midnight");
+        let install = || {
+            let _ = std::fs::remove_dir_all(&t);
+            super::install(&d, &package, &Author::unknown("x"), Some(&source)).unwrap();
+        };
+        let row = || templates::list(&d).unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap().clone();
+        install();
+        let first = row();
+        let shown = &first["imported"]["source"];
+        assert_eq!((&shown["kind"], &shown["id"], &shown["verified"], &shown["verified_at"]), (&json!("store"), &json!("midnight"), &json!(true), &json!(7)), "{first}");
+        assert!(first.get("edited").is_none() && first["imported"].get("left_out").is_none() && shown.get("store").is_none(), "{first}");
+        assert_eq!((first["imported"]["author"]["username"].as_str(), &first["imported"]["key"]), (Some("ada"), &Value::Null));
+        assert_eq!(row(), first, "the same when nothing changed");
+        let changes: [(&str, &dyn Fn()); 9] = [
+            ("a file changed", &|| write(&t.join("ds/tokens.luau"), "other")),
+            ("a file added", &|| write(&t.join("ds/more.luau"), "x")),
+            ("a file gone", &|| std::fs::remove_file(t.join("ds/tokens.luau")).unwrap()),
+            ("its README", &|| write(&t.join("README.md"), "# Other")),
+            ("a picture", &|| write(&t.join("screenshots/b.png"), "x")),
+            ("the file that was left out, put there", &|| write(&t.join("screens/plugins/x.luau"), "never")),
+            ("its name", &|| write(&t.join(MANIFEST), r#"{"id":"midnight","name":"Official","description":"Dark.","version":"1.0.0","zeron_version":"0.3.16","keywords":["dark"]}"#)),
+            ("its manifest can't be read", &|| write(&t.join(MANIFEST), "nope")),
+            ("what it left out can't be read", &|| {
+                let mut record = imported(&t).unwrap();
+                record["left_out"] = json!("nope");
+                write(&t.join(IMPORTED), &record.to_string());
+            }),
+        ];
+        for (what, change) in changes {
+            install();
+            assert_eq!((edited(&t), edited_for_row(&t)), (Some(false), Some(false)), "{what}");
+            change();
+            assert_eq!((edited(&t), edited_for_row(&t)), (Some(true), Some(true)), "{what}");
+            let row = row();
+            let shown = &row["imported"]["source"];
+            assert_eq!((&row["edited"], &shown["verified"], shown.get("verified_at")), (&json!(true), &json!(false), None), "{what}: {row}");
+        }
+        // What Zeron keeps beside it is no part of it.
+        install();
+        write(&t.join(templates::BASE), "{}");
+        write(&t.join(super::super::template_blocks::LINEAGE), "[]");
+        assert_eq!(edited(&t), Some(false));
+        // A record that isn't the store's says nothing of it, whatever it holds.
+        let mut record = imported(&t).unwrap();
+        record["source"]["kind"] = json!("file");
+        record["mine"] = json!(true);
+        write(&t.join(IMPORTED), &record.to_string());
+        let row = row();
+        assert_eq!((edited(&t), &row["imported"]["source"], row["imported"].get("mine")), (None, &json!({ "kind": "file" }), None), "{row}");
+    }
+
+    /// A row doesn't read again what hasn't moved; whatever has, it does, a
+    /// file put back to its size and time among them. A consent window reads
+    /// everything.
+    #[cfg(unix)]
+    #[test]
+    fn plugins_template_packages_a_row_reads_what_moved() {
+        let d = dir("row-reads").join("templates");
+        std::fs::create_dir_all(&d).unwrap();
+        let package = from_the_store("1.0.0");
+        let t = d.join("midnight");
+        super::install(&d, &package, &Author::unknown("x"), Some(&store_source(&package.content_hash, ADA, true))).unwrap();
+        let kept = || hashed().get(&t).map_or(0, BTreeMap::len);
+        assert_eq!((edited_for_row(&t), kept()), (Some(false), 0), "written just now: none is kept");
+        std::thread::sleep(std::time::Duration::from_millis(3100));
+        assert_eq!((edited_for_row(&t), kept()), (Some(false), 5));
+        // (What's kept is what it answers by: a wrong hash shows.)
+        hashed().get_mut(&t).unwrap().get_mut("app.luau").unwrap().1 = "0".repeat(64);
+        assert_eq!((edited_for_row(&t), edited(&t)), (Some(true), Some(false)));
+        let next = from_the_store("1.1.0");
+        stage_as(&d, &next, "store", &store_source(&next.content_hash, ADA, true), Some("midnight")).unwrap();
+        hashed().get_mut(&t).unwrap().get_mut("app.luau").unwrap().1 = "0".repeat(64);
+        assert!(pending(&d)[0].get("replaces_edits").is_none(), "{:?}", pending(&d));
+        hashed().remove(&t);
+        assert_eq!(edited_for_row(&t), Some(false));
+        // The same size, its time put back.
+        let file = t.join("app.luau");
+        let was = std::fs::metadata(&file).unwrap().modified().unwrap();
+        write(&file, "y");
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(was).unwrap();
+        assert_eq!((edited_for_row(&t), edited(&t)), (Some(true), Some(true)));
+        // Another file in its place, the same size and time.
+        write(&t.join("other"), "x");
+        std::fs::rename(t.join("other"), &file).unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(was).unwrap();
+        assert_eq!(edited_for_row(&t), Some(false));
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &file).unwrap();
+        assert_eq!(edited_for_row(&t), Some(true));
+    }
+
+    /// A waiting package says what it is itself, and what Zeron checked of
+    /// it: nothing the file beside it adds.
+    #[test]
+    fn plugins_template_packages_waiting_say_what_was_checked() {
+        let d = dir("waiting").join("templates");
+        std::fs::create_dir_all(d.join(templates::ZERON_DIR)).unwrap();
+        write(&d.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        let package = from_the_store("1.0.0");
+        let name = stage(&d, &package, "store", &store_source(&package.content_hash, ADA, true)).unwrap();
+        let about = d.join(PENDING).join(format!("{name}.json"));
+        let forge = |members: Value| {
+            let mut v: Value = serde_json::from_slice(&std::fs::read(&about).unwrap()).unwrap();
+            for (k, value) in members.as_object().unwrap() {
+                v[k] = value.clone();
+            }
+            write(&about, &v.to_string());
+        };
+        let one = || pending(&d).into_iter().next().unwrap();
+        let first = one();
+        let digest = zeron_plugin_guard::template::digest(&package.files);
+        assert_eq!((first["digest"].as_str(), first["hash"].as_str(), &first["key"]), (Some(digest.as_str()), Some(package.hash.as_str()), &Value::Null));
+        assert_eq!(first["store"], json!({ "id": "midnight", "version": "1.0.0", "publisher": "ada", "publisher_id": ADA, "verified": true, "verified_at": 7, "verified_alternative": null }));
+        assert_eq!(first["author"]["username"], "ada");
+        for absent in ["origin", "new_owner", "replaces_edits", "also_installed", "update_of"] {
+            assert!(first.get(absent).is_none(), "{absent}: {first}");
+        }
+        forge(json!({ "name": "Zeron", "description": "x", "version": "9.9.9", "files": 1, "ignored": [], "hash": "h", "digest": "d", "author": { "kind": "you" }, "new_owner": true, "replaces_edits": true, "also_installed": [], "store": { "verified": true }, "extra": 1 }));
+        assert_eq!(one(), first);
+        // A signer its package hasn't: it can't be allowed, so it isn't listed.
+        forge(json!({ "key": "k" }));
+        assert!(pending(&d).is_empty());
+        forge(json!({ "key": null, "update_of": "../x" }));
+        assert!(pending(&d).is_empty(), "nor one that updates what no template is");
+        forge(json!({ "update_of": null }));
+        // Not verified: the one that is, instead.
+        let mut source = store_source(&package.content_hash, ADA, false);
+        source.store.as_mut().unwrap().verified_alternative = Some(install::Alternative { version: "0.9.0".into(), added: vec![], removed: vec![], notes: String::new(), verified_at: None });
+        forge(json!({ "origin": source }));
+        assert_eq!((&one()["store"]["verified"], &one()["store"]["verified_alternative"]["version"], one()["store"].get("verified_at")), (&json!(false), &json!("0.9.0"), None));
+        // Under a record of something else, it can't be allowed: not listed.
+        forge(json!({ "origin": store_source(&"0".repeat(64), ADA, true) }));
+        assert!(pending(&d).is_empty());
+        forge(json!({ "origin": store_source(&package.content_hash, ADA, true) }));
+        // Allowed, it says what it's kept by.
+        let done = decide(&d, &name, true, &package.hash, |_| Author::unknown("x")).unwrap();
+        assert_eq!((done["installed"].as_str(), done["digest"].as_str()), (Some("midnight"), Some(digest.as_str())));
+        // Another of its id, then an update of the first: by a new publisher, over an edit.
+        let again = from_the_store("1.1.0");
+        let source = store_source(&again.content_hash, "pub_other", true);
+        stage(&d, &again, "store", &source).unwrap();
+        let beside = one();
+        assert_eq!(beside["also_installed"], json!([{ "id": "midnight", "from": { "kind": "store", "id": "midnight", "publisher": "ada", "verified": true, "verified_at": 7 } }]), "{beside}");
+        std::fs::remove_dir_all(d.join(PENDING)).unwrap();
+        stage_as(&d, &again, "store", &source, Some("midnight")).unwrap();
+        let update = one();
+        assert_eq!((&update["update_of"], &update["new_owner"], update.get("replaces_edits"), update.get("also_installed")), (&json!("midnight"), &json!(true), None, None));
+        write(&d.join("midnight/app.luau"), "mine");
+        assert_eq!(one()["replaces_edits"], true);
+        // Its package gone bad isn't listed.
+        let pending_package = std::fs::read_dir(d.join(PENDING)).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == EXTENSION)).unwrap().path();
+        write(&pending_package, "nope");
+        assert!(pending(&d).is_empty());
+    }
+
+    /// What's shown of a package is bounded, wherever it came from; what's
+    /// signed and kept is as it is.
+    #[test]
+    fn plugins_template_packages_show_bounded_words() {
+        let d = dir("bounded").join("templates");
+        std::fs::create_dir_all(d.join(templates::ZERON_DIR)).unwrap();
+        write(&d.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        let long = "n".repeat(5000);
+        let manifest = json!({ "id": "midnight", "name": format!("Mid\u{202e}\u{200b}night\n{long}"), "description": format!("\u{2764}\u{fe0f} {long}"), "version": long, "zeron_version": long });
+        let mine = key();
+        let raw = pack(&manifest, &BTreeMap::from([("app.luau".to_owned(), b"x".to_vec())]), Some(&mine)).unwrap();
+        let path = d.parent().unwrap().join("x.zeron-template");
+        std::fs::write(&path, &raw).unwrap();
+        let check = |v: &Value| {
+            assert_eq!(v["name"].as_str().unwrap(), format!("Midnight {}", "n".repeat(64 - 9)), "{v}");
+            assert_eq!(v["description"].as_str().unwrap(), format!("\u{2764}\u{fe0f} {}", "n".repeat(300 - 3)));
+            assert_eq!((v["version"].as_str().unwrap().len(), v["zeron_version"].as_str().unwrap().len()), (version::MAX_LEN, version::MAX_LEN));
+        };
+        let waiting = import(&d, &path, |_| Author::unknown("x")).unwrap();
+        check(&waiting);
+        check(&pending(&d)[0]);
+        let done = decide(&d, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), |_| Author::unknown("x")).unwrap();
+        assert!(done["name"].as_str().unwrap().len() <= 64, "{done}");
+        let listed = templates::list(&d).unwrap();
+        let row = listed["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap();
+        check(row);
+        assert_eq!(row["imported"]["version"].as_str().unwrap().len(), version::MAX_LEN);
+        let kept: Value = serde_json::from_slice(&std::fs::read(d.join("midnight").join(MANIFEST)).unwrap()).unwrap();
+        assert_eq!(kept["name"], manifest["name"], "what's signed is as it is");
+        assert_eq!(imported(&d.join("midnight")).unwrap()["version"].as_str().unwrap(), long);
     }
 
     #[test]

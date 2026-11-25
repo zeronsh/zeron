@@ -359,6 +359,23 @@ pub fn unseen_char(c: char) -> bool {
     matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format)
 }
 
+/// `text` as it's shown of a package, wherever it came from: one line of at
+/// most `max` characters, with none that's drawn as nothing but an emoji's
+/// selector. (What's shown alone: what's signed or compared is as it is.)
+pub fn shown(text: &str, max: usize) -> String {
+    let mut buf = [0; 4];
+    text.chars()
+        .filter_map(|c| match c {
+            _ if c.is_control() => Some(' '),
+            _ if unseen_char(c) || zeron_plugin_guard::template::unseen(c.encode_utf8(&mut buf)) => None,
+            _ => Some(c),
+        })
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 /// `text` for a terminal or a CI log, as one line: each control or format
 /// character written out (`\u{1b}`), so words from a plugin or the store
 /// can't start a line of their own, colour one, or reorder it.

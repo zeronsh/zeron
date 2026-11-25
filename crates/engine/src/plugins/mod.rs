@@ -1544,28 +1544,27 @@ impl Plugins {
         };
         let dir = self.inner.data_dir.join(TEMPLATES_DIR);
         for entry in list.iter_mut() {
-            if let Some(key) = entry["imported"]["key"].as_str().map(str::to_owned) {
+            // (The store's record says whose one from it is.)
+            if let Some(key) = entry["imported"]["key"].as_str().map(str::to_owned)
+                && entry["imported"]["source"]["kind"] != install::STORE
+            {
                 entry["imported"]["author"] = serde_json::json!(self.author_of(&key));
             }
-            // Where it came from (never a local path), and a newer version
-            // found there.
-            if let Some(source) = entry["imported"]
-                .as_object_mut()
-                .and_then(|i| i.remove("source"))
-                .and_then(|s| serde_json::from_value::<install::Source>(s).ok())
-            {
-                entry["imported"]["source"] = source.shown();
-            }
+            // A newer version found where it came from.
             if let (Some(id), Some(hash)) = (entry["id"].as_str(), entry["imported"]["hash"].as_str())
                 && let Some(found) = template_packages::found(&dir, id, hash)
             {
+                let version = listing::shown(&found.version, version::MAX_LEN);
                 entry["update"] = found.shown();
+                entry["update"]["version"] = serde_json::json!(version);
             }
         }
         let pending: Vec<serde_json::Value> = template_packages::pending(&dir)
             .into_iter()
             .map(|mut p| {
-                if let Some(key) = p["key"].as_str().map(str::to_owned) {
+                if let Some(key) = p["key"].as_str().map(str::to_owned)
+                    && p["store"].is_null()
+                {
                     p["author"] = serde_json::json!(self.author_of(&key));
                 }
                 p
