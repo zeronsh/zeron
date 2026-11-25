@@ -100,6 +100,9 @@ pub struct State {
     /// Templates served whole, as plugins are: their pages, records and
     /// packages.
     pub template_items: BTreeMap<String, StoredPlugin>,
+    /// Where a publish is said to have its page: this, then its kind and id
+    /// (none: an older store, which says nothing of it).
+    pub site: Option<String>,
     /// Templates' versions taken down, as the full check says them: `(id,
     /// version)`.
     pub templates_down: Vec<(String, String)>,
@@ -155,6 +158,14 @@ fn carded(state: &State, mut card: Value) -> Value {
         }
     }
     card
+}
+
+/// A publish's answer, with its page when this store says it.
+fn paged(state: &State, kind: &str, id: &str, mut answer: Value) -> Value {
+    if let Some(site) = &state.site {
+        answer["page_url"] = json!(format!("{site}/{kind}/{id}"));
+    }
+    answer
 }
 
 /// A version's package size as the store's records give it.
@@ -829,7 +840,7 @@ impl FakeStore {
                 plugin.supersede(&package.manifest.version);
                 let superseded: Vec<String> = plugin.versions.iter().filter(|v| v.superseded_by.is_some() && !before.contains(&v.version)).map(|v| v.version.clone()).collect();
                 state.submitted.push(((*id).to_owned(), body.to_vec(), via.to_owned()));
-                json_reply(201, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [], "superseded": superseded }))
+                json_reply(201, paged(&state, "plugins", id, json!({ "id": id, "version": package.manifest.version, "status": "listed", "verified": false, "checks": [], "superseded": superseded })))
             }
             ("GET", ["store", "v1", "me", "templates"]) => {
                 let Some((owner, None)) = who else { return unauthorized() };
@@ -898,7 +909,7 @@ impl FakeStore {
                     });
                 }
                 state.submitted_templates.push(((*id).to_owned(), body.to_vec()));
-                json_reply(201, json!({ "id": id, "version": version, "kind": "template", "status": "listed", "verified": false, "checks": [], "superseded": [] }))
+                json_reply(201, paged(&state, "templates", id, json!({ "id": id, "version": version, "kind": "template", "status": "listed", "verified": false, "checks": [], "superseded": [] })))
             }
             ("GET", ["store", "v1", "me", "plugins"]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };

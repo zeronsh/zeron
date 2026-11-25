@@ -224,7 +224,7 @@ async fn publish_with(token: DeployToken, kind: Kind, mut checked: Checked, pack
         return Ok(());
     }
     let reply = store.publish(&checked.id, raw, &caller).await.map_err(|(e, _)| failed_for(&e, kind))?;
-    submitted(&what, &reply, &store.page_url(&checked.id));
+    submitted(&what, &reply, &store.published_page(&checked.id, &reply));
     Ok(())
 }
 

@@ -2449,9 +2449,15 @@ async fn your_template_is_published_from_here() {
     store.add_template("ann", &template_package(&SigningKey::generate().unwrap().0, "midnight", "1.0.1", "return 9"), "listed");
     let refused = publish(&next).await.unwrap();
     assert_eq!((&refused["ok"], &refused["kind"], &refused["error"]), (&json!(false), &json!("template"), &json!("version_exists")), "{refused}");
+    // Its page is where the store says it is, on the store's own site alone.
+    let before = published["url"].clone();
+    store.state.lock().unwrap().site = Some("https://site.example.org".into());
+    making(&d, "midnight", "1.1.0", json!({}));
+    let paged = publish(&prepare("midnight").await.unwrap()).await.unwrap();
+    assert_eq!((&paged["ok"], &paged["url"]), (&json!(true), &before), "{paged}");
     // A store that can't be asked: checked all the same, and said.
     store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
-    making(&d, "midnight", "1.0.2", json!({}));
+    making(&d, "midnight", "1.1.1", json!({}));
     let unasked = prepare("midnight").await.unwrap();
     assert_eq!((&unasked["ok"], &unasked["store_checked"], unasked["note"].is_string()), (&json!(true), &json!(false), true), "{unasked}");
     let unsent = publish(&unasked).await.unwrap();

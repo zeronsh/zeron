@@ -913,7 +913,7 @@ impl Plugins {
                 // at the next check, not an idle hour on.
                 *lock(&self.inner.publishes_checked) = None;
                 // (Live at once: its page on the store's website.)
-                reply["url"] = json!(client.page_url(id));
+                reply["url"] = json!(client.published_page(id, &reply));
                 reply
             }
             Err((error, fields)) => refused(&error, &fields),
@@ -975,7 +975,7 @@ impl Plugins {
             Ok(mut reply) => {
                 reply["ok"] = json!(true);
                 *lock(&self.inner.publishes_checked) = None;
-                reply["url"] = json!(client.page_url(&item));
+                reply["url"] = json!(client.published_page(&item, &reply));
                 reply
             }
             Err((error, fields)) => refused(&error, &fields),

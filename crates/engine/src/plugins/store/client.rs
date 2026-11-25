@@ -486,6 +486,39 @@ impl StoreClient {
         format!("{site}/{}/{}", self.kind.segment(), segment(id))
     }
 
+    /// Where `id`, published as `answer` says, has its page: what the store
+    /// says (`page_url`), as given, when it's https on the store's own host or
+    /// one under the same parent domain, with no port or name in it; else
+    /// [`Self::page_url`], an older store's. (Escaped where it's shown.)
+    pub fn published_page(&self, id: &str, answer: &Value) -> String {
+        const MOST: usize = 2048;
+        let edge = url::Url::parse(&self.base).ok();
+        let own = edge.as_ref().and_then(|edge| match edge.host() {
+            Some(url::Host::Domain(host)) => Some(host),
+            _ => None,
+        });
+        let on_its_site = |host: &str| {
+            own.is_some_and(|own| {
+                let labels: Vec<&str> = own.rsplitn(3, '.').collect();
+                host == own || labels.len() >= 2 && {
+                    let parent = format!("{}.{}", labels[1], labels[0]);
+                    host == parent || host.ends_with(&format!(".{parent}"))
+                }
+            })
+        };
+        let said = answer["page_url"].as_str().filter(|said| {
+            // (The host as it's written is the host as it's read: no port,
+            // https's own among them, no name before it, nothing encoded.)
+            let written = said.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#', '\\']).next());
+            said.len() <= MOST
+                && said.is_ascii()
+                && !said.bytes().any(|b| b.is_ascii_control() || b == b' ')
+                && written.is_some_and(on_its_site)
+                && url::Url::parse(said).is_ok_and(|url| url.scheme() == "https" && url.host_str() == written)
+        });
+        said.map_or_else(|| self.page_url(id), str::to_owned)
+    }
+
     /// `method path` (path from `/store/v1`, query included) with `body`,
     /// as `caller`, its reply read up to `limit` bytes: `(status, bytes)` for
     /// a 2xx, else the failure.
@@ -758,6 +791,60 @@ mod tests {
     /// A client asks about one kind: a template's routes mirror a plugin's
     /// under their own prefix, and a store-wide route says which (plugins
     /// are asked about as they always were).
+    /// The page a publish is said to be at is the store's own word of it, on
+    /// its own site.
+    #[test]
+    fn a_published_page_is_where_the_store_says() {
+        let of = |base: &str, said: serde_json::Value| StoreClient::new(base).of(Kind::Template).published_page("midnight", &serde_json::json!({ "page_url": said }));
+        let edge = "https://edge.example.com";
+        let derived = "https://example.com/templates/midnight";
+        for own in ["https://example.com/t/midnight", "https://edge.example.com/t", "https://site-two.example.com/t/midnight?x=1#top", "https://a.b.example.com/"] {
+            assert_eq!(of(edge, own.into()), own);
+        }
+        for odd in [
+            serde_json::Value::Null,
+            1.into(),
+            "".into(),
+            "midnight".into(),
+            "/templates/midnight".into(),
+            "//example.com/t".into(),
+            "javascript:alert(1)".into(),
+            "file:///etc/passwd".into(),
+            "http://example.com/t".into(),
+            "HTTPS://example.com/t".into(),
+            "https://".into(),
+            "https:example.com/t".into(),
+            "https://example.org/t".into(),
+            "https://evilexample.com/t".into(),
+            "https://example.com.evil.org/t".into(),
+            "https://com/t".into(),
+            "https://example.com./t".into(),
+            "https://EXAMPLE.com/t".into(),
+            "https://evil.org\\.example.com/t".into(),
+            "https://evil.org\\@example.com/t".into(),
+            "https://ada:secret@example.com/".into(),
+            "https://@example.com/".into(),
+            "https://ada@b.example.com/".into(),
+            "https://ada:secret@b.example.com/".into(),
+            "https://%62.example.com/".into(),
+            "https://B.example.com/".into(),
+            "https://example.com:443/t".into(),
+            "https://example.com:8443/t".into(),
+            "https://example.com:/t".into(),
+            "https://example.com/\nfake line".into(),
+            "https://example.com/a b".into(),
+            "https://example.com/\u{202e}x".into(),
+            format!("https://example.com/{}", "a".repeat(2048)).into(),
+        ] {
+            assert_eq!(of(edge, odd.clone()), derived, "{odd}");
+        }
+        assert_eq!(StoreClient::new(edge).of(Kind::Template).published_page("midnight", &serde_json::json!({})), derived, "an older store's answer");
+        // A store that's an address, or one name, has no site beside it.
+        for (base, said) in [("http://127.0.0.1:9", "https://0.1/t"), ("http://127.0.0.1:9", "https://127.0.0.1/t"), ("http://127.0.0.1:9", "http://127.0.0.1:9/plugins/midnight"), ("http://localhost:9", "https://a.localhost/t")] {
+            assert_eq!(of(base, said.into()), format!("{base}/templates/midnight"), "{said}");
+        }
+    }
+
     #[test]
     fn a_client_is_for_one_kind() {
         let plugins = StoreClient::new("https://edge.example.test/");
