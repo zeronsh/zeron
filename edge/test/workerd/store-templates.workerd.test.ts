@@ -292,6 +292,16 @@ describe("templates: what's refused", () => {
     expect(await problems({ files: { "screens/plugins/page.luau": "x" } })).toEqual([400, "protected_file", "files", "screens/plugins/page.luau"]);
     expect(await problems({ files: { "Account/x.luau": "x" } })).toEqual([400, "protected_file", "files", "Account/x.luau"]);
     expect(await problems({ files: { ".luaurc": "{}" } })).toEqual([400, "protected_file", "files", ".luaurc"]);
+    // Where the app lays a template's tokens beside Zeron's, and a folder
+    // that would stand in for Zeron's own: never a template's, however
+    // spelt. Its ds/tokens.luau is.
+    for (const path of ["ds/tokens/init.luau", "DS/Tokens/colors.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", "ds/tokens_template/deep/x.luau", "DS/Tokens_Template.luau", "ds/tokens_template\ufe0f.luau"]) {
+      expect(await problems({ files: { [path]: "return {}" } }), path).toEqual([400, "protected_file", "files", path]);
+    }
+    for (const path of ["ds/tokens.luau", "ds/tokens_templates.luau"]) {
+      const id = uniqueId("k");
+      expect((await publishTemplate(a.userId, id, await makeTemplate({ id, version: "1.0.0", signer: a.signer, files: { [path]: "return {}" } }))).status, path).toBe(201);
+    }
     for (const member of ["builtin_theme", "builtin_template", "permissions", "icon", "categories", "engines"]) {
       expect(await problems({ manifest: { [member]: member === "engines" ? { zeron: ">=1.0.0" } : true } }), member).toEqual([400, "bad_listing", member, null]);
     }
