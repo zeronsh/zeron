@@ -21,8 +21,10 @@ pub const SCREENSHOTS: &str = "screenshots";
 pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
 
 /// Paths no template replaces: allowing plugins, your account and signing
-/// in, and the aliases every module resolves by. It only grows.
-pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
+/// in, the aliases every module resolves by, and where Zeron lays a
+/// template's `ds/tokens.luau` beside its own (a folder of that name too: its
+/// `init.luau` is the same module). It only grows.
+pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/"];
 
 /// Whether `rel` is one no template replaces. Compared as a case-insensitive
 /// filesystem (macOS's, Windows') names files (`path::fold`):
@@ -184,6 +186,15 @@ mod tests {
             ("\u{17f}creens/templates/page.luau", false, false, true, false, false, false),
             ("screens/plugins./page.luau", false, false, true, false, false, false),
             ("screens/plugins.luau", false, false, false, false, true, true),
+            ("ds/tokens.luau", false, false, false, false, true, true),
+            ("ds/tokens_template.luau", false, false, true, false, false, false),
+            ("DS/Tokens_Template.luau", false, false, true, false, false, false),
+            ("ds/tokens_template.luau./x", false, false, true, false, false, false),
+            ("ds/tokens_template\u{fe0f}.luau", false, false, true, false, false, false),
+            ("ds/tokens_template/init.luau", false, false, true, false, false, false),
+            ("ds/Tokens_Template./deep/a.luau", false, false, true, false, false, false),
+            ("ds/tokens_templates.luau", false, false, false, false, true, true),
+            ("ds/tokens_templates/init.luau", false, false, false, false, true, true),
             ("screens/TEMPLA~1/page.luau", false, false, false, true, false, true),
             ("LUAURC~1", false, false, false, true, false, true),
             ("screens/a~b.luau", false, false, false, false, true, true),
@@ -211,7 +222,7 @@ mod tests {
 
     #[test]
     fn what_s_protected_only_grows() {
-        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc"] {
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/"] {
             assert!(NEVER_TEMPLATED.contains(&released), "{released}");
         }
     }
@@ -228,7 +239,7 @@ mod tests {
         let vector = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
         assert_eq!(digest(&files), vector);
         // None of these is any part of it.
-        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
+        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
             files.insert(rel.to_owned(), b"x");
         }
         assert_eq!(digest(&files), vector);

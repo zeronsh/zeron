@@ -2198,6 +2198,78 @@
       "short_name": false,
       "template_protected": false,
       "unseen": false
+    },
+    {
+      "fold": "ds/tokens.luau",
+      "fold_path": "ds/tokens.luau",
+      "path": "ds/tokens.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template.luau",
+      "fold_path": "ds/tokens_template.luau",
+      "path": "ds/tokens_template.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template.luau",
+      "fold_path": "ds/tokens_template.luau",
+      "path": "DS/Tokens_Template.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template.luau",
+      "fold_path": "ds/tokens_template.luau",
+      "path": "ds/tokens_template️.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_templates.luau",
+      "fold_path": "ds/tokens_templates.luau",
+      "path": "ds/tokens_templates.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template",
+      "fold_path": "ds/tokens_template",
+      "path": "ds/tokens_template",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template/init.luau",
+      "fold_path": "ds/tokens_template/init.luau",
+      "path": "ds/tokens_template/init.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_template/deep/a.luau",
+      "fold_path": "ds/tokens_template/deep/a.luau",
+      "path": "ds/Tokens_Template./deep/a.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "ds/tokens_templates/init.luau",
+      "fold_path": "ds/tokens_templates/init.luau",
+      "path": "ds/tokens_templates/init.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
     }
   ],
   "format": "zeron-plugin-package-vectors:v1",

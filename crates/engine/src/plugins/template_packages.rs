@@ -1955,7 +1955,7 @@ mod tests {
     /// grows). Add to this list with each release that adds one; never drop.
     #[test]
     fn plugins_template_packages_protected_only_grows() {
-        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc"] {
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/"] {
             assert!(PROTECTED.contains(&released), "{released} was protected in a release: it stays so");
         }
     }
