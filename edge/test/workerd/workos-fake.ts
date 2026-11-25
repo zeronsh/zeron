@@ -6,10 +6,14 @@
  * Test controls (plain HTTP from inside the tests):
  *   GET  https://api.workos.com/__state        {orgs, users, memberships, invitations,
  *                                              deletedOrgs}
- *   POST https://api.workos.com/__fail         {path, times, status?, code?, method?}:
+ *   POST https://api.workos.com/__fail         {path, times, status?, code?, method?, match?}:
  *                                              the next `times` calls to `path`
- *                                              (by `method`, or any) answer
- *                                              `status` (500)
+ *                                              (by `method`, or any; whose body
+ *                                              has `match`'s fields, or any)
+ *                                              answer `status` (500). One fake
+ *                                              serves every test file at once,
+ *                                              so a path another file calls
+ *                                              too needs `match`.
  *   POST https://api.workos.com/__memberships  {user_id, organization_id, role,
  *                                              email?} seeds an active membership
  *   POST https://api.workos.com/__users        {id, email, first_name?, last_name?,
@@ -67,7 +71,15 @@ export const createWorkOsFake = () => {
   const users: User[] = [];
   /** Orgs deleted (DELETE /organizations/{id}), in order. */
   const deletedOrgs: string[] = [];
-  const failures = new Map<string, { times: number; status: number; code?: string; method?: string }>();
+  type Failure = {
+    path: string;
+    times: number;
+    status: number;
+    code?: string;
+    method?: string;
+    match: Record<string, string | number>;
+  };
+  let failures: Failure[] = [];
   let next = 0;
   /** Strictly increasing, so a later write always has a later `updated_at`. */
   let clock = Date.parse("2026-01-01T00:00:00Z");
@@ -109,11 +121,14 @@ export const createWorkOsFake = () => {
     const body =
       request.method === "POST" || request.method === "PUT" ? ((await request.json()) as Record<string, string | number>) : {};
     if (url.pathname === "/__fail") {
-      failures.set(body.path as string, {
-        times: body.times as number,
-        status: (body.status as number | undefined) ?? 500,
-        code: body.code as string | undefined,
-        method: body.method as string | undefined
+      const armed = body as unknown as Partial<Failure> & { path: string; times: number };
+      failures.push({
+        path: armed.path,
+        times: armed.times,
+        status: armed.status ?? 500,
+        code: armed.code,
+        method: armed.method,
+        match: armed.match ?? {}
       });
       return reply(200, {});
     }
@@ -152,9 +167,15 @@ export const createWorkOsFake = () => {
         addMembership(body.user_id as string, body.organization_id as string, body.role as string, body.email as string | undefined)
       );
     }
-    const failing = failures.get(url.pathname);
-    if (failing && failing.times > 0 && (!failing.method || failing.method === request.method)) {
+    const failing = failures.find(
+      (f) =>
+        f.path === url.pathname &&
+        (!f.method || f.method === request.method) &&
+        Object.entries(f.match).every(([field, value]) => body[field] === value)
+    );
+    if (failing) {
       failing.times -= 1;
+      if (failing.times <= 0) failures = failures.filter((f) => f !== failing);
       return reply(failing.status, { message: "fake WorkOS failure", ...(failing.code ? { code: failing.code } : {}) });
     }
     const userMatch = /^\/user_management\/users\/([^/]+)$/.exec(url.pathname);
