@@ -2183,6 +2183,14 @@ ui.command {
 		require("@app/screens/chat/shared").mention_chat("s1")
 	end,
 }
+-- (A scheme as the app wears it, the running template's own palette on it:
+-- for pictures of a template.)
+for _, scheme in { "light", "dark" } do
+	ui.command { id = `fixture.worn_{scheme}`, title = `{scheme}, as worn`, run = function()
+		ui.theme.follow_system(false)
+		ui.theme.current:set(`theme-{scheme}`)
+	end }
+end
 for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 	ui.command {
 		id = `go_{id}`,
