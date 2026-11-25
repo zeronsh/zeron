@@ -1615,7 +1615,7 @@ impl Plugins {
     async fn mark_templates(&self, client: &StoreClient, caller: &Caller, here: Vec<template_packages::Installed>) {
         let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
         for t in here.into_iter().filter(|t| !t.store.verified) {
-            let since = template_packages::unmarked();
+            let since = template_packages::unmarked(&dir);
             let Ok((_, record)) = client.version(&t.store.id, &t.version, caller).await else { continue };
             if !record.verified || !record.hash.eq_ignore_ascii_case(&t.store.hash) || record.key != t.store.key {
                 continue;

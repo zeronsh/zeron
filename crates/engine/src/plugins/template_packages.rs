@@ -1241,13 +1241,16 @@ pub fn imported(folder: &Path) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
-/// How often marks were taken off: a mark whose record was read before one
-/// was isn't put on after it.
-static UNMARKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How often marks were taken off in each templates folder: a mark whose
+/// record was read before one was isn't put on after it.
+fn unmarkings() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, u64>> {
+    static UNMARKED: std::sync::Mutex<BTreeMap<PathBuf, u64>> = std::sync::Mutex::new(BTreeMap::new());
+    UNMARKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// [`mark`]'s `since`, taken before the record is read.
-pub fn unmarked() -> u64 {
-    UNMARKED.load(std::sync::atomic::Ordering::SeqCst)
+pub fn unmarked(dir: &Path) -> u64 {
+    unmarkings().get(dir).copied().unwrap_or(0)
 }
 
 /// Template `installed`, whose own record in the store says it's verified
@@ -1256,7 +1259,7 @@ pub fn unmarked() -> u64 {
 pub fn mark(dir: &Path, installed: &Installed, verified_at: Option<i64>, since: u64) -> bool {
     let _changing = changing();
     let at = dir.join(&installed.id);
-    if unmarked() != since || super::template_blocks::blocked(dir, &at).is_some() {
+    if unmarked(dir) != since || super::template_blocks::blocked(dir, &at).is_some() {
         return false;
     }
     let Some(mut record) = imported(&at).filter(|record| record["hash"] == installed.hash.as_str() && source(&at).is_some_and(|s| s.store() == Some(&installed.store))) else { return false };
@@ -1272,7 +1275,7 @@ pub fn mark(dir: &Path, installed: &Installed, verified_at: Option<i64>, since: 
 /// changed, and whether every one that should be was.
 pub fn unmark(dir: &Path, versions: &[(String, String)]) -> (Vec<String>, bool) {
     let _changing = changing();
-    UNMARKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *unmarkings().entry(dir.to_owned()).or_default() += 1;
     let (mut changed, mut all) = (Vec::new(), true);
     for (folder, store) in from_store(dir) {
         let at = dir.join(&folder);
@@ -2086,13 +2089,15 @@ mod tests {
         put();
         let here = installed_from_store(&d, None).remove(0);
         for other in [Installed { hash: "other".into(), ..here.clone() }, Installed { store: install::StoreSource { publisher_id: "pub_other".into(), ..here.store.clone() }, ..here.clone() }, Installed { id: "elsewhere".into(), ..here.clone() }] {
-            assert!(!mark(&d, &other, Some(7), unmarked()) && !verified());
+            assert!(!mark(&d, &other, Some(7), unmarked(&d)) && !verified());
         }
-        // (Any taken off, meanwhile: other tests' too, so it's tried again.)
-        let since = unmarked();
+        // (One taken off in this folder, meanwhile; not in another.)
+        let since = unmarked(&d);
         unmark(&d, &[("other".into(), "1.0.0".into())]);
         assert!(!mark(&d, &here, Some(7), since) && !verified());
-        assert!((0..1000).any(|_| mark(&d, &here, Some(7), unmarked())));
+        let since = unmarked(&d);
+        unmark(&dir("marked-elsewhere"), &[("midnight".into(), "1.0.0".into())]);
+        assert!(mark(&d, &here, Some(7), since));
         assert!(verified());
         assert_eq!(unmark(&d, &[("midnight".into(), "1.0.0".into())]), (vec!["midnight".to_owned()], true));
         assert!(!verified());
