@@ -1810,8 +1810,8 @@ async fn only_a_whole_answer_lifts_or_repairs() {
     d.plugins.check_takedowns().await;
     let file = templates.join(".blocked.json");
     let whole = std::fs::read(&file).unwrap();
-    let refused = || async { d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.is_err_and(|e| e.contains("taken_down")) };
-    assert!(refused().await);
+    let refused = || async { word(&d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap_err()).to_owned() };
+    assert_eq!(refused().await, "taken_down");
     let row = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap().clone() };
     std::fs::create_dir_all(templates.join(".zeron")).unwrap();
     std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
@@ -1836,7 +1836,7 @@ async fn only_a_whole_answer_lifts_or_repairs() {
         assert!(same(), "{state}: the plugins alone");
         d.call(methods::CHECK_PLUGIN_UPDATES, json!({ "id": "focus" })).await.unwrap();
         assert!(same(), "{state}: one plugin");
-        assert!(refused().await, "{state}");
+        assert_eq!(refused().await, if state == "there" { "taken_down" } else { "blocks_unreadable" }, "{state}");
         let blocked = row().await["blocked"].clone();
         match state {
             "there" => assert_eq!(blocked["id"], "midnight"),
@@ -1847,7 +1847,7 @@ async fn only_a_whole_answer_lifts_or_repairs() {
             "gone" | "unreadable" => d.plugins.check_takedowns().await,
             _ => drop(d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap()),
         }
-        assert!(refused().await, "{state}: the whole answer");
+        assert_eq!(refused().await, "taken_down", "{state}: the whole answer");
         assert!(std::fs::read_to_string(&file).unwrap().contains("midnight"), "{state}");
     }
 }

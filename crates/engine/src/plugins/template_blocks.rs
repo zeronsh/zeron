@@ -39,6 +39,9 @@ pub const LINEAGE: &str = ".lineage.json";
 const KEEP_SECS: i64 = 30 * 24 * 60 * 60;
 /// The word a blocked template's refusal starts with.
 pub const TAKEN_DOWN: &str = "taken_down";
+/// The word a refusal starts with that's only because Zeron can't read what's
+/// been taken down, or where a template came from: nothing says it was.
+pub const UNCHECKED: &str = "blocks_unreadable";
 
 /// A template version the store took down.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,8 +256,15 @@ pub fn by_lineage(folder: &Path, block: &Block) -> bool {
 /// Refuses `what` of the template in `folder` when it's blocked.
 pub fn refuse(dir: &Path, folder: &Path, what: &str) -> Result<(), String> {
     let Some(block) = blocked(dir, folder) else { return Ok(()) };
+    if block.id.is_empty() {
+        return Err(unchecked(what));
+    }
     let why = if block.reason.is_empty() { String::new() } else { format!(" ({})", block.reason) };
     Err(super::install::failure(TAKEN_DOWN, format!("This template was taken down from the store{why}, so it can't be {what}.")))
+}
+
+fn unchecked(what: &str) -> String {
+    super::install::failure(UNCHECKED, format!("Zeron can't check whether this template was taken down from the store, so it can't be {what} now."))
 }
 
 /// Refuses a package (its content hash, and the store's id and version when
@@ -265,7 +275,7 @@ pub fn refuse_package(dir: &Path, content_hash: &str, identity: Option<&Identity
     if read(dir).is_err() && installed(dir).is_empty() {
         let _ = settle(dir, &[], Vec::new(), true, 0);
     }
-    let blocks = read(dir).map_err(|_| super::install::failure(TAKEN_DOWN, "Zeron can't read which templates have been taken down from the store, so it isn't installing any"))?;
+    let blocks = read(dir).map_err(|_| unchecked("installed"))?;
     let hit = blocks.iter().find(|b| b.hash.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(content_hash)) || identity.is_some_and(|i| b.is(i)));
     match hit {
         None => Ok(()),
@@ -497,12 +507,17 @@ mod tests {
         apply(dir, vec![Change::TakenDown(block("z", "1.0.0", NOW))], NOW).unwrap();
         assert!(blocked(dir, &store).is_none() && blocked(dir, &mine).is_none());
         assert!(blocked(dir, &broken).is_some() && blocked(dir, &lineage).is_some());
+        // (Nothing says it was taken down: a word of its own.)
+        for t in [&broken, &lineage] {
+            assert!(refuse(dir, t, "used").unwrap_err().starts_with("blocks_unreadable: "), "{t:?}");
+        }
         let entry = serde_json::to_value(block("z", "1.0.0", NOW)).unwrap();
         for text in ["", "nope", "[]", r#"{"format":"v2","blocks":[]}"#, &json!({ "format": FORMAT, "blocks": [entry, { "id": "y" }] }).to_string()] {
             std::fs::write(dir.join(FILE), text).unwrap();
             assert!(blocked(dir, &store).is_some() && blocked(dir, &broken).is_some(), "{text}");
             assert!(blocked(dir, &mine).is_none(), "what never came from the store still runs: {text}");
-            assert!(refuse_package(dir, "00", None).is_err(), "{text}");
+            assert!(refuse_package(dir, "00", None).unwrap_err().starts_with("blocks_unreadable: "), "{text}");
+            assert!(refuse(dir, &store, "used").unwrap_err().starts_with("blocks_unreadable: "), "{text}");
             assert!(apply(dir, Vec::new(), NOW).is_err(), "{text}");
         }
         // A folder where the file should be.
