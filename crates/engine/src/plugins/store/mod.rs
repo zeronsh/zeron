@@ -22,11 +22,11 @@ pub mod publish;
 pub mod text_notes;
 
 use super::install::{self, Package, StoreSource, failure};
-use super::signing;
+use super::{signing, template_packages};
 use client::{PackageRecord, Publisher, reason};
 
-pub use device::{MAX_UPDATE_PLUGINS, REPORT_REASONS, handles};
-pub(in crate::plugins) use device::StoreHandle;
+pub use device::{MAX_UPDATE_ITEMS, REPORT_REASONS, handles};
+pub(in crate::plugins) use device::{ShownRecord, StoreHandle, record_state};
 #[cfg(test)]
 pub(in crate::plugins) use device::publishes_idle;
 
@@ -60,32 +60,77 @@ pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
 /// `verified`: the version's record says Zeron verified it (fetched with
 /// `record`, at install time).
 pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher, verified: bool) -> Result<(Package, StoreSource), String> {
-    let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
     let (publisher, publisher_id) = vouched(publisher)?;
+    sent(&raw, record)?;
+    let package = install::parse_from_store(raw, record.key.is_some())?;
+    recorded(id, version, record, &package.id(), &package.manifest.version, &package.hash, package.key.as_deref())?;
+    Ok((package, store_source(id, publisher, publisher_id, record, verified)))
+}
+
+/// [`verify`] for a template (contract "Templates in the store"): its
+/// package, signed in the templates' domain by the key the record names, or
+/// unsigned under a record naming none, its contents vouched for by the
+/// record's hash.
+pub fn verify_template(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher, verified: bool) -> Result<(template_packages::Package, StoreSource), String> {
+    let (publisher, publisher_id) = vouched(publisher)?;
+    sent(&raw, record)?;
+    let package = template_packages::parse_from_store(raw, record.key.is_some())
+        .map_err(|error| failure(template_packages::refusal(&error).unwrap_or(reason::STORE_ERROR), error))?;
+    recorded(id, version, record, &package.id(), &package.version(), &package.content_hash, package.key.as_deref())?;
+    Ok((package, store_source(id, publisher, publisher_id, record, verified)))
+}
+
+fn mismatch(what: &str) -> String {
+    failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"))
+}
+
+/// The file `raw` is the one `record` names: its sha256 and its size.
+fn sent(raw: &[u8], record: &PackageRecord) -> Result<(), String> {
     if record.sha256.is_empty() || record.hash.is_empty() || record.bytes == 0 {
         return Err(mismatch("its record is incomplete"));
     }
-    if signing::sha256_hex(&raw) != record.sha256.to_ascii_lowercase() {
+    if signing::sha256_hex(raw) != record.sha256.to_ascii_lowercase() {
         return Err(mismatch("the file"));
     }
     if record.bytes != raw.len() as u64 {
         return Err(mismatch("its size"));
     }
-    let package = install::parse_from_store(raw, record.key.is_some())?;
-    if package.id() != id {
+    Ok(())
+}
+
+/// A package (its own id, version, content hash and signer) is what the
+/// store's record of `id` at `version` says.
+fn recorded(id: &str, version: &str, record: &PackageRecord, package_id: &str, package_version: &str, hash: &str, key: Option<&str>) -> Result<(), String> {
+    if package_id != id {
         return Err(mismatch("its id"));
     }
-    if package.manifest.version != version {
+    if package_version != version {
         return Err(mismatch("its version"));
     }
-    if package.hash != record.hash.to_ascii_lowercase() {
+    if hash != record.hash.to_ascii_lowercase() {
         return Err(mismatch("its contents"));
     }
-    if record.key.as_deref().is_some_and(|key| Some(key) != package.key.as_deref()) {
+    if record.key.as_deref().is_some_and(|named| Some(named) != key) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), last_key: None, verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
-    Ok((package, store))
+    Ok(())
+}
+
+/// The store's record to keep beside an install of it.
+fn store_source(id: &str, publisher: String, publisher_id: String, record: &PackageRecord, verified: bool) -> StoreSource {
+    StoreSource {
+        id: id.to_owned(),
+        publisher,
+        publisher_id,
+        hash: record.hash.to_ascii_lowercase(),
+        key: record.key.clone(),
+        last_key: None,
+        verified,
+        verified_at: None,
+        verified_alternative: None,
+        instead_of_unverified: false,
+        replaced: None,
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +147,62 @@ mod tests {
 
     fn record(raw: &[u8], package: &Package) -> PackageRecord {
         PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: package.key.clone() }
+    }
+
+    /// A template from the store is exactly what its record says, signed by
+    /// the key it names or unsigned under one that names none; a plugin's
+    /// package never passes for one, nor one signed in the plugins' domain.
+    #[test]
+    fn a_store_template_is_exactly_what_its_record_says() {
+        let (key, _) = SigningKey::generate().unwrap();
+        let manifest = serde_json::json!({ "id": "midnight", "name": "Midnight", "description": "Dark.", "version": "1.2.0", "zeron_version": "0.3.16" });
+        let files: std::collections::BTreeMap<String, Vec<u8>> = [("app.luau".to_owned(), b"return 1".to_vec()), ("preview.png".to_owned(), b"png".to_vec())].into();
+        let signed = template_packages::pack(&manifest, &files, Some(&key)).unwrap();
+        let unsigned = template_packages::pack(&manifest, &files, None).unwrap();
+        let record = |raw: &[u8], key: Option<String>| PackageRecord {
+            hash: template_packages::parse_from_store(raw.to_vec(), key.is_some()).unwrap().content_hash,
+            sha256: signing::sha256_hex(raw),
+            bytes: raw.len() as u64,
+            key,
+        };
+        let good = record(&signed, Some(key.public()));
+        let (package, store) = verify_template(signed.clone(), "midnight", "1.2.0", &good, &ada(), true).unwrap();
+        assert_eq!((package.id(), store.key.clone(), store.verified), ("midnight".into(), Some(key.public()), true));
+        assert_eq!((store.hash.as_str(), store.publisher.as_str(), store.publisher_id.as_str()), (package.content_hash.as_str(), "ada", ADA));
+        let unkeyed = record(&unsigned, None);
+        assert_eq!(unkeyed.hash, good.hash, "the signature is no part of the contents");
+        let (package, store) = verify_template(unsigned.clone(), "midnight", "1.2.0", &unkeyed, &ada(), false).unwrap();
+        assert_eq!((package.key, store.key, store.verified), (None, None, false));
+
+        let refused = |raw: &[u8], id: &str, version: &str, record: &PackageRecord| {
+            let error = verify_template(raw.to_vec(), id, version, record, &ada(), true).unwrap_err();
+            install::reason_of(&error).map(str::to_owned).unwrap_or(error)
+        };
+        for (record, what) in [
+            (PackageRecord { sha256: "00".repeat(32), ..good.clone() }, "the file"),
+            (PackageRecord { bytes: 3, ..good.clone() }, "its size"),
+            (PackageRecord { hash: "00".repeat(32), ..good.clone() }, "its contents"),
+            (PackageRecord { hash: String::new(), ..good.clone() }, "no hash"),
+            (PackageRecord { key: Some(SigningKey::generate().unwrap().0.public()), ..good.clone() }, "its signer"),
+            (PackageRecord { key: None, ..good.clone() }, "signed, under a record naming no signer"),
+        ] {
+            assert_eq!(refused(&signed, "midnight", "1.2.0", &record), "store_mismatch", "{what}");
+        }
+        assert_eq!(refused(&signed, "other", "1.2.0", &good), "store_mismatch");
+        assert_eq!(refused(&signed, "midnight", "1.3.0", &good), "store_mismatch");
+        // Unsigned where the record names a signer.
+        let named = PackageRecord { key: Some(key.public()), ..unkeyed.clone() };
+        assert_eq!(refused(&unsigned, "midnight", "1.2.0", &named), "unsigned");
+        // Another kind's package, or domain.
+        let plugin = signed_package(&key, "midnight", "1.2.0", &["ui.add"], "return 1");
+        let as_sent = |raw: &[u8]| PackageRecord { sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, ..good.clone() };
+        assert_eq!(refused(&plugin, "midnight", "1.2.0", &as_sent(&plugin)), "not_a_package");
+        let hashes = crate::plugins::package::hashes(&files);
+        let wrong_domain = crate::plugins::package::pack(template_packages::FORMAT, &key.sign_manifest(&manifest, &hashes), &files).unwrap();
+        assert_eq!(refused(&wrong_domain, "midnight", "1.2.0", &as_sent(&wrong_domain)), "bad_signature");
+        // No publisher to name.
+        let nobody = Publisher { id: None, username: Some("ada".into()), verified: true };
+        assert!(verify_template(signed, "midnight", "1.2.0", &good, &nobody, true).is_err());
     }
 
     #[test]

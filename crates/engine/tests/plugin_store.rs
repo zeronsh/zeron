@@ -584,6 +584,680 @@ async fn take_downs_reach_the_device_by_the_feed_and_a_restore_asks_again() {
     assert_eq!(store.state.lock().unwrap().asks.len(), asks + 1);
 }
 
+/// A template taken down from the store: by the feed (with its contents'
+/// hash) and by the full check; it and its copies can't be used, copied or
+/// exported, nothing with its contents is imported, and a restore lifts it.
+/// The device's place in the feed moves past it only once it's kept.
+#[tokio::test]
+async fn a_template_taken_down_is_blocked_here_and_so_are_its_copies() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    std::fs::write(templates.join(".zeron/app.luau"), "return 1").unwrap();
+    // (Its folder's name is another's.)
+    let folder = templates.join("midnight-2");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("zeron-template.json"), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#).unwrap();
+    std::fs::write(folder.join("app.luau"), "return 2").unwrap();
+    begin_blocks(&templates);
+    let record = json!({ "key": null, "hash": "h", "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+        "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+    std::fs::write(folder.join(".imported.json"), record.to_string()).unwrap();
+    d.call(methods::CREATE_TEMPLATE, json!({ "id": "mine", "from": "midnight-2" })).await.unwrap();
+    d.call(methods::CREATE_TEMPLATE, json!({ "id": "again", "from": "mine" })).await.unwrap();
+    let row = |list: &Value, id: &str| list["templates"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+
+    // No place in the feed yet: the full check, which asks about it once.
+    d.plugins.check_takedowns().await;
+    let asks = store.state.lock().unwrap().asks.clone();
+    assert_eq!((asks.len(), &asks[0]["templates"]), (1, &json!([{ "id": "midnight", "version": "1.0.0", "hash": "cd".repeat(32) }])), "{asks:?}");
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "mine" })).await.is_ok());
+
+    let down = |seq: u64, kind: &str| {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((seq, kind.into(), "midnight".into(), "1.0.0".into(), "It read your chats.".into()));
+        state.template_events.insert(seq);
+    };
+    down(1, "take_down");
+    // It can't be kept: the place doesn't move, and it's asked for again.
+    let file = templates.join(".blocked.json");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    d.plugins.check_takedowns().await;
+    std::fs::remove_dir(&file).unwrap();
+    // (What couldn't be read starts over: the full check, then the feed on.)
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    d.plugins.check_takedowns().await;
+    let list = d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap();
+    for id in ["midnight-2", "mine", "again"] {
+        let row = row(&list, id);
+        assert_eq!((row["status"].as_str(), row["blocked"]["reason"].as_str()), (Some("blocked"), Some("From the full check.")), "{row}");
+        for (method, params) in [
+            (methods::USE_TEMPLATE, json!({ "id": id })),
+            (methods::CREATE_TEMPLATE, json!({ "id": "another", "from": id })),
+            (methods::EXPORT_TEMPLATE, json!({ "id": id })),
+        ] {
+            let refused = d.call(method, params).await.unwrap_err();
+            assert!(refused.contains("taken_down"), "{method} {id}: {refused}");
+        }
+    }
+    // A copy's row names what it's a copy of, and says it's a copy.
+    let rows: Vec<Value> = ["midnight-2", "mine", "again"].iter().map(|id| row(&list, id)["blocked"].clone()).collect();
+    for (blocked, via) in rows.iter().zip([Value::Null, json!("lineage"), json!("lineage")]) {
+        assert_eq!((blocked["id"].as_str(), blocked["version"].as_str(), blocked["via"].clone()), (Some("midnight"), Some("1.0.0"), via), "{blocked}");
+    }
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "zeron" })).await.is_ok(), "Zeron's own always");
+
+    // Restored, by the feed; then taken down again, by it.
+    store.state.lock().unwrap().templates_down.clear();
+    down(2, "restore");
+    d.plugins.check_takedowns().await;
+    assert!(d.call(methods::USE_TEMPLATE, json!({ "id": "again" })).await.is_ok());
+    down(3, "take_down");
+    d.plugins.check_takedowns().await;
+    let list = d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap();
+    assert_eq!(row(&list, "again")["blocked"]["reason"], "It read your chats.");
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!((kept["format"].as_str(), kept["blocks"][0]["hash"].clone()), (Some("zeron-template-blocks:v1"), json!("ab".repeat(32))), "{kept}");
+
+    let asked = |path: &str| store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == path).count();
+    assert!(asked("/store/v1/takedowns?after=2") >= 1);
+}
+
+/// A template's take-down is never a plugin's, whatever its id and version;
+/// the device's place in the feed moves past it all the same.
+#[tokio::test]
+async fn a_template_s_take_down_never_touches_a_plugin() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    d.plugins.check_takedowns().await;
+    {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((1, "take_down".into(), "focus".into(), "1.0.0".into(), "A template's.".into()));
+        state.template_events.insert(1);
+    }
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item.get("blocked"), item["source"]["verified"].as_bool()), (Some("on"), None, Some(true)), "{item}");
+    // The next event is the plugin's own, asked for after the template's.
+    store.block("focus", "1.0.0", "Its own.");
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    let asked = store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns?after=1").count();
+    assert_eq!(asked, 1, "its place moved past the template's event");
+}
+
+/// The feed starts over only when the full check answered about every
+/// template here: one it couldn't read leaves the place where it was.
+#[tokio::test]
+async fn a_reset_waits_for_the_templates_too() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("midnight")).unwrap();
+    std::fs::write(templates.join("midnight/zeron-template.json"), r#"{"id":"midnight","name":"Midnight"}"#).unwrap();
+    let record = json!({ "key": null, "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+        "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+    std::fs::write(templates.join("midnight/.imported.json"), record.to_string()).unwrap();
+    let starts = || store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns").count();
+    // The check's answer about it can't be read.
+    store.state.lock().unwrap().blocked_anyway.push(json!({ "id": "midnight", "item_kind": "template" }));
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 2, "it starts over each time");
+    // It can: the device takes its place.
+    store.state.lock().unwrap().blocked_anyway.clear();
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 3, "no more from the start");
+}
+
+/// A template and a copy of an earlier version of it are one id in two
+/// versions: the store takes an id once a request, and a plugin's answer
+/// never hangs on a template's. A lineage that isn't one is never sent.
+#[tokio::test]
+async fn a_copy_of_an_earlier_version_stops_no_check() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let templates = d._dir.path().join("templates");
+    let folder = |id: &str, version: &str, lineage: Option<Value>| {
+        let folder = templates.join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("zeron-template.json"), json!({ "id": id, "name": id }).to_string()).unwrap();
+        match lineage {
+            Some(lineage) => std::fs::write(folder.join(".lineage.json"), lineage.to_string()).unwrap(),
+            None => {
+                let record = json!({ "key": null, "version": version, "source": { "kind": "store", "version": version, "installed_at": 0,
+                    "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+                std::fs::write(folder.join(".imported.json"), record.to_string()).unwrap();
+            }
+        }
+    };
+    begin_blocks(&templates);
+    folder("midnight", "1.1.0", None);
+    folder("mine", "", Some(json!([{ "id": "midnight", "version": "1.0.0", "hash": "ab".repeat(32) }])));
+    folder("odd", "", Some(json!([{ "id": "Not An Id", "version": "1.0.0", "hash": "h" }])));
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    store.block("focus", "1.0.0", "Its own.");
+    let checked = d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    assert_eq!(checked["errors"], json!([]), "{checked}");
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    let asked: Vec<Vec<String>> = store.state.lock().unwrap().asks.iter().map(|a| a["templates"].as_array().into_iter().flatten().map(|t| t["version"].as_str().unwrap().to_owned()).collect()).collect();
+    assert_eq!(asked, [vec!["1.0.0"], vec!["1.1.0"]], "each version of it, in a request of its own");
+    // The copy of the version taken down is blocked; the newer one isn't.
+    let kept: Value = serde_json::from_slice(&std::fs::read(templates.join(".blocked.json")).unwrap()).unwrap();
+    assert_eq!((kept["blocks"].as_array().unwrap().len(), kept["blocks"][0]["version"].as_str()), (1, Some("1.0.0")), "{kept}");
+    // And the feed takes its place (it had none).
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    let starts = store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns").count();
+    assert_eq!(starts, 1);
+}
+
+/// A template's take-down that can't be kept holds the place in the feed,
+/// and nothing else: a plugin's is applied.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_template_s_block_that_cannot_be_kept_holds_up_no_plugin() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    d.plugins.check_takedowns().await;
+    {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((1, "take_down".into(), "midnight".into(), "1.0.0".into(), String::new()));
+        state.template_events.insert(1);
+    }
+    store.block("focus", "1.0.0", "Its own.");
+    // (Its folder can be read and not written.)
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |mode| std::fs::set_permissions(&templates, std::fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    // The template is held to it all the same, unwritten.
+    let written = || std::fs::read_to_string(templates.join(".blocked.json")).unwrap().contains("midnight");
+    assert!(!written());
+    let refused = d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap_err();
+    assert!(refused.contains("taken_down"), "{refused}");
+    mode(0o755);
+    d.plugins.check_takedowns().await;
+    assert!(written(), "asked for again, and kept");
+    let after = |n: u64| store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| *p == format!("/store/v1/takedowns?after={n}")).count();
+    assert_eq!((after(0), after(2)), (2, 0), "the place waited for it");
+}
+
+/// The block list, empty: there before anything from the store is.
+fn begin_blocks(templates: &std::path::Path) {
+    std::fs::create_dir_all(templates).unwrap();
+    std::fs::write(templates.join(".blocked.json"), r#"{"format":"zeron-template-blocks:v1","blocks":[]}"#).unwrap();
+}
+
+/// Store template `id` at `version`, installed (no signer).
+fn store_template(templates: &std::path::Path, id: &str, version: &str) {
+    begin_blocks(templates);
+    let folder = templates.join(id);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("zeron-template.json"), json!({ "id": id, "name": id }).to_string()).unwrap();
+    let record = json!({ "key": null, "version": version, "source": { "kind": "store", "version": version, "installed_at": 0,
+        "store": { "id": id, "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+    std::fs::write(folder.join(".imported.json"), record.to_string()).unwrap();
+}
+
+/// Plugins never stop because of templates: a store that refuses any check
+/// that carries them still answers for the plugins, asked about alone; the
+/// templates aren't taken as checked, and the feed doesn't take its place.
+#[tokio::test]
+async fn a_check_refused_for_its_templates_still_answers_for_the_plugins() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store_template(&d._dir.path().join("templates"), "midnight", "1.0.0");
+    store.state.lock().unwrap().refuse_template_asks = true;
+    store.block("focus", "1.0.0", "Its own.");
+    let checked = d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    assert_eq!(checked["errors"], json!([]), "{checked}");
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    let starts = || store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns").count();
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 2, "the templates weren't checked: from the start each time");
+    store.state.lock().unwrap().refuse_template_asks = false;
+    d.plugins.check_takedowns().await;
+    d.plugins.check_takedowns().await;
+    assert_eq!(starts(), 3);
+}
+
+/// A take-down the feed brings while a full check is out isn't undone by
+/// that check's older answer.
+#[tokio::test]
+async fn a_full_check_undoes_no_take_down_newer_than_its_question() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    d.plugins.check_takedowns().await;
+    store.state.lock().unwrap().slow_updates = Some(std::time::Duration::from_millis(400));
+    let full = d.call(methods::CHECK_PLUGIN_UPDATES, json!({}));
+    let feed = async {
+        // (The full check's answer is made by now, and on its way.)
+        while store.state.lock().unwrap().asks.len() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        {
+            let mut state = store.state.lock().unwrap();
+            state.events.push((1, "take_down".into(), "midnight".into(), "1.0.0".into(), "Newer.".into()));
+            state.template_events.insert(1);
+        }
+        d.plugins.check_takedowns().await;
+    };
+    let (full, ()) = tokio::join!(full, feed);
+    full.unwrap();
+    let refused = d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap_err();
+    assert!(refused.contains("taken_down"), "{refused}");
+}
+
+/// The block list deleted: it starts over by the full check, so what was
+/// blocked before isn't lifted by the next event's list.
+#[tokio::test]
+async fn a_block_list_taken_away_starts_over() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    d.plugins.check_takedowns().await;
+    let list = || -> Vec<String> {
+        let kept: Value = serde_json::from_slice(&std::fs::read(templates.join(".blocked.json")).unwrap()).unwrap();
+        kept["blocks"].as_array().unwrap().iter().map(|b| b["id"].as_str().unwrap().to_owned()).collect()
+    };
+    assert!(list().is_empty(), "there, and empty");
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    let event = |seq: u64, id: &str| {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((seq, "take_down".into(), id.into(), "1.0.0".into(), String::new()));
+        state.template_events.insert(seq);
+    };
+    event(1, "midnight");
+    d.plugins.check_takedowns().await;
+    assert_eq!(list(), ["midnight"]);
+    std::fs::remove_file(templates.join(".blocked.json")).unwrap();
+    event(2, "elsewhere");
+    d.plugins.check_takedowns().await;
+    assert!(list().contains(&"midnight".to_owned()), "{:?}", list());
+}
+
+/// A template's package, signed, as `id` at `version`.
+fn template_package(key: &SigningKey, id: &str, version: &str, code: &str) -> Vec<u8> {
+    let manifest = json!({ "id": id, "name": id, "description": "", "version": version, "zeron_version": "0.0.1" });
+    let files = std::collections::BTreeMap::from([("app.luau".to_owned(), code.as_bytes().to_vec())]);
+    zeron_engine::plugins::template_packages::pack(&manifest, &files, Some(key)).unwrap()
+}
+
+/// `raw` waiting as one from the store, by a record of `publisher_id`'s.
+fn template_waits(d: &Device, raw: &[u8], publisher_id: &str, verified: bool) -> (String, String) {
+    use zeron_engine::plugins::template_packages;
+    let package = template_packages::parse(raw.to_vec()).unwrap();
+    let at = d._dir.path().join("templates/.pending");
+    std::fs::create_dir_all(&at).unwrap();
+    let name = format!("{}-1", package.id());
+    std::fs::write(at.join(format!("{name}.zeron-template")), raw).unwrap();
+    let origin = json!({ "kind": "store", "version": package.version(), "installed_at": 0, "store": { "id": package.id(), "publisher": "ada", "publisher_id": publisher_id, "hash": package.content_hash, "key": package.key, "verified": verified } });
+    std::fs::write(at.join(format!("{name}.json")), json!({ "pending": name, "id": package.id(), "key": package.key, "at": 1, "source": "store", "origin": origin }).to_string()).unwrap();
+    (name, package.hash)
+}
+
+/// A store template is allowed under its record as the store has it now and
+/// as the window draws it: any other answers what changed, at the review and
+/// at the decision, and installs nothing.
+#[tokio::test]
+async fn a_store_template_is_allowed_as_its_record_is_now() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    store.add_template("ada", &raw, "listed");
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    let ada = fake_store::publisher_id("ada");
+    let (name, hash) = template_waits(&d, &raw, &ada, true);
+    let shown = |verified: bool, publisher: &str, id: &str| json!({ "verified": verified, "publisher": publisher, "publisher_id": id, "version": "1.0.0" });
+    let review = |shown: Value| d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash, "shown": shown }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    let row = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["pending"][0].clone() };
+    let set = |verified: bool| store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0].verified = verified;
+
+    // Drawn verified, as it waited: the store doesn't say so any more.
+    let changed = review(shown(true, "ada", &ada)).await.unwrap();
+    assert_eq!(changed, json!({ "changed": { "verified": false, "publisher": "ada", "publisher_id": ada } }));
+    assert_eq!((&row().await["store"]["verified"], row().await["store"].get("verified_at")), (&json!(false), None), "the list says so too");
+    // Drawn so now: changed again before the second Allow. Compared with
+    // what's drawn, never with what was answered last.
+    set(true);
+    let changed = review(shown(false, "ada", &ada)).await.unwrap();
+    assert_eq!((&changed["changed"]["verified"], &changed["changed"]["verified_at"]), (&json!(true), &json!(1)));
+    set(false);
+    assert_eq!(review(shown(true, "ada", &ada)).await.unwrap()["changed"]["verified"], false);
+    // Its publisher, by name or by account.
+    for drawn in [shown(false, "eve", &ada), shown(false, "ada", "pub_other")] {
+        assert_eq!(review(drawn).await.unwrap()["changed"]["publisher_id"], json!(ada));
+    }
+    // As it is: a review, and between it and the decision it changes hands.
+    let good = review(shown(false, "ada", &ada)).await.unwrap();
+    store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().owner = "eve".into();
+    let eve = fake_store::publisher_id("eve");
+    assert_eq!(decide(good.clone()).await.unwrap(), json!({ "changed": { "verified": false, "publisher": "eve", "publisher_id": eve } }));
+    assert!(!templates.join("midnight").exists() && row().await["store"]["publisher"] == "eve");
+    assert!(decide(good).await.is_err(), "used up");
+    // Nothing said of what's drawn, part of it, or another version or package: no review.
+    for bad in [json!(null), json!({ "verified": false, "publisher": "eve", "publisher_id": eve }), json!({ "verified": false, "publisher": "eve", "publisher_id": eve, "version": "1.0.1" })] {
+        assert!(review(bad.clone()).await.is_err(), "{bad}");
+    }
+    assert!(d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": "0".repeat(64), "shown": shown(false, "eve", &eve) })).await.is_err());
+    // Allowed as it is: installed by the record as it is.
+    let good = review(shown(false, "eve", &eve)).await.unwrap();
+    let done = decide(good).await.unwrap();
+    assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("eve")), "{done}");
+    let record: Value = serde_json::from_slice(&std::fs::read(templates.join("midnight/.imported.json")).unwrap()).unwrap();
+    assert_eq!((&record["source"]["store"]["verified"], &record["source"]["store"]["publisher_id"]), (&json!(false), &json!(eve)));
+}
+
+/// One that can't be checked with the store isn't allowed, and waits; one
+/// taken down, or no longer listed, says which.
+#[tokio::test]
+async fn a_store_template_that_cannot_be_checked_waits() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    store.add_template("ada", &raw, "verified");
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    let ada = fake_store::publisher_id("ada");
+    let (name, hash) = template_waits(&d, &raw, &ada, true);
+    let shown = json!({ "verified": true, "publisher": "ada", "publisher_id": ada, "version": "1.0.0" });
+    let review = || d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash, "shown": shown }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    let offline = |on: bool| store.offline.store(on, std::sync::atomic::Ordering::SeqCst);
+    let set = |status: &str| store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0].status = status.to_owned();
+    let words = "Zeron couldn't check this with the store. Try again.";
+    offline(true);
+    assert_eq!(review().await.unwrap_err(), words);
+    offline(false);
+    let good = review().await.unwrap();
+    offline(true);
+    assert_eq!(decide(good).await.unwrap_err(), words);
+    offline(false);
+    // A record that can't be read, or of something else.
+    store.state.lock().unwrap().records_without_verified = true;
+    assert!(review().await.unwrap_err().starts_with("store_mismatch: "));
+    store.state.lock().unwrap().records_without_verified = false;
+    let was = store.state.lock().unwrap().template_items["midnight"].versions[0].clone();
+    for (hash, key) in [("0".repeat(64), was.key.clone()), (was.hash.clone(), None)] {
+        {
+            let mut state = store.state.lock().unwrap();
+            let v = &mut state.template_items.get_mut("midnight").unwrap().versions[0];
+            (v.hash, v.key) = (hash, key);
+        }
+        assert!(review().await.unwrap_err().starts_with("store_mismatch: "));
+    }
+    store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0] = was;
+    // (Another version is listed: it's this one that isn't.)
+    store.add_template("ada", &template_package(&key, "midnight", "1.1.0", "return 2"), "listed");
+    for status in ["yanked", "removed"] {
+        set(status);
+        assert!(review().await.unwrap_err().starts_with("not_in_store: "), "{status}");
+    }
+    set("taken_down");
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    assert!(review().await.unwrap_err().starts_with("taken_down: "));
+    // Known to be down here: without asking.
+    set("listed");
+    store.state.lock().unwrap().templates_down.clear();
+    begin_blocks(&templates);
+    let block = json!({ "id": "midnight", "version": "1.0.0", "reason": "", "at": 4_000_000_000u64 });
+    std::fs::write(templates.join(".blocked.json"), json!({ "format": "zeron-template-blocks:v1", "blocks": [block] }).to_string()).unwrap();
+    assert!(review().await.unwrap_err().starts_with("taken_down: "));
+    begin_blocks(&templates);
+    // All the while it waits, and is allowed once it can be checked.
+    assert!(!templates.join("midnight").exists());
+    let good = review().await.unwrap();
+    assert_eq!(decide(good).await.unwrap()["installed"], "midnight");
+}
+
+/// A package that isn't from the store asks nobody, and needs nothing shown.
+#[tokio::test]
+async fn a_file_s_template_is_allowed_as_before() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    let d = device(&store, Some("bob"));
+    let file = d._dir.path().join("midnight.zeron-template");
+    std::fs::write(&file, &raw).unwrap();
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let waiting = d.call(methods::IMPORT_TEMPLATE, json!({ "path": file })).await.unwrap();
+    let (name, hash) = (&waiting["pending"], &waiting["hash"]);
+    let review = || d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    // Reviewed as a file's, then said to be the store's: another thing.
+    let about = d._dir.path().join("templates/.pending").join(format!("{}.json", name.as_str().unwrap()));
+    let was = std::fs::read_to_string(&about).unwrap();
+    let good = review().await.unwrap();
+    store.offline.store(false, std::sync::atomic::Ordering::SeqCst);
+    store.add_template("ada", &raw, "listed");
+    let mut forged: Value = serde_json::from_str(&was).unwrap();
+    let package = zeron_engine::plugins::template_packages::parse(raw.clone()).unwrap();
+    forged["origin"] = json!({ "kind": "store", "version": "1.0.0", "installed_at": 0, "store": { "id": "midnight", "publisher": "ada", "publisher_id": fake_store::publisher_id("ada"), "hash": package.content_hash, "key": package.key, "verified": false } });
+    std::fs::write(&about, forged.to_string()).unwrap();
+    assert!(decide(good).await.unwrap_err().contains("review"));
+    assert!(!d._dir.path().join("templates/midnight").exists());
+    std::fs::write(&about, was).unwrap();
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let done = decide(review().await.unwrap()).await.unwrap();
+    assert_eq!(done["installed"], "midnight");
+    assert!(done["digest"].as_str().is_some_and(|h| h.len() == 64));
+}
+
+/// A check that failed repairs nothing, though what it asked about has been
+/// deleted since.
+#[tokio::test]
+async fn a_check_that_failed_repairs_nothing_once_what_it_asked_about_is_gone() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    let file = templates.join(".blocked.json");
+    std::fs::write(&file, "nope").unwrap();
+    {
+        let mut state = store.state.lock().unwrap();
+        state.slow_updates = Some(std::time::Duration::from_secs(1));
+        state.refuse_template_asks = true;
+    }
+    let check = d.call(methods::CHECK_PLUGIN_UPDATES, json!({}));
+    let deleted = async {
+        while !store.state.lock().unwrap().requests.iter().any(|(_, p, _)| p == "/store/v1/updates") {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        std::fs::remove_dir_all(templates.join("midnight")).unwrap();
+    };
+    let (check, ()) = tokio::join!(check, deleted);
+    check.unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"nope");
+}
+
+/// A take-down answered beside a template the store's answer can't be read
+/// about is kept, however often it's so, and nothing is lifted by it.
+#[tokio::test]
+async fn a_partial_answer_s_take_down_is_kept() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    store_template(&templates, "odd", "1.0.0");
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    store.state.lock().unwrap().blocked_anyway.push(json!({ "id": "odd", "item_kind": "template" }));
+    let kept = || std::fs::read_to_string(templates.join(".blocked.json")).unwrap();
+    d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    assert!(kept().contains("midnight"), "{}", kept());
+    let refused = d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap_err();
+    assert!(refused.contains("taken_down"), "{refused}");
+    store.state.lock().unwrap().templates_down.clear();
+    d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    assert!(kept().contains("midnight"), "lifted by a partial answer");
+    store.state.lock().unwrap().blocked_anyway.clear();
+    d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    assert!(!kept().contains("midnight"), "lifted by a whole one");
+}
+
+/// Only a whole answer lifts anything, or makes a block list that's gone or
+/// can't be read good again: a check that failed (offline), that answered for
+/// the plugins alone, or about one plugin, leaves it byte for byte as it is.
+#[tokio::test]
+async fn only_a_whole_answer_lifts_or_repairs() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    d.plugins.check_takedowns().await;
+    let file = templates.join(".blocked.json");
+    let whole = std::fs::read(&file).unwrap();
+    let refused = || async { d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.is_err_and(|e| e.contains("taken_down")) };
+    assert!(refused().await);
+    let row = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap().clone() };
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    assert_eq!((&row().await["blocked"]["id"], row().await["blocked"].get("unchecked")), (&json!("midnight"), None));
+    let offline = |on: bool| store.offline.store(on, std::sync::atomic::Ordering::SeqCst);
+    let refuse = |on: bool| store.state.lock().unwrap().refuse_template_asks = on;
+    for (state, bytes) in [("there", Some(whole.clone())), ("gone", None), ("unreadable", Some(b"nope".to_vec())), ("cut short", Some(whole[..whole.len() / 2].to_vec()))] {
+        match &bytes {
+            Some(bytes) => std::fs::write(&file, bytes).unwrap(),
+            None => std::fs::remove_file(&file).unwrap(),
+        }
+        let same = || std::fs::read(&file).ok() == bytes;
+        offline(true);
+        let _ = d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await;
+        d.plugins.check_takedowns().await;
+        offline(false);
+        assert!(same(), "{state}: offline");
+        refuse(true);
+        d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+        d.plugins.check_takedowns().await;
+        refuse(false);
+        assert!(same(), "{state}: the plugins alone");
+        d.call(methods::CHECK_PLUGIN_UPDATES, json!({ "id": "focus" })).await.unwrap();
+        assert!(same(), "{state}: one plugin");
+        assert!(refused().await, "{state}");
+        let blocked = row().await["blocked"].clone();
+        match state {
+            "there" => assert_eq!(blocked["id"], "midnight"),
+            _ => assert!(blocked["unchecked"] == true && blocked["reason"].is_string() && blocked.get("id").is_none() && blocked.get("version").is_none() && blocked.get("at").is_none(), "{state}: {blocked}"),
+        }
+        // (A poll that finds it lost asks about everything again.)
+        match state {
+            "gone" | "unreadable" => d.plugins.check_takedowns().await,
+            _ => drop(d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap()),
+        }
+        assert!(refused().await, "{state}: the whole answer");
+        assert!(std::fs::read_to_string(&file).unwrap().contains("midnight"), "{state}");
+    }
+}
+
+/// A template whose record can't be read can't be asked about: the place in
+/// the feed is taken once, not over again at each look.
+#[tokio::test]
+async fn a_record_that_cannot_be_read_starts_the_feed_over_once() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("bob"));
+    let folder = d._dir.path().join("templates/broken");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("zeron-template.json"), r#"{"id":"broken","name":"Broken"}"#).unwrap();
+    std::fs::write(folder.join(".imported.json"), "nope").unwrap();
+    for _ in 0..3 {
+        d.plugins.check_takedowns().await;
+    }
+    let starts = store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns").count();
+    assert_eq!(starts, 1);
+}
+
+/// Nothing a person does waits on a check that's out: their own check asks
+/// about the plugins alone, and using a template asks nobody.
+#[tokio::test]
+async fn nothing_a_person_does_waits_on_the_templates_check() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let templates = d._dir.path().join("templates");
+    store_template(&templates, "midnight", "1.0.0");
+    store.state.lock().unwrap().slow_updates = Some(std::time::Duration::from_secs(3));
+    let first = d.call(methods::CHECK_PLUGIN_UPDATES, json!({}));
+    let person = async {
+        while store.state.lock().unwrap().asks.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        store.state.lock().unwrap().slow_updates = None;
+        let started = std::time::Instant::now();
+        d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+        d.call(methods::USE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    };
+    let (first, ()) = tokio::join!(first, person);
+    first.unwrap();
+    let asked: Vec<usize> = store.state.lock().unwrap().asks.iter().map(|a| a["templates"].as_array().map_or(0, Vec::len)).collect();
+    assert_eq!(asked, [1, 0], "theirs asked about the plugins alone");
+}
+
+/// A block this Zeron can't tell the kind of lifts nothing: the plugin it
+/// names keeps the block it has.
+#[tokio::test]
+async fn a_block_of_an_unknown_kind_lifts_no_other() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    store.block("focus", "1.0.0", "Its own.");
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    // Restored in the feed (it's named by nothing), but the full check names
+    // it as a kind this Zeron doesn't know.
+    store.restore("focus", "1.0.0");
+    store.state.lock().unwrap().blocked_anyway.push(json!({ "id": "focus", "version": "1.0.0", "item_kind": "theme" }));
+    d.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    let item = d.item("focus").await;
+    assert_eq!(item["blocked"]["reason"], "Its own.", "{item}");
+}
+
 #[tokio::test]
 async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
     let store = FakeStore::start().await;
@@ -695,10 +1369,29 @@ async fn reports_compatibility_for_another_zeron_and_deploy_tokens_for_owned_plu
     // scope that isn't one is refused.
     let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "all": true } })).await.unwrap();
     assert_eq!(refused["error"], "not_published", "{refused}");
+    // A template is something to publish too: owning only one, a token for
+    // all of both kinds or for its id gets as far as the sign-in.
+    store.state.lock().unwrap().templates.insert("midnight".into(), ("bob".into(), vec!["1.0.0".into()]));
+    for scope in [json!({ "all": true, "all_kinds": ["plugin", "template"] }), json!({ "plugins": ["midnight"] })] {
+        let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": scope })).await.unwrap();
+        assert_eq!(refused["error"], "step_up_required", "{scope}: {refused}");
+    }
+    // A store that has no templates route has none of theirs.
+    store.state.lock().unwrap().without_templates = true;
+    let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "all": true } })).await.unwrap();
+    assert_eq!(refused["error"], "not_published", "{refused}");
+    store.state.lock().unwrap().without_templates = false;
     store.add("bob", &package_of(&key, "notes", "1.0.0", &[], "return 1", json!({})), "verified", "");
     let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "plugins": ["focus", "board"] } })).await.unwrap();
     assert_eq!((refused["error"].as_str(), refused["ids"].clone()), (Some("not_owner"), json!(["board", "focus"])), "{refused}");
-    for scope in [json!({}), json!({ "all": true, "plugins": ["focus"] }), json!({ "plugins": [] })] {
+    for scope in [
+        json!({}),
+        json!({ "all": true, "plugins": ["focus"] }),
+        json!({ "plugins": [] }),
+        json!({ "plugins": ["notes"], "all_kinds": ["plugin"] }),
+        json!({ "all": true, "all_kinds": ["template"] }),
+        json!({ "all": true, "all_kinds": [] }),
+    ] {
         let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": scope })).await.unwrap();
         assert_eq!(refused["error"], "invalid_scope", "{scope}: {refused}");
     }
@@ -795,7 +1488,7 @@ async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_
 
     // A deploy token publishes 1.1.0 (unsigned); the laptop 1.2.0; this
     // device 1.3.0.
-    let ci = store.add_deploy_token("ann", "CI", Scope::All);
+    let ci = store.add_deploy_token("ann", "CI", Scope::All { templates: false });
     let by_token = StoreClient::new(&store.url)
         .publish("focus", unsigned_package_of("focus", "1.1.0", &["ui.add"], "return 2"), &zeron_engine::plugins::store::client::Caller::DeployToken(Arc::new(DeployToken::parse(&ci).unwrap())))
         .await;

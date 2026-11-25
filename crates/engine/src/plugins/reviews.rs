@@ -75,6 +75,9 @@ struct Review {
     origin: Origin,
     subject: String,
     hash: String,
+    /// What else was shown that the decision holds to (a store template's
+    /// record, `store::device`).
+    shown: Option<String>,
     at: Instant,
 }
 
@@ -94,6 +97,11 @@ pub fn needed(what: &str) -> RpcError {
 impl Reviews {
     /// A fresh review for `subject` as shown (`hash`), good only to `origin`.
     pub fn mint(&mut self, kind: Kind, origin: Origin, subject: &str, hash: &str) -> Result<String, RpcError> {
+        self.mint_shown(kind, origin, subject, hash, None)
+    }
+
+    /// [`Self::mint`], with what else was shown (`redeem` gives it back).
+    pub fn mint_shown(&mut self, kind: Kind, origin: Origin, subject: &str, hash: &str, shown: Option<String>) -> Result<String, RpcError> {
         self.prune();
         while self.open.len() >= MAX {
             let Some(oldest) = self
@@ -115,6 +123,7 @@ impl Reviews {
                 origin,
                 subject: subject.to_owned(),
                 hash: hash.to_owned(),
+                shown,
                 at: Instant::now(),
             },
         );
@@ -125,6 +134,7 @@ impl Reviews {
     /// for what it was minted for, only to whom it was minted for
     /// (`origin`), only within [`TTL`]. A token presented for something
     /// else, or by someone else, is used up too (it was leaked or misused).
+    /// What else was shown when it was minted.
     pub fn redeem(
         &mut self,
         kind: Kind,
@@ -132,7 +142,7 @@ impl Reviews {
         subject: &str,
         hash: &str,
         token: Option<&str>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<String>, RpcError> {
         self.prune();
         let what = match kind {
             Kind::Plugin => "Allowing a plugin",
@@ -148,7 +158,7 @@ impl Reviews {
         if review.kind != kind || review.origin != *origin || review.subject != subject || review.hash != hash {
             return Err(needed(what));
         }
-        Ok(())
+        Ok(review.shown)
     }
 
     fn prune(&mut self) {

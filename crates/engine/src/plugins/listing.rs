@@ -2,7 +2,10 @@
 //! store (`categories`, `keywords`, `homepage`, `repository`, `license`,
 //! `screenshots`, `engines.zeron`, with `description` and `icon`), its
 //! `README.md` (its page) and `CHANGELOG.md` (each version's notes), and
-//! the rules a plugin meets to be published.
+//! the rules a plugin meets to be published. A template's ([`check_template`],
+//! contract "Templates in the store") are the same where they can be, with
+//! its own: a `preview.png` for its cover, its screenshots under
+//! `screenshots/`, a `zeron_version`, none of a plugin's asks.
 //!
 //! Every field is optional for a plugin that's only sideloaded: one that has
 //! none of them, or a malformed one, installs and runs as before
@@ -23,6 +26,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::manifest::{self, Manifest};
+use super::mark::Item;
 use super::package;
 use super::version::{Range, Version};
 
@@ -63,7 +67,7 @@ pub fn count_values(value: &Value) -> usize {
 /// A version's notes (its CHANGELOG.md section).
 pub const MAX_NOTES_BYTES: usize = 64 * 1024;
 /// Screenshots are PNG or JPEG pictures.
-pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
+pub use zeron_plugin_guard::template::SCREENSHOT_TYPES;
 
 /// The store's categories: a fixed list (the edge serves the same one at
 /// `/store/v1/categories`), `(id, name)`.
@@ -81,9 +85,9 @@ pub const CATEGORIES: &[(&str, &str)] = &[
 /// Ids nobody publishes: Zeron's own plugins'.
 pub const BUILTIN_IDS: &[&str] = &["git", "github", "parallax-scenes"];
 
-/// The store site's own pages beside plugin pages (`/plugins/<id>`): a
-/// plugin with one of these ids would be shadowed there, so the store never
-/// lists one. Zeron runs a plugin with one of these ids as any other (one
+/// The store site's own pages beside plugin pages (`/plugins/<id>`) and
+/// templates', and the two prefixes' own names: an item with one of these ids
+/// would be shadowed there, so the store never lists one. Zeron runs a plugin with one of these ids as any other (one
 /// made before they were kept still loads); only publishing is refused.
 /// (Some are usernames the edge keeps too; they're kept here all the same,
 /// so the site's pages never rest on another list.)
@@ -91,7 +95,7 @@ pub const SITE_IDS: &[&str] = &[
     "all", "new", "search", "browse", "discover", "featured", "popular", "updated", "category", "categories",
     "keyword", "keywords", "tags", "publishing", "publish", "guide", "docs", "help", "about", "account", "admin",
     "api", "install", "me", "settings", "report", "reports", "review", "queue", "audit", "terms", "privacy",
-    "sitemap", "feed", "static", "assets",
+    "sitemap", "feed", "static", "assets", "plugins", "templates",
 ];
 
 /// The stable words a problem is reported by.
@@ -106,6 +110,9 @@ pub mod rule {
     /// A listing field is there but wrong (`field` says which).
     pub const BAD_LISTING: &str = "bad_listing";
     pub const TOO_LARGE: &str = "too_large";
+    /// A template carrying one of the files no template replaces
+    /// (`template_packages::PROTECTED`); `path` says which.
+    pub const PROTECTED_FILE: &str = "protected_file";
     // Warnings: shown, never blocking.
     /// A file that isn't text or a picture (a binary, bytecode): the
     /// reviewer looks closely at these.
@@ -191,9 +198,9 @@ impl Problem {
     }
 
     /// A name's or description's mark claim (`claim`, in `text`).
-    fn mark(self, text: &str, claim: &str) -> Self {
+    fn mark(self, text: &str, claim: &str, item: Item) -> Self {
         let glyph = claim.chars().count() == 1 && claim.chars().all(|c| MARK_GLYPHS.contains(&c));
-        let written = super::mark::as_written(text, claim);
+        let written = super::mark::as_written_of(text, claim, item);
         self.because(if glyph { cause::MARK_GLYPH } else { cause::MARK_WORD }, Some(written.as_deref().unwrap_or(claim)))
     }
 
@@ -272,6 +279,19 @@ impl Listing {
             engines_zeron: text(raw.get("engines").and_then(|e| e.get("zeron"))),
         }
     }
+
+    /// A template's: as [`Listing::of`], with no categories or icon (a
+    /// template has neither), and `engines_zeron` read from its
+    /// `zeron_version`: `>=` it, the Zeron it was made from and later.
+    pub fn of_template(raw: &Value) -> Self {
+        let made_from = text(raw.get("zeron_version")).map(|v| v.trim().to_owned()).filter(|v| Version::parse(v).is_ok());
+        Self {
+            categories: Vec::new(),
+            icon: None,
+            engines_zeron: made_from.map(|v| format!(">={v}")),
+            ..Self::of(raw)
+        }
+    }
 }
 
 /// The range a manifest's `engines.zeron` names: none when it names none,
@@ -337,6 +357,34 @@ fn unseen(text: &str) -> bool {
 pub fn unseen_char(c: char) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
     matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format)
+}
+
+/// `text` as it's shown of a package, wherever it came from: one line of at
+/// most `max` characters, with none that's drawn as nothing but an emoji's
+/// selector, and whatever's drawn as space (a line's or paragraph's end, a
+/// blank Braille cell) one space between words. (What's shown alone: what's
+/// signed or compared is as it is.)
+pub fn shown(text: &str, max: usize) -> String {
+    let mut buf = [0; 4];
+    let mut out = String::new();
+    let mut len = 0;
+    let mut space = false;
+    for c in text.chars() {
+        if c.is_control() || c.is_whitespace() || c == '\u{2800}' {
+            space = !out.is_empty();
+        } else if !unseen_char(c) && !zeron_plugin_guard::template::unseen(c.encode_utf8(&mut buf)) {
+            if len + usize::from(space) >= max {
+                break;
+            }
+            if std::mem::take(&mut space) {
+                out.push(' ');
+                len += 1;
+            }
+            out.push(c);
+            len += 1;
+        }
+    }
+    out
 }
 
 /// `text` for a terminal or a CI log, as one line: each control or format
@@ -422,11 +470,13 @@ pub fn clashes<'a>(paths: impl IntoIterator<Item = &'a str>, taken: &[&'a str]) 
     found
 }
 
-/// A path as macOS and Windows compare it: Unicode NFC, then
-/// plugin-guard's `fold` (case, separators, trailing dots and spaces). Two
+/// A path as macOS and Windows compare it: without the selectors of emoji
+/// (no name is told apart by one), then Unicode NFC, then plugin-guard's
+/// `fold` (case, separators, trailing dots and spaces). Two
 /// paths that fold the same are one file there.
 pub fn fold_path(rel: &str) -> String {
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(rel);
+    let rel: String = rel.chars().filter(|c| !zeron_plugin_guard::path::selector(*c)).collect();
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&rel);
     zeron_plugin_guard::path::fold(&nfc)
 }
 
@@ -520,6 +570,7 @@ pub fn check(
     files: &BTreeMap<String, Vec<u8>>,
 ) -> (Vec<Problem>, Vec<Problem>) {
     use rule::*;
+    let item = Item::Plugin;
     let mut problems = Vec::new();
     let mut warnings = Vec::new();
     let raw = &manifest.raw;
@@ -530,41 +581,12 @@ pub fn check(
         Err(e) if e != manifest::RESERVED_ID_ERROR => {
             problems.push(Problem::new(BAD_PACKAGE, Some("id"), e))
         }
-        _ if reserved_for_store(&manifest.id) => {
-            problems.push(Problem::new(
-                ID_RESERVED,
-                Some("id"),
-                if SITE_IDS.contains(&manifest.id.as_str()) {
-                    format!("\"{}\" is kept for the store's own pages: pick another id", manifest.id)
-                } else {
-                    format!("\"{}\" is kept for Zeron", manifest.id)
-                },
-            ));
-        }
-        _ => {}
+        _ => reserved_id(&manifest.id, &mut problems),
     }
     if let Err(e) = Version::parse(&manifest.version) {
         problems.push(Problem::new(NOT_SEMVER, Some("version"), e));
     }
-    if manifest.name.chars().count() > MAX_NAME_LEN {
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("name"),
-            format!("Its name is longer than {MAX_NAME_LEN} characters"),
-        ).because(cause::TOO_LONG, None));
-    } else if unseen(&manifest.name) {
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("name"),
-            "Its name has a control or invisible formatting character",
-        ).unseen_in(&manifest.name));
-    } else if let Some(claim) = mark_claim(&manifest.name, true) {
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("name"),
-            format!("Its name says \"{claim}\": only the store marks a plugin verified or official. Name it for what it does, without that word"),
-        ).mark(&manifest.name, &claim));
-    }
+    check_name(&manifest.name, item, &mut problems);
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
             BAD_PACKAGE,
@@ -572,57 +594,8 @@ pub fn check(
             format!("Its entry file {} is missing", manifest.entry),
         ));
     }
-
-    // Its page.
-    match files.get(README) {
-        Some(bytes) if bytes.len() > MAX_README_BYTES => problems.push(Problem::at(
-            TOO_LARGE,
-            None,
-            README,
-            "README.md is over 512 KB",
-        )),
-        Some(bytes) if std::str::from_utf8(bytes).is_ok_and(|t| !t.trim().is_empty()) => {}
-        Some(_) => problems.push(Problem::at(
-            MISSING_README,
-            None,
-            README,
-            "Its README.md is empty or isn't text",
-        )),
-        None => problems.push(Problem::new(
-            MISSING_README,
-            None,
-            "It needs a README.md: its page in the store",
-        )),
-    }
-
-    // What the store shows on its card.
-    let description = manifest.description.trim();
-    if description.is_empty() {
-        problems.push(Problem::new(
-            MISSING_LISTING,
-            Some("description"),
-            "It needs a \"description\": one line saying what it does",
-        ));
-    } else if description.chars().count() > MAX_DESCRIPTION_LEN || description.contains('\n') {
-        let why = if description.chars().count() > MAX_DESCRIPTION_LEN { cause::TOO_LONG } else { cause::NOT_ONE_LINE };
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("description"),
-            format!("Its description is one line of at most {MAX_DESCRIPTION_LEN} characters"),
-        ).because(why, None));
-    } else if unseen(description) {
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("description"),
-            "Its description has a control or invisible formatting character",
-        ).unseen_in(description));
-    } else if let Some(claim) = mark_claim(description, false) {
-        problems.push(Problem::new(
-            BAD_LISTING,
-            Some("description"),
-            format!("Its description says \"{claim}\" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is (\"works with the official Slack app\")"),
-        ).mark(description, &claim));
-    }
+    check_readme(files, None, &mut problems);
+    check_description(&manifest.description, item, &mut problems);
     match raw.get("icon") {
         None | Some(Value::Null) => problems.push(Problem::new(
             MISSING_LISTING,
@@ -698,6 +671,156 @@ pub fn check(
             "Its \"categories\" must be a list",
         )),
     }
+    check_keywords(raw, item, &mut problems);
+    check_links(raw, &mut problems);
+    check_screenshots(raw, files, None, &mut problems);
+    match zeron_range(raw) {
+        Ok(None) => {}
+        Ok(Some(range)) => {
+            if let Err(e) = Range::parse(&range) {
+                problems.push(Problem::new(BAD_LISTING, Some("engines"), e));
+            }
+        }
+        Err(e) => problems.push(Problem::new(BAD_LISTING, Some("engines"), e)),
+    }
+    check_changelog_size(files, &mut problems);
+    check_manifest_size(&manifest.unsigned_value(), &mut problems);
+    // A name that could be another of its files' (a device refuses the
+    // package as it reads it), in code point order.
+    for rel in files.keys() {
+        if super::template_packages::short_name(rel) {
+            problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("{rel:?} could be a Windows short name of another file (a ~ with a digit after it): rename it")));
+        } else if super::template_packages::unseen(rel) {
+            problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("{rel:?} has a control or invisible character in its name: rename it")));
+        }
+    }
+    // Two paths that are one file on a Mac or a Windows machine (the
+    // manifest's own name among them), or a file where another needs a
+    // folder of that name (amendment 42), in code point order.
+    check_clashes(files, &[super::manifest::MANIFEST_FILE], &mut problems);
+    check_size(files, item, &mut problems);
+    worth_knowing(files, &manifest.version, &mut problems, &mut warnings);
+    (problems, warnings)
+}
+
+/// What a listing is of, as a refusal's words say it.
+fn noun(item: Item) -> &'static str {
+    match item {
+        Item::Plugin => "plugin",
+        Item::Template => "template",
+    }
+}
+
+/// `id_reserved` when the store keeps `id` (one namespace: a plugin's or a
+/// template's alike).
+fn reserved_id(id: &str, problems: &mut Vec<Problem>) {
+    if reserved_for_store(id) {
+        problems.push(Problem::new(
+            rule::ID_RESERVED,
+            Some("id"),
+            if SITE_IDS.contains(&id) {
+                format!("\"{id}\" is kept for the store's own pages: pick another id")
+            } else {
+                format!("\"{id}\" is kept for Zeron")
+            },
+        ));
+    }
+}
+
+/// Its name: at most [`MAX_NAME_LEN`], nothing drawn as nothing, no mark.
+fn check_name(name: &str, item: Item, problems: &mut Vec<Problem>) {
+    use rule::*;
+    if name.chars().count() > MAX_NAME_LEN {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            format!("Its name is longer than {MAX_NAME_LEN} characters"),
+        ).because(cause::TOO_LONG, None));
+    } else if unseen(name) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            "Its name has a control or invisible formatting character",
+        ).unseen_in(name));
+    } else if let Some(claim) = super::mark::mark_claim_of(name, true, item) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            format!("Its name says \"{claim}\": only the store marks a {} verified or official. Name it for what it does, without that word", noun(item)),
+        ).mark(name, &claim, item));
+    }
+}
+
+/// Its page: a `README.md` of text, at most [`MAX_README_BYTES`]; never one
+/// holding `stub` (the one Zeron wrote, unchanged).
+fn check_readme(files: &BTreeMap<String, Vec<u8>>, stub: Option<&str>, problems: &mut Vec<Problem>) {
+    use rule::*;
+    match files.get(README) {
+        Some(bytes) if bytes.len() > MAX_README_BYTES => problems.push(Problem::at(
+            TOO_LARGE,
+            None,
+            README,
+            "README.md is over 512 KB",
+        )),
+        Some(bytes) if std::str::from_utf8(bytes).is_ok_and(|t| stub.is_some_and(|stub| t.contains(stub))) => problems.push(Problem::at(
+            MISSING_README,
+            None,
+            README,
+            "Its README.md is still the one Zeron wrote: say what it is and how it looks, for its page in the store",
+        )),
+        Some(bytes) if std::str::from_utf8(bytes).is_ok_and(|t| !t.trim().is_empty()) => {}
+        Some(_) => problems.push(Problem::at(
+            MISSING_README,
+            None,
+            README,
+            "Its README.md is empty or isn't text",
+        )),
+        None => problems.push(Problem::new(
+            MISSING_README,
+            None,
+            "It needs a README.md: its page in the store",
+        )),
+    }
+}
+
+/// What the store shows on its card: one line, at most
+/// [`MAX_DESCRIPTION_LEN`], nothing drawn as nothing, no mark said of it.
+fn check_description(description: &str, item: Item, problems: &mut Vec<Problem>) {
+    use rule::*;
+    let description = description.trim();
+    if description.is_empty() {
+        problems.push(Problem::new(
+            MISSING_LISTING,
+            Some("description"),
+            "It needs a \"description\": one line saying what it does",
+        ));
+    } else if description.chars().count() > MAX_DESCRIPTION_LEN || description.contains('\n') {
+        let why = if description.chars().count() > MAX_DESCRIPTION_LEN { cause::TOO_LONG } else { cause::NOT_ONE_LINE };
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            format!("Its description is one line of at most {MAX_DESCRIPTION_LEN} characters"),
+        ).because(why, None));
+    } else if unseen(description) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            "Its description has a control or invisible formatting character",
+        ).unseen_in(description));
+    } else if let Some(claim) = super::mark::mark_claim_of(description, false, item) {
+        let noun = noun(item);
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            format!("Its description says \"{claim}\" of the {noun} itself: only the store marks a {noun} verified or official. Say what it does instead, or say whose thing it is (\"works with the official Slack app\")"),
+        ).mark(description, &claim, item));
+    }
+}
+
+/// Its keywords: at most [`MAX_KEYWORDS`], each once, each a keyword, none
+/// saying the mark.
+fn check_keywords(raw: &Value, item: Item, problems: &mut Vec<Problem>) {
+    use rule::*;
     match raw.get("keywords") {
         None | Some(Value::Null) => {}
         Some(Value::Array(items)) => {
@@ -721,10 +844,11 @@ pub fn check(
                     ),
                 ).because(cause::KEYWORD_SHAPE, *bad));
             } else if let Some((keyword, claim)) = words.iter().flatten().find_map(|w| keyword_claim(w).map(|claim| (w, claim))) {
+                let noun = noun(item);
                 problems.push(Problem::new(
                     BAD_LISTING,
                     Some("keywords"),
-                    format!("Keyword \"{keyword}\" says \"{claim}\": only the store marks a plugin verified or official. Drop it, or use a word for what the plugin does"),
+                    format!("Keyword \"{keyword}\" says \"{claim}\": only the store marks a {noun} verified or official. Drop it, or use a word for what the {noun} does"),
                 ).because(cause::MARK_WORD, Some(keyword)));
             }
         }
@@ -734,6 +858,12 @@ pub fn check(
             "Its \"keywords\" must be a list",
         )),
     }
+}
+
+/// Its `homepage` and `repository` (https links) and `license` (a short
+/// name).
+fn check_links(raw: &Value, problems: &mut Vec<Problem>) {
+    use rule::*;
     for field in ["homepage", "repository"] {
         match raw.get(field) {
             None | Some(Value::Null) => {}
@@ -763,6 +893,12 @@ pub fn check(
             ),
         )),
     }
+}
+
+/// Its screenshots: at most [`MAX_SCREENSHOTS`], each once, each a PNG or
+/// JPEG in it (under `folder`, when its pictures must be there).
+fn check_screenshots(raw: &Value, files: &BTreeMap<String, Vec<u8>>, folder: Option<&str>, problems: &mut Vec<Problem>) {
+    use rule::*;
     match raw.get("screenshots") {
         None | Some(Value::Null) => {}
         Some(Value::Array(items)) => {
@@ -788,13 +924,17 @@ pub fn check(
                     SCREENSHOT_TYPES.contains(&ext.to_ascii_lowercase().as_str())
                 });
                 let there = package::plain_path(path)
+                    && folder.is_none_or(|folder| path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/')))
                     && files.get(*path).is_some_and(|b| is_screenshot(b));
                 if !typed || !there {
                     problems.push(Problem::at(
                         BAD_LISTING,
                         Some("screenshots"),
                         path,
-                        "A screenshot must be a PNG or JPEG picture in it",
+                        match folder {
+                            None => "A screenshot must be a PNG or JPEG picture in it".to_owned(),
+                            Some(folder) => format!("A screenshot must be a PNG or JPEG picture in its {folder}/ folder"),
+                        },
                     ));
                 }
             }
@@ -805,41 +945,48 @@ pub fn check(
             "Its \"screenshots\" must be a list",
         )),
     }
-    match zeron_range(raw) {
-        Ok(None) => {}
-        Ok(Some(range)) => {
-            if let Err(e) = Range::parse(&range) {
-                problems.push(Problem::new(BAD_LISTING, Some("engines"), e));
-            }
-        }
-        Err(e) => problems.push(Problem::new(BAD_LISTING, Some("engines"), e)),
-    }
+}
 
+fn check_changelog_size(files: &BTreeMap<String, Vec<u8>>, problems: &mut Vec<Problem>) {
     if files.get(CHANGELOG).is_some_and(|log| log.len() > MAX_CHANGELOG_BYTES) {
-        problems.push(Problem::at(TOO_LARGE, None, CHANGELOG, "CHANGELOG.md is over 512 KB"));
+        problems.push(Problem::at(rule::TOO_LARGE, None, CHANGELOG, "CHANGELOG.md is over 512 KB"));
     }
-    // (As written: without the signature, which the store keeps apart.)
-    if super::signing::canonical_json(&manifest.unsigned_value()).len() > MAX_MANIFEST_BYTES {
-        problems.push(Problem::new(TOO_LARGE, Some("manifest"), "Its manifest is over 256 KB"));
-    }
-    // Two paths that are one file on a Mac or a Windows machine (the
-    // manifest's own name among them), or a file where another needs a
-    // folder of that name (amendment 42), in code point order.
-    for clash in clashes(files.keys().map(String::as_str), &[super::manifest::MANIFEST_FILE]) {
-        problems.push(Problem::at(BAD_LISTING, Some("files"), clash.path(), clash.words()));
-    }
+}
 
-    // How big.
+/// The manifest as written, without the signature (which the store keeps
+/// apart): at most [`MAX_MANIFEST_BYTES`].
+fn check_manifest_size(unsigned: &Value, problems: &mut Vec<Problem>) {
+    if super::signing::canonical_json(unsigned).len() > MAX_MANIFEST_BYTES {
+        problems.push(Problem::new(rule::TOO_LARGE, Some("manifest"), "Its manifest is over 256 KB"));
+    }
+}
+
+/// Two of its paths that are one file on a disk folding names, or a file
+/// where another needs a folder of that name; `taken` (files written beside
+/// them) first.
+fn check_clashes(files: &BTreeMap<String, Vec<u8>>, taken: &[&str], problems: &mut Vec<Problem>) {
+    for clash in clashes(files.keys().map(String::as_str), taken) {
+        problems.push(Problem::at(rule::BAD_LISTING, Some("files"), clash.path(), clash.words()));
+    }
+}
+
+/// How big: at most `MAX_FILES` files and `MAX_BYTES`.
+fn check_size(files: &BTreeMap<String, Vec<u8>>, item: Item, problems: &mut Vec<Problem>) {
     let total: u64 = files.values().map(|b| b.len() as u64).sum();
     if files.len() > super::files::MAX_FILES || total > super::files::MAX_BYTES {
         problems.push(Problem::new(
-            TOO_LARGE,
+            rule::TOO_LARGE,
             None,
-            "It's too big for a plugin (2,000 files, 50 MB)",
+            format!("It's too big for a {} (2,000 files, 50 MB)", noun(item)),
         ));
     }
+}
 
-    // Worth knowing.
+/// Worth knowing: files that aren't text or a picture (warnings), and
+/// `version`'s notes in `CHANGELOG.md` (too long is a problem; none, a
+/// warning).
+fn worth_knowing(files: &BTreeMap<String, Vec<u8>>, version: &str, problems: &mut Vec<Problem>, warnings: &mut Vec<Problem>) {
+    use rule::*;
     for (rel, bytes) in files {
         if !readable(rel, bytes) {
             warnings.push(Problem::at(
@@ -853,7 +1000,7 @@ pub fn check(
     let notes = files
         .get(CHANGELOG)
         .filter(|log| log.len() <= MAX_CHANGELOG_BYTES)
-        .map(|log| changelog_notes(&String::from_utf8_lossy(log), &manifest.version));
+        .map(|log| changelog_notes(&String::from_utf8_lossy(log), version));
     if let Some(Some(notes)) = &notes
         && notes.len() > MAX_NOTES_BYTES
     {
@@ -865,13 +1012,177 @@ pub fn check(
             None,
             CHANGELOG,
             format!(
-                "CHANGELOG.md has no section for {}: this version shows without notes",
-                manifest.version
+                "CHANGELOG.md has no section for {version}: this version shows without notes"
             ),
         ));
     }
+}
+
+// ── Templates ──────────────────────────────────────────────────────────────
+
+/// A template's preview, its card's cover: a PNG at most this big.
+pub const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
+/// A template's listing files: carried and installed, never part of its
+/// interface (never loaded, never a change of its code). `screenshots/`:
+/// the PNG and JPEG files under it ([`template_listing_file`]).
+pub const TEMPLATE_LISTING_FILES: &[&str] = &[README, CHANGELOG, super::templates::PREVIEW, "screenshots/"];
+/// What a template's manifest must have, and may have, for the store.
+pub const TEMPLATE_REQUIRED: &[&str] = &["id", "name", "description", "version", "zeron_version"];
+pub const TEMPLATE_OPTIONAL: &[&str] = &["keywords", "screenshots", "homepage", "repository", "license"];
+/// Members a template's manifest may not have in the store: the app's own
+/// marks of Zeron's templates, and a plugin's (a template asks for nothing:
+/// it runs as Zeron).
+pub const TEMPLATE_REFUSED_MEMBERS: &[&str] =
+    &["builtin_theme", "builtin_template", "permissions", "commands", "services", "tools", "engines", "icon", "categories"];
+/// The sentence the README Zeron writes into a new template holds
+/// (`guides::template_readme`): a README holding it is that one, unchanged.
+pub const TEMPLATE_README_STUB: &str = "This README isn't part of the interface.";
+
+/// Which of a template's files are its listing (carried and installed, never
+/// composed, no change of its code), which under `screenshots/` aren't
+/// (refused in the store, never installed from a package, never composed),
+/// and where its pictures are. One answer with the app's.
+pub use zeron_plugin_guard::template::{SCREENSHOTS as TEMPLATE_SCREENSHOTS, listing_file as template_listing_file, stray_screenshot as template_stray_screenshot};
+
+/// Whether PNG `bytes` are animated (an `acTL` chunk): a cover is a still.
+fn animated_png(bytes: &[u8]) -> bool {
+    let mut at = PNG_SIGNATURE.len();
+    while let Some(head) = bytes.get(at..at + 8) {
+        if &head[4..] == b"acTL" {
+            return true;
+        }
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        at = at.saturating_add(12).saturating_add(len);
+    }
+    false
+}
+
+/// What stands in the way of publishing template `manifest` (its signed
+/// manifest, as the package carries it) with `files` (every file the
+/// package carries, its manifest not among them), and what's worth knowing:
+/// each problem once, in a stable order. A template asks for nothing (it
+/// runs as Zeron), so its rules are the listing's, its files' and its
+/// preview's.
+pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (Vec<Problem>, Vec<Problem>) {
+    use rule::*;
+    let item = Item::Template;
+    let mut problems = Vec::new();
+    let mut warnings = Vec::new();
+    let Some(raw) = manifest.as_object() else {
+        problems.push(Problem::new(BAD_PACKAGE, Some("manifest"), "Its manifest isn't an object"));
+        return (problems, warnings);
+    };
+    // An allow list: those it's never told apart by name first, then any
+    // other, in code point order.
+    for member in TEMPLATE_REFUSED_MEMBERS {
+        if raw.contains_key(*member) {
+            problems.push(Problem::new(
+                BAD_LISTING,
+                Some(member),
+                format!("A template has no \"{member}\": it asks for nothing, and runs as Zeron itself"),
+            ));
+        }
+    }
+    let mut others: Vec<&str> = raw
+        .keys()
+        .map(String::as_str)
+        .filter(|key| *key != "signature" && ![TEMPLATE_REQUIRED, TEMPLATE_OPTIONAL, TEMPLATE_REFUSED_MEMBERS].iter().any(|list| list.contains(key)))
+        .collect();
+    others.sort_unstable();
+    for member in others {
+        let mut problem = Problem::new(BAD_LISTING, Some("manifest"), format!("\"{}\" isn't something a template's manifest says in the store: leave it out", problem_word(member)));
+        problem.word = Some(problem_word(member)).filter(|w| !w.is_empty());
+        problems.push(problem);
+    }
+    let text = |key: &str| raw.get(key).and_then(Value::as_str).map(str::trim);
+    let id = text("id").unwrap_or("");
+    if !super::templates::valid_id(id) {
+        problems.push(Problem::new(
+            BAD_PACKAGE,
+            Some("id"),
+            format!("\"{id}\" can't be a template's id: use 2 to 40 lowercase letters, digits and dashes, starting with a letter or digit"),
+        ));
+    } else {
+        reserved_id(id, &mut problems);
+    }
+    let version = text("version").unwrap_or("");
+    if let Err(e) = Version::parse(version) {
+        problems.push(Problem::new(NOT_SEMVER, Some("version"), e));
+    }
+    match text("zeron_version") {
+        None | Some("") => problems.push(Problem::new(
+            MISSING_LISTING,
+            Some("zeron_version"),
+            "It needs a \"zeron_version\": the Zeron it was made from",
+        )),
+        Some(made_from) => {
+            if let Err(e) = Version::parse(made_from) {
+                problems.push(Problem::new(NOT_SEMVER, Some("zeron_version"), e));
+            }
+        }
+    }
+    match text("name") {
+        None | Some("") => problems.push(Problem::new(MISSING_LISTING, Some("name"), "It needs a \"name\"")),
+        Some(name) => check_name(name, item, &mut problems),
+    }
+    check_readme(files, Some(TEMPLATE_README_STUB), &mut problems);
+    check_description(text("description").unwrap_or(""), item, &mut problems);
+    let preview = super::templates::PREVIEW;
+    match files.get(preview) {
+        None => problems.push(Problem::new(
+            MISSING_LISTING,
+            Some("preview"),
+            "It needs a preview.png: its card's cover in the store",
+        )),
+        Some(bytes) if bytes.len() > MAX_PREVIEW_BYTES || !bytes.starts_with(PNG_SIGNATURE) || animated_png(bytes) => problems.push(Problem::at(
+            BAD_LISTING,
+            Some("preview"),
+            preview,
+            format!("Its preview.png must be a still PNG picture, at most {} MB", MAX_PREVIEW_BYTES / 1024 / 1024),
+        )),
+        Some(_) => {}
+    }
+    check_keywords(manifest, item, &mut problems);
+    check_links(manifest, &mut problems);
+    check_screenshots(manifest, files, Some(TEMPLATE_SCREENSHOTS), &mut problems);
+    check_changelog_size(files, &mut problems);
+    let mut unsigned = manifest.clone();
+    if let Some(m) = unsigned.as_object_mut() {
+        m.remove("signature");
+    }
+    check_manifest_size(&unsigned, &mut problems);
+    // Its files: each one Zeron writes, none of those no template replaces.
+    for rel in files.keys() {
+        if super::templates::inside(std::path::Path::new("t"), rel).is_none() || super::template_packages::unseen(rel) {
+            problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("It has a file Zeron won't write: {rel:?}")));
+        } else if super::template_packages::protected(rel) {
+            problems.push(Problem::at(
+                PROTECTED_FILE,
+                Some("files"),
+                rel,
+                format!("{rel:?} is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out"),
+            ));
+        } else if super::template_packages::short_name(rel) {
+            problems.push(Problem::at(
+                PROTECTED_FILE,
+                Some("files"),
+                rel,
+                format!("{rel:?} could be a Windows short name of one of Zeron's own files (a ~ with a digit after it): rename it"),
+            ));
+        } else if template_stray_screenshot(rel) {
+            problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG: {TEMPLATE_SCREENSHOTS}/ holds its pictures alone")));
+        } else if rel.starts_with(TEMPLATE_SCREENSHOTS) && template_listing_file(rel) && !is_screenshot(&files[rel]) {
+            problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG picture, whatever its name says")));
+        }
+    }
+    check_clashes(files, &[super::templates::MANIFEST, super::template_packages::IMPORTED], &mut problems);
+    check_size(files, item, &mut problems);
+    worth_knowing(files, version, &mut problems, &mut warnings);
     (problems, warnings)
 }
+
+/// A PNG's first bytes.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -923,6 +1234,27 @@ pub(crate) mod tests {
         assert_eq!(listing.engines_zeron.as_deref(), Some(">=0.3.0"));
     }
 
+    /// A name that could be another file's: of a plugin's and of a
+    /// template's, the template's short names as its protected files are.
+    #[test]
+    fn a_path_that_could_be_another_s_is_refused() {
+        let (manifest, mut files) = listed();
+        let at = |problems: Vec<Problem>| -> Vec<(&'static str, Option<&'static str>, Option<String>)> {
+            problems.into_iter().filter(|p| p.field == Some("files")).map(|p| (p.rule, p.field, p.path)).collect()
+        };
+        let odd = ["ui/BADGE~1.LUA", "in\u{200c}it.luau"];
+        for rel in ["ui/a~b.luau", odd[0], odd[1]] {
+            files.insert(rel.into(), b"return 1".to_vec());
+        }
+        let refused = |rule| odd.map(|rel| (rule, Some("files"), Some(rel.to_owned())));
+        let (problems, _) = check(&Manifest::from_value(manifest).unwrap(), &files);
+        let mut expected = refused(rule::BAD_PACKAGE);
+        expected.sort_by(|a, b| a.2.cmp(&b.2));
+        assert_eq!(at(problems), expected);
+        let (problems, _) = check_template(&serde_json::json!({ "id": "midnight" }), &files);
+        assert_eq!(at(problems), [(rule::BAD_PACKAGE, Some("files"), Some(odd[1].to_owned())), (rule::PROTECTED_FILE, Some("files"), Some(odd[0].to_owned()))]);
+    }
+
     #[test]
     fn a_name_description_or_keyword_refused_says_why_and_where() {
         use serde_json::json;
@@ -956,9 +1288,11 @@ pub(crate) mod tests {
     fn the_site_s_pages_are_never_a_listed_plugin_s_id_but_still_run() {
         let (base, files) = listed();
         for id in SITE_IDS {
-            // Each a valid id Zeron runs and nothing else already kept.
-            assert_eq!(manifest::check_id(id), Ok(()), "{id} still runs");
-            assert!(!BUILTIN_IDS.contains(id) && !id.starts_with("zeron") && !manifest::RESERVED_IDS.contains(id), "{id}");
+            // Each a valid id Zeron runs and nothing else already kept (but
+            // `templates`, which no plugin ever had; a template could).
+            assert_eq!(manifest::check_id(id).is_ok(), *id != "templates", "{id} still runs");
+            assert!(super::super::templates::valid_id(id), "{id}");
+            assert!(!BUILTIN_IDS.contains(id) && !id.starts_with("zeron") && (*id == "templates" || !manifest::RESERVED_IDS.contains(id)), "{id}");
             let mut m = base.clone();
             m["id"] = serde_json::json!(id);
             assert_eq!(rules(&m, &files), vec![(rule::ID_RESERVED, Some("id"))], "{id}");

@@ -34,7 +34,10 @@ use super::listing::{self, CATEGORIES};
 use super::manifest::{self, Manifest};
 use super::package::{self, MAX_PACKAGE_BYTES};
 use super::signing::{self, FileHashes, PAYLOAD_PREFIX, SigCheck, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
+use super::store::client::Kind;
 use super::store::deploy_token::{self, DeployToken};
+use super::template_blocks::{self, Identity};
+use super::template_packages;
 use super::version::{self, Range, Version};
 
 const CORPUS: &str = include_str!("corpus.json");
@@ -219,6 +222,10 @@ fn signature_cases() -> Value {
     push("a missing file", PAYLOAD_PREFIX, &signed, &FileHashes::new());
     push("a template's signature isn't a plugin's", PAYLOAD_PREFIX, &key.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &manifest, &h), &h);
     push("a plugin's signature isn't a template's", TEMPLATE_PAYLOAD_PREFIX, &signed, &h);
+    let as_template = key.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &manifest, &h);
+    push("a template's, valid", TEMPLATE_PAYLOAD_PREFIX, &as_template, &h);
+    push("a template's, unsigned", TEMPLATE_PAYLOAD_PREFIX, &manifest, &h);
+    push("a template's, a changed file", TEMPLATE_PAYLOAD_PREFIX, &as_template, &package::hashes(&files(&[("init.luau", b"return 2")])));
     push("fractional settings, signed", PAYLOAD_PREFIX, &key.sign_manifest(&fractional(), &h), &h);
     let mut edited = signed.clone();
     edited["version"] = json!("2.0.0");
@@ -361,6 +368,29 @@ fn store_package_cases() -> Value {
     )
 }
 
+/// File names that could be another's, and some that only look it: in a
+/// plugin's package and a template's.
+const NAMES: &[(&str, &[&str])] = &[
+    ("a short name of its manifest's", &["ZERON-~1.JSO"]),
+    ("a short name of Zeron's templates page", &["screens/TEMPLA~1/page.luau"]),
+    ("a short name of .luaurc", &["LUAURC~1"]),
+    ("a ~ and a digit inside a name", &["ui/a~1b.luau"]),
+    ("a ~ and no digit right after", &["ui/a~b.luau"]),
+    ("a ~ and a digit that isn't ASCII", &["ui/a~\u{661}.luau"]),
+    ("a short name under screenshots/", &["screenshots/CHAT~1.PNG"]),
+    ("a zero-width joiner in a folder's name", &["screens/tem\u{200d}plates/page.luau"]),
+    ("a byte order mark in a name", &["ui/\u{feff}badge.luau"]),
+    ("a soft hyphen in a name", &["ui/bad\u{ad}ge.luau"]),
+    ("a Hangul filler in a name", &["ui/\u{3164}.luau"]),
+    ("a variation selector that isn't an emoji's", &["ui/a\u{fe00}.luau"]),
+    ("a tag character in a name", &["ui/a\u{e0041}.luau"]),
+    ("an emoji's selector in a name", &["ui/\u{2764}\u{fe0f}.png"]),
+    ("two names an emoji's selector tells apart", &["ui/\u{2764}.png", "ui/\u{2764}\u{fe0f}.png"]),
+    ("a selector between a letter and its accent", &["ui/e\u{fe0e}\u{301}.luau", "ui/\u{e9}.luau"]),
+    ("a protected folder with an emoji's selector", &["screens/plu\u{fe0f}gins/page.luau"]),
+    ("a dot file with an emoji's selector before it", &["\u{fe0e}.luaurc"]),
+];
+
 fn package_cases() -> Value {
     let key = author();
     let manifest = json!({ "id": "focus", "name": "Focus", "version": "1.0.0", "entry": "init.luau", "permissions": ["ui.add"] });
@@ -375,6 +405,7 @@ fn package_cases() -> Value {
         ("valid".into(), valid.clone()),
         ("not JSON".into(), b"PK\x03\x04".to_vec()),
         ("another format".into(), edit(&|v| v["format"] = json!("zeron-template:v1"))),
+        ("a template's package".into(), template_packed(Some(&key), &template_listed().0, &template_listed().1)),
         ("files isn't an object".into(), edit(&|v| v["files"] = json!([]))),
         ("unsigned".into(), packed(None, &manifest, &good)),
         ("a file changed after signing".into(), edit(&|v| v["files"]["init.luau"] = json!(B64.encode(b"return 2")))),
@@ -412,6 +443,16 @@ fn package_cases() -> Value {
             with.insert((*rel).into(), b"x".to_vec());
         }
         cases.push((name.into(), packed(Some(&key), &manifest, &with)));
+    }
+    // A name that could be another's on some disk: a Windows short name, or a
+    // character drawn as nothing (`file_names`); an emoji's selector isn't,
+    // and tells no two names apart.
+    for (name, paths) in NAMES {
+        let mut with = good.clone();
+        for rel in *paths {
+            with.insert((*rel).into(), b"x".to_vec());
+        }
+        cases.push((format!("names: {name}"), packed(Some(&key), &manifest, &with)));
     }
     let mut no_entry = good.clone();
     no_entry.remove("init.luau");
@@ -659,6 +700,8 @@ fn listing_cases() -> Value {
         ("an id the site's pages use: featured", "id", json!("featured")),
         ("an id the site's pages use: feed", "id", json!("feed")),
         ("an id the site's pages use: admin", "id", json!("admin")),
+        ("an id the site's pages use: plugins", "id", json!("plugins")),
+        ("an id the site's pages use: templates", "id", json!("templates")),
         ("an id with a site word in it is anyone's", "id", json!("feed-reader")),
         ("an id a site word is in is anyone's", "id", json!("allergies")),
         ("a permission Zeron doesn't know", "permissions", json!(["root"])),
@@ -689,6 +732,13 @@ fn listing_cases() -> Value {
     let mut no_readme = files.clone();
     no_readme.remove(listing::README);
     cases.push(("no README.md".into(), base.clone(), no_readme));
+    for (name, paths) in NAMES {
+        let mut f = files.clone();
+        for rel in *paths {
+            f.insert((*rel).into(), b"return {}".to_vec());
+        }
+        cases.push((format!("names: {name}"), base.clone(), f));
+    }
     cases.push(("a WebP screenshot".into(), { let mut m = base.clone(); m["screenshots"] = json!(["shots/a.webp"]); m }, with_file("shots/a.webp", b"RIFF\0\0\0\0WEBPVP8 ".to_vec())));
     // Each size limit, one byte under and one over (written as `parts`).
     for (name, bytes) in [("README.md at 512 KB", listing::MAX_README_BYTES), ("README.md one byte over 512 KB", listing::MAX_README_BYTES + 1)] {
@@ -1201,20 +1251,6 @@ fn listing_cases() -> Value {
             .into_iter()
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
-                let said = |list: &[listing::Problem]| -> Value {
-                    list.iter()
-                        .map(|p| {
-                            let mut said = json!({ "rule": p.rule, "field": p.field, "path": p.path });
-                            if let Some(cause) = p.cause {
-                                said["cause"] = json!(cause);
-                            }
-                            if let Some(word) = &p.word {
-                                said["word"] = json!(word);
-                            }
-                            said
-                        })
-                        .collect()
-                };
                 json!({
                     "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
                     "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
@@ -1222,6 +1258,23 @@ fn listing_cases() -> Value {
             })
             .collect(),
     )
+}
+
+/// Problems as a case says them: each one's rule, field and path, and its
+/// cause and word when it has them.
+fn said(list: &[listing::Problem]) -> Value {
+    list.iter()
+        .map(|p| {
+            let mut said = json!({ "rule": p.rule, "field": p.field, "path": p.path });
+            if let Some(cause) = p.cause {
+                said["cause"] = json!(cause);
+            }
+            if let Some(word) = &p.word {
+                said["word"] = json!(word);
+            }
+            said
+        })
+        .collect()
 }
 
 fn changelog_cases() -> Value {
@@ -1275,8 +1328,31 @@ fn deploy_token_cases() -> Value {
     .iter()
     .map(|t| read(t))
     .collect();
+    // A scope names ids of either kind (one namespace): a plugin's and a
+    // template's alike, sorted, each once.
+    let scopes: Vec<Value> = [&["midnight", "focus"][..], &["focus", " git"], &["git", "git"], &[], &["Not An Id"]]
+        .iter()
+        .map(|ids| {
+            let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+            match deploy_token::Scope::plugins(&ids) {
+                Ok(scope) => json!({ "ids": ids, "ok": true, "scope": scope.to_value() }),
+                Err(_) => json!({ "ids": ids, "ok": false }),
+            }
+        })
+        .collect();
+    // All of yours, of the kinds it says (none: plugins).
+    let all_scopes: Vec<Value> = [None, Some(&["plugin"][..]), Some(&["plugin", "template"]), Some(&["template"]), Some(&["template", "plugin"]), Some(&["plugin", "plugin"]), Some(&["plugin", "theme"]), Some(&[])]
+        .into_iter()
+        .map(|kinds| {
+            let kinds: Option<Vec<String>> = kinds.map(|k| k.iter().map(|w| (*w).to_owned()).collect());
+            match deploy_token::Scope::all(kinds.as_deref()) {
+                Ok(scope) => json!({ "all_kinds": kinds, "ok": true, "scope": scope.to_value(), "covers": { "plugin": scope.covers("any", Kind::Plugin), "template": scope.covers("any", Kind::Template) } }),
+                Err(_) => json!({ "all_kinds": kinds, "ok": false }),
+            }
+        })
+        .collect();
     json!({
-        "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`.",
+        "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`. Scopes: scopes are the ids named, of either kind (a plugin's and a template's alike), sorted by code unit after trimming, each once. all_scopes are {all: true, all_kinds?}: all_kinds null (absent) is [\"plugin\"]; as the store answers it, all_kinds is always there.",
         "prefix": deploy_token::PREFIX,
         "alphabet": std::str::from_utf8(deploy_token::ALPHABET).unwrap(),
         "body_len": deploy_token::BODY_LEN,
@@ -1285,6 +1361,519 @@ fn deploy_token_cases() -> Value {
         "short_len": deploy_token::SHORT_LEN,
         "tokens": tokens,
         "reads": reads,
+        "scopes": scopes,
+        "all_scopes": all_scopes,
+    })
+}
+
+// ── Templates ───────────────────────────────────────────────────────────────
+
+/// A template package's raw bytes: `files` signed by `key` in the template
+/// domain (none: unsigned).
+fn template_packed(key: Option<&SigningKey>, manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let manifest = match key {
+        Some(key) => key.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, manifest, &package::hashes(files)),
+        None => manifest.clone(),
+    };
+    package::pack(template_packages::FORMAT, &manifest, files).unwrap()
+}
+
+/// A PNG's first bytes, and a few more: as much of a picture as the rules
+/// look at.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+/// A template that meets every store rule: its manifest and every file its
+/// package carries.
+fn template_listed() -> (Value, BTreeMap<String, Vec<u8>>) {
+    let manifest = json!({
+        "id": "midnight", "name": "Midnight", "description": "A dark interface with the sidebar on the right.",
+        "version": "1.2.0", "zeron_version": "0.3.16", "keywords": ["dark", "sidebar"],
+        "screenshots": ["screenshots/chat.png"], "homepage": "https://example.com/midnight",
+        "repository": "https://github.com/example/midnight", "license": "MIT",
+    });
+    let files = files(&[
+        ("app.luau", b"return require('./screens/shell/page')"),
+        ("ds/tokens.luau", b"return { bg = '#000' }"),
+        ("screens/shell/sidebar.luau", b"return {}"),
+        ("preview.png", PNG),
+        ("screenshots/chat.png", PNG),
+        ("README.md", b"# Midnight\n\nA dark interface."),
+        ("CHANGELOG.md", b"# Changes\n\n## 1.2.0\n\n- The sidebar moves right.\n"),
+    ]);
+    (manifest, files)
+}
+
+/// What a device makes of template package bytes, as read by `parse`:
+/// `{ok: true, id, version, key, hash, sha256, files, paths, ignored}` (`hash`
+/// its content hash, `paths` what it installs, `ignored` what it carried
+/// that no template replaces, left out), or `{ok: false, error}`.
+fn template_result(raw: &[u8], parse: impl Fn(Vec<u8>) -> Result<template_packages::Package, String>) -> Value {
+    match parse(raw.to_vec()) {
+        Ok(p) => json!({
+            "ok": true, "id": p.id(), "version": p.version(), "key": p.key, "hash": p.content_hash, "sha256": p.hash,
+            "files": p.files.len(), "paths": p.files.keys().collect::<Vec<_>>(), "ignored": p.ignored,
+        }),
+        Err(error) => {
+            let word = template_packages::refusal(&error).unwrap_or_else(|| panic!("a refusal without a word: {error}"));
+            json!({ "ok": false, "error": word })
+        }
+    }
+}
+
+/// Template packages, each read as a device reads one from a file or a link
+/// (`result`: signed, always) and as one the store serves under a record
+/// naming no signer (`store_result`: unsigned, a deploy token's; a signed
+/// one there is `store_mismatch`).
+fn template_package_cases() -> Value {
+    let key = author();
+    let (manifest, good) = template_listed();
+    let valid = template_packed(Some(&key), &manifest, &good);
+    let edit = |change: &dyn Fn(&mut Value)| {
+        let mut value: Value = serde_json::from_slice(&valid).unwrap();
+        change(&mut value);
+        serde_json::to_vec(&value).unwrap()
+    };
+    let with = |extra: &[(&str, &[u8])]| {
+        let mut files = good.clone();
+        for (rel, bytes) in extra {
+            files.insert((*rel).into(), bytes.to_vec());
+        }
+        files
+    };
+    let plugin_manifest = json!({ "id": "focus", "name": "Focus", "version": "1.0.0", "entry": "init.luau" });
+    let mut cases: Vec<(String, Vec<u8>)> = vec![
+        ("valid".into(), valid.clone()),
+        ("unsigned (a deploy token's)".into(), template_packed(None, &manifest, &good)),
+        ("not JSON".into(), b"PK\x03\x04".to_vec()),
+        ("a plugin's package".into(), packed(Some(&key), &plugin_manifest, &files(&[("init.luau", b"return 1")]))),
+        ("signed in the plugin's domain".into(), package::pack(template_packages::FORMAT, &key.sign_manifest(&manifest, &package::hashes(&good)), &good).unwrap()),
+        ("a file changed after signing".into(), edit(&|v| v["files"]["app.luau"] = json!(B64.encode(b"return 2")))),
+        ("a file added after signing".into(), edit(&|v| v["files"]["extra.luau"] = json!(B64.encode(b"x")))),
+        ("a manifest field changed after signing".into(), edit(&|v| v["manifest"]["version"] = json!("9.9.9"))),
+        ("a file that isn't base64".into(), edit(&|v| v["files"]["app.luau"] = json!("@@@"))),
+    ];
+    // What no template replaces, folded as a disk folds it: left out (and
+    // named) on a device; refused by the store (the listing's
+    // protected_file).
+    for (name, rel) in [
+        ("the plugins page", "screens/plugins/page.luau"),
+        ("the plugins page in capitals", "Screens/Plugins/page.luau"),
+        ("the templates page with a long s", "\u{17f}creens/templates/x.luau"),
+        ("your account", "account/sessions.luau"),
+        ("its .luaurc", ".luaurc"),
+        ("its own manifest as a file", "zeron-template.json"),
+        ("code under screenshots/", "screenshots/x.luau"),
+    ] {
+        cases.push((format!("carries {name}"), template_packed(Some(&key), &manifest, &with(&[(rel, b"-- x")]))));
+    }
+    for (name, paths) in NAMES {
+        let extra: Vec<(&str, &[u8])> = paths.iter().map(|p| (*p, &b"x"[..])).collect();
+        cases.push((format!("names: {name}"), template_packed(Some(&key), &manifest, &with(&extra))));
+    }
+    for (name, rel) in [
+        ("a path out of the folder", "../evil.luau"),
+        ("a dot folder", ".git/config"),
+        ("an absolute path", "/etc/x"),
+        ("a Windows device name", "screens/NUL.luau"),
+        ("a trailing dot", "app.luau."),
+    ] {
+        cases.push((name.into(), template_packed(Some(&key), &manifest, &with(&[(rel, b"x")]))));
+    }
+    for (name, paths) in [
+        ("two paths that differ only in case", &["ds/Tokens.luau"][..]),
+        ("its manifest's name in capitals", &["Zeron-Template.json"]),
+        ("a file where a folder is", &["ds"]),
+    ] {
+        let extra: Vec<(&str, &[u8])> = paths.iter().map(|p| (*p, &b"x"[..])).collect();
+        cases.push((name.into(), template_packed(Some(&key), &manifest, &with(&extra))));
+    }
+    for (name, field, value) in [
+        ("an id Zeron keeps", "id", json!("zeron")),
+        ("an id that isn't one", "id", json!("Midnight")),
+        ("a builtin mark (installed without it)", "builtin_template", json!("zeron-v2")),
+        ("unknown fields are kept", "x-future", json!({ "unknown": "fields are kept and signed" })),
+    ] {
+        let mut m = manifest.clone();
+        m[field] = value;
+        cases.push((name.into(), template_packed(Some(&key), &m, &good)));
+    }
+    let many: BTreeMap<String, Vec<u8>> = (0..=super::files::MAX_FILES).map(|n| (format!("f/{n:04}.luau"), b"x".to_vec())).collect();
+    cases.push(("one file more than max_files".into(), template_packed(Some(&key), &manifest, &many)));
+    Value::Array(
+        cases
+            .into_iter()
+            .map(|(name, raw)| {
+                json!({
+                    "name": name, "package_b64": B64.encode(&raw),
+                    "result": template_result(&raw, template_packages::parse),
+                    "store_result": template_result(&raw, |raw| template_packages::parse_from_store(raw, false)),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// A template's content hash: over its manifest without the signature and
+/// every file its package carries, as a plugin's is.
+fn template_content_hash_cases() -> Value {
+    let (manifest, files) = template_listed();
+    let hashes = package::hashes(&files);
+    let signed = author().sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes);
+    let mut changed = files.clone();
+    changed.insert("preview.png".into(), b"\x89PNG\r\n\x1a\nother".to_vec());
+    let cases: Vec<(&str, Value, FileHashes)> = vec![
+        ("unsigned", manifest.clone(), hashes.clone()),
+        ("signed: the signature isn't part of it", signed, hashes.clone()),
+        ("its preview is part of it", manifest.clone(), package::hashes(&changed)),
+        ("a protected file it carries is part of it", manifest.clone(), package::hashes(&{
+            let mut f = files.clone();
+            f.insert("account/x.luau".into(), b"x".to_vec());
+            f
+        })),
+    ];
+    Value::Array(
+        cases
+            .into_iter()
+            .map(|(name, manifest, files)| {
+                let mut unsigned = manifest.clone();
+                unsigned.as_object_mut().unwrap().remove("signature");
+                json!({ "name": name, "manifest": text(&manifest), "files": files, "hash": signing::content_hash_of(&unsigned, &files) })
+            })
+            .collect(),
+    )
+}
+
+/// Bytes as a case carries them: [`files_b64`]'s, and binary with a long
+/// run of one ASCII character (a size case's filler) as `{bytes: [b64,
+/// {repeat, count}, b64]}`, which expands to exactly those bytes.
+fn files_with_bytes(files: &BTreeMap<String, Vec<u8>>) -> Value {
+    let mut out = files_b64(files);
+    for (rel, bytes) in files {
+        if std::str::from_utf8(bytes).is_ok() {
+            continue;
+        }
+        let Some((start, end, byte)) = longest_run(bytes).filter(|(s, e, b)| e - s >= LONG_RUN && b.is_ascii()) else { continue };
+        out[rel] = json!({ "bytes": [B64.encode(&bytes[..start]), { "repeat": (byte as char).to_string(), "count": end - start }, B64.encode(&bytes[end..])] });
+    }
+    out
+}
+
+/// The longest run of one byte in `bytes`: (start, end, byte).
+fn longest_run(bytes: &[u8]) -> Option<(usize, usize, u8)> {
+    let mut best: Option<(usize, usize, u8)> = None;
+    let mut start = 0;
+    for at in 1..=bytes.len() {
+        if at == bytes.len() || bytes[at] != bytes[start] {
+            if best.is_none_or(|(s, e, _)| at - start > e - s) {
+                best = Some((start, at, bytes[start]));
+            }
+            start = at;
+        }
+    }
+    best
+}
+
+/// The store's rules for a template's listing (`listing::check_template`),
+/// over its manifest and every file its package carries.
+fn template_listing_cases() -> Value {
+    let (base, files) = template_listed();
+    let with_files = |change: &dyn Fn(&mut BTreeMap<String, Vec<u8>>)| {
+        let mut f = files.clone();
+        change(&mut f);
+        f
+    };
+    let with_manifest = |field: &str, value: Value| {
+        let mut m = base.clone();
+        if value.is_null() {
+            m.as_object_mut().unwrap().remove(field);
+        } else {
+            m[field] = value;
+        }
+        m
+    };
+    let mut big = PNG.to_vec();
+    big.resize(listing::MAX_PREVIEW_BYTES + 1, b'a');
+    let mut at_limit = PNG.to_vec();
+    at_limit.resize(listing::MAX_PREVIEW_BYTES, b'a');
+    let stub = super::guides::template_readme("Midnight", std::path::Path::new("/Users/you/.zeron/docs/templates.md"));
+    let mut cases: Vec<(String, Value, BTreeMap<String, Vec<u8>>)> = vec![
+        ("meets every rule".into(), base.clone(), files.clone()),
+        ("no preview".into(), base.clone(), with_files(&|f| { f.remove("preview.png"); })),
+        ("a preview that's a JPEG".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), b"\xff\xd8\xff\xe0JFIF".to_vec()); })),
+        ("a preview that's text".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), b"not a picture".to_vec()); })),
+        ("a preview of max_preview_bytes".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), at_limit.clone()); })),
+        ("a preview one byte over max_preview_bytes".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), big.clone()); })),
+        ("the README Zeron wrote".into(), base.clone(), with_files(&|f| { f.insert("README.md".into(), stub.clone().into_bytes()); })),
+        ("no README".into(), base.clone(), with_files(&|f| { f.remove("README.md"); })),
+        ("no notes for its version".into(), base.clone(), with_files(&|f| { f.insert("CHANGELOG.md".into(), b"## 1.1.0\n- Older.\n".to_vec()); })),
+        ("a protected file: the plugins page".into(), base.clone(), with_files(&|f| { f.insert("screens/plugins/page.luau".into(), b"-- x".to_vec()); })),
+        ("a protected file: your account, in capitals".into(), base.clone(), with_files(&|f| { f.insert("Account/x.luau".into(), b"-- x".to_vec()); })),
+        ("a protected file: .luaurc".into(), base.clone(), with_files(&|f| { f.insert(".luaurc".into(), b"{}".to_vec()); })),
+        ("a file Zeron won't write".into(), base.clone(), with_files(&|f| { f.insert(".git/config".into(), b"x".to_vec()); })),
+        ("its manifest's name as a file".into(), base.clone(), with_files(&|f| { f.insert("Zeron-Template.json".into(), b"{}".to_vec()); })),
+        ("an animated preview".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89\0\0\0\x08acTL\0\0\0\x02\0\0\0\0\0\0\0\0".to_vec()); })),
+        ("code under screenshots/".into(), base.clone(), with_files(&|f| { f.insert("screenshots/x.luau".into(), b"return {}".to_vec()); })),
+        ("code under Screenshots/, as a folding disk has it".into(), base.clone(), with_files(&|f| { f.insert("Screenshots/x.luau".into(), b"return {}".to_vec()); })),
+        ("a picture under screenshots/ it doesn't list".into(), base.clone(), with_files(&|f| { f.insert("screenshots/Two.JPG".into(), b"\xff\xd8\xff\xe0JFIF".to_vec()); })),
+        ("a compiled file is worth a look".into(), base.clone(), with_files(&|f| { f.insert("lib/x.luac".into(), b"\x1bLua".to_vec()); })),
+        ("code called a picture, not listed".into(), base.clone(), with_files(&|f| { f.insert("screenshots/x.png".into(), b"return {}".to_vec()); })),
+        ("a GIF called a picture, not listed".into(), base.clone(), with_files(&|f| { f.insert("screenshots/x.jpg".into(), b"GIF89a".to_vec()); })),
+        ("code called a picture, listed".into(), base.clone(), with_files(&|f| { f.insert("screenshots/chat.png".into(), b"return {}".to_vec()); })),
+        ("a JPEG called a PNG is a picture".into(), base.clone(), with_files(&|f| { f.insert("screenshots/x.png".into(), b"\xff\xd8\xff\xe0JFIF".to_vec()); })),
+    ];
+    for (name, paths) in NAMES {
+        cases.push((format!("names: {name}"), base.clone(), with_files(&|f| {
+            for rel in *paths {
+                f.insert((*rel).into(), PNG.to_vec());
+            }
+        })));
+    }
+    let changes: &[(&str, &str, Value)] = &[
+        ("no zeron_version", "zeron_version", Value::Null),
+        ("a zeron_version that isn't strict", "zeron_version", json!("0.3")),
+        ("a version that isn't strict", "version", json!("1.2")),
+        ("no name", "name", Value::Null),
+        ("no description", "description", Value::Null),
+        ("an id that isn't one", "id", json!("Midnight")),
+        ("an id Zeron keeps", "id", json!("zeron-dark")),
+        ("an id the store site keeps", "id", json!("all")),
+        ("an id the store site keeps: plugins", "id", json!("plugins")),
+        ("an id the store site keeps: templates", "id", json!("templates")),
+        ("a plugin's id Zeron keeps", "id", json!("git")),
+        ("a screenshot outside screenshots/", "screenshots", json!(["preview.png"])),
+        ("a screenshot that isn't there", "screenshots", json!(["screenshots/missing.png"])),
+        ("a keyword in capitals", "keywords", json!(["Dark"])),
+        ("an http homepage", "homepage", json!("http://example.com")),
+        ("refused: categories", "categories", json!(["appearance"])),
+        ("refused: permissions", "permissions", json!(["ui.add"])),
+        ("refused: icon", "icon", json!("icon.svg")),
+        ("refused: engines", "engines", json!({ "zeron": ">=0.3.0" })),
+        ("refused: commands", "commands", json!(["git"])),
+        ("refused: builtin_template", "builtin_template", json!("zeron-v2")),
+        ("refused: builtin_theme", "builtin_theme", json!("midnight")),
+        ("a member its manifest may not have", "x-future", json!(1)),
+        ("an author isn't one of its members", "author", json!("Zeron")),
+        ("its signature is no member of the list", "signature", json!({ "key": "k", "sig": "s" })),
+        ("the mark: 官方介面", "description", json!("\u{6df1}\u{8272}\u{7684}\u{5b98}\u{65b9}\u{4ecb}\u{9762}")),
+        ("the mark: 公式インターフェース", "description", json!("ダークな公式インターフェース")),
+        ("the mark: a verified name", "name", json!("Midnight Verified")),
+        ("the mark: official, first", "description", json!("Official dark interface for Zeron.")),
+        ("the mark: beside a word for a template (a plugin's would pass)", "description", json!("A clean, verified layout.")),
+        ("honest: with someone else's verified layout", "description", json!("Dark, with a verified layout for chats.")),
+        ("the mark: beside template", "description", json!("The verified template for long chats.")),
+        ("the mark: 公式テンプレート", "description", json!("ダークな公式テンプレート")),
+        ("honest: someone else's official thing", "description", json!("Matches the official Solarized palette.")),
+        ("honest: not said of it", "description", json!("Dark, with the sidebar on the right.")),
+        ("the mark: a keyword", "keywords", json!(["verified"])),
+    ];
+    for (name, field, value) in changes {
+        cases.push(((*name).into(), with_manifest(field, value.clone()), files.clone()));
+    }
+    Value::Array(
+        cases
+            .into_iter()
+            .map(|(name, manifest, files)| {
+                let (problems, warnings) = listing::check_template(&manifest, &files);
+                json!({
+                    "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_with_bytes(&files),
+                    "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of_template(&manifest),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Which of a path's characters and parts could make it another's on some
+/// disk, and what it's compared as (plugin-guard's `template::short_name` and
+/// `template::unseen`, `path::fold`, `listing::fold_path`).
+fn file_name_cases() -> Value {
+    let mut paths: Vec<&str> = NAMES.iter().flat_map(|(_, paths)| paths.iter().copied()).collect();
+    paths.extend([
+        "init.luau", "ui/Badge.luau", "~1", "a~", "~", "a~~1", "a~/1.luau", "x~9/y", "\u{e9}.luau", "e\u{301}.luau", "\u{17f}creens/plugins/x.luau", "\u{212a}.luau",
+        "a./b", "a\u{fe0f}./b", "a.\u{fe0f}/b", "\u{fe0f}/a", "\u{1f468}\u{200d}\u{1f4bb}.png", "\u{8bbe}\u{7f6e}.luau", "\u{180e}.luau", "\u{e0fff}", "\u{e1000}",
+    ]);
+    let mut seen = std::collections::BTreeSet::new();
+    paths.retain(|rel| seen.insert(*rel));
+    Value::Array(
+        paths
+            .into_iter()
+            .map(|rel| {
+                json!({
+                    "path": rel, "short_name": template_packages::short_name(rel), "unseen": template_packages::unseen(rel),
+                    "fold": zeron_plugin_guard::path::fold(rel), "fold_path": listing::fold_path(rel), "template_protected": template_packages::protected(rel),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The characters no file's name may hold, as ranges `[first, last]` of code
+/// points.
+fn unseen_ranges() -> Vec<[u32; 2]> {
+    let mut ranges: Vec<[u32; 2]> = Vec::new();
+    for c in (0..=0x10ffff).filter_map(char::from_u32) {
+        if !template_packages::unseen(c.encode_utf8(&mut [0; 4])) {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some(last) if last[1] + 1 == c as u32 => last[1] = c as u32,
+            _ => ranges.push([c as u32; 2]),
+        }
+    }
+    ranges
+}
+
+/// What's blocked of templates here (`template_blocks::blocked`): the list
+/// (`.blocked.json`'s text, none when there's no file), each folder's
+/// `.imported.json` and `.lineage.json` (their text, none when there's none),
+/// and of each whether it's `blocked`: the entry's `{id, version}`,
+/// `"unchecked"` (it can't be told), or null.
+fn template_block_cases() -> Value {
+    type Folder<'a> = (&'a str, Option<String>, Option<String>);
+    let hash = "cd".repeat(32);
+    let record = |id: &str, version: &str| json!({ "key": null, "version": version, "source": { "kind": "store", "version": version, "installed_at": 0, "store": { "id": id, "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": hash } } });
+    let of = |id: &str, version: &str| Some(record(id, version).to_string());
+    let from = |kind: &str| Some(json!({ "key": "k", "version": "1.0.0", "source": { "kind": kind, "version": "1.0.0", "installed_at": 0 } }).to_string());
+    let lineage = |of: &[(&str, &str)]| Some(json!(of.iter().map(|(id, version)| json!({ "id": id, "version": version, "hash": hash })).collect::<Vec<_>>()).to_string());
+    let list = |of: &[(&str, &str)]| {
+        let blocks: Vec<Value> = of.iter().map(|(id, version)| json!({ "id": id, "version": version, "hash": hash, "reason": "It read your chats.", "at": 1_800_000_000 })).collect();
+        Some(json!({ "format": template_blocks::FORMAT, "blocks": blocks }).to_string())
+    };
+    let without = |member: &str| {
+        let mut r = record("midnight", "1.0.0");
+        r["source"]["store"].as_object_mut().unwrap().remove(member);
+        Some(r.to_string())
+    };
+    let with = |pointer: &str, value: Value| {
+        let mut r = record("midnight", "1.0.0");
+        *r.pointer_mut(pointer).unwrap() = value;
+        Some(r.to_string())
+    };
+    let everything: Vec<Folder> = vec![
+        ("midnight", of("midnight", "1.0.0"), None),
+        ("copy", None, lineage(&[("midnight", "1.0.0")])),
+        ("filed", from("file"), None),
+        ("mine", None, None),
+        ("odd", Some("nope".into()), None),
+    ];
+    let down = [("midnight", "1.0.0")];
+    let cases: Vec<(&str, Option<String>, Vec<Folder>)> = vec![
+        ("nothing is down", list(&[]), everything.clone()),
+        ("one is: its record, and a copy of it", list(&down), everything.clone()),
+        ("another is: only what can't be told", list(&[("dusk", "2.0.0")]), everything.clone()),
+        ("no list, with one from the store here: lost", None, everything.clone()),
+        ("no list, and nothing from the store here", None, vec![("filed", from("file"), None), ("mine", None, None)]),
+        ("no list, and only a record that can't be read", None, vec![("odd", Some("nope".into()), None), ("mine", None, None)]),
+        ("no list, and a copy alone", None, vec![("copy", None, lineage(&[("midnight", "1.0.0")]))]),
+        ("a list that isn't JSON", Some("nope".into()), everything.clone()),
+        ("an empty list file", Some(String::new()), everything.clone()),
+        ("a list cut short", list(&down).map(|l| l[..l.len() / 2].to_owned()), everything.clone()),
+        ("a list of another format", Some(json!({ "format": "zeron-template-blocks:v2", "blocks": [] }).to_string()), everything.clone()),
+        ("a list with an entry that isn't one", Some(json!({ "format": template_blocks::FORMAT, "blocks": [{ "id": "dusk" }] }).to_string()), everything.clone()),
+        ("an entry with no hash", Some(json!({ "format": template_blocks::FORMAT, "blocks": [{ "id": "midnight", "version": "1.0.0", "reason": "", "at": 0 }] }).to_string()), everything.clone()),
+        ("an entry with a member more", Some(json!({ "format": template_blocks::FORMAT, "more": 1, "blocks": [{ "id": "midnight", "version": "1.0.0", "reason": "", "at": 0, "more": 1 }] }).to_string()), everything.clone()),
+        ("by its record, never its folder's name", list(&down), vec![("midnight-2", of("midnight", "1.0.0"), None), ("midnight", of("dusk", "1.0.0"), None)]),
+        ("build metadata is no part of a version", list(&down), vec![("a", of("midnight", "1.0.0+build.2"), None), ("b", of("midnight", "1.0.1"), None), ("c", of("midnight", "1.0.0-rc.1"), None)]),
+        ("a version that isn't one is as it's written", list(&[("midnight", "1.0")]), vec![("a", of("midnight", "1.0"), None), ("b", of("midnight", "1.0.0"), None)]),
+        ("a copy of a copy, and of two", list(&down), vec![("a", None, lineage(&[("dusk", "1.0.0"), ("midnight", "1.0.0")])), ("b", None, lineage(&[("dusk", "1.0.0")])), ("c", of("dusk", "1.0.0"), lineage(&[("midnight", "1.0.0")]))]),
+        ("the record can be read and the lineage can't", list(&down), vec![("a", of("dusk", "1.0.0"), Some("{}".into())), ("b", None, Some(json!([{ "id": "midnight" }]).to_string())), ("c", None, Some("[]".into()))]),
+        ("a record that's no object, or says no source", list(&down), vec![("a", Some("[]".into()), None), ("b", Some("{}".into()), None), ("c", Some(r#"{"source":null}"#.into()), None)]),
+        (
+            "a record that says the store, and not what",
+            list(&down),
+            vec![
+                ("a", without("id"), None),
+                ("b", without("hash"), None),
+                ("c", with("/source/store", Value::Null), None),
+                ("d", with("/version", Value::Null), None),
+                ("e", with("/source/kind", json!(1)), None),
+                ("f", with("/source/kind", json!("somewhere")), None),
+            ],
+        ),
+        (
+            "an identity the store wouldn't take",
+            list(&down),
+            vec![
+                ("a", with("/source/store/id", json!("Midnight")), None),
+                ("b", with("/source/store/hash", json!("CD".repeat(32))), None),
+                ("c", with("/source/store/hash", json!("cd")), None),
+                ("d", with("/version", json!("")), None),
+                ("e", with("/version", json!("1".repeat(129))), None),
+                ("f", None, Some(json!([{ "id": "Not An Id", "version": "1.0.0", "hash": hash }]).to_string())),
+            ],
+        ),
+    ];
+    Value::Array(
+        cases
+            .into_iter()
+            .map(|(name, list, folders)| {
+                let tmp = tempfile::tempdir().unwrap();
+                let dir = tmp.path();
+                if let Some(list) = &list {
+                    std::fs::write(dir.join(template_blocks::FILE), list).unwrap();
+                }
+                for (folder, imported, lineage) in &folders {
+                    let at = dir.join(folder);
+                    std::fs::create_dir_all(&at).unwrap();
+                    std::fs::write(at.join("zeron-template.json"), "{}").unwrap();
+                    for (file, text) in [(template_packages::IMPORTED, imported), (template_blocks::LINEAGE, lineage)] {
+                        if let Some(text) = text {
+                            std::fs::write(at.join(file), text).unwrap();
+                        }
+                    }
+                }
+                let folders: serde_json::Map<String, Value> = folders
+                    .iter()
+                    .map(|(folder, imported, lineage)| {
+                        let blocked = template_blocks::blocked(dir, &dir.join(folder)).map(|b| match b.id.as_str() {
+                            "" => json!("unchecked"),
+                            id => json!({ "id": id, "version": b.version }),
+                        });
+                        ((*folder).to_owned(), json!({ "imported": imported, "lineage": lineage, "blocked": blocked }))
+                    })
+                    .collect();
+                json!({ "name": name, "list": list, "folders": folders })
+            })
+            .collect(),
+    )
+}
+
+/// The template part of an update request: each identity, and whether a
+/// device sends it (`Identity::valid`); and how many requests it makes of
+/// some, an id once in each, at most `most` in one.
+fn update_ask_cases() -> Value {
+    let hash = "cd".repeat(32);
+    let identity = |id: &str, version: &str, hash: &str| Identity { id: id.into(), version: version.into(), hash: hash.into() };
+    let items = [
+        identity("midnight", "1.0.0", &hash),
+        identity("a1", "1.0.0-rc.1+build.2", &hash),
+        identity(&"a".repeat(40), "1", &hash),
+        identity("midnight", &"1".repeat(128), &hash),
+        identity("midnight", &"1".repeat(129), &hash),
+        identity("midnight", &"\u{e9}".repeat(64), &hash),
+        identity("midnight", &"\u{e9}".repeat(65), &hash),
+        identity("midnight", "", &hash),
+        identity(&"a".repeat(41), "1.0.0", &hash),
+        identity("a", "1.0.0", &hash),
+        identity("Midnight", "1.0.0", &hash),
+        identity("-midnight", "1.0.0", &hash),
+        identity("mid_night", "1.0.0", &hash),
+        identity("", "1.0.0", &hash),
+        identity("midnight", "1.0.0", &hash.to_uppercase()),
+        identity("midnight", "1.0.0", &hash[1..]),
+        identity("midnight", "1.0.0", &format!("{hash}0")),
+        identity("midnight", "1.0.0", &"g".repeat(64)),
+    ];
+    let versions: Vec<Identity> = ["1.0.0", "1.1.0", "1.2.0"].iter().map(|v| identity("midnight", v, &hash)).collect();
+    let many: Vec<Identity> = (0..5).map(|n| identity(&format!("t{n}"), "1.0.0", &hash)).collect();
+    let mixed: Vec<Identity> = versions.iter().chain(&many).cloned().collect();
+    let requests: Vec<Value> = [("nothing", Vec::new(), 2), ("three versions of one id", versions, 200), ("five ids, two at a time", many, 2), ("both", mixed, 4)]
+        .into_iter()
+        .map(|(name, all, most)| json!({ "name": name, "items": all, "most": most, "requests": template_blocks::requests(&all, most) }))
+        .collect();
+    json!({
+        "items": items.iter().map(|i| json!({ "item": i, "sent": i.valid() })).collect::<Vec<_>>(),
+        "requests": requests,
     })
 }
 
@@ -1335,15 +1924,20 @@ fn consent_item_cases() -> Value {
     )
 }
 
+/// The mark rule's words for a thing, by language: `{lang: {substring, words}}`.
+fn word_lists(lists: &[(&str, bool, &[&str])]) -> Value {
+    lists.iter().map(|(lang, substring, words)| ((*lang).to_owned(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>().into()
+}
+
 /// `docs/plugin-store-data.json`: the store's rules as data, small enough
 /// for the edge to import at run time (its Worker never bundles the test
 /// vectors): formats and prefixes, limits, categories, kept ids, report
 /// reasons, deploy-token constants, and the tables behind the consent
 /// sheet's ratings.
 fn data() -> Value {
-    json!({
+    let mut data = json!({
         "format": "zeron-plugin-store-data:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id>: a device runs a plugin with one, but the store never lists it (the listing rule id_reserved, which no reservation lifts). known_permissions are every permission a manifest may ask for: one not among them is the manifest's problem ('It asks for \"x\", which isn't a permission Zeron knows'), read on a device and at the store alike. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id> and /templates/<id>, and those two names: a device runs a plugin with one (but 'templates', which is a reserved id too) and uses a template with one, but the store never lists it, of either kind (the listing rule id_reserved, which no reservation lifts). known_permissions are every permission a manifest may ask for: one not among them is the manifest's problem ('It asks for \"x\", which isn't a permission Zeron knows'), read on a device and at the store alike. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
         "package_format": FORMAT,
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
@@ -1356,6 +1950,7 @@ fn data() -> Value {
             "len": deploy_token::LEN,
             "short_len": deploy_token::SHORT_LEN,
             "max_scope_plugins": deploy_token::MAX_SCOPE_PLUGINS,
+            "all_kinds": [["plugin"], ["plugin", "template"]],
             "env": deploy_token::ENV,
         },
         "limits": {
@@ -1384,7 +1979,8 @@ fn data() -> Value {
             "max_manifest_values": listing::MAX_MANIFEST_VALUES,
             "max_notes_bytes": listing::MAX_NOTES_BYTES,
             "screenshot_types": listing::SCREENSHOT_TYPES,
-            "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
+            "max_preview_bytes": listing::MAX_PREVIEW_BYTES,
+            "max_update_items": super::store::MAX_UPDATE_ITEMS,
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
         "mark_claims": {
@@ -1423,7 +2019,7 @@ fn data() -> Value {
                 .collect::<serde_json::Map<_, _>>(),
             "description": {
                 "about": "In a description, only a glyph refuses anywhere; a mark word only when said of the plugin itself (crates/engine/src/plugins/mark.rs, Reading::said_of, is the reference). Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. A sentence is bounded by sentence_ends. Candidates and their kind: MARK: words spelled as mark_claims reads them; languages words whose description is 'folded'; 'accented' ones in the text read with accents kept; a with_kana word that is the only CJK in the text (no other Han, kana or Hangul). NAME-ONLY: languages words whose description is 'never' and that have neither with_kana nor before. AMBIGUOUS: ambiguous, and the languages words with with_kana or before, as substrings. For each occurrence (covering the words it overlaps), in order: (4) refused when the words directly before it, or directly after it, read as one of store_words; else (negation) not refused when a word of negations is among the four words before it in its sentence, or ends the characters before it inside its word, or one of negations_after is after it in its sentence; else (object) unless a word directly before it holds a plugin_words entry ('Cliente oficial para Git'), not refused when the word directly after it in its sentence is one of object_words; else (by) when that word is one of by_words: refused when the next word after it (articles skipped) is one of authorities, else not; else (alone) refused when every word of its sentence is one it covers. Then by kind. MARK is refused when: it ends its sentence and directly before it is one of conjunctions, subject_words or predicate_before, or one of list_marks ends the characters before it in its sentence (spaces aside); or (first) for a mark word not matched as a substring, every word before it in the text is one of articles or holds no letter or digit; or (3) the word directly before it is one of subject_words; or (2, near) below. NAME-ONLY is refused when: the word directly before it is one of subject_words; or (first, as above) and the word after it is one of conjunctions; or it ends its sentence and the word before it is one of conjunctions or holds a plugin_words entry. AMBIGUOUS is refused when it ends its sentence after one of list_marks or conjunctions, or (2, near). (2, near): a plugin_words entry (whole words in order, a last word ending in '*' a stem; or a substring where substring), or for a MARK one of certified_words as a substring, with nothing in sentence_ends between, either after it with at most two words between and none of them one of relation_words nor any of relation_after among the characters between, or directly before it with no word between, or overlapping it; and the phrase not someone else's thing: walking back from the phrase's first word (skipping at most two articles), no word of relation_words; no relation_before_zh ending the characters before it (separators aside); no relation_after beginning the characters after the plugin word (separators aside). Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:', 'corpus:' and 'corpus3:' hold both sides to it.",
-                "plugin_words": super::mark::PLUGIN_WORDS.iter().map(|(lang, substring, words)| (lang.to_string(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>(),
+                "plugin_words": word_lists(super::mark::PLUGIN_WORDS),
                 "subject_words": super::mark::SUBJECT_WORDS,
                 "negations": super::mark::NEGATIONS,
                 "sentence_ends": super::mark::SENTENCE_ENDS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
@@ -1458,6 +2054,31 @@ fn data() -> Value {
         "site_ids": listing::SITE_IDS,
         "report_reasons": super::store::REPORT_REASONS,
         "consent": consent_tables(),
+    });
+    data.as_object_mut().unwrap().extend(template_data().as_object().unwrap().clone());
+    let description = &mut data["mark_claims"]["description"];
+    description["template_words"] = word_lists(super::mark::TEMPLATE_WORDS);
+    description["template_about"] = json!("A template's name and description are read with template_words as plugin_words too (beside them, wherever the rules above say plugin_words); a plugin's with plugin_words alone.");
+    data
+}
+
+/// What the store's data file says of templates (contract "Templates in the
+/// store"), beside the rest.
+fn template_data() -> Value {
+    json!({
+        "kinds": ["plugin", "template"],
+        "template_format": template_packages::FORMAT,
+        "template_protected": template_packages::PROTECTED,
+        "template_listing_files": listing::TEMPLATE_LISTING_FILES,
+        "template_manifest_fields": { "required": listing::TEMPLATE_REQUIRED, "allowed": listing::TEMPLATE_OPTIONAL },
+        "template_refused_members": listing::TEMPLATE_REFUSED_MEMBERS,
+        "template_readme_stub": listing::TEMPLATE_README_STUB,
+        "file_names": {
+            "about": "Of a plugin's files and a template's alike. A short name is a '~' directly followed by an ASCII digit, anywhere in a path (Windows opens ZERON-~1.JSO as zeron-plugin.json). unseen: the characters, as [first, last] code points, no path may hold (HFS+ leaves some out of a name it looks up). selectors are allowed (ordinary emoji names have them), and a path is compared without them: fold drops them before anything else it does, and the collision rule drops them before NFC too. At publish: a plugin's short name, and either kind's unseen character, is bad_package (field files, its path); a template's short name is protected_file (field files, its path). One problem a path: of a plugin, its short name before its unseen character; of a template, its unseen character, then that it's protected, then its short name, then what screenshots/ may hold. A device refuses a plugin's package with either, and a template's with an unseen character, as bad_file; a template's short name is left out and named. What's installed already loads as it did. The file_names cases hold both sides to it.",
+            "unseen": unseen_ranges(),
+            "selectors": ["\u{fe0e}", "\u{fe0f}"],
+        },
+        "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces, none of file_names.selectors in it), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface; of screenshots/, the files whose extension (ASCII case aside) is one of limits.screenshot_types, and any other file under it (its path folded as for template_protected) is refused (bad_listing, field files, its path), left out by a device and never composed; and one of them, listed in the manifest or not, whose first bytes aren't a PNG's or a JPEG's is refused too (bad_listing, field files, its path). template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field, in that list's order); nor may any other but signature (bad_listing, field manifest, word the member, in code point order). template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a still PNG (no acTL chunk, read chunk by chunk from the signature while a whole chunk header remains) of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
     })
 }
 
@@ -1465,7 +2086,7 @@ fn data() -> Value {
 fn build() -> Value {
     json!({
         "format": "zeron-plugin-package-vectors:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. A string field written as {parts: [...]} is its parts concatenated, each a string or {repeat, count} (that string count times); a files_b64 value written so is that text's UTF-8 bytes, and package_parts is a package's bytes so. The constants and tables these cases hold to are in docs/plugin-store-data.json. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. A string field written as {parts: [...]} is its parts concatenated, each a string or {repeat, count} (that string count times); a files_b64 value written so is that text's UTF-8 bytes, and package_parts is a package's bytes so; a files_b64 value written {bytes: [...]} is its parts' bytes concatenated, each a standard base64 string or {repeat, count} (that ASCII character count times). The constants and tables these cases hold to are in docs/plugin-store-data.json. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
         "canonical_json": canonical_cases(),
         "content_hash": content_hash_cases(),
         "signatures": signature_cases(),
@@ -1480,6 +2101,12 @@ fn build() -> Value {
         "changelog": changelog_cases(),
         "deploy_token": deploy_token_cases(),
         "consent_items": consent_item_cases(),
+        "template_content_hash": template_content_hash_cases(),
+        "template_packages": template_package_cases(),
+        "template_listing": template_listing_cases(),
+        "file_names": file_name_cases(),
+        "template_blocks": template_block_cases(),
+        "update_ask": update_ask_cases(),
     })
 }
 

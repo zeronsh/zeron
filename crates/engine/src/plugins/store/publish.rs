@@ -16,6 +16,7 @@ use crate::plugins::listing::{self, Listing, Problem};
 use crate::plugins::manifest::{MANIFEST_FILE, Manifest};
 use crate::plugins::package::{self, MAX_PACKAGE_BYTES};
 use crate::plugins::signing::{self, SigningKey};
+use crate::plugins::{template_packages, templates};
 
 /// A plugin folder read for publishing: what it is, and what the store's
 /// rules say of it.
@@ -49,7 +50,9 @@ pub fn read(dir: &Path) -> Result<Prepared, String> {
     }
     let hash = signing::content_hash(&manifest, &package::hashes(&read));
     let (mut problems, mut warnings) = listing::check(&manifest, &read);
-    problems.extend(sizes(&manifest, &read));
+    if let Some(measure) = SigningKey::from_seed(&[0; 32]) {
+        problems.extend(sizes(&measure.sign_manifest(&manifest.unsigned_value(), &package::hashes(&read)), FORMAT, &read));
+    }
     // What the stores show as typed (raw HTML, footnotes): advice, the
     // publish check's own, never a failure.
     for name in [listing::README, listing::CHANGELOG] {
@@ -67,12 +70,11 @@ pub fn read(dir: &Path) -> Result<Prepared, String> {
 /// file's size, and its manifest's (as written in it, signature included)
 /// size and number of values. Measured on the package as it would be sent:
 /// a signature is the same size whoever signs, so any key measures it.
-fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+/// (`signed`: the manifest so signed; `format`: the package's.)
+fn sizes(signed: &Value, format: &str, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
     let mut problems = Vec::new();
-    let Some(measure) = SigningKey::from_seed(&[0; 32]) else { return problems };
-    let signed = measure.sign_manifest(&manifest.unsigned_value(), &package::hashes(files));
-    let manifest_bytes = serde_json::to_vec(&signed).map_or(0, |b| b.len());
-    if manifest_bytes > listing::MAX_MANIFEST_JSON_BYTES || listing::count_values(&signed) > listing::MAX_MANIFEST_VALUES {
+    let manifest_bytes = serde_json::to_vec(signed).map_or(0, |b| b.len());
+    if manifest_bytes > listing::MAX_MANIFEST_JSON_BYTES || listing::count_values(signed) > listing::MAX_MANIFEST_VALUES {
         problems.push(Problem {
             rule: listing::rule::TOO_LARGE,
             field: Some("manifest"),
@@ -86,7 +88,7 @@ fn sizes(manifest: &Manifest, files: &BTreeMap<String, Vec<u8>>) -> Vec<Problem>
     let total: usize = files.values().map(Vec::len).sum();
     // (Skipped past the engine's own limit: `listing::check` says so.)
     if total as u64 <= files::MAX_BYTES
-        && package::pack(FORMAT, &signed, files).is_ok_and(|raw| raw.len() > listing::MAX_PUBLISH_BYTES)
+        && package::pack(format, signed, files).is_ok_and(|raw| raw.len() > listing::MAX_PUBLISH_BYTES)
     {
         problems.push(Problem {
             rule: listing::rule::TOO_LARGE,
@@ -157,6 +159,74 @@ impl Prepared {
     }
 }
 
+/// A template folder read for publishing (contract "Templates in the
+/// store"): what its package carries, and what the store's rules say of it.
+#[derive(Debug, Clone)]
+pub struct PreparedTemplate {
+    /// Its manifest, unsigned, as packed.
+    pub manifest: Value,
+    /// Every file its package carries.
+    pub files: BTreeMap<String, Vec<u8>>,
+    /// Its content hash: what's checked is what's sent.
+    pub hash: String,
+    pub problems: Vec<Problem>,
+    pub warnings: Vec<Problem>,
+    /// This version's notes, from its CHANGELOG.md.
+    pub notes: Option<String>,
+}
+
+/// The template folder `dir`, read as an export reads it
+/// (`template_packages::contents`) and checked. `Err` only when it can't be
+/// read as a template at all.
+pub fn read_template(dir: &Path) -> Result<PreparedTemplate, String> {
+    let no_manifest = || install::failure(install::reason::NO_MANIFEST, "There's no zeron-template.json in that folder");
+    let bytes = templates::read_regular(&dir.join(templates::MANIFEST)).ok_or_else(no_manifest)?;
+    let own: Value = serde_json::from_slice(&bytes).map_err(|_| install::failure(listing::rule::BAD_PACKAGE, "Its zeron-template.json isn't JSON"))?;
+    let id = own["id"].as_str().unwrap_or("").trim();
+    let (manifest, files) = template_packages::contents(dir, id)?;
+    let hashes = package::hashes(&files);
+    let hash = signing::content_hash_of(&manifest, &hashes);
+    let (mut problems, mut warnings) = listing::check_template(&manifest, &files);
+    if let Some(measure) = SigningKey::from_seed(&[0; 32]) {
+        problems.extend(sizes(&measure.sign_manifest_for(signing::TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes), template_packages::FORMAT, &files));
+    }
+    for name in [listing::README, listing::CHANGELOG] {
+        if let Some(bytes) = files.get(name) {
+            warnings.extend(super::text_notes::notes(name, &String::from_utf8_lossy(bytes)));
+        }
+    }
+    let notes = files
+        .get(listing::CHANGELOG)
+        .and_then(|bytes| listing::changelog_notes(&String::from_utf8_lossy(bytes), manifest["version"].as_str().unwrap_or("")));
+    Ok(PreparedTemplate { manifest, files, hash, problems, warnings, notes })
+}
+
+impl PreparedTemplate {
+    pub fn id(&self) -> &str {
+        self.manifest["id"].as_str().unwrap_or("")
+    }
+
+    pub fn version(&self) -> &str {
+        self.manifest["version"].as_str().unwrap_or("")
+    }
+
+    /// Whether nothing stands in the way of publishing it.
+    pub fn ok(&self) -> bool {
+        self.problems.is_empty()
+    }
+
+    /// It packed, signed by `key` in the templates' domain or (none) unsigned
+    /// for a deploy token to publish, then read back as a device will.
+    pub fn pack(&self, key: Option<&SigningKey>) -> Result<Vec<u8>, String> {
+        let raw = template_packages::pack(&self.manifest, &self.files, key)?;
+        let read = template_packages::parse_from_store(raw.clone(), key.is_some())?;
+        if read.content_hash != self.hash || read.key != key.map(SigningKey::public) {
+            return Err("It changed while it was being packed: try again".into());
+        }
+        Ok(raw)
+    }
+}
+
 /// Whether `version` is one the store will take beside the versions it
 /// already has of the plugin (`versions`: `[{version, status}]`, the
 /// owner's view or its public list), as amendment 21 says: equal precedence to any version
@@ -213,6 +283,35 @@ pub fn lines(problems: &[Problem]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::plugins::listing::tests::listed;
+
+    /// A template folder is read as its package will carry it, checked, and
+    /// packed signed or (a deploy token's) unsigned, the same contents.
+    #[test]
+    fn a_template_folder_is_read_checked_and_packed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_template(dir.path()).unwrap_err().starts_with("no_manifest: "));
+        let write = |rel: &str, bytes: &[u8]| {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        write("zeron-template.json", br#"{"id":"midnight","name":"Midnight","description":"Dark.","author":"you","version":"1.2.0","zeron_version":"0.3.16"}"#);
+        write("app.luau", b"return 1");
+        write("preview.png", b"\x89PNG\r\n\x1a\n");
+        write("CHANGELOG.md", b"## 1.2.0\n- Darker.");
+        write(".base.json", b"{}");
+        let missing = read_template(dir.path()).unwrap();
+        assert_eq!(missing.problems.iter().map(|p| p.rule).collect::<Vec<_>>(), ["missing_readme"]);
+        write("README.md", b"# Midnight");
+        let ready = read_template(dir.path()).unwrap();
+        assert!(ready.ok(), "{:?}", ready.problems);
+        assert_eq!((ready.id(), ready.version(), ready.notes.as_deref(), ready.files.len()), ("midnight", "1.2.0", Some("- Darker."), 4));
+        let (key, _) = SigningKey::generate().unwrap();
+        let signed = template_packages::parse(ready.pack(Some(&key)).unwrap()).unwrap();
+        let unsigned = template_packages::parse_from_store(ready.pack(None).unwrap(), false).unwrap();
+        assert_eq!((signed.key, unsigned.key), (Some(key.public()), None));
+        assert!(signed.content_hash == ready.hash && unsigned.content_hash == ready.hash);
+    }
 
     fn folder(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

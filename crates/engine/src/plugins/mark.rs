@@ -233,6 +233,42 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
     ("ko", true, &["\u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{d655}\u{c7a5}", "\u{c571}", "\u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}", "\u{b3c4}\u{ad6c}", "\u{d14c}\u{b9c8}", "\u{d328}\u{d0a4}\u{c9c0}", "\u{bc84}\u{c804}", "\u{d1b5}\u{d569}", "\u{d328}\u{b110}"]),
 ];
 
+/// More words for the thing itself when it's a template (rule 2, beside
+/// [`PLUGIN_WORDS`], which already says "theme"): a template's listing only.
+/// A plugin's is read with [`PLUGIN_WORDS`] alone.
+pub const TEMPLATE_WORDS: &[(&str, bool, &[&str])] = &[
+    ("en", false, &["template", "templates", "layout", "layouts", "interface", "interfaces", "skin", "skins"]),
+    ("es", false, &["plantilla", "plantillas", "interfaz"]),
+    ("fr", false, &["gabarit", "gabarits", "interface", "habillage", "habillages"]),
+    ("de", false, &["vorlage", "vorlagen", "oberfl\u{e4}che", "layout"]),
+    ("it", false, &["interfaccia", "interfacce"]),
+    ("pt", false, &["interface", "layout"]),
+    ("ru", false, &["\u{448}\u{430}\u{431}\u{43b}\u{43e}\u{43d}*", "\u{438}\u{43d}\u{442}\u{435}\u{440}\u{444}\u{435}\u{439}\u{441}*", "\u{43c}\u{430}\u{43a}\u{435}\u{442}*"]),
+    ("zh", true, &["\u{6a21}\u{677f}", "\u{754c}\u{9762}", "\u{5e03}\u{5c40}", "\u{76ae}\u{80a4}", "\u{4f48}\u{5c40}", "\u{4ecb}\u{9762}", "\u{7bc4}\u{672c}", "\u{76ae}\u{819a}"]),
+    ("ja", true, &["\u{30c6}\u{30f3}\u{30d7}\u{30ec}\u{30fc}\u{30c8}", "\u{30ec}\u{30a4}\u{30a2}\u{30a6}\u{30c8}", "\u{30a4}\u{30f3}\u{30bf}\u{30fc}\u{30d5}\u{30a7}\u{30fc}\u{30b9}", "\u{30a4}\u{30f3}\u{30bf}\u{30fc}\u{30d5}\u{30a7}\u{30a4}\u{30b9}"]),
+    ("ko", true, &["\u{d15c}\u{d50c}\u{b9bf}", "\u{b808}\u{c774}\u{c544}\u{c6c3}", "\u{c2a4}\u{d0a8}", "\u{c778}\u{d130}\u{d398}\u{c774}\u{c2a4}"]),
+];
+
+/// What a listing is of: a template's is read with [`TEMPLATE_WORDS`] as
+/// words for the thing itself too; a plugin's with [`PLUGIN_WORDS`] alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Item {
+    #[default]
+    Plugin,
+    Template,
+}
+
+impl Item {
+    /// Its words for itself (rule 2), by language.
+    fn words(self) -> impl Iterator<Item = &'static (&'static str, bool, &'static [&'static str])> {
+        let more: &'static [(&'static str, bool, &'static [&'static str])] = match self {
+            Item::Plugin => &[],
+            Item::Template => TEMPLATE_WORDS,
+        };
+        PLUGIN_WORDS.iter().chain(more)
+    }
+}
+
 /// Words that say a mark word of the subject when it follows them directly
 /// (rule 3: "is verified", "now official"). Not Italian "è" nor
 /// Portuguese "é": folded, both are "e", "and".
@@ -408,7 +444,12 @@ pub const WRITTEN_MAX_WORDS: usize = 32;
 /// does, then without its last while it still does. Runs of at most
 /// [`WRITTEN_MAX_WORDS`] words; none when no run does.
 pub fn as_written(text: &str, claim: &str) -> Option<String> {
-    let claims = |s: &str| name_mark(s).as_deref() == Some(claim);
+    as_written_of(text, claim, Item::Plugin)
+}
+
+/// [`as_written`], for a listing of `item`.
+pub fn as_written_of(text: &str, claim: &str, item: Item) -> Option<String> {
+    let claims = |s: &str| name_mark(s, item).as_deref() == Some(claim);
     let mut words: Vec<(usize, usize)> = Vec::new();
     let mut start = None;
     for (at, c) in text.char_indices().chain([(text.len(), ' ')]) {
@@ -568,12 +609,17 @@ fn unspaced(text: &[char]) -> Vec<char> {
 /// a description only when said of the plugin itself
 /// ([`description_mark`]).
 pub fn mark_claim(text: &str, in_name: bool) -> Option<String> {
-    if in_name { name_mark(text) } else { description_mark(text) }
+    mark_claim_of(text, in_name, Item::Plugin)
+}
+
+/// [`mark_claim`], for a listing of `item`.
+pub fn mark_claim_of(text: &str, in_name: bool, item: Item) -> Option<String> {
+    if in_name { name_mark(text, item) } else { description_mark(text, item) }
 }
 
 /// A name's mark: any glyph, any mark word, each of [`OTHER_LANGUAGES`]
 /// folded (with its kana and `before` conditions).
-fn name_mark(text: &str) -> Option<String> {
+fn name_mark(text: &str, item: Item) -> Option<String> {
     let folded = folded(text);
     if let Some(glyph) = folded.iter().find(|c| MARK_GLYPHS.contains(c)) {
         return Some(glyph.to_string());
@@ -597,7 +643,7 @@ fn name_mark(text: &str) -> Option<String> {
     for word in AMBIGUOUS {
         let wanted = folded_word(word);
         let said = readings.iter().any(|reading| {
-            let reading = Reading::new(reading.clone(), folded_word);
+            let reading = Reading::new(reading.clone(), folded_word, item);
             spans(&reading.text, &wanted, true).into_iter().any(|span| reading.said_of(span, Kind::Ambiguous, false))
         });
         if said {
@@ -735,12 +781,14 @@ struct Reading {
     text: Vec<char>,
     words: Vec<(usize, usize)>,
     form: fn(&str) -> Vec<char>,
+    /// Whose listing it is (its words for itself).
+    item: Item,
 }
 
 impl Reading {
-    fn new(text: Vec<char>, form: fn(&str) -> Vec<char>) -> Self {
+    fn new(text: Vec<char>, form: fn(&str) -> Vec<char>, item: Item) -> Self {
         let words = words_of(&text);
-        Reading { text, words, form }
+        Reading { text, words, form, item }
     }
 
     /// The words a span covers: (first, last).
@@ -829,7 +877,7 @@ impl Reading {
         let plugin_before = first > 0 && in_sentence(first - 1) && {
             let (a, b) = self.words[first - 1];
             let word = &self.text[a..b];
-            PLUGIN_WORDS.iter().any(|(_, substring, words)| {
+            self.item.words().any(|(_, substring, words)| {
                 words.iter().any(|w| {
                     let (w, stem) = listed(w);
                     let w = (self.form)(w);
@@ -895,7 +943,7 @@ impl Reading {
     /// thing in Japanese and Korean ("アプリと", "앱과").
     fn near_plugin(&self, (first, last): (usize, usize), span: (usize, usize), ambiguous: bool) -> bool {
         let certified: &[&str] = if ambiguous { &[] } else { CERTIFIED_WORDS };
-        let neighbours = PLUGIN_WORDS.iter().map(|(_, substring, words)| (*substring, *words)).chain(std::iter::once((true, certified)));
+        let neighbours = self.item.words().map(|(_, substring, words)| (*substring, *words)).chain(std::iter::once((true, certified)));
         neighbours.into_iter().any(|(substring, words)| {
             words.iter().any(|word| {
                 let (word, stem) = listed(word);
@@ -990,12 +1038,12 @@ fn same_word(text: &[char], word: &[char]) -> bool {
 /// words of a word for the plugin; directly after a word that says it of
 /// the subject; beside "zeron" or the store), unless a negation is directly
 /// before it (not for the last).
-fn description_mark(text: &str) -> Option<String> {
+fn description_mark(text: &str, item: Item) -> Option<String> {
     let folded_text = folded(text);
     if let Some(glyph) = folded_text.iter().find(|c| MARK_GLYPHS.contains(c)) {
         return Some(glyph.to_string());
     }
-    let folded_readings = [Reading::new(folded_text.clone(), folded_word), Reading::new(unspaced(&folded_text), folded_word)];
+    let folded_readings = [Reading::new(folded_text.clone(), folded_word, item), Reading::new(unspaced(&folded_text), folded_word, item)];
     for reading in &folded_readings {
         for word in MARK_WORDS {
             let spelling: Vec<char> = mark_text(word).chars().collect();
@@ -1040,7 +1088,7 @@ fn description_mark(text: &str) -> Option<String> {
     }
     // Words refused only as written with their accents.
     let kept = kept_accents(text);
-    for reading in [Reading::new(kept.clone(), kept_accents), Reading::new(unspaced(&kept), kept_accents)] {
+    for reading in [Reading::new(kept.clone(), kept_accents, item), Reading::new(unspaced(&kept), kept_accents, item)] {
         for (_, substring, words) in OTHER_LANGUAGES {
             for word in words.iter().filter(|w| w.description == InDescription::Accented) {
                 if spans(&reading.text, &kept_accents(word.word), *substring).into_iter().any(|span| reading.said_of_plugin(span, false)) {
@@ -1087,6 +1135,22 @@ pub fn keyword_claim(keyword: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A template's words for itself count only in a template's listing: a
+    /// plugin's reads as it always has.
+    #[test]
+    fn a_template_s_words_for_itself_are_its_own() {
+        for text in ["A clean, verified layout.", "Clean and dark, verified interface.", "Minimal, verified templates."] {
+            assert!(mark_claim_of(text, false, Item::Template).is_some(), "{text}");
+            assert_eq!(mark_claim_of(text, false, Item::Plugin), None, "{text}");
+            assert_eq!(mark_claim(text, false), None, "{text}");
+        }
+        // Said of something else, or of the plugin's own words: as before.
+        assert_eq!(mark_claim_of("Matches the official Solarized palette.", false, Item::Template), None);
+        assert!(mark_claim_of("A verified theme.", false, Item::Plugin).is_some());
+        // A name says no mark word at all, whatever it's of.
+        assert!(mark_claim_of("Midnight Verified", true, Item::Template).is_some());
+    }
 
     #[test]
     fn the_mark_s_words_whole_and_its_glyphs() {
@@ -1242,7 +1306,7 @@ mod tests {
             // Look-alikes and spacing count as anywhere.
             "Notes. V.E.R.I.F.I.E.D.", "A v3rified plugin.",
         ] {
-            assert!(description_mark(text).is_some(), "{text}");
+            assert!(description_mark(text, Item::Plugin).is_some(), "{text}");
         }
         for text in [
             "Opens the official Rust documentation.", "Shows GitHub's verified badge next to commits.", "Not official, just useful.",
@@ -1252,7 +1316,7 @@ mod tests {
             "V\u{e9}rifie la syntaxe de vos fichiers", "Verifiziert Signaturen.", "Das Plugin verifiziert Signaturen.", "Eingaben werden gepr\u{fc}ft.",
             "\u{6570}\u{5b66}\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}", "\u{c218}\u{d559} \u{acf5}\u{c2dd}", "\u{8eab}\u{4efd}\u{8ba4}\u{8bc1}", "\u{8a8d}\u{8a3c}\u{30c8}\u{30fc}\u{30af}\u{30f3}", "\u{c778}\u{c99d} \u{d1a0}\u{d070}",
         ] {
-            assert_eq!(description_mark(text), None, "{text}");
+            assert_eq!(description_mark(text, Item::Plugin), None, "{text}");
         }
     }
 

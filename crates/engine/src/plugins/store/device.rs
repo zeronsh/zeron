@@ -27,7 +27,7 @@ use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
 use crate::plugins::status::{Blocked, UpdatePreference};
 use crate::plugins::version::{self, Version};
-use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing};
+use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks, template_packages};
 
 /// The most one store file fetched for showing may be.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -51,8 +51,9 @@ const ALTERNATIVE_PAGES: usize = 4;
 /// with plugins: at each take-down check; and a publish from here looks at
 /// the next).
 const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-/// The most plugins one update check asks about (the edge's limit).
-pub const MAX_UPDATE_PLUGINS: usize = 200;
+/// The most items (plugins and templates together) one update check asks
+/// about (the edge's limit, `max_update_items`).
+pub const MAX_UPDATE_ITEMS: usize = 200;
 /// What a report may say it's about (contract amendment 13).
 pub const REPORT_REASONS: &[&str] = &["malware", "misleading", "broken", "copyright", "other"];
 pub const CACHE_DIR: &str = "store-cache";
@@ -81,6 +82,20 @@ pub fn handles(method: &str) -> bool {
             | methods::STORE_REPORT
             | methods::ACK_STORE_NOTICES
     )
+}
+
+/// What a store template's consent window draws of its record.
+#[derive(Deserialize)]
+pub(in crate::plugins) struct ShownRecord {
+    verified: bool,
+    publisher: String,
+    publisher_id: String,
+    version: String,
+}
+
+/// A record's mark and publisher, as a review is good for them.
+pub(in crate::plugins) fn record_state(record: &install::StoreSource) -> String {
+    json!([record.verified, record.publisher, record.publisher_id]).to_string()
 }
 
 /// Where the store is, and the session that speaks to it.
@@ -167,7 +182,7 @@ struct VersionActionParams {
 #[derive(Deserialize)]
 struct CreateTokenParams {
     name: String,
-    /// `{all: true}` or `{plugins: [id…]}` (amendment 44).
+    /// `{all: true, all_kinds?}` or `{plugins: [id…]}`.
     scope: ScopeParams,
     /// Epoch ms.
     #[serde(default)]
@@ -178,15 +193,20 @@ struct CreateTokenParams {
 struct ScopeParams {
     #[serde(default)]
     all: bool,
+    /// Beside `all` alone: `["plugin"]` (none: that) or `["plugin",
+    /// "template"]`.
+    #[serde(default)]
+    all_kinds: Option<Vec<String>>,
+    /// Ids of either kind.
     #[serde(default)]
     plugins: Option<Vec<String>>,
 }
 
 impl ScopeParams {
     fn scope(&self) -> Result<Scope, String> {
-        match (self.all, &self.plugins) {
-            (true, None) => Ok(Scope::All),
-            (false, Some(ids)) => Scope::plugins(ids),
+        match (self.all, &self.all_kinds, &self.plugins) {
+            (true, kinds, None) => Scope::all(kinds.as_deref()),
+            (false, None, Some(ids)) => Scope::plugins(ids),
             _ => Err("A token's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
         }
     }
@@ -220,6 +240,14 @@ struct Candidate {
     verified: bool,
     /// Which update this device stages for it.
     prefer: UpdatePreference,
+}
+
+/// What a full check of the store found.
+struct StoreCheck {
+    updates: Vec<Value>,
+    errors: Vec<Value>,
+    /// Every template here was answered about, and what's blocked kept.
+    templates_settled: bool,
 }
 
 /// `{ok: false, error, message}` from a failure's `"<word>: <words>"`.
@@ -690,22 +718,30 @@ impl Plugins {
             Ok(store) => store,
             Err(error) => return not_ok(&error),
         };
-        // A token publishes plugins you have in the store already (a first
-        // version comes from a signed-in device): said here, by id, before
-        // the step-up.
+        // A token publishes what you have in the store already, a plugin or
+        // a template (a first version comes from a signed-in device): said
+        // here, by id, before the step-up.
         let mine = match client.my_plugins(&caller).await {
             Ok(mine) => mine,
             Err(error) => return not_ok(&error),
         };
-        let owned: Vec<&str> = mine["plugins"].as_array().into_iter().flatten().filter_map(|plugin| plugin["id"].as_str()).collect();
+        let mine_templates = match client.of(client::Kind::Template).my_plugins(&caller).await {
+            Ok(mine) => mine,
+            // (A store without templates has none of yours.)
+            Err(error) if install::reason_of(&error) == Some(client::reason::NOT_IN_STORE) => Value::Null,
+            Err(error) => return not_ok(&error),
+        };
+        let ids = |mine: &Value, key: &str| -> Vec<String> { mine[key].as_array().into_iter().flatten().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect() };
+        let mut owned = ids(&mine, "plugins");
+        owned.extend(ids(&mine_templates, "templates"));
         if owned.is_empty() {
             return not_ok(&failure(
                 "not_published",
-                "You have no plugin in the store yet: publish one from this device (`zeron plugin publish <id>`), then make a deploy token",
+                "You have no plugin or template in the store yet: publish one from this device, then make a deploy token",
             ));
         }
         if let Scope::Plugins(ids) = &scope {
-            let missing: Vec<&str> = ids.iter().map(String::as_str).filter(|id| !owned.contains(id)).collect();
+            let missing: Vec<&str> = ids.iter().filter(|id| !owned.contains(id)).map(String::as_str).collect();
             if !missing.is_empty() {
                 return not_owner(&missing);
             }
@@ -963,6 +999,101 @@ impl Plugins {
         }
     }
 
+    /// The waiting template package `pending`, if it's one from the store.
+    pub(in crate::plugins) async fn waiting_from_store(&self, pending: &str) -> Result<Option<template_packages::FromStore>, RpcError> {
+        let (dir, pending) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned());
+        tokio::task::spawn_blocking(move || template_packages::waiting_from_store(&dir, &pending)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
+    }
+
+    /// The store's record of a waiting template, asked now: its mark and its
+    /// publisher. Refused when the store can't be asked (`NOT_CHECKED`), when
+    /// it's taken down (`taken_down`) or no longer listed (`not_in_store`),
+    /// and when its record is of other contents or another signer.
+    pub(in crate::plugins) async fn record_now(&self, waiting: &template_packages::FromStore) -> Result<install::StoreSource, RpcError> {
+        let (was, version) = (&waiting.store, waiting.version.as_str());
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let identity = template_blocks::Identity { id: was.id.clone(), version: version.to_owned(), hash: was.hash.clone() };
+        let (content_hash, known) = (waiting.content_hash.clone(), identity.clone());
+        tokio::task::spawn_blocking(move || template_blocks::refuse_package(&dir, &content_hash, Some(&known))).await.map_err(|_| failed(template_packages::NOT_CHECKED))?.map_err(failed)?;
+        let (client, caller) = self.store_reader().map_err(|_| failed(template_packages::NOT_CHECKED))?;
+        let client = client.of(client::Kind::Template);
+        let gone = || failure(client::reason::NOT_IN_STORE, "This version of the template can't be installed from the store any more");
+        let refused = |error: String| match install::reason_of(&error) {
+            Some(client::reason::NOT_IN_STORE) => gone(),
+            Some(client::reason::STORE_MISMATCH) => error,
+            _ => template_packages::NOT_CHECKED.to_owned(),
+        };
+        let record = match client.version(&was.id, version, &caller).await {
+            Ok((_, record)) if record.status == "listed" && !record.yanked => record,
+            Ok(_) => return Err(failed(gone())),
+            Err(error) => {
+                let error = refused(error);
+                if install::reason_of(&error) == Some(client::reason::NOT_IN_STORE)
+                    && let Some(reason) = self.taken_down(&client, &caller, &identity).await
+                {
+                    let why = if reason.is_empty() { String::new() } else { format!(" ({reason})") };
+                    return Err(failed(failure(template_blocks::TAKEN_DOWN, format!("This template was taken down from the store{why}, so it wasn't installed."))));
+                }
+                return Err(failed(error));
+            }
+        };
+        if !record.hash.eq_ignore_ascii_case(&was.hash) || record.key != was.key {
+            return Err(failed(failure(client::reason::STORE_MISMATCH, format!("The store's record of {} {version} names other content or another signer, so it wasn't installed", was.id))));
+        }
+        let (_, detail) = client.plugin(&was.id, &caller).await.map_err(|e| failed(refused(e)))?;
+        let (publisher, publisher_id) = super::vouched(&detail.author).map_err(failed)?;
+        Ok(install::StoreSource { publisher, publisher_id, verified: record.verified, verified_at: record.verified.then_some(record.verified_at).flatten(), ..was.clone() })
+    }
+
+    /// Why the store took `identity` down, if it did (a version gone from its
+    /// pages may only be yanked, or removed).
+    async fn taken_down(&self, client: &StoreClient, caller: &Caller, identity: &template_blocks::Identity) -> Option<String> {
+        let ask = UpdatesAsk {
+            zeron: version::zeron().to_string(),
+            plugins: Vec::new(),
+            templates: vec![Asked { id: identity.id.clone(), version: identity.version.clone(), hash: identity.hash.clone(), prerelease: false }],
+        };
+        let reply = client.updates(&ask, caller).await.ok()?;
+        let block = reply.blocked.into_iter().find(|b| b.item_kind == Some(client::Kind::Template) && b.id == identity.id && same_version(&b.version, &identity.version))?;
+        Some(plain(&block.reason, 500))
+    }
+
+    /// Whether a waiting store template is still what its window draws
+    /// (`shown`), by its record `now`: the state its review is good for, or
+    /// `{changed}`. Refused when the window says nothing of it, or draws
+    /// another package.
+    pub(in crate::plugins) async fn shown_still(
+        &self,
+        pending: &str,
+        waiting: &template_packages::FromStore,
+        hash: &str,
+        shown: Option<&ShownRecord>,
+        now: &install::StoreSource,
+    ) -> Result<Result<String, Value>, RpcError> {
+        let shown = shown.ok_or_else(|| failed("Say what's shown of it (`shown`)"))?;
+        if waiting.hash != hash || listing::shown(&waiting.version, version::MAX_LEN) != shown.version {
+            return Err(failed("This template changed while it waited for you. Look at it again."));
+        }
+        let drawn = (shown.verified, shown.publisher.as_str(), shown.publisher_id.as_str());
+        let publisher = template_packages::shown_publisher(now);
+        if drawn == (now.verified, publisher.as_str(), now.publisher_id.as_str()) {
+            return Ok(Ok(record_state(now)));
+        }
+        Ok(Err(self.record_changed(pending, now).await?))
+    }
+
+    /// `{changed}`: what the store's record of the waiting template says now,
+    /// kept for the list to say too.
+    pub(in crate::plugins) async fn record_changed(&self, pending: &str, now: &install::StoreSource) -> Result<Value, RpcError> {
+        let (dir, name, record) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned(), now.clone());
+        tokio::task::spawn_blocking(move || template_packages::keep_record(&dir, &name, &record)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)?;
+        let mut changed = json!({ "verified": now.verified, "publisher": template_packages::shown_publisher(now), "publisher_id": now.publisher_id });
+        if let Some(at) = now.verified_at {
+            changed["verified_at"] = json!(at);
+        }
+        Ok(json!({ "changed": changed }))
+    }
+
     /// The batched check for every plugin installed from the store (or
     /// `only`): updates kept as any source's are (`install::Found`), blocked
     /// versions turned off, a block the store no longer names lifted.
@@ -1005,11 +1136,20 @@ impl Plugins {
     /// count. Nothing about what's installed is sent.
     pub async fn check_takedowns(&self) {
         self.rescan().await;
-        if self.store_candidates(None).is_empty() {
+        let templates_dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let (has_templates, lost) = {
+            let dir = templates_dir.clone();
+            tokio::task::spawn_blocking(move || (!template_blocks::installed(&dir).is_empty(), template_blocks::wanted(&dir))).await.unwrap_or((true, true))
+        };
+        if self.store_candidates(None).is_empty() && !has_templates {
             return;
         }
         let Ok((client, caller)) = self.store_reader() else { return };
         let mut after = lock(&self.inner.state).takedowns_after;
+        // What's blocked of templates is lost: it starts over, whole.
+        if lost {
+            after = None;
+        }
         // (At most a few pages a check; the next one carries on.)
         for _ in 0..TAKEDOWN_PAGES {
             let feed = match client.takedowns(after).await {
@@ -1020,8 +1160,8 @@ impl Plugins {
                 }
             };
             if feed.reset || after.is_none_or(|a| a > feed.head) {
-                let (_, errors) = self.check_store_updates(None).await;
-                if errors.is_empty() {
+                let check = self.check_store(None).await;
+                if check.errors.is_empty() && check.templates_settled {
                     self.end_marks(&client, &caller).await;
                     let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
                 }
@@ -1029,6 +1169,36 @@ impl Plugins {
             }
             let events: Vec<_> = feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a) && e.seq <= feed.head).collect();
             let Some(last) = events.iter().map(|e| e.seq).max() else { return };
+            // Templates' first: a place in the feed is past both kinds. One
+            // that couldn't be kept is asked for again, from a fresh start
+            // when what's kept can't be read.
+            let changes: Vec<template_blocks::Change> = events
+                .iter()
+                .filter(|e| e.item_kind == Some(client::Kind::Template))
+                .filter_map(|e| match e.kind.as_str() {
+                    "take_down" => Some(template_blocks::Change::TakenDown(template_blocks::Block {
+                        id: e.id.clone(),
+                        version: e.version.clone(),
+                        hash: e.hash.clone(),
+                        reason: plain(&e.reason, 500),
+                        at: now_secs(),
+                    })),
+                    "restore" => Some(template_blocks::Change::Restored(e.id.clone(), e.version.clone())),
+                    _ => None,
+                })
+                .collect();
+            let templates_kept = match self.apply_template_changes(&templates_dir, changes).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "store: a template's take-down couldn't be kept");
+                    if template_blocks::read(&templates_dir).is_err() {
+                        let _ = self.update_state(|state| state.takedowns_after = None);
+                    }
+                    false
+                }
+            };
+            // (A template's is never a plugin's here.)
+            let events = events.into_iter().filter(|e| e.item_kind == Some(client::Kind::Plugin));
             let candidates = self.store_candidates(None);
             let mut down: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
             let mut restored: Vec<&Candidate> = Vec::new();
@@ -1058,6 +1228,11 @@ impl Plugins {
             self.unblock(&restored);
             if !down.is_empty() {
                 self.block(down.into_values().collect()).await;
+            }
+            // (A template's that couldn't be kept is asked for again; the
+            // plugins' were applied, and applying one again changes nothing.)
+            if !templates_kept {
+                return;
             }
             after = Some(last);
             let _ = self.update_state(|state| state.takedowns_after = Some(last));
@@ -1111,18 +1286,91 @@ impl Plugins {
         }
     }
 
+    /// Make `changes` to what's blocked of templates, and say which of those
+    /// installed here that newly blocks.
+    async fn apply_template_changes(&self, dir: &Path, changes: Vec<template_blocks::Change>) -> Result<(), String> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let dir = dir.to_owned();
+        let _held = self.inner.template_checks.lock().await;
+        self.changing_blocks(move || template_blocks::apply(&dir, changes, now_secs())).await
+    }
+
+    /// Run `change` (to what's blocked of templates), then tell you of each
+    /// template here it newly blocks.
+    async fn changing_blocks<T: Send + 'static>(&self, change: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let (changed, newly) = tokio::task::spawn_blocking(move || {
+            let blocked = || -> BTreeMap<String, template_blocks::Block> {
+                template_blocks::installed(&dir).into_iter().filter_map(|(id, _)| template_blocks::blocked(&dir, &dir.join(&id)).map(|b| (id, b))).collect()
+            };
+            let before = blocked();
+            let changed = change();
+            let newly: Vec<(String, template_blocks::Block)> = blocked().into_iter().filter(|(id, _)| !before.contains_key(id)).collect();
+            (changed, newly)
+        })
+        .await
+        .map_err(|_| "Couldn't keep it".to_string())?;
+        for (folder, block) in newly {
+            tracing::warn!(template = %folder, id = %block.id, version = %block.version, "store: a template was blocked");
+            let why = if block.reason.is_empty() { String::new() } else { format!(": {}", block.reason) };
+            self.key_notice(
+                &format!("template_blocked:{folder}:{}:{}", block.id, block.version),
+                "template_blocked",
+                None,
+                "Template blocked",
+                &format!("The template {folder} was taken down from the store{why}. Zeron won't run it."),
+            );
+        }
+        changed
+    }
+
     pub(in crate::plugins) async fn check_store_updates(&self, only: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+        let check = self.check_store(only).await;
+        (check.updates, check.errors)
+    }
+
+    async fn check_store(&self, only: Option<&str>) -> StoreCheck {
         let candidates = self.store_candidates(only);
-        if candidates.is_empty() {
-            return (Vec::new(), Vec::new());
+        let templates_dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        // (One plugin's check asks about it alone.)
+        let templates: Vec<template_blocks::Identity> = match only {
+            Some(_) => Vec::new(),
+            None => {
+                let dir = templates_dir.clone();
+                tokio::task::spawn_blocking(move || template_blocks::all_identities(&dir)).await.unwrap_or_default()
+            }
+        };
+        let mut check = StoreCheck { updates: Vec::new(), errors: Vec::new(), templates_settled: templates.is_empty() };
+        if candidates.is_empty() && templates.is_empty() {
+            return check;
         }
         let said = |c: &Candidate, error: &str| json!({ "id": c.id, "name": c.name, "error": error });
         let (client, caller) = match self.store_reader() {
             Ok(store) => store,
-            Err(error) => return (Vec::new(), candidates.iter().map(|c| said(c, &error.to_string())).collect()),
+            Err(error) => {
+                check.errors = candidates.iter().map(|c| said(c, &error.to_string())).collect();
+                return check;
+            }
         };
+        // At most the edge's limit per request, over both kinds together, and
+        // a template's id once in each. The first of the templates' go with
+        // the last of the plugins'; the rest after, so none of them can take
+        // a plugin's answer with it.
+        let mut asks: Vec<(&[Candidate], Vec<template_blocks::Identity>)> = candidates.chunks(MAX_UPDATE_ITEMS).map(|c| (c, Vec::new())).collect();
+        let room = asks.last().map_or(MAX_UPDATE_ITEMS, |(c, _)| MAX_UPDATE_ITEMS - c.len());
+        let mut template_asks = template_blocks::requests(&templates, MAX_UPDATE_ITEMS).into_iter().peekable();
+        if let (Some(last), Some(first)) = (asks.last_mut(), template_asks.peek())
+            && first.len() <= room
+        {
+            last.1 = template_asks.next().unwrap_or_default();
+        }
+        asks.extend(template_asks.map(|templates| (&[][..], templates)));
+        let mut settled: Vec<template_blocks::Identity> = Vec::new();
+        let mut template_downs: Vec<template_blocks::Block> = Vec::new();
         let by_id: HashMap<&str, &Candidate> = candidates.iter().map(|c| (c.id.as_str(), c)).collect();
-        let mut errors = Vec::new();
+        let mut errors: Vec<Value> = Vec::new();
         let mut offers: BTreeMap<String, Offer> = BTreeMap::new();
         let mut blocks = Vec::new();
         // The plugins the store answered about (offline batches aren't).
@@ -1130,32 +1378,83 @@ impl Plugins {
         // Those with an entry it sent that couldn't be read: whatever block
         // they have stays (it fails closed).
         let mut unread: BTreeSet<&str> = BTreeSet::new();
-        // At most the edge's limit per request.
-        for batch in candidates.chunks(MAX_UPDATE_PLUGINS) {
-            let ask = UpdatesAsk {
+        // Held from the first request that carries templates until what they
+        // answered is kept: the requests' own time, nothing else's. Never
+        // waited on: another check asking about them now, this one asks
+        // about the plugins alone (a person's, opening Settings, waits on
+        // nobody's).
+        let mut held = None;
+        for (batch, mut asked_templates) in asks {
+            if !asked_templates.is_empty() && held.is_none() {
+                held = self.inner.template_checks.try_lock().ok();
+            }
+            if held.is_none() && !asked_templates.is_empty() {
+                asked_templates.clear();
+                if batch.is_empty() {
+                    continue;
+                }
+            }
+            let mut ask = UpdatesAsk {
                 zeron: version::zeron().to_string(),
                 plugins: batch
                     .iter()
                     .map(|c| Asked { id: c.id.clone(), version: c.version.clone(), hash: c.hash.clone(), prerelease: c.prerelease })
                     .collect(),
+                templates: asked_templates.iter().map(|t| Asked { id: t.id.clone(), version: t.version.clone(), hash: t.hash.clone(), prerelease: false }).collect(),
             };
-            let reply = match client.updates(&ask, &caller).await {
+            let mut reply = client.updates(&ask, &caller).await;
+            // Refused with the templates in it: the plugins are asked about
+            // alone, so nothing about a template keeps them from an answer.
+            if let Err(error) = &reply
+                && !batch.is_empty()
+                && !asked_templates.is_empty()
+                && install::reason_of(error) != Some(client::reason::STORE_UNREACHABLE)
+            {
+                tracing::warn!(%error, "store: the templates were refused in an update check");
+                ask.templates.clear();
+                asked_templates.clear();
+                reply = client.updates(&ask, &caller).await;
+            }
+            let reply = match reply {
                 Ok(reply) => reply,
                 // Offline: what's installed keeps running; the next check asks again.
                 Err(error) => {
+                    if batch.is_empty() {
+                        tracing::warn!(%error, templates = asked_templates.len(), "store: the templates couldn't be checked");
+                    }
                     errors.extend(batch.iter().map(|c| said(c, &error)));
                     continue;
                 }
             };
             answered.extend(batch.iter());
+            // Each template asked about, as the answer says: one it couldn't
+            // be read about keeps the block it has.
+            let anyone = reply.unreadable.iter().any(|id| id.as_deref().is_none_or(|id| !by_id.contains_key(id) && !asked_templates.iter().any(|t| t.id == id)));
+            // (And one of a kind this Zeron doesn't know, whatever it is.)
+            let unknown = |id: &str| reply.blocked.iter().any(|b| b.item_kind.is_none() && b.id == id);
+            let readable = |t: &&template_blocks::Identity| !anyone && !unknown(&t.id) && !reply.unreadable.iter().any(|id| id.as_deref() == Some(t.id.as_str()));
+            settled.extend(asked_templates.iter().filter(readable).cloned());
+            for t in &asked_templates {
+                if let Some(block) = reply.blocked.iter().find(|b| b.item_kind == Some(client::Kind::Template) && b.id == t.id && same_version(&b.version, &t.version)) {
+                    template_downs.push(template_blocks::Block { id: t.id.clone(), version: t.version.clone(), hash: Some(t.hash.clone()), reason: plain(&block.reason, 500), at: now_secs() });
+                }
+            }
             for unreadable in &reply.unreadable {
                 match unreadable.as_deref().and_then(|id| by_id.get(id)) {
                     Some(c) => {
                         unread.insert(c.id.as_str());
                         errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
                     }
+                    None if unreadable.as_deref().is_some_and(|id| asked_templates.iter().any(|t| t.id == id)) => {}
                     // (Whose, it doesn't say: none of this batch's blocks lifts.)
                     None => unread.extend(batch.iter().map(|c| c.id.as_str())),
+                }
+            }
+            // One of a kind this Zeron doesn't know, naming one of these:
+            // whatever block it has stays.
+            for block in reply.blocked.iter().filter(|b| b.item_kind.is_none()) {
+                if let Some(c) = by_id.get(block.id.as_str()) {
+                    unread.insert(c.id.as_str());
                 }
             }
             blocks.extend(reply.blocked);
@@ -1167,11 +1466,28 @@ impl Plugins {
                 }
             }
         }
+        if held.is_some() {
+            let whole = settled.len() == templates.len();
+            let dir = templates_dir.clone();
+            match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, whole, now_secs())).await {
+                Ok(whole) => {
+                    check.templates_settled = whole;
+                    if !whole {
+                        tracing::warn!(asked = templates.len(), "store: not every template here was answered about");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "store: what's blocked of templates couldn't be kept"),
+            }
+        } else if !templates.is_empty() {
+            tracing::debug!("store: the templates are being checked already");
+        }
+        drop(held);
         // One block per plugin, for the version installed (the first the
         // store says: a hostile answer repeating one costs nothing more).
         let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
         for block in &blocks {
-            if let Some(c) = by_id.get(block.id.as_str())
+            if block.item_kind == Some(client::Kind::Plugin)
+                && let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
                 blocked.entry(c.id.as_str()).or_insert_with(|| (*c, plain(&block.reason, 500)));
@@ -1219,7 +1535,9 @@ impl Plugins {
             }
         }
         self.catch_up_verified(&client, &caller, &candidates).await;
-        (updates, errors)
+        check.updates = updates;
+        check.errors = errors;
+        check
     }
 
     /// Each version installed here unverified whose own record, read now,
@@ -1465,12 +1783,12 @@ fn agent_unverified(id: &str, version: &str) -> RpcError {
     ))
 }
 
-/// `{ok: false, error: "not_owner", ids}`: a token's scope names plugins
-/// that aren't the account's in the store.
+/// `{ok: false, error: "not_owner", ids}`: a token's scope names ids that
+/// aren't the account's in the store.
 fn not_owner(ids: &[&str]) -> Value {
     let mut value = not_ok(&failure(
         "not_owner",
-        format!("{} isn't yours in the store: a token publishes plugins you already have there (a first version comes from a signed-in device)", ids.join(", ")),
+        format!("{} isn't yours in the store: a token publishes what you already have there (a first version comes from a signed-in device)", ids.join(", ")),
     ));
     value["ids"] = json!(ids);
     value
