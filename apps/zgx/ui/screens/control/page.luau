@@ -1880,10 +1880,12 @@ local NotesTab = ui.component(function(props: { width: State<number> }): Node
 	return scrolled {
 		id = "control-notes-scroll",
 		place = M.place,
-		-- (Its end scrolls clear of Capture's bar. Needs you and the history
-		-- float over it, and never move it.)
+		-- (Its end scrolls clear of Capture's bar, and of the most Needs you
+		-- has reached over its right-hand column: opened or shut, the same.
+		-- The history floats over it.)
 		pb = function(): any
-			return ui.raw(M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar, measured")
+			local room = math.max(M.float_h:get() + FLOAT_FOOT, M.needs_reach:get())
+			return ui.raw(room + FLOAT_CLEAR, "what floats at its foot, measured")
 		end,
 		ui.presence(function(): string
 			if M.scratchpad_open:get() then
@@ -2005,10 +2007,18 @@ local ChatTab = ui.component(function(): Node
 						chat = id,
 						title = locale.s("control.tabs.chat"),
 						data = {
-							-- (Clear of the floating composer. Needs you and the
-							-- history float over it, and never move it.)
+							-- (Clear of the floating composer, and of the most
+							-- Needs you has reached, where the page is narrow
+							-- enough for it to reach the transcript: opened or
+							-- shut, the same. The history floats over it.)
 							foot = function(): number
-								return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
+								local room = M.float_h:get() + FLOAT_FOOT
+								local w = M.page_w:get()
+								local half = prefs.conversation_width:get() / 2 + 24
+								if w > 0 and w / 2 + half > w - NEEDS_W - FLOAT_SIDE then
+									room = math.max(room, M.needs_reach:get())
+								end
+								return room + FLOAT_CLEAR
 							end,
 							live = M.live("chat"),
 						},
@@ -2075,6 +2085,11 @@ M.needs_min = ui.persist("control_needs_min", false)
 -- The room it takes at the page's foot (its height and its offset from the
 -- foot), while it shows: what Board and Chat keep clear at their ends.
 M.needs_room = ui.state("control_needs_room", 0)
+-- The most room it has taken while asks wait: what Notes' and Chat's ends
+-- keep clear of it, so their last lines scroll out from under it. Never
+-- less as it's minimised, nor more as it's opened again: opening and
+-- shutting it moves nothing. (None again once nothing waits.)
+M.needs_reach = ui.state("control_needs_reach", 0)
 local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
 	-- (Its list's own height, to the room it has: a scroll doesn't take its
 	-- content's.)
@@ -2196,6 +2211,9 @@ local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
 			local room = size.h + props.bottom()
 			if math.abs(room - M.needs_room:peek()) >= 1 then
 				M.needs_room:set(room)
+			end
+			if room > M.needs_reach:peek() + 0.5 then
+				M.needs_reach:set(room)
 			end
 		end,
 		items = "end",
@@ -2414,6 +2432,12 @@ M.Page = ui.component(function(): Node
 	local function needs_floats(): boolean
 		return M.tab:get() ~= "board" and not M.inviting() and tally.needs(false) > 0
 	end
+	-- (Nothing waiting: nothing for Notes and Chat to keep clear of.)
+	ui.effect(function()
+		if tally.needs(false) == 0 and M.needs_reach:peek() ~= 0 then
+			M.needs_reach:set(0)
+		end
+	end)
 	-- Needs you floating: off the page's foot, and over the floating
 	-- composer where the page has no room for both side by side.
 	local function needs_bottom(): number

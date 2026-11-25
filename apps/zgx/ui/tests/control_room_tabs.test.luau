@@ -232,16 +232,9 @@ test("control room tabs: the Map reaches Capture's bar at rest at the screenshot
 		local mx, my, mw, mh = box(app, "#control-map")
 		local _, fy, _, fh = box(app, "#orch-force-field")
 		local _, cy = box(app, "#control-float")
-		-- (Clear of the bar at rest, by its clearance and no more; or of
-		-- Needs you floating, where it reaches over the Map.)
-		local limit = cy
-		if app:has("#control-needs-float") then
-			local nx, ny = box(app, "#control-needs-float")
-			if nx < mx + mw then
-				limit = math.min(limit, ny)
-			end
-		end
-		local gap = limit - (my + mh)
+		-- (Clear of the bar at rest, by its clearance and no more. Needs you
+		-- floats over it: never what its foot keeps clear of.)
+		local gap = cy - (my + mh)
 		expect(gap >= 0 and gap <= 24).to_be(true)
 		-- (The field fills the block: its head and padding the rest.)
 		expect(fy >= my and fy + fh <= my + mh and mh - fh <= 80).to_be(true)
