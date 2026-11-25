@@ -4549,7 +4549,10 @@
       "version": "Version {version}",
       "instead": "This replaces {from} with {to}, which Zeron has verified.",
       "instead_older": "This replaces {from} with {to}, an older version, which Zeron has verified.",
-      "instead_unknown": "This replaces the version you have with {to}, which Zeron has verified."
+      "instead_unknown": "This replaces the version you have with {to}, which Zeron has verified.",
+      "instead_plain": "This replaces {from} with {to}.",
+      "instead_older_plain": "This replaces {from} with {to}, an older version.",
+      "instead_unknown_plain": "This replaces the version you have with {to}."
     },
     "store": {
       "search": "Search templates",

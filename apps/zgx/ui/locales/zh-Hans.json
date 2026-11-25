@@ -4549,7 +4549,10 @@
       "version": "版本 {version}",
       "instead": "这会用 {to} 替换 {from}，Zeron 已验证该版本。",
       "instead_older": "这会用较旧的版本 {to} 替换 {from}，Zeron 已验证该版本。",
-      "instead_unknown": "这会用 {to} 替换你现有的版本，Zeron 已验证该版本。"
+      "instead_unknown": "这会用 {to} 替换你现有的版本，Zeron 已验证该版本。",
+      "instead_plain": "这会用 {to} 替换 {from}。",
+      "instead_older_plain": "这会用较旧的版本 {to} 替换 {from}。",
+      "instead_unknown_plain": "这会用 {to} 替换你现有的版本。"
     },
     "store": {
       "search": "搜索模板",

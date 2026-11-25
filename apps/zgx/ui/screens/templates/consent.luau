@@ -181,10 +181,12 @@ local function body(key: string): Node
 	local replaced: any = if it.instead == true and type(it.from) == "table" and type(it.from.replaced) == "table" then it.from.replaced else nil
 	if replaced and not keep then
 		local was = if type(replaced.version) == "string" then replaced.version else ""
+		-- (That Zeron verified it, only while the store says so.)
+		local verified = if store and store.verified == true then "" else "_plain"
 		local said = if was == ""
-			then ui.t("templates.consent.instead_unknown", { to = it.version or "" })
-			elseif replaced.older == true then ui.t("templates.consent.instead_older", { from = was, to = it.version or "" })
-			else ui.t("templates.consent.instead", { from = was, to = it.version or "" })
+			then ui.t(`templates.consent.instead_unknown{verified}`, { to = it.version or "" })
+			elseif replaced.older == true then ui.t(`templates.consent.instead_older{verified}`, { from = was, to = it.version or "" })
+			else ui.t(`templates.consent.instead{verified}`, { from = was, to = it.version or "" })
 		table.insert(changes, ui.div { id = "template-consent-instead", w_full = true, fact("info-circle", said, nil, "$zeron.tone.info.ink") })
 	end
 	if store and store.verified ~= true and not keep and not alternative then
