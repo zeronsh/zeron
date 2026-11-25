@@ -372,9 +372,14 @@ describe("the public card", () => {
     }
   });
 
-  it("limits reads per client IP, cached or not, and per IP only", async () => {
+  it("limits reads per client IP, cached or not, and per IP only", { timeout: 30_000 }, async () => {
     await signUp("user_limit_read");
     await claim("user_limit_read", "limitread");
+    // Miniflare counts in windows that start as the clock's minute does, and
+    // a minute turning among the reads starts the count over: with little
+    // of this one left, the reads wait for the next.
+    const left = 60_000 - (Date.now() % 60_000);
+    if (left < 15_000) await new Promise((resolve) => setTimeout(resolve, left + 100));
     const read = (ip: string, path = "/cards/limitread") =>
       SELF.fetch(`https://edge.test${path}`, { headers: { "cf-connecting-ip": ip } });
     const statuses = [];
