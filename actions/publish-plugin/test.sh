@@ -153,6 +153,19 @@ plugin() { # <folder> <id>
 }
 plugin "$work/plugins/ok" focus-ci
 plugin "$work/plugins/reserved" all
+template() { # <folder> <id>
+  mkdir -p "$1"
+  printf 'return {}\n' >"$1/app.luau"
+  printf '# Midnight\n\nA dark look.\n' >"$1/README.md"
+  printf '## 1.0.0\n\n- First.\n' >"$1/CHANGELOG.md"
+  printf '\x89PNG\r\n\x1a\n' >"$1/preview.png"
+  jq -n --arg id "$2" '{id: $id, name: "Midnight", version: "1.0.0", description: "A dark look.", zeron_version: "0.3.16"}' >"$1/zeron-template.json"
+}
+template "$work/plugins/template" midnight-ci
+template "$work/plugins/reserved-template" all
+plugin "$work/plugins/both" both-ci
+template "$work/plugins/both" both-ci
+mkdir -p "$work/plugins/neither"
 
 # ── The cases ───────────────────────────────────────────────────────────────
 
@@ -226,6 +239,18 @@ expect "an https manifest redirected to http isn't followed" 2 "Couldn't read Ze
 expect "an https tarball redirected to http isn't followed" 2 "Couldn't download $file." \
   ZERON_RELEASES_URL="$https/tarball-to-http" ZERON_PLUGIN_PATH="$ok"
 never_ran "the tarball redirected to http"
+# A template's folder publishes a template; both, or neither, nothing.
+template="$work/plugins/template"
+expect "no key: checks a template that meets the rules" 0 "midnight-ci 1.0.0 meets the store's rules." \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="$template"
+expect "no key: a template that doesn't is exit 1 with the rule's word" 1 'id_reserved (id): "all"' \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="$work/plugins/reserved-template"
+expect "a folder that says it's both" 2 "has a zeron-plugin.json and a zeron-template.json" \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="$work/plugins/both"
+never_ran "both"
+expect "a folder that says it's neither" 2 "there's no plugin folder there, nor a template's" \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="$work/plugins/neither"
+never_ran "neither"
 touch_target="$work/runs/injected"
 expect "a version that isn't one is refused, never run as a command" 2 "zeron-version is latest or a version like 0.4.0." \
   ZERON_RELEASES_URL="$http/good" ZERON_VERSION="1.0;touch $touch_target" ZERON_PLUGIN_PATH="$ok"
@@ -250,6 +275,9 @@ print(before + b62(zlib.crc32(before.encode()), 6))')"
 offline="http://127.0.0.1:9"
 expect "a dry run with a token checks and packs, and sends nothing" 0 "Not sent (--dry-run)." \
   ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_TOKEN="$token" ZERON_DRY_RUN=true ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
+expect "a template's dry run with a token too" 0 "midnight-ci 1.0.0 is ready" \
+  ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_TOKEN="$token" ZERON_DRY_RUN=true ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$template"
+[[ "$last_out" == *"Not sent (--dry-run)."* ]] || { echo "FAIL the template's dry run: $last_out" >&2; exit 1; }
 expect "a mistyped token stops the step before anything is sent" 2 "damaged: ZERON_DEPLOY_TOKEN" \
   ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_TOKEN="${token%?}0" ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
 for word in yes True 1 " true"; do
