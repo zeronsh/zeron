@@ -27,7 +27,7 @@ use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
 use crate::plugins::status::{Blocked, UpdatePreference};
 use crate::plugins::version::{self, Version};
-use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks};
+use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks, template_packages};
 
 /// The most one store file fetched for showing may be.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -82,6 +82,20 @@ pub fn handles(method: &str) -> bool {
             | methods::STORE_REPORT
             | methods::ACK_STORE_NOTICES
     )
+}
+
+/// What a store template's consent window draws of its record.
+#[derive(Deserialize)]
+pub(in crate::plugins) struct ShownRecord {
+    verified: bool,
+    publisher: String,
+    publisher_id: String,
+    version: String,
+}
+
+/// A record's mark and publisher, as a review is good for them.
+pub(in crate::plugins) fn record_state(record: &install::StoreSource) -> String {
+    json!([record.verified, record.publisher, record.publisher_id]).to_string()
 }
 
 /// Where the store is, and the session that speaks to it.
@@ -983,6 +997,101 @@ impl Plugins {
             Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// The waiting template package `pending`, if it's one from the store.
+    pub(in crate::plugins) async fn waiting_from_store(&self, pending: &str) -> Result<Option<template_packages::FromStore>, RpcError> {
+        let (dir, pending) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned());
+        tokio::task::spawn_blocking(move || template_packages::waiting_from_store(&dir, &pending)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
+    }
+
+    /// The store's record of a waiting template, asked now: its mark and its
+    /// publisher. Refused when the store can't be asked (`NOT_CHECKED`), when
+    /// it's taken down (`taken_down`) or no longer listed (`not_in_store`),
+    /// and when its record is of other contents or another signer.
+    pub(in crate::plugins) async fn record_now(&self, waiting: &template_packages::FromStore) -> Result<install::StoreSource, RpcError> {
+        let (was, version) = (&waiting.store, waiting.version.as_str());
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let identity = template_blocks::Identity { id: was.id.clone(), version: version.to_owned(), hash: was.hash.clone() };
+        let (content_hash, known) = (waiting.content_hash.clone(), identity.clone());
+        tokio::task::spawn_blocking(move || template_blocks::refuse_package(&dir, &content_hash, Some(&known))).await.map_err(|_| failed(template_packages::NOT_CHECKED))?.map_err(failed)?;
+        let (client, caller) = self.store_reader().map_err(|_| failed(template_packages::NOT_CHECKED))?;
+        let client = client.of(client::Kind::Template);
+        let gone = || failure(client::reason::NOT_IN_STORE, "This version of the template can't be installed from the store any more");
+        let refused = |error: String| match install::reason_of(&error) {
+            Some(client::reason::NOT_IN_STORE) => gone(),
+            Some(client::reason::STORE_MISMATCH) => error,
+            _ => template_packages::NOT_CHECKED.to_owned(),
+        };
+        let record = match client.version(&was.id, version, &caller).await {
+            Ok((_, record)) if record.status == "listed" && !record.yanked => record,
+            Ok(_) => return Err(failed(gone())),
+            Err(error) => {
+                let error = refused(error);
+                if install::reason_of(&error) == Some(client::reason::NOT_IN_STORE)
+                    && let Some(reason) = self.taken_down(&client, &caller, &identity).await
+                {
+                    let why = if reason.is_empty() { String::new() } else { format!(" ({reason})") };
+                    return Err(failed(failure(template_blocks::TAKEN_DOWN, format!("This template was taken down from the store{why}, so it wasn't installed."))));
+                }
+                return Err(failed(error));
+            }
+        };
+        if !record.hash.eq_ignore_ascii_case(&was.hash) || record.key != was.key {
+            return Err(failed(failure(client::reason::STORE_MISMATCH, format!("The store's record of {} {version} names other content or another signer, so it wasn't installed", was.id))));
+        }
+        let (_, detail) = client.plugin(&was.id, &caller).await.map_err(|e| failed(refused(e)))?;
+        let (publisher, publisher_id) = super::vouched(&detail.author).map_err(failed)?;
+        Ok(install::StoreSource { publisher, publisher_id, verified: record.verified, verified_at: record.verified.then_some(record.verified_at).flatten(), ..was.clone() })
+    }
+
+    /// Why the store took `identity` down, if it did (a version gone from its
+    /// pages may only be yanked, or removed).
+    async fn taken_down(&self, client: &StoreClient, caller: &Caller, identity: &template_blocks::Identity) -> Option<String> {
+        let ask = UpdatesAsk {
+            zeron: version::zeron().to_string(),
+            plugins: Vec::new(),
+            templates: vec![Asked { id: identity.id.clone(), version: identity.version.clone(), hash: identity.hash.clone(), prerelease: false }],
+        };
+        let reply = client.updates(&ask, caller).await.ok()?;
+        let block = reply.blocked.into_iter().find(|b| b.item_kind == Some(client::Kind::Template) && b.id == identity.id && same_version(&b.version, &identity.version))?;
+        Some(plain(&block.reason, 500))
+    }
+
+    /// Whether a waiting store template is still what its window draws
+    /// (`shown`), by its record `now`: the state its review is good for, or
+    /// `{changed}`. Refused when the window says nothing of it, or draws
+    /// another package.
+    pub(in crate::plugins) async fn shown_still(
+        &self,
+        pending: &str,
+        waiting: &template_packages::FromStore,
+        hash: &str,
+        shown: Option<&ShownRecord>,
+        now: &install::StoreSource,
+    ) -> Result<Result<String, Value>, RpcError> {
+        let shown = shown.ok_or_else(|| failed("Say what's shown of it (`shown`)"))?;
+        if waiting.hash != hash || listing::shown(&waiting.version, version::MAX_LEN) != shown.version {
+            return Err(failed("This template changed while it waited for you. Look at it again."));
+        }
+        let drawn = (shown.verified, shown.publisher.as_str(), shown.publisher_id.as_str());
+        let publisher = template_packages::shown_publisher(now);
+        if drawn == (now.verified, publisher.as_str(), now.publisher_id.as_str()) {
+            return Ok(Ok(record_state(now)));
+        }
+        Ok(Err(self.record_changed(pending, now).await?))
+    }
+
+    /// `{changed}`: what the store's record of the waiting template says now,
+    /// kept for the list to say too.
+    pub(in crate::plugins) async fn record_changed(&self, pending: &str, now: &install::StoreSource) -> Result<Value, RpcError> {
+        let (dir, name, record) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), pending.to_owned(), now.clone());
+        tokio::task::spawn_blocking(move || template_packages::keep_record(&dir, &name, &record)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)?;
+        let mut changed = json!({ "verified": now.verified, "publisher": template_packages::shown_publisher(now), "publisher_id": now.publisher_id });
+        if let Some(at) = now.verified_at {
+            changed["verified_at"] = json!(at);
+        }
+        Ok(json!({ "changed": changed }))
     }
 
     /// The batched check for every plugin installed from the store (or

@@ -270,6 +270,29 @@ pub(super) fn listing_files(template: &Path) -> Vec<String> {
     files
 }
 
+/// Whether something in `template` (its own dot files aside) isn't one of its
+/// files as [`app_files`] lists them: a name Zeron doesn't write, or what
+/// isn't a file. (The app may make a file of one all the same.)
+pub(super) fn has_others(template: &Path) -> bool {
+    fn walk(root: &Path, at: &Path, prefix: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir(at) else { return true };
+        entries.flatten().any(|entry| {
+            let Ok(name) = entry.file_name().into_string() else { return true };
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            if name.starts_with('.') && rel != LUAURC {
+                return false;
+            }
+            match entry.file_type() {
+                _ if inside(root, &rel).is_none() => true,
+                Ok(kind) if kind.is_dir() => walk(root, &entry.path(), &rel),
+                Ok(kind) => !kind.is_file(),
+                Err(_) => true,
+            }
+        })
+    }
+    walk(template, template, "")
+}
+
 /// The active template's id, as `.active` says: `zeron` when it's absent,
 /// empty, or names a template that isn't installed.
 pub fn active(dir: &Path) -> String {
@@ -351,6 +374,18 @@ fn official(id: &str, folder: &Path, manifest: &Manifest) -> bool {
     at_its_id && !super::template_packages::has_record(folder)
 }
 
+/// A template's name as it's shown: its manifest's, else its id.
+fn shown_name(name: Option<&str>, id: &str) -> String {
+    let name = super::listing::shown(name.unwrap_or_default(), super::listing::MAX_NAME_LEN);
+    if name.is_empty() { id.to_owned() } else { name }
+}
+
+/// [`shown_name`] of the template in `folder`.
+pub(super) fn name(folder: &Path, id: &str) -> String {
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    shown_name(manifest.name.as_deref(), id)
+}
+
 /// One template, as `ListTemplates` lists it.
 fn entry(
     dir: &Path,
@@ -378,13 +413,12 @@ fn entry(
         ("ok", None)
     };
     let said = |text: Option<String>, max| super::listing::shown(&text.unwrap_or_default(), max);
-    let name = said(manifest.name, super::listing::MAX_NAME_LEN);
     let mut out = json!({
         "id": id,
-        "name": if name.is_empty() { id.to_owned() } else { name },
+        "name": shown_name(manifest.name.as_deref(), id),
         "description": said(manifest.description, super::listing::MAX_DESCRIPTION_LEN),
         // (A package's manifest doesn't say whose it is: its record does.)
-        "author": manifest.author.filter(|_| !super::template_packages::has_record(folder)).unwrap_or_default(),
+        "author": said(manifest.author.filter(|_| !super::template_packages::has_record(folder)), super::listing::MAX_NAME_LEN),
         "version": said(manifest.version, super::version::MAX_LEN),
         "zeron_version": said(Some(made_for), super::version::MAX_LEN),
         "builtin": builtin,

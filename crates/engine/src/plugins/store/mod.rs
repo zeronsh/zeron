@@ -26,7 +26,7 @@ use super::{signing, template_packages};
 use client::{PackageRecord, Publisher, reason};
 
 pub use device::{MAX_UPDATE_ITEMS, REPORT_REASONS, handles};
-pub(in crate::plugins) use device::StoreHandle;
+pub(in crate::plugins) use device::{ShownRecord, StoreHandle, record_state};
 #[cfg(test)]
 pub(in crate::plugins) use device::publishes_idle;
 

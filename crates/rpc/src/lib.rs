@@ -656,13 +656,19 @@ pub mod methods {
     /// allow in Zeron, `{pending, id, name, …, key, author, hash, ignored,
     /// needs_consent: true}`. Unsigned or tampered packages are refused.
     pub const IMPORT_TEMPLATE: &str = "ImportTemplate";
-    /// `{pending, allow, hash}` → `{installed, name, author}` or
-    /// `{declined}`: the consent window's answer for a waiting package
-    /// (checked again; `hash` is the package as shown). Only Zeron's consent
-    /// window calls it.
+    /// `{pending, allow, hash, review}` → `{installed, name, author, digest}`
+    /// or `{declined}`: the consent window's answer for a waiting package
+    /// (checked again; `hash` is the package as shown). One from the store
+    /// has its record read again: `{changed}` ([`REVIEW_TEMPLATE`]) when it
+    /// isn't what it was allowed under. Only Zeron's consent window calls it.
     pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
-    /// `{pending, hash}` → `{review}`: as [`REVIEW_PLUGIN`], for
-    /// `DecideTemplate {allow: true}` on that waiting package.
+    /// `{pending, hash, shown?}` → `{review}`: as [`REVIEW_PLUGIN`], for
+    /// `DecideTemplate {allow: true}` on that waiting package. One from the
+    /// store says what its window draws, `shown: {verified, publisher,
+    /// publisher_id, version}` (required), and has its record read now: when
+    /// that isn't what's drawn, `{changed: {verified, verified_at?,
+    /// publisher, publisher_id}}` and no review. Refused when the store can't
+    /// be asked, or it's `taken_down` or `not_in_store`.
     pub const REVIEW_TEMPLATE: &str = "ReviewTemplate";
     /// Each template installed from a link checked there for a newer
     /// version (`{id?}`): `{updates, errors}`.

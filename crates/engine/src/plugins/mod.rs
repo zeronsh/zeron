@@ -335,6 +335,9 @@ struct ReviewParams {
     #[serde(default)]
     pending: Option<String>,
     hash: String,
+    /// A store template's: what its window draws of it.
+    #[serde(default)]
+    shown: Option<store::ShownRecord>,
 }
 
 #[derive(Deserialize)]
@@ -1703,7 +1706,7 @@ impl Plugins {
         subject: &str,
         hash: &str,
         review: Option<&str>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<String>, RpcError> {
         let what = match kind {
             reviews::Kind::Plugin => "Allowing a plugin",
             reviews::Kind::Template => "Allowing a template",
@@ -1745,7 +1748,7 @@ impl Plugins {
         }
         self.rescan().await;
         let hash = self.entry(&id).map(|e| e.item.hash).unwrap_or_default();
-        self.redeem_review(reviews::Kind::Plugin, &id, &hash, review)
+        self.redeem_review(reviews::Kind::Plugin, &id, &hash, review).map(|_| ())
     }
 
     // ── Methods ─────────────────────────────────────────────────────────────
@@ -1786,7 +1789,20 @@ impl Plugins {
                     lock(&self.inner.reviews).mint(reviews::Kind::Plugin, origin, &id, &p.hash)?
                 } else {
                     let pending = p.pending.unwrap_or_default();
-                    lock(&self.inner.reviews).mint(reviews::Kind::Template, origin, pending.trim(), &p.hash)?
+                    let pending = pending.trim();
+                    // One from the store: its record read now, against what
+                    // its window draws.
+                    let shown = match self.waiting_from_store(pending).await? {
+                        None => None,
+                        Some(waiting) => {
+                            let now = self.record_now(&waiting).await?;
+                            match self.shown_still(pending, &waiting, &p.hash, p.shown.as_ref(), &now).await? {
+                                Ok(state) => Some(state),
+                                Err(changed) => return RpcReply::value(&changed),
+                            }
+                        }
+                    };
+                    lock(&self.inner.reviews).mint_shown(reviews::Kind::Template, origin, pending, &p.hash, shown)?
                 };
                 RpcReply::value(&serde_json::json!({ "review": review }))
             }
@@ -2236,9 +2252,10 @@ impl Plugins {
                     )));
                 }
                 let method = method.to_owned();
+                let this = self.clone();
                 let reply = tokio::task::spawn_blocking(move || {
                     let id = p.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
-                    match (method.as_str(), id) {
+                    let reply = match (method.as_str(), id) {
                         (methods::LIST_TEMPLATES, _) => templates::list(&dir),
                         (methods::DESCRIBE_APP, _) => templates::describe(&dir).map(|mut v| {
                             let (_, guide) = guides::ensure(&data_dir);
@@ -2261,12 +2278,15 @@ impl Plugins {
                         (methods::USE_TEMPLATE, Some(id)) => templates::use_template(&dir, id, by.as_ref()),
                         (methods::TEMPLATE_STATUS, Some(id)) => templates::status(&dir, id),
                         (_, Some(id)) => templates::delete(&dir, id),
-                    }
+                    };
+                    // (It reads the packages that wait: here too, off the
+                    // engine's own threads.)
+                    reply.map(|reply| this.with_template_authors(reply))
                 })
                 .await
                 .map_err(|_| failed("Couldn't reach the templates folder"))?
                 .map_err(failed)?;
-                RpcReply::value(&self.with_template_authors(reply))
+                RpcReply::value(&reply)
             }
             // From a link: fetched and verified, then imported as a file is.
             methods::IMPORT_TEMPLATE if params.get("url").and_then(|u| u.as_str()).is_some_and(|u| !u.trim().is_empty()) => {
@@ -2333,14 +2353,29 @@ impl Plugins {
                 let p: PackageParams = parse_params(params)?;
                 // Allowing a template is Zeron's template consent window's
                 // alone, with a review minted for this package as shown.
+                let mut now = None;
                 if method == methods::DECIDE_TEMPLATE && p.allow {
                     let pending = p.pending.as_deref().unwrap_or_default().trim();
-                    self.redeem_review(
+                    let shown = self.redeem_review(
                         reviews::Kind::Template,
                         pending,
                         p.hash.as_deref().unwrap_or_default(),
                         p.review.as_deref(),
                     )?;
+                    // One from the store: its record read again, against the
+                    // one it was allowed under.
+                    match (self.waiting_from_store(pending).await?, shown) {
+                        (None, None) => {}
+                        (Some(waiting), Some(shown)) => {
+                            let record = self.record_now(&waiting).await?;
+                            if store::record_state(&record) != shown {
+                                return RpcReply::value(&self.record_changed(pending, &record).await?);
+                            }
+                            now = Some(record);
+                        }
+                        // (Not the kind of package it was when it was shown.)
+                        _ => return Err(reviews::needed("Allowing a template")),
+                    }
                 }
                 // R29: an agent exports to Zeron's exports folder only; a
                 // path of its choosing is the person's (their save dialog).
@@ -2388,7 +2423,7 @@ impl Plugins {
                         }
                         _ => {
                             let pending = p.pending.unwrap_or_default();
-                            template_packages::decide(&dir, pending.trim(), p.allow, p.hash.as_deref().unwrap_or(""), author_of)
+                            template_packages::decide(&dir, pending.trim(), p.allow, p.hash.as_deref().unwrap_or(""), now.as_ref(), author_of)
                         }
                     }
                 })

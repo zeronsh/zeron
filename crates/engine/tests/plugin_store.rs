@@ -908,6 +908,177 @@ async fn a_block_list_taken_away_starts_over() {
     assert!(list().contains(&"midnight".to_owned()), "{:?}", list());
 }
 
+/// A template's package, signed, as `id` at `version`.
+fn template_package(key: &SigningKey, id: &str, version: &str, code: &str) -> Vec<u8> {
+    let manifest = json!({ "id": id, "name": id, "description": "", "version": version, "zeron_version": "0.0.1" });
+    let files = std::collections::BTreeMap::from([("app.luau".to_owned(), code.as_bytes().to_vec())]);
+    zeron_engine::plugins::template_packages::pack(&manifest, &files, Some(key)).unwrap()
+}
+
+/// `raw` waiting as one from the store, by a record of `publisher_id`'s.
+fn template_waits(d: &Device, raw: &[u8], publisher_id: &str, verified: bool) -> (String, String) {
+    use zeron_engine::plugins::template_packages;
+    let package = template_packages::parse(raw.to_vec()).unwrap();
+    let at = d._dir.path().join("templates/.pending");
+    std::fs::create_dir_all(&at).unwrap();
+    let name = format!("{}-1", package.id());
+    std::fs::write(at.join(format!("{name}.zeron-template")), raw).unwrap();
+    let origin = json!({ "kind": "store", "version": package.version(), "installed_at": 0, "store": { "id": package.id(), "publisher": "ada", "publisher_id": publisher_id, "hash": package.content_hash, "key": package.key, "verified": verified } });
+    std::fs::write(at.join(format!("{name}.json")), json!({ "pending": name, "id": package.id(), "key": package.key, "at": 1, "source": "store", "origin": origin }).to_string()).unwrap();
+    (name, package.hash)
+}
+
+/// A store template is allowed under its record as the store has it now and
+/// as the window draws it: any other answers what changed, at the review and
+/// at the decision, and installs nothing.
+#[tokio::test]
+async fn a_store_template_is_allowed_as_its_record_is_now() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    store.add_template("ada", &raw, "listed");
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    let ada = fake_store::publisher_id("ada");
+    let (name, hash) = template_waits(&d, &raw, &ada, true);
+    let shown = |verified: bool, publisher: &str, id: &str| json!({ "verified": verified, "publisher": publisher, "publisher_id": id, "version": "1.0.0" });
+    let review = |shown: Value| d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash, "shown": shown }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    let row = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["pending"][0].clone() };
+    let set = |verified: bool| store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0].verified = verified;
+
+    // Drawn verified, as it waited: the store doesn't say so any more.
+    let changed = review(shown(true, "ada", &ada)).await.unwrap();
+    assert_eq!(changed, json!({ "changed": { "verified": false, "publisher": "ada", "publisher_id": ada } }));
+    assert_eq!((&row().await["store"]["verified"], row().await["store"].get("verified_at")), (&json!(false), None), "the list says so too");
+    // Drawn so now: changed again before the second Allow. Compared with
+    // what's drawn, never with what was answered last.
+    set(true);
+    let changed = review(shown(false, "ada", &ada)).await.unwrap();
+    assert_eq!((&changed["changed"]["verified"], &changed["changed"]["verified_at"]), (&json!(true), &json!(1)));
+    set(false);
+    assert_eq!(review(shown(true, "ada", &ada)).await.unwrap()["changed"]["verified"], false);
+    // Its publisher, by name or by account.
+    for drawn in [shown(false, "eve", &ada), shown(false, "ada", "pub_other")] {
+        assert_eq!(review(drawn).await.unwrap()["changed"]["publisher_id"], json!(ada));
+    }
+    // As it is: a review, and between it and the decision it changes hands.
+    let good = review(shown(false, "ada", &ada)).await.unwrap();
+    store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().owner = "eve".into();
+    let eve = fake_store::publisher_id("eve");
+    assert_eq!(decide(good.clone()).await.unwrap(), json!({ "changed": { "verified": false, "publisher": "eve", "publisher_id": eve } }));
+    assert!(!templates.join("midnight").exists() && row().await["store"]["publisher"] == "eve");
+    assert!(decide(good).await.is_err(), "used up");
+    // Nothing said of what's drawn, part of it, or another version or package: no review.
+    for bad in [json!(null), json!({ "verified": false, "publisher": "eve", "publisher_id": eve }), json!({ "verified": false, "publisher": "eve", "publisher_id": eve, "version": "1.0.1" })] {
+        assert!(review(bad.clone()).await.is_err(), "{bad}");
+    }
+    assert!(d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": "0".repeat(64), "shown": shown(false, "eve", &eve) })).await.is_err());
+    // Allowed as it is: installed by the record as it is.
+    let good = review(shown(false, "eve", &eve)).await.unwrap();
+    let done = decide(good).await.unwrap();
+    assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("eve")), "{done}");
+    let record: Value = serde_json::from_slice(&std::fs::read(templates.join("midnight/.imported.json")).unwrap()).unwrap();
+    assert_eq!((&record["source"]["store"]["verified"], &record["source"]["store"]["publisher_id"]), (&json!(false), &json!(eve)));
+}
+
+/// One that can't be checked with the store isn't allowed, and waits; one
+/// taken down, or no longer listed, says which.
+#[tokio::test]
+async fn a_store_template_that_cannot_be_checked_waits() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    store.add_template("ada", &raw, "verified");
+    let d = device(&store, Some("bob"));
+    let templates = d._dir.path().join("templates");
+    let ada = fake_store::publisher_id("ada");
+    let (name, hash) = template_waits(&d, &raw, &ada, true);
+    let shown = json!({ "verified": true, "publisher": "ada", "publisher_id": ada, "version": "1.0.0" });
+    let review = || d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash, "shown": shown }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    let offline = |on: bool| store.offline.store(on, std::sync::atomic::Ordering::SeqCst);
+    let set = |status: &str| store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0].status = status.to_owned();
+    let words = "Zeron couldn't check this with the store. Try again.";
+    offline(true);
+    assert_eq!(review().await.unwrap_err(), words);
+    offline(false);
+    let good = review().await.unwrap();
+    offline(true);
+    assert_eq!(decide(good).await.unwrap_err(), words);
+    offline(false);
+    // A record that can't be read, or of something else.
+    store.state.lock().unwrap().records_without_verified = true;
+    assert!(review().await.unwrap_err().starts_with("store_mismatch: "));
+    store.state.lock().unwrap().records_without_verified = false;
+    let was = store.state.lock().unwrap().template_items["midnight"].versions[0].clone();
+    for (hash, key) in [("0".repeat(64), was.key.clone()), (was.hash.clone(), None)] {
+        {
+            let mut state = store.state.lock().unwrap();
+            let v = &mut state.template_items.get_mut("midnight").unwrap().versions[0];
+            (v.hash, v.key) = (hash, key);
+        }
+        assert!(review().await.unwrap_err().starts_with("store_mismatch: "));
+    }
+    store.state.lock().unwrap().template_items.get_mut("midnight").unwrap().versions[0] = was;
+    // (Another version is listed: it's this one that isn't.)
+    store.add_template("ada", &template_package(&key, "midnight", "1.1.0", "return 2"), "listed");
+    for status in ["yanked", "removed"] {
+        set(status);
+        assert!(review().await.unwrap_err().starts_with("not_in_store: "), "{status}");
+    }
+    set("taken_down");
+    store.state.lock().unwrap().templates_down.push(("midnight".into(), "1.0.0".into()));
+    assert!(review().await.unwrap_err().starts_with("taken_down: "));
+    // Known to be down here: without asking.
+    set("listed");
+    store.state.lock().unwrap().templates_down.clear();
+    begin_blocks(&templates);
+    let block = json!({ "id": "midnight", "version": "1.0.0", "reason": "", "at": 4_000_000_000u64 });
+    std::fs::write(templates.join(".blocked.json"), json!({ "format": "zeron-template-blocks:v1", "blocks": [block] }).to_string()).unwrap();
+    assert!(review().await.unwrap_err().starts_with("taken_down: "));
+    begin_blocks(&templates);
+    // All the while it waits, and is allowed once it can be checked.
+    assert!(!templates.join("midnight").exists());
+    let good = review().await.unwrap();
+    assert_eq!(decide(good).await.unwrap()["installed"], "midnight");
+}
+
+/// A package that isn't from the store asks nobody, and needs nothing shown.
+#[tokio::test]
+async fn a_file_s_template_is_allowed_as_before() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = template_package(&key, "midnight", "1.0.0", "return 1");
+    let d = device(&store, Some("bob"));
+    let file = d._dir.path().join("midnight.zeron-template");
+    std::fs::write(&file, &raw).unwrap();
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let waiting = d.call(methods::IMPORT_TEMPLATE, json!({ "path": file })).await.unwrap();
+    let (name, hash) = (&waiting["pending"], &waiting["hash"]);
+    let review = || d.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash }));
+    let decide = |review: Value| d.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    // Reviewed as a file's, then said to be the store's: another thing.
+    let about = d._dir.path().join("templates/.pending").join(format!("{}.json", name.as_str().unwrap()));
+    let was = std::fs::read_to_string(&about).unwrap();
+    let good = review().await.unwrap();
+    store.offline.store(false, std::sync::atomic::Ordering::SeqCst);
+    store.add_template("ada", &raw, "listed");
+    let mut forged: Value = serde_json::from_str(&was).unwrap();
+    let package = zeron_engine::plugins::template_packages::parse(raw.clone()).unwrap();
+    forged["origin"] = json!({ "kind": "store", "version": "1.0.0", "installed_at": 0, "store": { "id": "midnight", "publisher": "ada", "publisher_id": fake_store::publisher_id("ada"), "hash": package.content_hash, "key": package.key, "verified": false } });
+    std::fs::write(&about, forged.to_string()).unwrap();
+    assert!(decide(good).await.unwrap_err().contains("review"));
+    assert!(!d._dir.path().join("templates/midnight").exists());
+    std::fs::write(&about, was).unwrap();
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let done = decide(review().await.unwrap()).await.unwrap();
+    assert_eq!(done["installed"], "midnight");
+    assert!(done["digest"].as_str().is_some_and(|h| h.len() == 64));
+}
+
 /// A check that failed repairs nothing, though what it asked about has been
 /// deleted since.
 #[tokio::test]

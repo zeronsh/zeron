@@ -97,6 +97,9 @@ pub struct State {
     pub submitted: Vec<(String, Vec<u8>, String)>,
     /// Templates: each one's owner and versions, as published.
     pub templates: BTreeMap<String, (String, Vec<String>)>,
+    /// Templates served whole, as plugins are: their pages, records and
+    /// packages.
+    pub template_items: BTreeMap<String, StoredPlugin>,
     /// Templates' versions taken down, as the full check says them: `(id,
     /// version)`.
     pub templates_down: Vec<(String, String)>,
@@ -234,6 +237,11 @@ impl StoredPlugin {
 }
 
 impl State {
+    /// The items under `/store/v1/<segment>`.
+    fn items(&self, segment: &str) -> &BTreeMap<String, StoredPlugin> {
+        if segment == "templates" { &self.template_items } else { &self.plugins }
+    }
+
     /// The store's clock: now, and never the same twice.
     fn tick(&mut self) -> i64 {
         self.clock = (self.clock + 1).max(chrono_now());
@@ -332,6 +340,34 @@ impl FakeStore {
         if state != "yanked" {
             plugin.supersede(&package.manifest.version);
         }
+    }
+
+    /// [`Self::add`] for a template's package.
+    pub fn add_template(&self, owner: &str, raw: &[u8], state: &str) {
+        use zeron_engine::plugins::template_packages;
+        let package = template_packages::parse(raw.to_vec()).or_else(|_| template_packages::parse_from_store(raw.to_vec(), false)).expect("a valid template");
+        let mut all = self.state.lock().unwrap();
+        let published_at = all.tick();
+        let item = all.template_items.entry(package.id()).or_default();
+        if item.owner.is_empty() {
+            item.owner = owner.to_owned();
+        }
+        item.versions.push(StoredVersion {
+            version: package.version(),
+            status: if state == "verified" { "listed".into() } else { state.to_owned() },
+            verified: state == "verified",
+            raw: raw.to_vec(),
+            hash: package.content_hash.clone(),
+            key: package.key.clone(),
+            notes: String::new(),
+            engines: package.manifest["zeron_version"].as_str().map(|v| format!(">={v}")),
+            blocked: None,
+            via: "device".into(),
+            deploy_token: None,
+            published_at,
+            superseded_by: None,
+            publisher_account: String::new(),
+        });
     }
 
     fn version_mut<'a>(state: &'a mut State, id: &str, version: &str) -> &'a mut StoredVersion {
@@ -503,9 +539,9 @@ impl FakeStore {
                 // (One page: the total is what it lists.)
                 json_reply(200, json!({ "total": items.len(), "items": items }))
             }
-            ("GET", ["store", "v1", "plugins", id]) => {
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id]) => {
                 let state = self.state.lock().unwrap();
-                let Some(p) = state.plugins.get(*id) else { return not_found() };
+                let Some(p) = state.items(kind).get(*id) else { return not_found() };
                 let Some(v) = p.newest() else { return not_found() };
                 let versions: Vec<Value> = p.listed().iter().take(5).map(|v| version_info(&state, v)).collect();
                 json_reply(200, carded(&state, json!({
@@ -518,9 +554,12 @@ impl FakeStore {
                     "package": { "hash": v.hash, "sha256": sha256_hex(&v.raw), "bytes": bytes_of(&state, v), "key": v.key },
                 })))
             }
-            ("GET", ["store", "v1", "plugins", id, "versions"]) => {
+            // (A template that's only named, `State::templates`, has its own.)
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id, "versions"])
+                if *kind == "plugins" || self.state.lock().unwrap().template_items.contains_key(*id) =>
+            {
                 let state = self.state.lock().unwrap();
-                let Some(p) = state.plugins.get(*id) else { return not_found() };
+                let Some(p) = state.items(kind).get(*id) else { return not_found() };
                 let mut public: Vec<&StoredVersion> = p.versions.iter().filter(|v| matches!(v.status.as_str(), "listed" | "yanked")).collect();
                 public.sort_by(|a, b| Version::parse(&b.version).unwrap().cmp(&Version::parse(&a.version).unwrap()));
                 let from: usize = query.get("cursor").and_then(|c| c.parse().ok()).unwrap_or(0);
@@ -532,9 +571,9 @@ impl FakeStore {
                 }
                 json_reply(200, reply)
             }
-            ("GET", ["store", "v1", "plugins", id, "versions", version]) => {
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id, "versions", version]) => {
                 let state = self.state.lock().unwrap();
-                let Some(v) = state.plugins.get(*id).and_then(|p| p.versions.iter().find(|v| v.version == *version)) else { return not_found() };
+                let Some(v) = state.items(kind).get(*id).and_then(|p| p.versions.iter().find(|v| v.version == *version)) else { return not_found() };
                 if !matches!(v.status.as_str(), "listed" | "yanked") {
                     return not_found();
                 }
@@ -544,7 +583,7 @@ impl FakeStore {
                 }
                 json_reply(200, info)
             }
-            ("GET", ["store", "v1", "plugins", id, "versions", version, "package"]) => {
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id, "versions", version, "package"]) => {
                 let mut state = self.state.lock().unwrap();
                 if let Some(raw) = state.serve_instead.remove(&((*id).to_owned(), (*version).to_owned())) {
                     return (200, "application/octet-stream", raw);
@@ -552,7 +591,7 @@ impl FakeStore {
                 if let Some(location) = state.redirect_package.take() {
                     return (302, "redirect", location.into_bytes());
                 }
-                let Some(p) = state.plugins.get(*id) else { return not_found() };
+                let Some(p) = state.items(kind).get(*id) else { return not_found() };
                 match p.versions.iter().find(|v| v.version == *version) {
                     Some(v) if matches!(v.status.as_str(), "listed" | "yanked") => (200, "application/octet-stream", v.raw.clone()),
                     _ => not_found(),
@@ -591,9 +630,9 @@ impl FakeStore {
                 self.state.lock().unwrap().reports.push(((*id).to_owned(), body));
                 json_reply(201, json!({ "reported": true }))
             }
-            ("GET", ["store", "v1", "plugins", id, "files", version, rest @ ..]) => {
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates"), id, "files", version, rest @ ..]) => {
                 let state = self.state.lock().unwrap();
-                let Some(v) = state.plugins.get(*id).and_then(|p| p.versions.iter().find(|v| v.version == *version)) else { return not_found() };
+                let Some(v) = state.items(kind).get(*id).and_then(|p| p.versions.iter().find(|v| v.version == *version)) else { return not_found() };
                 let package: Value = serde_json::from_slice(&v.raw).unwrap();
                 let path = rest.join("/");
                 match package["files"][path.as_str()].as_str() {

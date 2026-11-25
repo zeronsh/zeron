@@ -608,6 +608,25 @@ fn came_from(value: &Value) -> Option<Source> {
     Some(source)
 }
 
+/// `source` with its words bounded, to be shown.
+fn bounded(source: &Source) -> Source {
+    let mut source = source.clone();
+    for (text, max) in [(&mut source.url, MAX_SHOWN_PATH), (&mut source.git_ref, MAX_SHOWN_PATH)] {
+        if let Some(text) = text {
+            *text = listing::shown(text, max);
+        }
+    }
+    if let Some(store) = &mut source.store {
+        store.publisher = listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER);
+        store.id = listing::shown(&store.id, 40);
+        store.publisher_id = listing::shown(&store.publisher_id, MAX_SHOWN_PUBLISHER);
+        if let Some(other) = &mut store.verified_alternative {
+            other.version = listing::shown(&other.version, version::MAX_LEN);
+        }
+    }
+    source
+}
+
 /// One waiting package, as [`pending`] lists it.
 fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
     let source = came_from(&about["origin"]);
@@ -618,7 +637,8 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
     out["digest"] = json!(package.digest());
     out["at"] = json!(about["at"].as_i64().unwrap_or(0));
     out["source"] = json!(listing::shown(about["source"].as_str().unwrap_or(""), MAX_SHOWN_PATH));
-    if let Some(source) = &source {
+    let shown_source = source.as_ref().map(bounded);
+    if let Some(source) = &shown_source {
         out["from"] = source.shown();
     }
     let update_of = match &about["update_of"] {
@@ -628,20 +648,22 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
     if let Some(id) = update_of {
         out["update_of"] = json!(id);
     }
-    let Some(store) = store else { return Some(out) };
+    let (Some(store), Some(drawn)) = (store, shown_source.as_ref().and_then(Source::store)) else { return Some(out) };
     out["store"] = json!({
-        "id": store.id,
+        "id": drawn.id,
         "version": out["version"],
-        "publisher": listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER),
-        "publisher_id": store.publisher_id,
+        "publisher": drawn.publisher,
+        "publisher_id": drawn.publisher_id,
         "verified": store.verified,
-        "verified_alternative": store.verified_alternative.as_ref().filter(|_| !store.verified),
+        "verified_alternative": drawn.verified_alternative.as_ref().filter(|_| !store.verified),
     });
     if store.verified && let Some(at) = store.verified_at {
         out["store"]["verified_at"] = json!(at);
     }
-    out["author"] = json!(super::scan::store_author(store));
-    if let Some(folder) = update_of.and_then(|id| templates::template_dir(dir, id)) {
+    out["author"] = json!(super::scan::store_author(drawn));
+    if let Some(of) = update_of {
+        // (One whose template is gone can't be allowed: only declined.)
+        let Some(folder) = templates::template_dir(dir, of) else { return Some(out) };
         if self::source(&folder).and_then(|s| s.store().map(|was| was.publisher_id != store.publisher_id)) == Some(true) {
             out["new_owner"] = json!(true);
         }
@@ -657,7 +679,7 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
                 let imported = imported(&folder)?;
                 let manifest: Value = serde_json::from_slice(&templates::read_regular(&folder.join(MANIFEST))?).ok()?;
                 (manifest["id"].as_str().map(str::trim) == Some(store.id.as_str())).then(|| {
-                    let from = came_from(&imported["source"]).map_or_else(|| json!({ "kind": "file" }), |s| s.shown());
+                    let from = came_from(&imported["source"]).map_or_else(|| json!({ "kind": "file" }), |s| bounded(&s).shown());
                     json!({ "id": id, "from": from })
                 })
             })
@@ -667,6 +689,11 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
         }
     }
     Some(out)
+}
+
+/// A record's publisher, as it's shown.
+pub fn shown_publisher(store: &install::StoreSource) -> String {
+    listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER)
 }
 
 /// The most of a path or a link, and of a publisher's name, that's shown.
@@ -762,6 +789,9 @@ fn edited_by(folder: &Path, file_hash: &mut dyn FnMut(&Path, &str) -> Option<(u6
     let record = imported(folder)?;
     let store = came_from(&record["source"])?.store?;
     let mut hash = || -> Option<String> {
+        if templates::has_others(folder) {
+            return None;
+        }
         let mut manifest: Value = serde_json::from_slice(&templates::read_regular(&folder.join(MANIFEST))?).ok()?;
         manifest.as_object_mut()?.remove("signature");
         let mut hashes: FileHashes = match &record["left_out"] {
@@ -803,7 +833,7 @@ pub fn shown_record(folder: &Path) -> Option<(Value, bool)> {
         "ignored": record["ignored"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|rel| listing::shown(rel, MAX_SHOWN_PATH)).collect::<Vec<_>>(),
     });
     let mut edited = false;
-    if let Some(mut source) = came_from(&record["source"]) {
+    if let Some(mut source) = came_from(&record["source"]).as_ref().map(bounded) {
         if let Some(store) = &mut source.store {
             edited = edited_for_row(folder) == Some(true);
             if edited {
@@ -828,12 +858,60 @@ fn pending_paths(dir: &Path, pending: &str) -> Result<(PathBuf, PathBuf), String
     Ok((about, package))
 }
 
+/// A waiting package from the store: the record it was fetched by, and what
+/// it is.
+pub struct FromStore {
+    pub store: install::StoreSource,
+    pub version: String,
+    pub hash: String,
+    pub content_hash: String,
+}
+
+/// The waiting package `pending`, if it's one from the store (and is still
+/// the one its record says; `Err` when it isn't). `None` for any other, or
+/// when there's none.
+pub fn waiting_from_store(dir: &Path, pending: &str) -> Result<Option<FromStore>, String> {
+    let Ok((about_path, package_path)) = pending_paths(dir, pending) else { return Ok(None) };
+    let about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let Some(store) = came_from(&about["origin"]).and_then(|s| s.store) else { return Ok(None) };
+    let package = read_waiting(&package_path, &about, Some(&store))?;
+    Ok(Some(FromStore { version: package.version(), hash: package.hash, content_hash: package.content_hash, store }))
+}
+
+/// The waiting store package `pending`'s record as the store has it now
+/// (`now`): its mark and its publisher, for the list to say.
+pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Result<(), String> {
+    let (about_path, _) = pending_paths(dir, pending)?;
+    let mut about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).ok_or("What waits can't be read")?;
+    let mut source = came_from(&about["origin"]).ok_or("What waits can't be read")?;
+    let Some(store) = source.store.as_mut() else { return Ok(()) };
+    let was = store.clone();
+    take_record(store, now);
+    if *store == was {
+        return Ok(());
+    }
+    about["origin"] = json!(source);
+    templates::write_atomic(&dir.join(PENDING), &format!("{pending}.json"), &signing::pretty(&about))
+}
+
+/// What a store's record says now that it may have said otherwise before.
+fn take_record(store: &mut install::StoreSource, now: &install::StoreSource) {
+    store.publisher.clone_from(&now.publisher);
+    store.publisher_id.clone_from(&now.publisher_id);
+    store.verified = now.verified;
+    store.verified_at = now.verified_at;
+}
+
+/// What a store template that couldn't be checked is answered.
+pub const NOT_CHECKED: &str = "Zeron couldn't check this with the store. Try again.";
+
 /// `DecideTemplate`: a waiting package allowed (checked again, then
 /// installed: `{installed, name, author, digest}`, `digest` what the app
 /// keeps it by) or not (dropped: `{declined}`).
 /// `hash` is the package's as you were shown it: a different one isn't
-/// installed.
-pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
+/// installed. `now`: for one from the store, its record as the store has it
+/// now; none, or another's, isn't installed.
+pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&install::StoreSource>, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
     let (about_path, package_path) = pending_paths(dir, pending)?;
     let forget = || {
         let _ = std::fs::remove_file(&package_path);
@@ -846,7 +924,11 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
     let about: Value = templates::read_regular(&about_path)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    let mut source: Option<Source> = serde_json::from_value(about["origin"].clone()).ok();
+    let mut source = came_from(&about["origin"]);
+    if let Some(store) = source.as_mut().and_then(|s| s.store.as_mut()) {
+        let now = now.filter(|n| n.id == store.id && n.hash == store.hash && n.key == store.key).ok_or(NOT_CHECKED)?;
+        take_record(store, now);
+    }
     let store = source.as_ref().and_then(Source::store).cloned();
     let package = match read_waiting(&package_path, &about, store.as_ref()) {
         Ok(package) => package,
@@ -1113,25 +1195,26 @@ pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, s
 /// The templates installed from a package that may have a newer version
 /// where they came from: each one's id, name, key, package hash and source.
 pub fn checkable(dir: &Path) -> Vec<(String, String, String, String, Source)> {
-    let Ok(list) = templates::list(dir) else { return Vec::new() };
-    list["templates"]
-        .as_array()
+    // (Their records alone: no list, whose rows are hashed for their mark.
+    // In its order.)
+    let mut out: Vec<(String, String, String, String, Source)> = templates::installed(dir)
         .into_iter()
-        .flatten()
-        .filter_map(|t| {
-            let id = t["id"].as_str()?.to_owned();
+        .filter_map(|id| {
             let folder = templates::template_dir(dir, &id)?;
             let imported = imported(&folder)?;
             let source: Source = serde_json::from_value(imported["source"].clone()).ok()?;
+            let name = templates::name(&folder, &id);
             Some((
                 id,
-                t["name"].as_str().unwrap_or("").to_owned(),
+                name,
                 imported["key"].as_str()?.to_owned(),
                 imported["hash"].as_str()?.to_owned(),
                 source,
             ))
         })
-        .collect()
+        .collect();
+    out.sort_by_key(|(id, name, ..)| (name.to_lowercase(), id.clone()));
+    out
 }
 
 /// `UpdateTemplate`: the update found for `id` installed in its place (its
@@ -1350,19 +1433,25 @@ mod tests {
         // all: never installed.
         for bad in [source(record(&"0".repeat(64), "midnight")), source(record(&hash, "other")), Source { kind: "file".into(), store: None, ..source(record(&hash, "midnight")) }] {
             let (pending, shown) = wait(&bad);
-            assert!(decide(&d, &pending, true, &shown, nobody).is_err());
+            assert!(decide(&d, &pending, true, &shown, bad.store.as_ref(), nobody).is_err());
             assert!(!d.join("midnight").exists());
         }
-        let (pending, shown) = wait(&source(record(&hash, "midnight")));
+        // (It waited verified; the store's word now is that it isn't.)
+        let (pending, shown) = wait(&source(install::StoreSource { verified: true, verified_at: Some(7), publisher_id: "pub_old".into(), ..record(&hash, "midnight") }));
         assert!(!d.join(super::super::template_blocks::FILE).exists());
-        let done = decide(&d, &pending, true, &shown, nobody).unwrap();
+        // Not without the store's word of it now, nor by another record's.
+        let now = record(&hash, "midnight");
+        for other in [None, Some(record(&"0".repeat(64), "midnight")), Some(record(&hash, "other")), Some(install::StoreSource { key: Some("k".into()), ..now.clone() })] {
+            assert_eq!(decide(&d, &pending, true, &shown, other.as_ref(), nobody).unwrap_err(), NOT_CHECKED);
+        }
+        let done = decide(&d, &pending, true, &shown, Some(&now), nobody).unwrap();
         assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("ada")), "{done}");
         // (What's been taken down is kept from before it: it isn't blocked.)
         assert!(super::super::template_blocks::read(&d).is_ok_and(|b| b.is_empty()));
         let t = d.join("midnight");
         let kept = imported(&t).unwrap();
         assert!(kept["key"].is_null() && has_record(&t), "{kept}");
-        assert_eq!(super::source(&t).unwrap().store().unwrap().id, "midnight");
+        assert_eq!(super::source(&t).unwrap().store(), Some(&now), "as the store says now");
         let listed = templates::list(&d).unwrap();
         let row = listed["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap().clone();
         assert_eq!((row["builtin"].as_bool(), row["author"].as_str(), row["imported"]["author"]["username"].as_str()), (Some(false), Some(""), Some("ada")), "{row}");
@@ -1395,7 +1484,7 @@ mod tests {
         // Waiting, then taken down: not allowed.
         let waiting = import(&other, &out, author_as(&bob)).unwrap();
         downed(&out, Change::TakenDown);
-        let error = decide(&other, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), author_as(&bob)).unwrap_err();
+        let error = decide(&other, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), None, author_as(&bob)).unwrap_err();
         assert!(error.starts_with("taken_down: "), "{error}");
         // From a file: someone else's, or yours.
         for me in [&bob, &alice] {
@@ -1736,6 +1825,33 @@ mod tests {
             let shown = &row["imported"]["source"];
             assert_eq!((&row["edited"], &shown["verified"], shown.get("verified_at")), (&json!(true), &json!(false), None), "{what}: {row}");
         }
+        // A name Zeron doesn't write, which the app may make a file of (a
+        // backslash's a separator to it), and what isn't a file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            for name in [&b"screens\\sidebar.luau"[..], b"app.luau.", b"CON.luau", b"x\xff.luau"] {
+                install();
+                std::fs::write(t.join(std::ffi::OsStr::from_bytes(name)), "x").unwrap();
+                assert_eq!((edited(&t), edited_for_row(&t)), (Some(true), Some(true)), "{name:?}");
+            }
+            install();
+            std::os::unix::fs::symlink(t.join("app.luau"), t.join("more.luau")).unwrap();
+            assert_eq!(edited(&t), Some(true));
+            install();
+            write(&t.join("deep/er/a\\b.luau"), "x");
+            assert_eq!(edited(&t), Some(true));
+            // The one dot name that counts, as a link; and a folder of nothing.
+            install();
+            std::os::unix::fs::symlink("/etc/hostname", t.join(".luaurc")).unwrap();
+            assert_eq!((edited(&t), edited_for_row(&t)), (Some(true), Some(true)));
+            install();
+            std::fs::create_dir_all(t.join("empty/er")).unwrap();
+            assert_eq!((edited(&t), edited_for_row(&t)), (Some(false), Some(false)));
+            install();
+            write(&t.join(".hidden.luau"), "x");
+            assert_eq!((edited(&t), edited_for_row(&t)), (Some(false), Some(false)), "never composed");
+        }
         // What Zeron keeps beside it is no part of it.
         install();
         write(&t.join(templates::BASE), "{}");
@@ -1834,7 +1950,8 @@ mod tests {
         assert!(pending(&d).is_empty());
         forge(json!({ "origin": store_source(&package.content_hash, ADA, true) }));
         // Allowed, it says what it's kept by.
-        let done = decide(&d, &name, true, &package.hash, |_| Author::unknown("x")).unwrap();
+        let now = store_source(&package.content_hash, ADA, true).store;
+        let done = decide(&d, &name, true, &package.hash, now.as_ref(), |_| Author::unknown("x")).unwrap();
         assert_eq!((done["installed"].as_str(), done["digest"].as_str()), (Some("midnight"), Some(digest.as_str())));
         // Another of its id, then an update of the first: by a new publisher, over an edit.
         let again = from_the_store("1.1.0");
@@ -1848,6 +1965,11 @@ mod tests {
         assert_eq!((&update["update_of"], &update["new_owner"], update.get("replaces_edits"), update.get("also_installed")), (&json!("midnight"), &json!(true), None, None));
         write(&d.join("midnight/app.luau"), "mine");
         assert_eq!(one()["replaces_edits"], true);
+        // Its template gone: listed, to be declined, and compared with nothing.
+        std::fs::rename(d.join("midnight"), d.join("elsewhere")).unwrap();
+        let gone = one();
+        assert_eq!((&gone["update_of"], gone.get("also_installed"), gone.get("replaces_edits"), gone.get("new_owner")), (&json!("midnight"), None, None, None), "{gone}");
+        std::fs::rename(d.join("elsewhere"), d.join("midnight")).unwrap();
         // Its package gone bad isn't listed.
         let pending_package = std::fs::read_dir(d.join(PENDING)).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == EXTENSION)).unwrap().path();
         write(&pending_package, "nope");
@@ -1875,12 +1997,37 @@ mod tests {
         let waiting = import(&d, &path, |_| Author::unknown("x")).unwrap();
         check(&waiting);
         check(&pending(&d)[0]);
-        let done = decide(&d, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), |_| Author::unknown("x")).unwrap();
+        let done = decide(&d, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), None, |_| Author::unknown("x")).unwrap();
         assert!(done["name"].as_str().unwrap().len() <= 64, "{done}");
         let listed = templates::list(&d).unwrap();
         let row = listed["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap();
         check(row);
         assert_eq!(row["imported"]["version"].as_str().unwrap().len(), version::MAX_LEN);
+        for (text, max, expected) in [
+            ("Midnight\u{2028}Verified", 64, "Midnight Verified"),
+            ("a\u{2029}\u{2800} \t\u{3000}b \n ", 64, "a b"),
+            ("  a", 64, "a"),
+            ("a b", 2, "a"),
+            ("a b", 3, "a b"),
+            ("\u{200b}a\u{e0041}\u{202e}b", 64, "ab"),
+            ("", 64, ""),
+        ] {
+            assert_eq!(listing::shown(text, max), expected, "{text:?}");
+        }
+        // A forged record's words are bounded wherever they're shown.
+        let mut record = imported(&d.join("midnight")).unwrap();
+        let mut source = store_source("h", &long, true);
+        let store = source.store.as_mut().unwrap();
+        (store.publisher, store.id) = (long.clone(), long.clone());
+        (source.url, source.git_ref) = (Some(long.clone()), Some(long.clone()));
+        record["source"] = json!(source);
+        record["author"] = json!(long);
+        write(&d.join("midnight").join(IMPORTED), &record.to_string());
+        let row = templates::list(&d).unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "midnight").unwrap()["imported"].clone();
+        assert_eq!((row["author"]["username"].as_str().map(str::len), row["source"]["publisher"].as_str().map(str::len)), (Some(64), Some(64)), "{row}");
+        assert!(row["source"]["url"].as_str().unwrap().len() <= 1024 && row["source"]["id"].as_str().unwrap().len() <= 40);
+        write(&d.join("mine").join(MANIFEST), &json!({ "name": "Mine", "author": long }).to_string());
+        assert_eq!(templates::list(&d).unwrap()["templates"].as_array().unwrap().iter().find(|t| t["id"] == "mine").unwrap()["author"].as_str().unwrap().len(), 64);
         let kept: Value = serde_json::from_slice(&std::fs::read(d.join("midnight").join(MANIFEST)).unwrap()).unwrap();
         assert_eq!(kept["name"], manifest["name"], "what's signed is as it is");
         assert_eq!(imported(&d.join("midnight")).unwrap()["version"].as_str().unwrap(), long);
@@ -1920,7 +2067,7 @@ mod tests {
 
         // Allowed: installed as signed, and no longer waiting.
         let hash = waiting["hash"].as_str().unwrap();
-        let done = decide(&bob_dir, name, true, hash, author_as(&bob)).unwrap();
+        let done = decide(&bob_dir, name, true, hash, None, author_as(&bob)).unwrap();
         assert_eq!(done["installed"], "midnight");
         let t = bob_dir.join("midnight");
         assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens");
@@ -1939,7 +2086,7 @@ mod tests {
 
         // Imported again: beside the first, never over it.
         let again = import(&bob_dir, &out, author_as(&bob)).unwrap();
-        let again = decide(&bob_dir, again["pending"].as_str().unwrap(), true, again["hash"].as_str().unwrap(), author_as(&bob)).unwrap();
+        let again = decide(&bob_dir, again["pending"].as_str().unwrap(), true, again["hash"].as_str().unwrap(), None, author_as(&bob)).unwrap();
         assert_eq!(again["installed"], "midnight-2");
     }
 
@@ -2075,7 +2222,7 @@ mod tests {
         let name = waiting["pending"].as_str().unwrap();
         let staged = bob_dir.join(PENDING).join(format!("{name}.{EXTENSION}"));
         std::fs::write(&staged, serde_json::to_vec(&changed).unwrap()).unwrap();
-        let error = decide(&bob_dir, name, true, waiting["hash"].as_str().unwrap(), author_as(&bob)).unwrap_err();
+        let error = decide(&bob_dir, name, true, waiting["hash"].as_str().unwrap(), None, author_as(&bob)).unwrap_err();
         assert!(error.contains("changed after it was signed"), "{error}");
         assert!(!bob_dir.join("midnight").exists());
     }
@@ -2102,13 +2249,13 @@ mod tests {
         assert_eq!(waiting["needs_consent"], true);
         let name = waiting["pending"].as_str().unwrap();
         // Only with what was shown: another hash installs nothing.
-        assert!(decide(&bob_dir, name, true, "not-what-was-shown", author_as(&bob)).is_err());
+        assert!(decide(&bob_dir, name, true, "not-what-was-shown", None, author_as(&bob)).is_err());
         assert!(!bob_dir.join("midnight").exists());
-        assert_eq!(decide(&bob_dir, name, false, "", author_as(&bob)).unwrap(), json!({ "declined": name }));
+        assert_eq!(decide(&bob_dir, name, false, "", None, author_as(&bob)).unwrap(), json!({ "declined": name }));
         assert!(pending(&bob_dir).is_empty());
         assert!(!bob_dir.join("midnight").exists());
-        assert!(decide(&bob_dir, name, true, "", author_as(&bob)).is_err());
-        assert!(decide(&bob_dir, "../../x", true, "", author_as(&bob)).is_err());
+        assert!(decide(&bob_dir, name, true, "", None, author_as(&bob)).is_err());
+        assert!(decide(&bob_dir, "../../x", true, "", None, author_as(&bob)).is_err());
     }
 
     #[test]
@@ -2190,7 +2337,7 @@ mod tests {
         let waiting = update(&other, "midnight", author_as(&alice)).unwrap();
         assert_eq!((waiting["needs_consent"].as_bool(), waiting["update_of"].as_str()), (Some(true), Some("midnight")));
         assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens", "nothing changes before you allow it");
-        let done = decide(&other, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), author_as(&alice)).unwrap();
+        let done = decide(&other, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), None, author_as(&alice)).unwrap();
         assert_eq!((done["installed"].as_str(), done["updated"].as_str()), (Some("midnight"), Some("midnight")));
         assert!(!other.join("midnight-2").exists(), "in place, never beside it");
         assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens, v2");
