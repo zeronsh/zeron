@@ -82,6 +82,7 @@ describe("store admin routes", () => {
     // The settled shape (amendment 35), all of it.
     expect(mine).toEqual([
       {
+        kind: "plugin",
         plugin: { id, name: id.replace(/-/g, " ") },
         version: "1.1.0",
         status: "listed",
@@ -109,6 +110,7 @@ describe("store admin routes", () => {
     // A PluginCard, its icon and cover paths in the card's version (the newest listed, unverified).
     expect(sub.plugin).toEqual({
       id,
+      kind: "plugin",
       name: id.replace(/-/g, " "),
       summary: expect.any(String),
       icon: "icon.svg",

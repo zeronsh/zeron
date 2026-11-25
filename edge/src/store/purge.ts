@@ -13,25 +13,37 @@
  * verify, decline, take-down, restore, remove, yank, unyank, feature,
  * suspend, restore of a plugin, transfer and release.
  */
-import { cacheKey, purge } from "./cache";
-import { CATEGORIES_KEY, STATS_KEY, firstPageKeys, keywordsKey, takedownsKey, versionKey, versionsPageKey } from "./catalog";
+import { purge } from "./cache";
+import { CATEGORIES_KEY, firstPageKeys, itemKey, keywordsKey, statsKey, takedownsKey, versionKey, versionsPageKey } from "./catalog";
+import { KINDS, type Kind } from "./kind";
 import { CATEGORIES } from "./listing";
 import { versionFileKeys } from "./serve";
 
 
+/** What a change to an item of `kind` moves for the whole store: the first
+ * pages of its kind's lists, its totals, and its keywords; and, a plugin's,
+ * the categories (a template is in none). */
+const sharedKeys = (kind: Kind): string[] => {
+  const categories = kind === "plugin" ? CATEGORIES.map((c) => c.id) : [];
+  return [
+    ...firstPageKeys(kind, categories),
+    statsKey(kind),
+    ...(kind === "plugin" ? [CATEGORIES_KEY] : []),
+    keywordsKey(kind, undefined),
+    ...categories.map((c) => keywordsKey(kind, c))
+  ];
+};
 
-/** Purge what a change to plugin `id`, and to `versions` of it, moves. */
+/** Purge what a change to item `id`, and to `versions` of it, moves. The
+ * store-wide keys are its kind's; its own are under both prefixes, since an
+ * id names one item, and a request under the other prefix may have cached
+ * its 404 (a released id can be claimed as the other kind). */
 export const purgeCatalog = async (db: D1Database, id: string, versions: readonly string[] = []): Promise<void> => {
   const files = await Promise.all(versions.map((v) => versionFileKeys(db, id, v)));
+  const row = await db.prepare("SELECT kind FROM plugins WHERE id = ?").bind(id).first<{ kind: Kind }>();
   await purge([
-    cacheKey(["plugins", id]),
-    versionsPageKey(id),
-    ...versions.map((v) => versionKey(id, v)),
-    ...firstPageKeys(CATEGORIES.map((c) => c.id)),
-    STATS_KEY,
-    CATEGORIES_KEY,
-    keywordsKey(undefined),
-    ...CATEGORIES.map((c) => keywordsKey(c.id)),
+    ...KINDS.flatMap((kind) => [itemKey(kind, id), versionsPageKey(kind, id), ...versions.map((v) => versionKey(kind, id, v))]),
+    ...(row ? sharedKeys(row.kind) : KINDS.flatMap(sharedKeys)),
     ...files.flat()
   ]);
 };

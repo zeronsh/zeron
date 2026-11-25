@@ -20,6 +20,7 @@
  * - A keyword may not say the mark.
  */
 import { STORE_DATA } from "./data";
+import type { Kind as Item } from "./kind";
 
 type Text = readonly string[];
 type Span = readonly [number, number];
@@ -55,6 +56,8 @@ const MARKS = STORE_DATA.mark_claims as unknown as {
     readonly certified_words: readonly string[];
     readonly object_words: readonly string[];
     readonly plugin_words: Readonly<Record<string, WordList>>;
+    /** More words for the thing itself when it's a template. */
+    readonly template_words: Readonly<Record<string, WordList>>;
     readonly predicate_before: readonly string[];
     readonly relation_after: readonly string[];
     readonly relation_before_zh: readonly string[];
@@ -74,6 +77,13 @@ const OTHER_LANGUAGES: readonly (readonly [boolean, readonly OtherWord[]])[] = O
 const AMBIGUOUS = MARKS.description.ambiguous;
 const NEGATIONS = MARKS.description.negations;
 const PLUGIN_WORDS: readonly WordList[] = Object.values(MARKS.description.plugin_words);
+/** What a listing is of: a template's is read with `template_words` as words
+ * for the thing itself too (beside `plugin_words`, wherever the rules say
+ * them); a plugin's with `plugin_words` alone (mark.rs `Item`). */
+const ITEM_WORDS: Readonly<Record<Item, readonly WordList[]>> = {
+  plugin: PLUGIN_WORDS,
+  template: [...PLUGIN_WORDS, ...Object.values(MARKS.description.template_words)]
+};
 const SENTENCE_ENDS = new Set(MARKS.description.sentence_ends);
 const STORE_WORDS = MARKS.description.store_words;
 const SUBJECT_WORDS = MARKS.description.subject_words;
@@ -308,7 +318,9 @@ class Reading {
   readonly words: Span[];
   constructor(
     readonly text: Text,
-    readonly form: (word: string) => string[]
+    readonly form: (word: string) => string[],
+    /** Whose listing it is (its words for itself). */
+    readonly item: Item
   ) {
     this.words = wordsOf(text);
   }
@@ -413,7 +425,7 @@ class Reading {
       (() => {
         const [a, b] = this.words[first - 1]!;
         const word = this.text.slice(a, b);
-        return PLUGIN_WORDS.some(({ substring, words }) =>
+        return ITEM_WORDS[this.item].some(({ substring, words }) =>
           words.some((entry) => {
             const [w, stem] = listed(entry);
             const wanted = this.form(w);
@@ -471,7 +483,7 @@ class Reading {
    * it's certified) after it within two words with no relation between, or
    * directly before it; not when the phrase is someone else's. */
   nearPlugin([first, last]: readonly [number, number], span: Span, ambiguous: boolean): boolean {
-    const neighbours: WordList[] = [...PLUGIN_WORDS, { substring: true, words: ambiguous ? [] : CERTIFIED_WORDS }];
+    const neighbours: WordList[] = [...ITEM_WORDS[this.item], { substring: true, words: ambiguous ? [] : CERTIFIED_WORDS }];
     return neighbours.some(({ substring, words }) =>
       words.some((entry) => {
         const [word, stem] = listed(entry);
@@ -568,7 +580,7 @@ const writtenWord = (plain: Text): string | undefined => {
 };
 
 /** A name's mark: any glyph, any mark word, each other-language word. */
-const nameMark = (text: string): string | undefined => {
+const nameMark = (text: string, item: Item): string | undefined => {
   const plain = folded(text);
   const glyph = plain.find((c) => MARK_GLYPHS.includes(c));
   if (glyph !== undefined) return glyph;
@@ -582,7 +594,7 @@ const nameMark = (text: string): string | undefined => {
   for (const ambiguous of AMBIGUOUS) {
     const wanted = folded(ambiguous);
     const said = readings.some((r) => {
-      const reading = new Reading(r, folded);
+      const reading = new Reading(r, folded, item);
       return spans(reading.text, wanted, true).some((span) => reading.saidOf(span, "ambiguous", false));
     });
     if (said) return ambiguous;
@@ -614,11 +626,11 @@ const nameMark = (text: string): string | undefined => {
 
 /** A description's mark: a glyph anywhere; a mark word only when said of
  * the plugin itself. */
-const descriptionMark = (text: string): string | undefined => {
+const descriptionMark = (text: string, item: Item): string | undefined => {
   const plainText = folded(text);
   const glyph = plainText.find((c) => MARK_GLYPHS.includes(c));
   if (glyph !== undefined) return glyph;
-  for (const reading of [new Reading(plainText, folded), new Reading(unspaced(plainText), folded)]) {
+  for (const reading of [new Reading(plainText, folded, item), new Reading(unspaced(plainText), folded, item)]) {
     for (const word of MARK_WORDS) {
       const spelling = [...markText(word)];
       for (let at = 0; at < reading.text.length; at++) {
@@ -661,7 +673,7 @@ const descriptionMark = (text: string): string | undefined => {
   }
   // Words refused only as written with their accents.
   const kept = keptAccents(text);
-  for (const reading of [new Reading(kept, keptAccents), new Reading(unspaced(kept), keptAccents)]) {
+  for (const reading of [new Reading(kept, keptAccents, item), new Reading(unspaced(kept), keptAccents, item)]) {
     for (const [substring, words] of OTHER_LANGUAGES) {
       for (const w of words.filter((w) => w.description === "accented")) {
         if (spans(reading.text, keptAccents(w.word), substring).some((span) => reading.saidOfPlugin(span, false))) return w.word;
@@ -671,9 +683,10 @@ const descriptionMark = (text: string): string | undefined => {
   return undefined;
 };
 
-/** What in `text` claims the store's mark, if anything: in a name
- * (`inName`) anywhere; in a description only when said of the plugin. */
-export const markClaim = (text: string, inName = true): string | undefined => (inName ? nameMark(text) : descriptionMark(text));
+/** What in `text`, of a listing of `item`, claims the store's mark, if
+ * anything: in a name (`inName`) anywhere; in a description only when said
+ * of the thing itself. */
+export const markClaim = (text: string, inName = true, item: Item = "plugin"): string | undefined => (inName ? nameMark(text, item) : descriptionMark(text, item));
 
 /** What a keyword says that it may not: a part (or its parts joined) that
  * is a mark word in any language a keyword's letters can write. No badge
@@ -718,8 +731,8 @@ export const firstUnseen = (text: string): string | undefined => {
  * `written_max_words`) that read as a name claims the same, then without
  * its first character while it still does, then without its last;
  * undefined when no run does. */
-export const asWritten = (text: string, claim: string): string | undefined => {
-  const claims = (run: string) => nameMark(run) === claim;
+export const asWritten = (text: string, claim: string, item: Item = "plugin"): string | undefined => {
+  const claims = (run: string) => nameMark(run, item) === claim;
   const chars = [...text];
   const words: [number, number][] = [];
   let start: number | undefined;

@@ -75,6 +75,21 @@ two applied by hand (a local `.wrangler/state`, or a staging trial) is
 recreated, not migrated: delete it and apply again. From the first deploy
 on, the rule above holds.
 
+Since then:
+- `0002_card_cover.sql` adds `plugins.cover` and fills it from each listed
+  version.
+- `0003_template_kind.sql` widens `plugins.kind` to
+  `('plugin', 'template')`. SQLite can't alter a check, so it rebuilds the
+  table in one transaction and keeps every row (`seq`, the search index's
+  row id, included). Before it runs on a database with data, note the
+  current Time Travel bookmark:
+  `npx wrangler d1 time-travel info STORE_DB [--env staging]`. After it:
+  `SELECT COUNT(*), SUM(kind = 'plugin') FROM plugins` is the same as before
+  it (both numbers, until a template is published), and
+  `PRAGMA foreign_key_check` answers nothing. It was tried on a copy of
+  staging's data first. `wrangler d1 export` refuses the store's database
+  (it has an FTS5 table), so the copy was read table by table.
+
 ## 3. Check after the deploy
 
 Run each check on staging before production. Mind `STORE_WRITES`: 30

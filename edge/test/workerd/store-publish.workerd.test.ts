@@ -87,7 +87,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
     }) as D1Database;
     const request = new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
-    await expect(handlePublish(request, env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    await expect(handlePublish(request, env as never, failing, env.PLUGIN_STORE, "plugin", id)).rejects.toThrow("D1 is down");
     const objects = (await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects;
     expect(objects).toHaveLength(1);
     const orphans = await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_orphans WHERE key LIKE ?").bind(`%/${id}/%`).first<{ n: number }>();
@@ -119,7 +119,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
           : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
     }) as R2Bucket;
     const request = new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
-    const res = await handlePublish(request, env as never, env.STORE_DB, revoking, id);
+    const res = await handlePublish(request, env as never, env.STORE_DB, revoking, "plugin", id);
     expect([res.status, ((await res.json()) as { error: string }).error]).toEqual([403, "key_not_allowed"]);
     expect(revoked).toBe(true);
     // Nothing landed, and the objects are the sweep's to judge.
@@ -136,7 +136,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
     }) as D1Database;
     // An attempt failed and left its objects, recorded, an hour and more ago.
-    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, "plugin", id)).rejects.toThrow("D1 is down");
     await env.STORE_DB.prepare("UPDATE object_orphans SET at = ? WHERE key LIKE ?").bind(Date.now() - 2 * ORPHAN_GRACE_MS, `%/${id}/%`).run();
     // Its retry: the hourly sweep runs after its objects are written and
     // before its batch lands.
@@ -150,7 +150,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
             }
           : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
     }) as D1Database;
-    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, id)).status).toBe(201);
+    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, "plugin", id)).status).toBe(201);
     expect(swept).toBe(0);
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
     expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/files/1.0.0/init.luau`)).status).toBe(200);
@@ -167,7 +167,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
     }) as D1Database;
     // An earlier attempt left its objects, recorded more than an hour ago.
-    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    await expect(handlePublish(request(), env as never, failing, env.PLUGIN_STORE, "plugin", id)).rejects.toThrow("D1 is down");
     await env.STORE_DB.prepare("UPDATE object_orphans SET at = ? WHERE key LIKE ?").bind(Date.now() - 2 * ORPHAN_GRACE_MS, `%/${id}/%`).run();
     // The sweep claims a record, finds no row and no fresh record, and is
     // about to delete: held there.
@@ -199,7 +199,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
             }
           : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target)
     }) as D1Database;
-    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, id)).status).toBe(201);
+    expect((await handlePublish(request(), env as never, slow, env.PLUGIN_STORE, "plugin", id)).status).toBe(201);
     // Both objects are there and served.
     const sha = (await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).first<string>("package_sha256"))!;
     expect(await env.PLUGIN_STORE.head(`pkg/${id}/1.0.0/${sha}.zeron-plugin`)).not.toBeNull();

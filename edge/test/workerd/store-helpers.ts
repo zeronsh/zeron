@@ -4,7 +4,7 @@ import { expect } from "vitest";
 import { b64urlEncode } from "../../src/cloud/crypto";
 import { PLUGIN_KEY_PROOF_PREFIX } from "../../src/plugin-keys";
 import { type Json, type JsonObject, canonicalJson, parseJsonText } from "../../src/store/json";
-import { PAYLOAD_PREFIX, sha256Hex } from "../../src/store/package";
+import { PAYLOAD_PREFIX, TEMPLATE_PAYLOAD_PREFIX, sha256Hex } from "../../src/store/package";
 import { SITE, grantAdmin, person, sessionHeader, setCookies, stepUp, webSignIn } from "./identity-helpers";
 
 /** Which staff account: two, for the tests where two admins race. */
@@ -126,7 +126,7 @@ export const registerKey = async (userId: string, signer: Signer): Promise<void>
 /** A deploy token of `userId`'s, made as the app or the CLI makes one. */
 export const deployToken = async (
   userId: string,
-  scope: { all: true } | { plugins: string[] },
+  scope: { all: true; all_kinds?: ("plugin" | "template")[] } | { plugins: string[] },
   extra: Record<string, unknown> = {}
 ): Promise<{ token: string; id: string; short: string; name: string }> => {
   const res = await call(userId, "POST", "/store/v1/me/tokens", { name: "CI", scope, stepUp: await stepUp(userId), ...extra });
@@ -217,6 +217,82 @@ export const makePackage = async (o: PackageOptions): Promise<Uint8Array> => {
     JSON.stringify({ format: "zeron-plugin:v1", manifest: signed, files: Object.fromEntries([...bytes].map(([p, d]) => [p, b64(d)])) })
   );
 };
+
+export interface TemplateOptions {
+  readonly id: string;
+  readonly version: string;
+  /** Who signs it; null for an unsigned one, as CI sends one with a deploy token. */
+  readonly signer: Signer | null;
+  /** Manifest fields over the defaults (undefined deletes one). */
+  readonly manifest?: Record<string, unknown>;
+  /** Files over the defaults (undefined deletes one). */
+  readonly files?: Record<string, string | Uint8Array | undefined>;
+  /** A package that isn't a template's: its format, its signing domain. */
+  readonly format?: string;
+  readonly prefix?: string;
+}
+
+/** A `.zeron-template` as the engine packs one: signed by `signer` in the
+ * template domain, or (null) unsigned. */
+export const makeTemplate = async (o: TemplateOptions): Promise<Uint8Array> => {
+  const files: Record<string, string | Uint8Array | undefined> = {
+    "app.luau": `return "${o.id} ${o.version}"`,
+    "ds/tokens.luau": "return {}",
+    "README.md": `# ${o.id}\n\nA look for Zeron.\n`,
+    "CHANGELOG.md": `# Changes\n\n## ${o.version}\n\n- What changed in ${o.version}.\n`,
+    "preview.png": PNG,
+    "screenshots/one.png": PNG,
+    ...o.files
+  };
+  const bytes = new Map<string, Uint8Array>();
+  for (const [path, data] of Object.entries(files)) {
+    if (data !== undefined) bytes.set(path, typeof data === "string" ? encoder.encode(data) : data);
+  }
+  const fields: Record<string, unknown> = {
+    id: o.id,
+    name: o.id.replace(/-/g, " "),
+    description: `The ${o.id} template.`,
+    version: o.version,
+    zeron_version: "0.3.0",
+    keywords: ["dark", "layout"],
+    screenshots: ["screenshots/one.png"],
+    ...o.manifest
+  };
+  for (const [k, v] of Object.entries(fields)) if (v === undefined) delete fields[k];
+  const manifest = parseJsonText(JSON.stringify(fields)) as JsonObject;
+  const hashes = new Map<string, string>();
+  for (const path of [...bytes.keys()].sort()) hashes.set(path, await sha256Hex(bytes.get(path)!));
+  const signed = JSON.parse(canonicalJson(manifest)) as Record<string, unknown>;
+  if (o.signer) {
+    const toSign: JsonObject = new Map(manifest);
+    toSign.set("signature", new Map<string, Json>([["key", o.signer.key], ["files", new Map([...hashes].map(([k, v]) => [k, v as Json]))]]));
+    const sig = await o.signer.sign(encoder.encode((o.prefix ?? TEMPLATE_PAYLOAD_PREFIX) + canonicalJson(toSign)));
+    signed.signature = { key: o.signer.key, files: Object.fromEntries(hashes), sig };
+  }
+  return encoder.encode(
+    JSON.stringify({ format: o.format ?? "zeron-template:v1", manifest: signed, files: Object.fromEntries([...bytes].map(([p, d]) => [p, b64(d)])) })
+  );
+};
+
+export const publishTemplate = (bearer: string | undefined, id: string, pkg: Uint8Array, headers: Record<string, string> = {}) =>
+  call(bearer, "POST", `/store/v1/templates/${id}/versions`, pkg, headers);
+
+/** Publish a template from its author's device: its answer's body. */
+export const publishedTemplate = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<TemplateOptions> = {}) => {
+  const res = await publishTemplate(who.userId, id, await makeTemplate({ id, version, signer: who.signer, ...options }));
+  expect(res.status, await res.clone().text()).toBe(201);
+  return (await res.json()) as { id: string; version: string; status: string; verified: boolean; superseded: string[] };
+};
+
+/** Publish a template, then staff verify it. */
+export const listedTemplate = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<TemplateOptions> = {}) => {
+  await publishedTemplate(who, id, version, options);
+  const ok = await adminCall("POST", `/store/v1/admin/versions/${id}/${version}/verify`);
+  expect(ok.status, await ok.clone().text()).toBe(200);
+};
+
+/** Publish a template with a deploy token, as CI does. */
+export const tokenPublishTemplate = (token: string, id: string, pkg: Uint8Array) => publishTemplate(undefined, id, pkg, { authorization: `Bearer ${token}` });
 
 export const publish = (bearer: string, id: string, pkg: Uint8Array) => call(bearer, "POST", `/store/v1/plugins/${id}/versions`, pkg);
 

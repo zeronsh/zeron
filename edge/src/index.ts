@@ -88,6 +88,7 @@
  *   POST /store/v1/updates                — batched update check
  *   POST /store/v1/plugins/:id/versions   — publish (session or deploy token)
  *   …    /store/v1/me/plugins, …/{withdraw,yank,unyank,installed,reports}, /store/v1/admin/*
+ *   …    the same of templates under /store/v1/templates (and /me/templates)
  */
 import { authenticate, bearerFromRequest } from "./auth";
 import { sessionRequired } from "./store/identity/callers";

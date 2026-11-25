@@ -10,6 +10,7 @@ import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import type { StoreAuthor } from "../user-directory";
 import { type PluginRow, type VersionRow, parseList } from "./db";
+import { type Kind, segmentOf } from "./kind";
 
 export interface Author {
   /** `publisherId`: stable and opaque (amendment 33). */
@@ -62,20 +63,23 @@ export const authorsOf = async (env: Env, userIds: readonly string[]): Promise<R
 /** The card's author: never the user id. */
 export const authorCard = (found: Author): Author => ({ id: found.id, username: found.username, badges: found.badges });
 
-export const packageUrl = (id: string, version: string): string =>
-  `/store/v1/plugins/${id}/versions/${encodeURIComponent(version)}/package`;
+export const packageUrl = (kind: Kind, id: string, version: string): string =>
+  `/store/v1/${segmentOf(kind)}/${id}/versions/${encodeURIComponent(version)}/package`;
 
 /**
- * A plugin's card. `icon` and `cover` (like a detail's `screenshots`) are
- * paths in the package of the card's `version` (amendment 35), fetched
- * through the files route with that version; never URLs. `cover` is that
- * version's first screenshot, null when it has none. No version, neither.
+ * An item's card, either kind's. `icon` and `cover` (like a detail's
+ * `screenshots`) are paths in the package of the card's `version`
+ * (amendment 35), fetched through the files route with that version; never
+ * URLs. `cover` is a plugin's first screenshot, null when that version has
+ * none, or a template's preview.png. A template has no icon. No version,
+ * neither.
  */
 export const pluginCard = (p: PluginRow, author: Author) => ({
   id: p.id,
+  kind: p.kind,
   name: p.name,
   summary: p.summary,
-  icon: p.listed_version ? p.icon : null,
+  icon: p.listed_version && p.kind === "plugin" ? p.icon : null,
   cover: p.listed_version ? p.cover : null,
   author,
   categories: parseList(p.categories),
@@ -116,11 +120,13 @@ export const reviewOf = (v: VersionRow) =>
       ? { decided: true, decision: "declined" as const, reason: v.decline_reason ?? undefined, message: v.decline_message ?? undefined, decided_at: v.declined_at }
       : { decided: false, decision: null };
 
-/** A version as the public sees it (the contract's `VersionInfo`); `full`
+/** A version of an item of `kind` as the public sees it (the contract's
+ * `VersionInfo`); `full`
  * adds what its owner and staff read: the review, the checks, the deploy
  * key that published it, and why staff took it down or removed it. */
-export const versionInfo = (v: VersionRow, full = false) => ({
+export const versionInfo = (v: VersionRow, kind: Kind, full = false) => ({
   version: v.version,
+  kind,
   status: v.status,
   published_at: v.published_at,
   notes: v.notes,
