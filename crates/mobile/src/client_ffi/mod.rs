@@ -456,6 +456,23 @@ impl CoreClient {
         Ok(refs.into_iter().map(Into::into).collect())
     }
 
+    /// The git repositories in a project folder that isn't one itself (on
+    /// `device_id`), for a worktree of the whole project. A host too old to
+    /// list them fails: offer no such worktree then (its folder runs in
+    /// place, as before).
+    pub async fn list_project_repositories(
+        &self,
+        device_id: String,
+        path: String,
+    ) -> CoreResult<ProjectRepositories> {
+        let client = self.client.clone();
+        let listing = on_runtime(async move {
+            client.list_project_repositories(&device_id, &path).await
+        })
+        .await?;
+        Ok(listing.into())
+    }
+
     /// Files matching `query` in the chat's (or project's) workspace, for
     /// composer `@` mentions.
     pub async fn search_files(
@@ -582,6 +599,18 @@ impl CoreClient {
 }
 
 // ── static helpers ─────────────────────────────────────────────────────────
+
+/// The repositories a new worktree of a project starts with (their paths):
+/// those `remembered` from its last choice that can still be chosen, else
+/// every one of a few (8 or fewer), else none. As the desktop composer
+/// starts one (`zeron_proto::ProjectRepositories::first_choice`).
+#[uniffi::export]
+pub fn project_worktree_first_choice(
+    listing: ProjectRepositories,
+    remembered: Option<Vec<String>>,
+) -> Vec<String> {
+    zeron_proto::ProjectRepositories::from(&listing).first_choice(remembered.as_deref())
+}
 
 /// Production edge base URL.
 #[uniffi::export]

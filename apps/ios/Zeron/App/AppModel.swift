@@ -967,13 +967,54 @@ final class AppModel {
         (try? await client?.githubBranches(repo: repo)) ?? []
     }
 
-    /// The worktree a new session starts in. Only a git project can make one:
-    /// the pick outlives a switch to a plain folder (where its chip is hidden)
-    /// and the host would refuse the run, so there it's left for the next git
-    /// project rather than sent.
+    /// The repositories in a project folder that isn't one itself, for a
+    /// worktree of the whole project. Nil when there's nothing to choose
+    /// from: a repository, no project, or a host too old to list them (its
+    /// folder then runs in place, as before).
+    func projectRepositories(projectId: String) async -> ProjectRepositories? {
+        guard let client, let p = rawProjects.first(where: { $0.id == projectId }), !p.gitDetected, !p.isCloud else { return nil }
+        guard let listing = try? await client.listProjectRepositories(deviceId: p.deviceId, path: p.path),
+              !listing.isRepo, listing.repositories.contains(where: \.hasCommits)
+        else { return nil }
+        return listing
+    }
+
+    /// The repositories last chosen for each project's worktree, by project
+    /// id: the next new session there starts from them.
+    private static let rememberedRepositoriesKey = "app.projectRepositories"
+
+    /// (The demo's, for this launch only: each starts as a fresh demo does.)
+    private var demoRepositories: [String: [String]] = [:]
+
+    func rememberedRepositories(projectId: String) -> [String]? {
+        if isDemo { return demoRepositories[projectId] }
+        return (UserDefaults.standard.dictionary(forKey: Self.rememberedRepositoriesKey) as? [String: [String]])?[projectId]
+    }
+
+    func rememberRepositories(_ paths: [String], projectId: String) {
+        if isDemo {
+            demoRepositories[projectId] = paths
+            return
+        }
+        var all = (UserDefaults.standard.dictionary(forKey: Self.rememberedRepositoriesKey) as? [String: [String]]) ?? [:]
+        all[projectId] = paths
+        UserDefaults.standard.set(all, forKey: Self.rememberedRepositoriesKey)
+    }
+
+    /// The worktree a new session starts in. A git project makes one off the
+    /// picked branch. A folder holding several repositories makes one of the
+    /// whole project, checking out those chosen (`draft.repositories`, set
+    /// only once its host listed them). Anywhere else the pick outlives a
+    /// switch to a plain folder (where its chip is hidden) and the host would
+    /// refuse the run, so there it's left for the next git project rather
+    /// than sent.
     static func worktreeSpec(draft: NewSessionDraft, project: ProjectView?) -> WorktreeSpec? {
-        guard draft.worktree, let project, project.gitDetected else { return nil }
-        return WorktreeSpec(repoPath: project.path, base: draft.branch ?? "HEAD", spaceId: project.id)
+        guard draft.worktree, let project else { return nil }
+        if project.gitDetected {
+            return WorktreeSpec(repoPath: project.path, base: draft.branch ?? "HEAD", spaceId: project.id, repositories: [])
+        }
+        guard let repositories = draft.repositories, !repositories.isEmpty else { return nil }
+        return WorktreeSpec(repoPath: project.path, base: "HEAD", spaceId: project.id, repositories: repositories)
     }
 
     /// Create the chat, open it, and send the first message.

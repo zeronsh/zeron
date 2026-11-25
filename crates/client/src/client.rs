@@ -1702,6 +1702,31 @@ impl Client {
         }
     }
 
+    /// The git repositories in a project folder that isn't one itself (host
+    /// `ListProjectRepositories`), for a worktree of the whole project
+    /// ([`zeron_proto::WorktreeSpec::repositories`]). A host too old to
+    /// answer refuses it: offer no such worktree then.
+    pub async fn list_project_repositories(
+        &self,
+        device_id: &str,
+        path: &str,
+    ) -> Result<zeron_proto::ProjectRepositories> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_project_repositories(path).await,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_PROJECT_REPOSITORIES,
+                        serde_json::json!({ "path": path }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
     /// Workspace file search for composer `@` mentions (host `SearchFiles`,
     /// gitignore-aware; an empty query returns the chat's featured files).
     pub async fn search_files(

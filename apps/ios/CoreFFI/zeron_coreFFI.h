@@ -568,6 +568,11 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_harnesses(uint64_t ptr, R
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_models(uint64_t ptr, RustBuffer device_id, RustBuffer harness
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_project_repositories(uint64_t ptr, RustBuffer device_id, RustBuffer path
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_REFS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_REFS
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_refs(uint64_t ptr, RustBuffer device_id, RustBuffer repo_path
@@ -1729,6 +1734,11 @@ uint32_t uniffi_zeron_mobile_fn_func_project_color_count(RustCallStatus *_Nonnul
 uint32_t uniffi_zeron_mobile_fn_func_project_color_index(RustBuffer space_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+RustBuffer uniffi_zeron_mobile_fn_func_project_worktree_first_choice(RustBuffer listing, RustBuffer remembered, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_REASONING_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_REASONING_LABEL
 RustBuffer uniffi_zeron_mobile_fn_func_reasoning_label(RustBuffer level, RustCallStatus *_Nonnull out_status
@@ -2148,6 +2158,12 @@ uint16_t uniffi_zeron_mobile_checksum_func_project_color_index(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+uint16_t uniffi_zeron_mobile_checksum_func_project_worktree_first_choice(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_REASONING_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_REASONING_LABEL
 uint16_t uniffi_zeron_mobile_checksum_func_reasoning_label(void
@@ -2361,6 +2377,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_MODELS
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_models(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_project_repositories(void
     
 );
 #endif

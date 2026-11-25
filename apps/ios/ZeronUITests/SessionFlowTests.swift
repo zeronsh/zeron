@@ -429,6 +429,50 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "picked-clone")
     }
 
+    /// A project folder holding several repositories (the demo's Acme): its
+    /// checkout chip opens the sheet choosing the folder or a worktree of
+    /// the whole project, and which repositories that worktree checks out.
+    func testAFolderOfRepositoriesChoosesAWorktreeOfThem() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let acme = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Acme'")).firstMatch
+        XCTAssertTrue(acme.waitForExistence(timeout: 5))
+        acme.tap()
+        let chip = app.buttons["composer-chip-repositories"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "a folder of repositories offers its checkout")
+        XCTAssertFalse(app.buttons["composer-chip-branch"].exists, "no branches of its own")
+        // (The chips scroll: brought into view for the picture, dragged
+        // without a fling.)
+        func bringChipsIntoView() {
+            let host = app.buttons["composer-chip-host"]
+            guard host.isHittable else { return }
+            let start = host.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        bringChipsIntoView()
+        snapshot(app, "repositories-chip-folder")
+        chip.tap()
+        let mode = app.segmentedControls["repositories-mode"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 5))
+        mode.buttons["New worktree"].tap()
+        XCTAssertTrue(app.staticTexts["3 of 3"].waitForExistence(timeout: 2), "all of a few chosen at first")
+        let scratch = app.buttons["repository-row-scratch"]
+        XCTAssertTrue(scratch.waitForExistence(timeout: 5))
+        XCTAssertFalse(scratch.isEnabled, "no commit: can't be chosen")
+        snapshot(app, "repositories-sheet")
+        app.buttons["repository-row-packages/ui"].tap()
+        XCTAssertTrue(app.staticTexts["2 of 3"].waitForExistence(timeout: 2))
+        snapshot(app, "repositories-sheet-chosen")
+        app.buttons["repositories-close"].tap()
+        let counted = NSPredicate(format: "label CONTAINS '2 repositories'")
+        expectation(for: counted, evaluatedWith: chip)
+        waitForExpectations(timeout: 5)
+        bringChipsIntoView()
+        snapshot(app, "repositories-chip-worktree")
+    }
+
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
         let expand = app.buttons["Expand"].firstMatch

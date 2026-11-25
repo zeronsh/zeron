@@ -919,6 +919,46 @@ pub struct ProjectRepositories {
     pub truncated: bool,
 }
 
+/// A project's first worktree checks out every repository when it holds this
+/// many or fewer, and none (until some are chosen) when it holds more: a
+/// folder of dozens of clones isn't checked out whole by accident.
+pub const PROJECT_WORKTREE_ALL_UP_TO: usize = 8;
+
+impl ProjectRepositories {
+    /// The repositories that can be checked out (each with a commit to
+    /// branch from), by path.
+    pub fn choosable(&self) -> Vec<String> {
+        self.repositories
+            .iter()
+            .filter(|r| r.has_commits && !r.linked)
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
+    /// The repositories a new worktree of the project starts with: those
+    /// `remembered` for it (its last choice) that can still be chosen, else
+    /// every one when there are [`PROJECT_WORKTREE_ALL_UP_TO`] or fewer,
+    /// else none. A choice remembered as none stays none. In list order.
+    pub fn first_choice(&self, remembered: Option<&[String]>) -> Vec<String> {
+        let all = self.choosable();
+        if let Some(remembered) = remembered {
+            let kept: Vec<String> = all
+                .iter()
+                .filter(|path| remembered.contains(path))
+                .cloned()
+                .collect();
+            if !kept.is_empty() || remembered.is_empty() {
+                return kept;
+            }
+        }
+        if all.len() <= PROJECT_WORKTREE_ALL_UP_TO {
+            all
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderEntry {
@@ -2340,6 +2380,43 @@ mod tests {
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn a_project_s_first_worktree_choice() {
+        let repo = |path: &str, has_commits: bool| ProjectRepository {
+            path: path.into(),
+            branch: Some("main".into()),
+            has_commits,
+            linked: false,
+        };
+        let few = ProjectRepositories {
+            is_repo: false,
+            repositories: vec![repo("api", true), repo("empty", false), repo("web", true)],
+            truncated: false,
+        };
+        // All of a few, never one with no commit.
+        assert_eq!(few.first_choice(None), ["api", "web"]);
+        // The last choice, as far as it still stands; none stays none.
+        assert_eq!(few.first_choice(Some(&["web".into(), "gone".into()])), ["web"]);
+        assert!(few.first_choice(Some(&[])).is_empty());
+        // A choice of which none stands any more: as if never made.
+        assert_eq!(few.first_choice(Some(&["gone".into()])), ["api", "web"]);
+        // None of many.
+        let many = ProjectRepositories {
+            is_repo: false,
+            repositories: (0..=PROJECT_WORKTREE_ALL_UP_TO)
+                .map(|i| repo(&format!("r{i}"), true))
+                .collect(),
+            truncated: false,
+        };
+        assert!(many.first_choice(None).is_empty());
+        let listing: ProjectRepositories = serde_json::from_value(serde_json::json!({
+            "isRepo": false,
+            "repositories": [{ "path": "api", "branch": "main", "hasCommits": true }],
+        }))
+        .unwrap();
+        assert_eq!(listing.choosable(), ["api"]);
     }
 
     #[test]

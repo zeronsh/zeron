@@ -439,6 +439,9 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             true,
             2 * DAY,
         ),
+        // A folder holding several repositories (no git of its own): a
+        // worktree of it checks them out together (`demo::seeded_repositories`).
+        space("space-acme", MAC, "/Users/dev/acme", Some("Acme"), false, DAY),
     ]
 }
 

@@ -1041,6 +1041,68 @@ impl From<RepoRef> for zc::rpc::RepoRef {
     }
 }
 
+/// One git repository inside a project folder that isn't one itself: what a
+/// worktree of the whole project can check out (`WorktreeSpec::repositories`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProjectRepository {
+    /// Its `/`-separated path in the project's folder (`packages/web`).
+    pub path: String,
+    /// The branch checked out there (None: detached).
+    pub branch: Option<String>,
+    /// False with no commit yet: nothing to branch from, can't be chosen.
+    pub has_commits: bool,
+}
+
+/// A project folder's repositories (`list_project_repositories`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProjectRepositories {
+    /// The folder is a repository itself: its worktrees are that repository's,
+    /// and `repositories` is empty.
+    pub is_repo: bool,
+    pub repositories: Vec<ProjectRepository>,
+    /// More were there than are listed.
+    pub truncated: bool,
+}
+
+impl From<zeron_proto::ProjectRepositories> for ProjectRepositories {
+    fn from(r: zeron_proto::ProjectRepositories) -> Self {
+        Self {
+            is_repo: r.is_repo,
+            repositories: r
+                .repositories
+                .into_iter()
+                // (A project worktree's own checkouts are never offered.)
+                .filter(|r| !r.linked)
+                .map(|r| ProjectRepository {
+                    path: r.path,
+                    branch: r.branch,
+                    has_commits: r.has_commits,
+                })
+                .collect(),
+            truncated: r.truncated,
+        }
+    }
+}
+
+impl From<&ProjectRepositories> for zeron_proto::ProjectRepositories {
+    fn from(r: &ProjectRepositories) -> Self {
+        Self {
+            is_repo: r.is_repo,
+            repositories: r
+                .repositories
+                .iter()
+                .map(|r| zeron_proto::ProjectRepository {
+                    path: r.path.clone(),
+                    branch: r.branch.clone(),
+                    has_commits: r.has_commits,
+                    linked: false,
+                })
+                .collect(),
+            truncated: r.truncated,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FolderEntry {
     pub name: String,

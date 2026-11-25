@@ -30,6 +30,11 @@ pub struct WorktreeSpec {
     /// Base ref for the fresh `zeron/<name>` branch.
     pub base: String,
     pub space_id: Option<String>,
+    /// A project folder holding several repositories: those to check out
+    /// (their paths in it), in one worktree of the whole project. Empty:
+    /// `repo_path` is the repository. Only for a host that listed them
+    /// (`list_project_repositories`).
+    pub repositories: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -58,7 +63,7 @@ impl From<SendRequest> for zc::SendRequest {
                 repo_path: w.repo_path,
                 base: w.base,
                 space_id: w.space_id,
-                repositories: Vec::new(),
+                repositories: w.repositories,
             }),
             busy: match r.busy {
                 BusyPolicy::Queue => zc::BusyPolicy::Queue,

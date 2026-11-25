@@ -747,3 +747,30 @@ fn delegation_lists_its_children_as_subagents_and_answers_them_in_their_own_chat
     // Waiting, the parent can be stopped (which ends its subagents).
     assert!(session.composer().live.can_interrupt);
 }
+
+/// A project folder holding several repositories: the demo lists Acme's,
+/// one with no commit, and its first worktree starts with the others; a
+/// repository's own folder says it is one.
+#[test]
+fn a_folder_of_repositories_lists_them_for_a_project_worktree() {
+    let (client, _dir) = demo(DemoOptions::default());
+    let acme = client
+        .workspace()
+        .projects
+        .iter()
+        .find(|p| p.id == "space-acme")
+        .cloned()
+        .expect("Acme is among the demo's projects");
+    assert!(!acme.git_detected, "a folder with no git of its own");
+    let listing = zeron_client::runtime::shared()
+        .block_on(client.list_project_repositories(&acme.device_id, &acme.path))
+        .unwrap();
+    assert!(!listing.is_repo);
+    let paths: Vec<_> = listing.repositories.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, ["api", "packages/ui", "scratch", "web"]);
+    assert_eq!(listing.first_choice(None), ["api", "packages/ui", "web"]);
+    let repo = zeron_client::runtime::shared()
+        .block_on(client.list_project_repositories(&acme.device_id, "/Users/dev/zeron"))
+        .unwrap();
+    assert!(repo.is_repo && repo.repositories.is_empty());
+}

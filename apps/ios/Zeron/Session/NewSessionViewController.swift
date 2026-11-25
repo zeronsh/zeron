@@ -12,6 +12,9 @@ struct NewSessionDraft: Equatable, Codable {
     var effort: String?
     /// Run on its own Cloud machine (optional: drafts saved before Cloud).
     var cloud: Bool?
+    /// A project folder holding several repositories: those its worktree
+    /// checks out (their paths in it). Optional: drafts saved before.
+    var repositories: [String]?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -155,8 +158,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
         // The model chip opens the picker sheet (tabs per provider).
         composer.onChipTap = { [weak self] id, _ in
-            guard let self, id == "model" else { return }
-            self.present(self.modelPicker(), animated: true)
+            guard let self else { return }
+            if id == "model" {
+                self.present(self.modelPicker(), animated: true)
+            } else if id == "repositories", let picker = self.repositoryPicker() {
+                self.present(picker, animated: true)
+            }
         }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
@@ -212,6 +219,54 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         loadModels()
     }
 
+    // MARK: A folder of repositories
+
+    /// The draft's project's repositories, when it's a folder holding
+    /// several (not one itself) whose host can list them: a worktree of the
+    /// whole project can check them out. Nil otherwise.
+    private var repositories: (projectId: String, listing: ProjectRepositories)?
+
+    /// The repositories of the draft's project, asked of its host as it's
+    /// picked; the draft's choice starts from the one last made there (else
+    /// all of a few, none of many: `projectWorktreeFirstChoice`).
+    private func loadRepositories() {
+        guard let p = project, !p.git, !p.isCloud else {
+            if repositories != nil {
+                repositories = nil
+                refreshChips()
+            }
+            return
+        }
+        if repositories?.projectId == p.id { return }
+        // (Another project: its own choice, once its host has listed them.)
+        repositories = nil
+        draft.repositories = nil
+        let id = p.id
+        Task { @MainActor [weak self] in
+            guard let self, let listing = await self.app.projectRepositories(projectId: id), self.draft.projectId == id else { return }
+            self.repositories = (id, listing)
+            self.draft.repositories = projectWorktreeFirstChoice(listing: listing, remembered: self.app.rememberedRepositories(projectId: id))
+            self.refreshChips()
+        }
+    }
+
+    /// Whether the draft's project is a folder of repositories (listed).
+    private var holdsRepositories: Bool {
+        guard let p = project, let r = repositories, r.projectId == p.id, !runsOnCloud else { return false }
+        return true
+    }
+
+    private func repositoryPicker() -> UIViewController? {
+        guard holdsRepositories, let p = project, let r = repositories else { return nil }
+        return RepositoryPickerViewController.sheet(project: p.groupName, host: p.deviceName, repositories: r.listing.repositories, worktree: draft.worktree, chosen: draft.repositories ?? []) { [weak self] worktree, chosen in
+            guard let self, self.draft.projectId == r.projectId else { return }
+            self.draft.worktree = worktree
+            self.draft.repositories = chosen
+            self.app.rememberRepositories(chosen, projectId: r.projectId)
+            self.refreshChips()
+        }
+    }
+
     private var cloudToken: AnyObject?
 
     /// The session will run on its own Cloud machine: a Cloud project, or
@@ -235,6 +290,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     /// Models for the draft's host: cached (or the built-in catalog) at once,
     /// then the host's own list.
     private func loadModels() {
+        loadRepositories()
         let device = runsOnCloud ? Self.cloudModelsKey : deviceId
         guard device != modelsDevice else { return refreshChips() }
         modelsDevice = device
@@ -334,6 +390,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             chips.append(ComposerChip(id: "host", title: p.deviceName, symbol: "desktopcomputer"))
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
+            } else if holdsRepositories {
+                // A folder of repositories: its folder, or a worktree of those
+                // chosen (its chip opens the sheet choosing them).
+                let n = draft.repositories?.count ?? 0
+                chips.append(ComposerChip(id: "repositories", title: draft.worktree ? (n == 1 ? "1 repository" : "\(n) repositories") : "Project folder", symbol: draft.worktree ? nil : "folder", icon: draft.worktree ? BranchIcon.sized() : nil))
             }
         } else {
             let host = app.hostOptions.first { $0.id == draft.hostId }
@@ -553,6 +614,16 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         app.lastDraft = draft
         if runsOnCloud {
             createOnCloud(text: text, images: images)
+            return false
+        }
+        // A worktree of a folder of repositories needs at least one of them.
+        if holdsRepositories, draft.worktree, (draft.repositories ?? []).isEmpty {
+            let alert = UIAlertController(title: "Choose a repository", message: "Choose at least one repository for the worktree.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Choose", style: .default) { [weak self] _ in
+                if let self, let picker = self.repositoryPicker() { self.present(picker, animated: true) }
+            })
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            present(alert, animated: true)
             return false
         }
         guard let chatId = app.createSession(draft: draft, text: text, images: images) else {

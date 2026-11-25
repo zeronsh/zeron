@@ -38,4 +38,36 @@ final class NewSessionWorktreeTests: XCTestCase {
     func testNoProjectNoWorktree() {
         XCTAssertNil(AppModel.worktreeSpec(draft: draft(worktree: true), project: nil))
     }
+
+    func testAGitProjectsWorktreeNamesNoRepositories() {
+        XCTAssertEqual(AppModel.worktreeSpec(draft: draft(worktree: true), project: project(git: true))?.repositories, [])
+    }
+
+    func testAFolderOfRepositoriesGetsOneWorktreeOfThoseChosen() throws {
+        var d = draft(worktree: true)
+        d.repositories = ["api", "packages/web"]
+        let spec = try XCTUnwrap(AppModel.worktreeSpec(draft: d, project: project(git: false)))
+        XCTAssertEqual(spec.repoPath, "/code/notes")
+        XCTAssertEqual(spec.base, "HEAD")
+        XCTAssertEqual(spec.repositories, ["api", "packages/web"])
+    }
+
+    func testAFolderWithNoneChosenRunsInPlace() {
+        var d = draft(worktree: true)
+        d.repositories = []
+        XCTAssertNil(AppModel.worktreeSpec(draft: d, project: project(git: false)))
+    }
+
+    /// The first choice is the core's, as the desktop's: all of a few, never
+    /// one with no commit; the last choice where it still stands.
+    func testAFolderOfRepositoriesStartsFromItsLastChoice() {
+        let listing = ProjectRepositories(isRepo: false, repositories: [
+            ProjectRepository(path: "api", branch: "main", hasCommits: true),
+            ProjectRepository(path: "scratch", branch: nil, hasCommits: false),
+            ProjectRepository(path: "web", branch: "develop", hasCommits: true),
+        ], truncated: false)
+        XCTAssertEqual(projectWorktreeFirstChoice(listing: listing, remembered: nil), ["api", "web"])
+        XCTAssertEqual(projectWorktreeFirstChoice(listing: listing, remembered: ["web"]), ["web"])
+        XCTAssertEqual(projectWorktreeFirstChoice(listing: listing, remembered: []), [])
+    }
 }

@@ -1145,6 +1145,43 @@ impl DemoHost {
         }
     }
 
+    /// The repositories in a demo project's folder: Acme's several (one with
+    /// no commit yet); a repository's folder says it is one.
+    fn seeded_repositories(path: &str) -> zeron_proto::ProjectRepositories {
+        let r = |path: &str, branch: Option<&str>, has_commits: bool| {
+            zeron_proto::ProjectRepository {
+                path: path.into(),
+                branch: branch.map(str::to_owned),
+                has_commits,
+                linked: false,
+            }
+        };
+        if path.ends_with("/acme") {
+            return zeron_proto::ProjectRepositories {
+                is_repo: false,
+                repositories: vec![
+                    r("api", Some("main"), true),
+                    r("packages/ui", Some("main"), true),
+                    r("scratch", None, false),
+                    r("web", Some("develop"), true),
+                ],
+                truncated: false,
+            };
+        }
+        zeron_proto::ProjectRepositories {
+            is_repo: !path.contains("/Projects/blog"),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) async fn list_project_repositories(
+        &self,
+        path: &str,
+    ) -> Result<zeron_proto::ProjectRepositories> {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        Ok(Self::seeded_repositories(path))
+    }
+
     pub(crate) async fn list_refs(&self, path: &str) -> Result<Vec<RepoRef>> {
         tokio::time::sleep(Duration::from_millis(120)).await;
         Ok(lock(&self.refs)

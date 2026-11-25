@@ -1121,6 +1121,14 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func listModels(deviceId: String, harness: String) async  -> [ModelInfo]
     
+    /**
+     * The git repositories in a project folder that isn't one itself (on
+     * `device_id`), for a worktree of the whole project. A host too old to
+     * list them fails: offer no such worktree then (its folder runs in
+     * place, as before).
+     */
+    func listProjectRepositories(deviceId: String, path: String) async throws  -> ProjectRepositories
+    
     func listRefs(deviceId: String, repoPath: String) async throws  -> [RepoRef]
     
     func markSeen(chatId: String) 
@@ -1813,6 +1821,28 @@ open func listModels(deviceId: String, harness: String)async  -> [ModelInfo]  {
             liftFunc: FfiConverterSequenceTypeModelInfo.lift,
             errorHandler: nil
             
+        )
+}
+    
+    /**
+     * The git repositories in a project folder that isn't one itself (on
+     * `device_id`), for a worktree of the whole project. A host too old to
+     * list them fails: offer no such worktree then (its folder runs in
+     * place, as before).
+     */
+open func listProjectRepositories(deviceId: String, path: String)async throws  -> ProjectRepositories  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_project_repositories(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(path)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeProjectRepositories_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
         )
 }
     
@@ -11046,6 +11076,161 @@ public func FfiConverterTypeProjectRef_lower(_ value: ProjectRef) -> RustBuffer 
 }
 
 
+/**
+ * A project folder's repositories (`list_project_repositories`).
+ */
+public struct ProjectRepositories: Equatable, Hashable {
+    /**
+     * The folder is a repository itself: its worktrees are that repository's,
+     * and `repositories` is empty.
+     */
+    public var isRepo: Bool
+    public var repositories: [ProjectRepository]
+    /**
+     * More were there than are listed.
+     */
+    public var truncated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The folder is a repository itself: its worktrees are that repository's,
+         * and `repositories` is empty.
+         */isRepo: Bool, repositories: [ProjectRepository], 
+        /**
+         * More were there than are listed.
+         */truncated: Bool) {
+        self.isRepo = isRepo
+        self.repositories = repositories
+        self.truncated = truncated
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectRepositories: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectRepositories: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectRepositories {
+        return
+            try ProjectRepositories(
+                isRepo: FfiConverterBool.read(from: &buf), 
+                repositories: FfiConverterSequenceTypeProjectRepository.read(from: &buf), 
+                truncated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectRepositories, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.isRepo, into: &buf)
+        FfiConverterSequenceTypeProjectRepository.write(value.repositories, into: &buf)
+        FfiConverterBool.write(value.truncated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectRepositories_lift(_ buf: RustBuffer) throws -> ProjectRepositories {
+    return try FfiConverterTypeProjectRepositories.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectRepositories_lower(_ value: ProjectRepositories) -> RustBuffer {
+    return FfiConverterTypeProjectRepositories.lower(value)
+}
+
+
+/**
+ * One git repository inside a project folder that isn't one itself: what a
+ * worktree of the whole project can check out (`WorktreeSpec::repositories`).
+ */
+public struct ProjectRepository: Equatable, Hashable {
+    /**
+     * Its `/`-separated path in the project's folder (`packages/web`).
+     */
+    public var path: String
+    /**
+     * The branch checked out there (None: detached).
+     */
+    public var branch: String?
+    /**
+     * False with no commit yet: nothing to branch from, can't be chosen.
+     */
+    public var hasCommits: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Its `/`-separated path in the project's folder (`packages/web`).
+         */path: String, 
+        /**
+         * The branch checked out there (None: detached).
+         */branch: String?, 
+        /**
+         * False with no commit yet: nothing to branch from, can't be chosen.
+         */hasCommits: Bool) {
+        self.path = path
+        self.branch = branch
+        self.hasCommits = hasCommits
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectRepository: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectRepository: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectRepository {
+        return
+            try ProjectRepository(
+                path: FfiConverterString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                hasCommits: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectRepository, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterBool.write(value.hasCommits, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectRepository_lift(_ buf: RustBuffer) throws -> ProjectRepository {
+    return try FfiConverterTypeProjectRepository.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectRepository_lower(_ value: ProjectRepository) -> RustBuffer {
+    return FfiConverterTypeProjectRepository.lower(value)
+}
+
+
 public struct ProjectView: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -14800,6 +14985,13 @@ public struct WorktreeSpec: Equatable, Hashable {
      */
     public var base: String
     public var spaceId: String?
+    /**
+     * A project folder holding several repositories: those to check out
+     * (their paths in it), in one worktree of the whole project. Empty:
+     * `repo_path` is the repository. Only for a host that listed them
+     * (`list_project_repositories`).
+     */
+    public var repositories: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -14809,10 +15001,17 @@ public struct WorktreeSpec: Equatable, Hashable {
          */repoPath: String, 
         /**
          * Base ref for the fresh `zeron/<name>` branch.
-         */base: String, spaceId: String?) {
+         */base: String, spaceId: String?, 
+        /**
+         * A project folder holding several repositories: those to check out
+         * (their paths in it), in one worktree of the whole project. Empty:
+         * `repo_path` is the repository. Only for a host that listed them
+         * (`list_project_repositories`).
+         */repositories: [String]) {
         self.repoPath = repoPath
         self.base = base
         self.spaceId = spaceId
+        self.repositories = repositories
     }
 
     
@@ -14833,7 +15032,8 @@ public struct FfiConverterTypeWorktreeSpec: FfiConverterRustBuffer {
             try WorktreeSpec(
                 repoPath: FfiConverterString.read(from: &buf), 
                 base: FfiConverterString.read(from: &buf), 
-                spaceId: FfiConverterOptionString.read(from: &buf)
+                spaceId: FfiConverterOptionString.read(from: &buf), 
+                repositories: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -14841,6 +15041,7 @@ public struct FfiConverterTypeWorktreeSpec: FfiConverterRustBuffer {
         FfiConverterString.write(value.repoPath, into: &buf)
         FfiConverterString.write(value.base, into: &buf)
         FfiConverterOptionString.write(value.spaceId, into: &buf)
+        FfiConverterSequenceString.write(value.repositories, into: &buf)
     }
 }
 
@@ -20531,6 +20732,30 @@ fileprivate struct FfiConverterOptionTypeVoiceSpeaker: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
     typealias SwiftType = [UInt32]
 
@@ -21173,6 +21398,31 @@ fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePendingSend.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeProjectRepository: FfiConverterRustBuffer {
+    typealias SwiftType = [ProjectRepository]
+
+    public static func write(_ value: [ProjectRepository], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProjectRepository.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProjectRepository] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProjectRepository]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProjectRepository.read(from: &buf))
         }
         return seq
     }
@@ -22009,6 +22259,21 @@ public func projectColorIndex(spacePath: String) -> UInt32  {
     )
 })
 }
+/**
+ * The repositories a new worktree of a project starts with (their paths):
+ * those `remembered` from its last choice that can still be chosen, else
+ * every one of a few (8 or fewer), else none. As the desktop composer
+ * starts one (`zeron_proto::ProjectRepositories::first_choice`).
+ */
+public func projectWorktreeFirstChoice(listing: ProjectRepositories, remembered: [String]?) -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_project_worktree_first_choice(
+        FfiConverterTypeProjectRepositories_lower(listing),
+        FfiConverterOptionSequenceString.lower(remembered),uniffiCallStatus
+    )
+})
+}
 public func reasoningLabel(level: String) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -22226,6 +22491,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_project_color_index() != 14874) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_project_worktree_first_choice() != 41535) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_reasoning_label() != 22513) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22332,6 +22600,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_models() != 23103) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_project_repositories() != 50034) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_refs() != 27606) {
