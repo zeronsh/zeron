@@ -12,6 +12,7 @@ import fragment from "./session.fragment.html?raw";
 import "./session.icons.css";
 import "./session.vars.css";
 import "./zw.css";
+import PixelWalker from "./PixelWalker.astro";
 
 interface Props {
   theme?: "dark" | "light";
@@ -20,13 +21,18 @@ interface Props {
   /** Not for readers: a second copy on a page, or a piece used as a picture. */
   decorative?: boolean;
   class?: string;
+  /** The Pixel Walker plugin's fellow, strolling along the top bar. */
+  walker?: boolean;
 }
-const { theme = "dark", crop = [0, 0, 1320, 840], decorative = false, class: className } = Astro.props;
+const { theme = "dark", crop = [0, 0, 1320, 840], decorative = false, class: className, walker = false } = Astro.props;
 const [x, y, w, h] = crop;
 const label =
   "Zeron with a session open. The sidebar groups eight sessions under four projects, run by Claude Code, Codex and Grok; two are still working. In the open one, Claude Code explains and fixes a rate limiter bug, and the Changes panel beside it shows the diff of window.ts.";
 ---
 
 <div class:list={["zw-fit", className]} style={`--zx:${x};--zy:${y};--zw:${w};--zh:${h}`}>
-  <div class:list={["zw", "zw-session", theme === "light" ? "t1" : "t0"]} role={decorative ? undefined : "img"} aria-label={decorative ? undefined : label} aria-hidden={decorative ? "true" : undefined} set:html={fragment} />
+  <div class:list={["zw", "zw-session", theme === "light" ? "t1" : "t0"]} role={decorative ? undefined : "img"} aria-label={decorative ? undefined : label} aria-hidden={decorative ? "true" : undefined}>
+    <Fragment set:html={fragment} />
+    {walker && <PixelWalker />}
+  </div>
 </div>
