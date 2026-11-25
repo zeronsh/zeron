@@ -373,11 +373,13 @@ pub fn coalesce_ops(a: &RowOp, b: &RowOp) -> Option<RowOp> {
 /// batch) any op whose `JSON.stringify` is longer.
 pub const MAX_OP_BYTES: usize = 16 * 1024;
 
-/// Whether `op` passes the room's size check. serde_json's UTF-8 byte count
-/// is never below `JSON.stringify`'s UTF-16 length for the same value, so
-/// this errs toward "too large".
+/// Whether `op` passes the room's size check, measured as the room does
+/// (`JSON.stringify` length in UTF-16 units). Numbers JS might print longer
+/// count at their longest, so this never says "fits" for an op the room
+/// refuses. Not UTF-8 bytes: those run up to 3× the room's measure for text
+/// outside Latin script, and would cut writes the room takes whole.
 fn fits_op_budget(op: &RowOp) -> bool {
-    serde_json::to_vec(op).is_ok_and(|bytes| bytes.len() <= MAX_OP_BYTES)
+    op_budget::surely_fits(op)
 }
 
 /// The `sessions` fields the room's push notifications switch on

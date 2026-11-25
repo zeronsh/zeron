@@ -177,7 +177,30 @@ pub(super) fn never_accepted(op: &RowOp) -> Option<usize> {
     (len > MAX_OP_BYTES).then_some(len)
 }
 
+/// Whether the room's size check passes `op` under any reading: its
+/// `JSON.stringify` length in UTF-16 code units, with every number that
+/// might print differently in JS counted at its longest. Measured as the
+/// room does, so text outside Latin script (up to 3 UTF-8 bytes per UTF-16
+/// unit) is not cut or split when the room would take it whole.
+pub(super) fn surely_fits(op: &RowOp) -> bool {
+    serde_json::to_value(op).is_ok_and(|value| js_len_upper_bound(&value) <= MAX_OP_BYTES)
+}
+
+/// The longest a JS number prints: `-2.2250738585072014e-308`.
+const LONGEST_JS_NUMBER: usize = 24;
+
 fn js_len_lower_bound(value: &Value) -> usize {
+    js_len(value, 1)
+}
+
+fn js_len_upper_bound(value: &Value) -> usize {
+    js_len(value, LONGEST_JS_NUMBER)
+}
+
+/// `JSON.stringify(value).length`, exact but for numbers JS might print
+/// differently from Rust (floats, integers past 2^53), which count as
+/// `other_number`.
+fn js_len(value: &Value, other_number: usize) -> usize {
     match value {
         Value::Null => 4,
         Value::Bool(true) => 4,
@@ -187,17 +210,18 @@ fn js_len_lower_bound(value: &Value) -> usize {
             match (n.as_i64(), n.as_u64()) {
                 (Some(i), _) if i.unsigned_abs() <= SAFE => i.to_string().len(),
                 (_, Some(u)) if u <= SAFE => u.to_string().len(),
-                _ => 1,
+                _ => other_number,
             }
         }
         Value::String(s) => js_string_len(s),
         Value::Array(items) => {
-            2 + items.iter().map(js_len_lower_bound).sum::<usize>() + items.len().saturating_sub(1)
+            2 + items.iter().map(|v| js_len(v, other_number)).sum::<usize>()
+                + items.len().saturating_sub(1)
         }
         Value::Object(map) => {
             2 + map
                 .iter()
-                .map(|(k, v)| js_string_len(k) + 1 + js_len_lower_bound(v))
+                .map(|(k, v)| js_string_len(k) + 1 + js_len(v, other_number))
                 .sum::<usize>()
                 + map.len().saturating_sub(1)
         }
@@ -344,6 +368,76 @@ mod tests {
             tasks.clocks.as_ref().unwrap()["tasks"],
             "1794626320000-000000-dev-a"
         );
+    }
+
+    #[test]
+    fn text_outside_latin_script_the_room_takes_is_neither_cut_nor_split() {
+        // 6000 CJK chars: 18000 UTF-8 bytes, over the limit by bytes, but
+        // about 6000 UTF-16 units for the room. It goes out whole.
+        let title = "漢".repeat(6000);
+        let original = op(BTreeMap::from([(
+            "title".to_string(),
+            Value::String(title.clone()),
+        )]));
+        assert!(serde_json::to_vec(&original).unwrap().len() > MAX_OP_BYTES);
+        assert!(surely_fits(&original));
+        assert_eq!(fit_op(original.clone()), vec![original]);
+        // Astral chars are 4 bytes and 2 units: still measured as the room does.
+        let emoji = op(BTreeMap::from([(
+            "title".to_string(),
+            Value::String("😀".repeat(6000)),
+        )]));
+        assert!(surely_fits(&emoji));
+    }
+
+    #[test]
+    fn text_outside_latin_script_too_big_for_the_room_is_cut_by_its_measure() {
+        // 20000 CJK chars is over the room's limit too; one halving (to
+        // 10000 chars) fits it. Measured in bytes, it was cut below 5462.
+        let original = op(BTreeMap::from([(
+            "title".to_string(),
+            Value::String("漢".repeat(20_000)),
+        )]));
+        assert!(!surely_fits(&original));
+        let pieces = fit_op(original);
+        assert_eq!(pieces.len(), 1);
+        assert!(surely_fits(&pieces[0]));
+        let title = pieces[0].set.as_ref().unwrap()["title"].as_str().unwrap();
+        assert!(title.ends_with('…'));
+        assert!(
+            title.chars().count() > 9_000,
+            "cut to {}",
+            title.chars().count()
+        );
+    }
+
+    #[test]
+    fn numbers_js_might_print_longer_count_at_their_longest() {
+        assert_eq!(
+            js_len_upper_bound(&serde_json::json!(1.5)),
+            LONGEST_JS_NUMBER
+        );
+        assert_eq!(
+            js_len_upper_bound(&serde_json::json!(u64::MAX)),
+            LONGEST_JS_NUMBER
+        );
+        assert_eq!(js_len_upper_bound(&serde_json::json!(-42)), 3);
+        // An op at the limit by the room's measure fits, one unit past does not.
+        let base = js_len_upper_bound(
+            &serde_json::to_value(op(BTreeMap::from([(
+                "note".to_string(),
+                Value::String(String::new()),
+            )])))
+            .unwrap(),
+        );
+        let at = |n| {
+            op(BTreeMap::from([(
+                "note".to_string(),
+                Value::String("a".repeat(n)),
+            )]))
+        };
+        assert!(surely_fits(&at(MAX_OP_BYTES - base)));
+        assert!(!surely_fits(&at(MAX_OP_BYTES - base + 1)));
     }
 
     #[test]
