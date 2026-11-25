@@ -112,6 +112,9 @@ pub mod rule {
     /// (Worth knowing alone.) What a template's folder has and its package
     /// doesn't carry: a file (`path`), or a member of its manifest (`word`).
     pub const LEFT_OUT: &str = "left_out";
+    /// (Worth knowing alone.) A template's file (`path`) that's sent and never
+    /// used: where it is, Zeron's own files have a folder, or a file.
+    pub const NOT_USED: &str = "not_used";
     pub const TOO_LARGE: &str = "too_large";
     /// A template carrying one of the files no template replaces
     /// (`template_packages::never_templated`); `path` says which.

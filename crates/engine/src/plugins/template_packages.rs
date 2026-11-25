@@ -295,6 +295,30 @@ pub fn left_out(folder: &Path, files: &BTreeMap<String, Vec<u8>>) -> LeftOut {
     LeftOut { files: left, zeron_s: zeron_s.len(), members }
 }
 
+/// A path, as it's shown.
+pub fn shown_path(rel: &str) -> String {
+    listing::shown(rel, MAX_SHOWN_PATH)
+}
+
+/// Which of a template's `files` are never laid over Zeron's own, as this
+/// device has them (`dir`'s `.zeron`; none known, none named): a path through
+/// one of Zeron's files, or a file where Zeron has a folder.
+pub fn not_used(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    use zeron_plugin_guard::{path::fold, template::composed};
+    let own: std::collections::BTreeSet<String> = templates::zeron_s_own(dir).iter().map(|rel| fold(rel)).collect();
+    let parents = |rel: &str| -> Vec<String> { rel.match_indices('/').map(|(at, _)| rel[..at].to_owned()).collect() };
+    let folders: std::collections::BTreeSet<String> = own.iter().flat_map(|rel| parents(rel)).collect();
+    files
+        .keys()
+        .filter(|rel| composed(rel))
+        .filter(|rel| {
+            let rel = fold(rel);
+            folders.contains(&rel) || parents(&rel).iter().any(|parent| own.contains(parent))
+        })
+        .cloned()
+        .collect()
+}
+
 /// `manifest` and `files` as a package's bytes: signed by `key` in the
 /// template domain, or unsigned (a deploy token's).
 pub fn pack(manifest: &Value, files: &BTreeMap<String, Vec<u8>>, key: Option<&SigningKey>) -> Result<Vec<u8>, String> {

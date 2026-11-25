@@ -928,7 +928,7 @@ impl Plugins {
         tokio::task::spawn_blocking(move || {
             let folder = crate::plugins::templates::own_dir(&dir, &id)?;
             template_blocks::refuse(&dir, &folder, "published")?;
-            let prepared = publish::read_template(&folder)?;
+            let prepared = publish::read_template(&folder)?.against(&dir);
             // (Here a template is its folder's id; published elsewhere, its
             // manifest's: one that says both is no surprise.)
             if prepared.id() != id {

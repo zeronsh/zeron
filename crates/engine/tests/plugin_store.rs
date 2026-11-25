@@ -2676,6 +2676,40 @@ async fn what_a_template_s_package_leaves_out_is_said() {
     assert!(prepared["warnings"].as_array().unwrap().iter().any(|w| w["rule"] == "left_out" && w["path"] == "README.md"), "{prepared}");
 }
 
+/// A file that Zeron's own leave no place for is said before it's published,
+/// and stands in no one's way.
+#[tokio::test]
+async fn what_a_template_s_files_never_run_over_is_said() {
+    let store = FakeStore::start().await;
+    let d = device(&store, Some("ann"));
+    let zeron = d._dir.path().join("templates/.zeron");
+    let own = |rel: &str| {
+        std::fs::create_dir_all(zeron.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(zeron.join(rel), "return 1").unwrap();
+    };
+    let folder = making(&d, "midnight", "1.0.0", json!({}));
+    let theirs = |rel: &str| {
+        std::fs::create_dir_all(folder.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(folder.join(rel), "return 2").unwrap();
+    };
+    for rel in ["ds/button.luau/x.luau", "DS/Sidebar.luau/deep/y.luau", "Screens", "screens.luau", "ds/buttons.luau", "ds/button/x.luau", "extra/a.luau"] {
+        theirs(rel);
+    }
+    let said = async || {
+        let prepared = d.call(methods::PREPARE_TEMPLATE_PUBLISH, json!({ "id": "midnight" })).await.unwrap();
+        assert_eq!((&prepared["ok"], &prepared["package"]["files"]), (&json!(true), &json!(10)), "{prepared}");
+        prepared["warnings"].as_array().unwrap().iter().filter(|w| w["rule"] == "not_used").map(|w| {
+            assert!(w["field"] == "files" && w["words"].as_str().unwrap().ends_with("Not used: Zeron has a folder of this name, or a file where this path has a folder."), "{w}");
+            w["path"].as_str().unwrap().to_owned()
+        }).collect::<Vec<_>>()
+    };
+    assert_eq!(said().await, Vec::<String>::new(), "Zeron's own aren't known here");
+    for rel in ["app.luau", "ds/button.luau", "ds/sidebar.luau", "screens/shell/init.luau", "zeron-template.json"] {
+        own(rel);
+    }
+    assert_eq!(said().await, ["DS/Sidebar.luau/deep/y.luau", "Screens", "ds/button.luau/x.luau"]);
+}
+
 /// Only a template you're making here is published from here.
 #[tokio::test]
 async fn only_your_own_template_is_published_from_here() {

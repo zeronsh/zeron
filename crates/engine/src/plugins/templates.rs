@@ -230,6 +230,12 @@ fn zeron_files(zeron: &Path) -> Vec<String> {
     app_files(zeron, &[MANIFEST, HASHES, CATALOG])
 }
 
+/// Zeron's own app files as the app laid them here (`dir`'s `.zeron`): none
+/// when it hasn't.
+pub(super) fn zeron_s_own(dir: &Path) -> Vec<String> {
+    zeron_dir(dir).map(|zeron| zeron_files(&zeron)).unwrap_or_default()
+}
+
 /// The most `stock/<version>.json` may be (the edge reads no more).
 const MAX_STOCK_BYTES: usize = 4 * 1024 * 1024;
 

@@ -335,7 +335,8 @@ fn template_folder(target: &str, data_dir: &Path) -> anyhow::Result<PathBuf> {
 
 /// (One in Zeron's own templates folder that was taken down there, or copied
 /// from one that was, is refused, as through the running Zeron. A folder
-/// anywhere else has no list to ask.)
+/// anywhere else has no list to ask. What Zeron's own files leave unused is
+/// said where they're here: on a CI runner, say, they aren't.)
 fn read_template(dir: &Path, data_dir: &Path) -> anyhow::Result<PreparedTemplate> {
     let templates = data_dir.join(TEMPLATES_DIR);
     if let (Ok(at), Ok(root)) = (std::fs::canonicalize(dir), std::fs::canonicalize(&templates))
@@ -343,7 +344,7 @@ fn read_template(dir: &Path, data_dir: &Path) -> anyhow::Result<PreparedTemplate
     {
         template_blocks::refuse(&root, &at, "published").map_err(|e| exit(RULES, e))?;
     }
-    publish::read_template(dir).map_err(|e| exit(if install::reason_of(&e) == Some("no_manifest") { SETUP } else { RULES }, e))
+    publish::read_template(dir).map(|prepared| prepared.against(&templates)).map_err(|e| exit(if install::reason_of(&e) == Some("no_manifest") { SETUP } else { RULES }, e))
 }
 
 /// Every problem and warning, one line each, on stderr.

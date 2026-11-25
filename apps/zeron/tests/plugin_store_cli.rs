@@ -266,6 +266,17 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     assert_eq!(said.status.code(), Some(0), "{}", text(&said));
     assert!(text(&said).contains("warning: left_out (account/page.luau)"), "{}", text(&said));
     std::fs::remove_dir_all(folder.join("account")).unwrap();
+    // So is what Zeron's own files leave unused, where they're known.
+    write("ds/button.luau/x.luau", b"return {}");
+    let unknown = run.run(&store, None, "template", &["check", &arg]).await;
+    assert!(unknown.status.code() == Some(0) && !text(&unknown).contains("not_used"), "{}", text(&unknown));
+    let own = run.home.join("data/templates/.zeron/ds");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("button.luau"), "return {}").unwrap();
+    let said = run.run(&store, None, "template", &["check", &arg]).await;
+    assert!(said.status.code() == Some(0) && text(&said).contains("warning: not_used (ds/button.luau/x.luau)"), "{}", text(&said));
+    std::fs::remove_dir_all(folder.join("ds")).unwrap();
+    std::fs::remove_dir_all(run.home.join("data/templates/.zeron")).unwrap();
     // The rest is the running Zeron's (2, when none is), never a token's.
     for (token, args, words) in [
         (None, vec!["publish", "midnight"], "Zeron isn't running here"),
