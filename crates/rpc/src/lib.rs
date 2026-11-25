@@ -901,106 +901,111 @@ pub mod methods {
 /// Methods answered only over this device's own local IPC, never to a peer
 /// device through the device-room relay ([`HostRelay`] refuses them): they
 /// hand the caller this device's credentials.
+///
+/// One that names another device (`targetDeviceId`) is refused, never
+/// answered here in its place.
+pub const LOCAL_ONLY: &[&str] = &[
+    methods::ACCESS_TOKEN,
+    methods::STEP_UP,
+    methods::CANCEL_STEP_UP,
+    // This device's background engine: whether it outlives its app.
+    methods::GET_BACKGROUND_SETTINGS,
+    methods::SET_BACKGROUND_SETTINGS,
+    methods::QUIT_CHECK,
+    methods::APP_QUITTING,
+    // An API key typed into this device's app: stored here alone.
+    methods::ADD_AGENT_API_KEY,
+    methods::DELETE_ACCOUNT,
+    methods::REVIEW_TEMPLATE,
+    // Plugins: authoring, tools and the window's channel stay this
+    // device's. Your other devices may list, review, allow, turn
+    // off, install and remove plugins here (the account's own
+    // devices: Settings → Plugins' device switcher), deliver a
+    // message, and call a service (`ServePluginCall`).
+    methods::NEW_PLUGIN,
+    methods::SIGN_PLUGIN,
+    methods::VERIFY_PLUGIN,
+    methods::LIST_PLUGIN_TOOLS,
+    methods::WATCH_PLUGIN_TOOLS,
+    methods::CALL_PLUGIN_TOOL,
+    methods::SERVE_PLUGIN_TOOLS,
+    methods::PLUGIN_TOOL_RESULT,
+    methods::PLUGIN_SEND,
+    methods::CALL_PLUGIN_SERVICE,
+    methods::PLUGIN_AGENTS,
+    methods::WATCH_PLUGIN_CHANNEL,
+    methods::PLUGIN_SIGNING_KEY,
+    methods::LIST_TEMPLATES,
+    methods::CREATE_TEMPLATE,
+    methods::USE_TEMPLATE,
+    methods::TEMPLATE_STATUS,
+    methods::DELETE_TEMPLATE,
+    methods::EXPORT_TEMPLATE,
+    methods::IMPORT_TEMPLATE,
+    methods::DECIDE_TEMPLATE,
+    methods::CHECK_TEMPLATE_UPDATES,
+    methods::UPDATE_TEMPLATE,
+    methods::PREPARE_TEMPLATE_PUBLISH,
+    methods::PUBLISH_TEMPLATE,
+    methods::INSTALL_VERIFIED_TEMPLATE,
+    methods::SET_TEMPLATE_UPDATES,
+    methods::SET_TEMPLATE_PRERELEASES,
+    methods::DESCRIBE_APP,
+    methods::DESCRIBE_ELEMENTS,
+    // Themes: this device's library and choice, never another's.
+    methods::LIST_THEMES,
+    methods::GET_THEME,
+    methods::CREATE_THEME,
+    methods::UPDATE_THEME,
+    methods::DELETE_THEME,
+    methods::USE_THEME,
+    methods::WATCH_THEMES,
+    methods::SET_BUILTIN_PLUGINS,
+    methods::POST_NOTIFICATION,
+    methods::EXPORT_PLUGIN,
+    // The store: browsing and publishing are this device's app's and
+    // CLI's (your session, this device's key); deploy tokens too.
+    // Installing from it (`InstallPlugin {store}`), its updates and
+    // a plugin's pre-releases (`SetPluginPrereleases`) are managed
+    // across your devices as any plugin is.
+    methods::STORE_SEARCH,
+    methods::STORE_PLUGIN,
+    methods::STORE_VERSIONS,
+    methods::STORE_VERSION,
+    methods::STORE_CATEGORIES,
+    methods::STORE_STATS,
+    methods::STORE_FILE,
+    methods::PREPARE_PLUGIN_PUBLISH,
+    methods::PUBLISH_PLUGIN,
+    methods::STORE_MY_PLUGINS,
+    methods::STORE_VERSION_ACTION,
+    methods::LIST_DEPLOY_TOKENS,
+    methods::CREATE_DEPLOY_TOKEN,
+    methods::REVOKE_DEPLOY_TOKEN,
+    methods::STORE_REPORT,
+    methods::ACK_STORE_NOTICES,
+    // What a Cloud chat reaches: this device's app sets it, never
+    // another device (a Cloud machine among them) and never an agent.
+    methods::CLOUD_SET_REACH,
+    methods::CLOUD_SESSION_SET_REACH,
+    // Managed MCP server mutations and OAuth flows carry secrets or
+    // drive loopback auth callbacks: never cross the peer relay.
+    methods::UPSERT_MCP_SERVER,
+    methods::SET_MCP_SERVER_ENABLED,
+    methods::DELETE_MCP_SERVER,
+    methods::START_MCP_AUTH,
+    methods::POLL_MCP_AUTH,
+    methods::CANCEL_MCP_AUTH,
+    methods::DISCONNECT_MCP_AUTH,
+    // What an agent asks for is this device's to answer, here.
+    methods::REQUEST_MCP_CHANGE,
+    methods::GET_MCP_REQUEST,
+    methods::RESOLVE_MCP_REQUEST,
+];
+
+/// Whether `method` is one of [`LOCAL_ONLY`].
 pub fn local_only(method: &str) -> bool {
-    matches!(
-        method,
-        methods::ACCESS_TOKEN
-            | methods::STEP_UP
-            | methods::CANCEL_STEP_UP
-            // This device's background engine: whether it outlives its app.
-            | methods::GET_BACKGROUND_SETTINGS
-            | methods::SET_BACKGROUND_SETTINGS
-            | methods::QUIT_CHECK
-            | methods::APP_QUITTING
-            // An API key typed into this device's app: stored here alone.
-            | methods::ADD_AGENT_API_KEY
-            | methods::DELETE_ACCOUNT
-            | methods::REVIEW_TEMPLATE
-            // Plugins: authoring, tools and the window's channel stay this
-            // device's. Your other devices may list, review, allow, turn
-            // off, install and remove plugins here (the account's own
-            // devices: Settings → Plugins' device switcher), deliver a
-            // message, and call a service (`ServePluginCall`).
-            | methods::NEW_PLUGIN
-            | methods::SIGN_PLUGIN
-            | methods::VERIFY_PLUGIN
-            | methods::LIST_PLUGIN_TOOLS
-            | methods::WATCH_PLUGIN_TOOLS
-            | methods::CALL_PLUGIN_TOOL
-            | methods::SERVE_PLUGIN_TOOLS
-            | methods::PLUGIN_TOOL_RESULT
-            | methods::PLUGIN_SEND
-            | methods::CALL_PLUGIN_SERVICE
-            | methods::PLUGIN_AGENTS
-            | methods::WATCH_PLUGIN_CHANNEL
-            | methods::PLUGIN_SIGNING_KEY
-            | methods::LIST_TEMPLATES
-            | methods::CREATE_TEMPLATE
-            | methods::USE_TEMPLATE
-            | methods::TEMPLATE_STATUS
-            | methods::DELETE_TEMPLATE
-            | methods::EXPORT_TEMPLATE
-            | methods::IMPORT_TEMPLATE
-            | methods::DECIDE_TEMPLATE
-            | methods::CHECK_TEMPLATE_UPDATES
-            | methods::UPDATE_TEMPLATE
-            | methods::PREPARE_TEMPLATE_PUBLISH
-            | methods::PUBLISH_TEMPLATE
-            | methods::INSTALL_VERIFIED_TEMPLATE
-            | methods::SET_TEMPLATE_UPDATES
-            | methods::SET_TEMPLATE_PRERELEASES
-            | methods::DESCRIBE_APP
-            | methods::DESCRIBE_ELEMENTS
-            // Themes: this device's library and choice, never another's.
-            | methods::LIST_THEMES
-            | methods::GET_THEME
-            | methods::CREATE_THEME
-            | methods::UPDATE_THEME
-            | methods::DELETE_THEME
-            | methods::USE_THEME
-            | methods::WATCH_THEMES
-            | methods::SET_BUILTIN_PLUGINS
-            | methods::POST_NOTIFICATION
-            | methods::EXPORT_PLUGIN
-            // The store: browsing and publishing are this device's app's and
-            // CLI's (your session, this device's key); deploy tokens too.
-            // Installing from it (`InstallPlugin {store}`), its updates and
-            // a plugin's pre-releases (`SetPluginPrereleases`) are managed
-            // across your devices as any plugin is.
-            | methods::STORE_SEARCH
-            | methods::STORE_PLUGIN
-            | methods::STORE_VERSIONS
-            | methods::STORE_VERSION
-            | methods::STORE_CATEGORIES
-            | methods::STORE_STATS
-            | methods::STORE_FILE
-            | methods::PREPARE_PLUGIN_PUBLISH
-            | methods::PUBLISH_PLUGIN
-            | methods::STORE_MY_PLUGINS
-            | methods::STORE_VERSION_ACTION
-            | methods::LIST_DEPLOY_TOKENS
-            | methods::CREATE_DEPLOY_TOKEN
-            | methods::REVOKE_DEPLOY_TOKEN
-            | methods::STORE_REPORT
-            | methods::ACK_STORE_NOTICES
-            // What a Cloud chat reaches: this device's app sets it, never
-            // another device (a Cloud machine among them) and never an agent.
-            | methods::CLOUD_SET_REACH
-            | methods::CLOUD_SESSION_SET_REACH
-            // Managed MCP server mutations and OAuth flows carry secrets or
-            // drive loopback auth callbacks: never cross the peer relay.
-            | methods::UPSERT_MCP_SERVER
-            | methods::SET_MCP_SERVER_ENABLED
-            | methods::DELETE_MCP_SERVER
-            | methods::START_MCP_AUTH
-            | methods::POLL_MCP_AUTH
-            | methods::CANCEL_MCP_AUTH
-            | methods::DISCONNECT_MCP_AUTH
-            // What an agent asks for is this device's to answer, here.
-            | methods::REQUEST_MCP_CHANGE
-            | methods::GET_MCP_REQUEST
-            | methods::RESOLVE_MCP_REQUEST
-    )
+    LOCAL_ONLY.contains(&method)
 }
 
 /// Methods a peer device may not have answered here even though they're

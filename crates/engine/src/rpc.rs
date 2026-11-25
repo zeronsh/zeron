@@ -2707,6 +2707,12 @@ fn include_registry(params: &serde_json::Value) -> bool {
 
 /// The refusal of a change to another device's plugins that wasn't the
 /// person's (`zeron_rpc::person_only_from_peer`).
+/// A [`zeron_rpc::LOCAL_ONLY`] method asked for another device.
+fn only_here(method: &str, target: &serde_json::Value) -> RpcError {
+    let named: String = target.as_str().map_or_else(|| target.to_string(), str::to_owned).chars().filter(|c| !c.is_control()).take(80).collect();
+    RpcError::Failed(format!("{method}: only this device's own window can do that. It was asked of another device (\"{named}\"), and nothing was done."))
+}
+
 fn plugins_need_person() -> RpcError {
     RpcError::Failed(crate::plugins::install::failure(
         crate::plugins::install::reason::NEEDS_PERSON,
@@ -3586,6 +3592,14 @@ impl crate::remote_terminals::Relay for EngineRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        // What's only this device's, asked for another: never done here in
+        // its place.
+        if zeron_rpc::local_only(method)
+            && let Some(target) = params.get("targetDeviceId").filter(|t| !t.is_null())
+            && target.as_str() != Some(self.doc_host.device_id())
+        {
+            return Err(only_here(method, target));
+        }
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         let mut params = self.agent_gate(method, params)?;
@@ -7203,6 +7217,51 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    /// A method that's only this device's, asked for another: refused, naming
+    /// it, and nothing done here. Every one of them, whoever asks.
+    #[tokio::test]
+    async fn a_local_only_call_for_another_device_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let templates = temp.path().join("templates");
+        for id in [".zeron", "midnight"] {
+            std::fs::create_dir_all(templates.join(id)).unwrap();
+            std::fs::write(templates.join(id).join("zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+        }
+        let refused = |error: &RpcError, method: &str, target: &str| matches!(error, RpcError::Failed(m) if m.contains(method) && m.contains(target) && m.contains("only this device's own window"));
+        assert!(zeron_rpc::LOCAL_ONLY.len() > 70);
+        for method in zeron_rpc::LOCAL_ONLY {
+            assert!(!forwardable(method) && zeron_rpc::local_only(method), "{method} isn't both");
+            for (params, named) in [
+                (serde_json::json!({ "targetDeviceId": "other-device", "id": "midnight" }), "other-device"),
+                (serde_json::json!({ "targetDeviceId": "", "id": "midnight" }), ""),
+                (serde_json::json!({ "targetDeviceId": ["other-device"], "id": "midnight" }), "other-device"),
+            ] {
+                for caller in [zeron_rpc::Caller::Local, zeron_rpc::Caller::Agent { chat: None }] {
+                    let error = zeron_rpc::with_caller(caller, rpc.handle(method, params.clone())).await.err();
+                    assert!(error.as_ref().is_some_and(|e| refused(e, method, named)), "{method} {params}: {error:?}");
+                }
+            }
+        }
+        assert!(!templates.join(".active").exists(), "nothing was done here");
+        // Its own id, or none, is itself; a target that's long or odd is said
+        // short and plainly.
+        let own = core.doc_host.device_id().to_owned();
+        for params in [serde_json::json!({}), serde_json::json!({ "targetDeviceId": own }), serde_json::json!({ "targetDeviceId": null })] {
+            assert!(rpc.handle(methods::LIST_TEMPLATES, params.clone()).await.is_ok(), "{params}");
+        }
+        let odd = format!("{}\n\u{1b}[31m", "d".repeat(500));
+        let error = rpc.handle(methods::USE_TEMPLATE, serde_json::json!({ "id": "midnight", "targetDeviceId": odd })).await.err().unwrap().to_string();
+        assert!(error.len() < 400 && !error.contains(|c: char| c.is_control()), "{error}");
     }
 
     #[test]
