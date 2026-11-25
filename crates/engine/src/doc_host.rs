@@ -7226,6 +7226,11 @@ impl DocHost {
             .repos
             .get()
             .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
+        if !spec.repositories.is_empty() {
+            return self
+                .materialize_project_worktree(chat_id, spec, repos)
+                .await;
+        }
         let worktree = repos
             .create_worktree(std::path::Path::new(&spec.repo_path), &spec.base)
             .await?;
@@ -7236,6 +7241,41 @@ impl DocHost {
             "worktree materialized for run"
         );
         Ok((worktree.path.clone(), Some(worktree)))
+    }
+
+    /// [`Self::materialize_worktree`] for a project holding several
+    /// repositories: one folder laid out like the project, a worktree of
+    /// each repository named on one branch ([`crate::repos::ProjectWorktree`]).
+    /// The chat runs in that folder; a chat already in one of this project's
+    /// (a retried first run) keeps it.
+    async fn materialize_project_worktree(
+        &self,
+        chat_id: &str,
+        spec: &zeron_proto::WorktreeSpec,
+        repos: &crate::repos::Repos,
+    ) -> Result<(String, Option<zeron_proto::Worktree>), EngineError> {
+        let project = std::path::Path::new(&spec.repo_path);
+        if let Some(ws) = self.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(cwd) = chat.cwd
+            && repos
+                .is_project_worktree_of(std::path::Path::new(&cwd), project)
+                .await
+        {
+            tracing::info!(chat = %chat_id, cwd = %cwd, "project worktree spec: reusing the chat's existing worktree");
+            return Ok((cwd, None));
+        }
+        let made = repos
+            .create_project_worktree(project, &spec.repositories, &spec.base)
+            .await?;
+        tracing::info!(
+            chat = %chat_id,
+            path = %made.worktree.path,
+            branch = %made.worktree.branch,
+            repositories = made.repositories.len(),
+            "project worktree materialized for run"
+        );
+        Ok((made.worktree.path.clone(), Some(made.worktree)))
     }
 
     fn complete_worktree_setup_handoff(

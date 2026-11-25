@@ -534,7 +534,7 @@ stub.send = function(req: any)
 		end
 	end
 	if req.fresh then
-		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}`)
+		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}{if req.repositories then "|" .. table.concat(req.repositories, ",") else ""}`)
 	end
 	if req.fresh then
 		-- (On Cloud, on its way to a machine still to come: sending, as the
@@ -1266,6 +1266,68 @@ ui.command {
 		sessions.now:set(now)
 	end,
 }
+-- Acme: a project folder holding several repositories (no git of its own),
+-- on this computer; its repositories as the host lists them.
+ui.command {
+	id = "fixture.acme_project",
+	title = "Fixture: Acme, a project folder holding several repositories",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "acme", name = "Acme", device = "mac", path = "/tmp/acme", git = false })
+		sessions.now:set(now)
+	end,
+}
+-- Many: a folder of a dozen clones (more than are chosen at first).
+ui.command {
+	id = "fixture.clones_project",
+	title = "Fixture: Clones, a folder of a dozen repositories",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "clones", name = "Clones", device = "mac", path = "/tmp/clones", git = false })
+		sessions.now:set(now)
+	end,
+}
+local REPOSITORIES: { [string]: any } = {
+	["/tmp/acme"] = {
+		repo = false,
+		list = {
+			{ path = "api", branch = "main" },
+			{ path = "packages/ui", branch = "main" },
+			{ path = "scratch", empty = true },
+			{ path = "web", branch = "develop" },
+		},
+	},
+}
+do
+	local list = {}
+	for i = 1, 12 do
+		table.insert(list, { path = string.format("clone-%02d", i), branch = "main" })
+	end
+	REPOSITORIES["/tmp/clones"] = { repo = false, list = list }
+end
+-- A host too old to list them (it refuses the call): `repositories_refused`.
+local REPOSITORIES_REFUSED = ui.state("fixture_repositories_refused", false)
+ui.command {
+	id = "repositories_refused",
+	title = "The host is too old to list a project's repositories",
+	run = function()
+		REPOSITORIES_REFUSED:set(true)
+	end,
+}
+stub.repositories = function(path: string, device: string?): any
+	note(`repositories:{path}:{device or "here"}`)
+	if REPOSITORIES_REFUSED:peek() then
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err("unsupported")
+			end,
+		}
+	end
+	return settled(REPOSITORIES[path] or { repo = false, list = {} })
+end
+
 -- This device's connection as the shell hears it (`connection`).
 for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offline", "offline" }, { "connection_back", nil } } do
 	ui.command {

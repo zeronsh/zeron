@@ -1212,6 +1212,7 @@ local function Composer(): Node
 				T.sent_here(req.message_id :: string)
 				req.cwd = plan.cwd
 				req.worktree = plan.worktree
+				req.repositories = plan.repositories
 				-- Opened first, then sent: the host shows a prompt at once
 				-- only for the chat it has open, so the new page has your
 				-- message from its first frame, sending, rather than nothing
@@ -1421,6 +1422,7 @@ local function Composer(): Node
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
+			repositories = where.repositories,
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,

@@ -114,6 +114,7 @@ return {
 	SearchField = require("@self/search_field"),
 	TokenField = require("@self/token_field"),
 	Checkbox = require("@self/checkbox"),
+	RepositoryChoice = require("@self/repository_choice"),
 	RadioGroup = require("@self/radio"),
 	Select = require("@self/select"),
 	Slider = require("@self/slider"),

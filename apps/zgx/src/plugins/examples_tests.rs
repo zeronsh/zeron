@@ -2808,7 +2808,11 @@ fn git_in_within(
             h.borrow_mut().push(("service".into(), asked.to_string()));
             let method = asked["method"].as_str().unwrap_or_default().to_string();
             let world = w.borrow();
-            let answer = if let Some(why) = world["fail"][&method].as_str() {
+            // (A failure in one folder alone: `fail_in[cwd][method]`.)
+            let cwd = asked["args"]["cwd"].as_str().unwrap_or_default().to_string();
+            let answer = if let Some(why) = world["fail_in"][&cwd][&method].as_str() {
+                Err(why.to_string())
+            } else if let Some(why) = world["fail"][&method].as_str() {
                 Err(why.to_string())
             } else if method == "changes" {
                 let scope = asked["args"]["scope"].as_str().unwrap_or("working");
@@ -2889,6 +2893,46 @@ fn git_s_changes_show_a_session_s_work_tree_on_its_device() {
     assert!(app.wait_until(|_| asked_service(&heard, "status").len() > asked));
     app.frames(10);
     assert_eq!(asked_service(&heard, "changes").len(), before, "the files are asked again only as they move");
+    assert_eq!(app.error(), None);
+}
+
+/// A chat whose folder holds several repositories rather than being one (a
+/// project's, or a worktree of one): the tab shows one of them (the first
+/// with changes), names it in a chip beside the branch, and asks every
+/// question of it; another chosen there is asked instead.
+#[test]
+fn git_shows_one_of_a_folder_s_repositories_and_switches_between_them() {
+    let mut world = git_world();
+    world["fail_in"] = json!({ "/work/acme": { "status": "failed: not_a_repo: fatal: not a git repository" } });
+    world["repositories"] = json!({ "repo": false, "list": [
+        { "path": "api", "branch": "main", "changed": 0 },
+        { "path": "web", "branch": "feature/graph", "changed": 2 },
+    ] });
+    let records = json!({ "sessions": { "s1": {
+        "title": "Wire login across the stack", "status": "done", "device": "box", "cwd": "/work/acme",
+        "branch": "zeron/swift-otter", "project": "acme",
+    } }, "files_read": true });
+    let (mut app, heard, _) = git_in("git_fixture.luau", records, world, None);
+    assert_eq!(app.error(), None);
+    // The folder said no; its repositories were asked for, and the one with
+    // changes shown, its files listed.
+    assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{:?}\n{}", service_calls(&heard), app.tree());
+    let found = asked_service(&heard, "repositories");
+    assert_eq!(found[0]["args"]["cwd"], "/work/acme", "{found:?}");
+    let status = asked_service(&heard, "status");
+    assert_eq!(status.last().unwrap()["args"]["cwd"], "/work/acme/web", "{status:?}");
+    assert_eq!(asked_service(&heard, "changes").last().unwrap()["args"]["cwd"], "/work/acme/web");
+    // Its chip, beside the branch's.
+    assert!(app.find("#git-repository").is_some(), "{}", app.tree());
+    assert!(app.tree().contains("\"web\""), "{}", app.tree());
+    // Another repository chosen: asked of it from then on.
+    app.click("#git-repository >> role:button");
+    app.frames(10);
+    assert!(app.wait_until(|app| app.find("role:option ~\"api\"").is_some()), "{}", app.tree());
+    let asked = asked_service(&heard, "status").len();
+    app.click("role:option ~\"api\"");
+    assert!(app.wait_until(|_| asked_service(&heard, "status").len() > asked), "{:?}", service_calls(&heard));
+    assert_eq!(asked_service(&heard, "status").last().unwrap()["args"]["cwd"], "/work/acme/api");
     assert_eq!(app.error(), None);
 }
 

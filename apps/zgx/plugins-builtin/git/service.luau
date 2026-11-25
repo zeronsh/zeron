@@ -526,7 +526,12 @@ local function changes(args: any): any
 			out.base = base
 			out.files = diff_files(cwd, out.a, tree)
 		elseif scope == "turn" then
-			local turn = (turns:get() or {})[args.chat or ""]
+			local kept = turns:get() or {}
+			local turn = kept[args.chat or ""]
+			-- (A repository in a chat's folder of several: noted on its own.)
+			if not turn or turn.cwd ~= cwd then
+				turn = kept[`{args.chat or ""}|{cwd}`]
+			end
 			if not turn or turn.cwd ~= cwd then
 				error("no_turn: No turn has started here since Zeron was set up", 0)
 			end
@@ -998,13 +1003,13 @@ end
 -- A chat's turn started here (its window saw it go to work): where the
 -- work tree stands now, for Last turn. A second word within a few seconds
 -- for the same chat (another window, the same turn) keeps the first.
-local function turn_start(args: any): any
-	local cwd = check_cwd(args.cwd)
-	local chat = args.chat
-	assert(type(chat) == "string" and chat ~= "", "turn_start needs the chat")
+-- Where `cwd`'s work tree stood as a turn began, kept under `key` (the
+-- chat's id; for a repository in a chat's folder of several, the chat's id
+-- and that repository's folder).
+local function note_turn(cwd: string, key: string): any
 	local now = os.time()
 	local kept = turns:get() or {}
-	local was = kept[chat]
+	local was = kept[key]
 	if was and was.cwd == cwd and now - (was.at or 0) < 15 then
 		return was
 	end
@@ -1013,7 +1018,7 @@ local function turn_start(args: any): any
 		return snapshot(cwd, if head.status == 0 then trim(head.stdout) else nil)
 	end)
 	kept = table.clone(turns:get() or {})
-	kept[chat] = { cwd = cwd, tree = tree, at = now }
+	kept[key] = { cwd = cwd, tree = tree, at = now }
 	-- (The newest 200.)
 	local ids = {}
 	for id in kept do
@@ -1028,7 +1033,29 @@ local function turn_start(args: any): any
 		end
 	end
 	turns:set(kept)
-	return kept[chat]
+	return kept[key]
+end
+
+local function turn_start(args: any): any
+	local cwd = check_cwd(args.cwd)
+	local chat = args.chat
+	assert(type(chat) == "string" and chat ~= "", "turn_start needs the chat")
+	-- A folder holding several repositories (a project's, or a worktree of
+	-- one): each of them noted on its own.
+	if run(cwd, { "rev-parse", "--is-inside-work-tree" }).status ~= 0 then
+		local noted = {}
+		for _, r in zeron.repositories(cwd):await() or {} do
+			if type(r) == "table" and type(r.path) == "string" then
+				local at = `{cwd}/{r.path}`
+				local ok, turn = pcall(note_turn, at, `{chat}|{at}`)
+				if ok then
+					noted[r.path] = turn
+				end
+			end
+		end
+		return noted
+	end
+	return note_turn(cwd, chat)
 end
 
 -- What the branch adds over its base, in lines: the Branch scope's own
@@ -1056,6 +1083,42 @@ local function branch_totals(args: any): any
 		end
 		return { base = base, adds = adds, dels = dels }
 	end)
+end
+
+-- The repositories in a chat's folder that isn't one (a project's own
+-- folder holding several, or a worktree of such a project): each one's path
+-- in it, its branch and how many files changed there, for the tab's
+-- repository switcher. A folder inside a repository says so (`repo`) and
+-- lists none: it's that repository's.
+local function repositories(args: any): any
+	local cwd = check_cwd(args.cwd)
+	if run(cwd, { "rev-parse", "--is-inside-work-tree" }).status == 0 then
+		return { repo = true, list = {} }
+	end
+	local found = zeron.repositories(cwd):await() or {}
+	local list = {}
+	for _, r in found do
+		if type(r) == "table" and type(r.path) == "string" then
+			local at = `{cwd}/{r.path}`
+			local branch = run(at, { "branch", "--show-current" })
+			-- (One line a file, a rename's included; a name with a line break
+			-- in it is quoted.)
+			local status = run(at, { "status", "--porcelain=v1", "--untracked-files=normal" })
+			local changed = 0
+			if status.status == 0 then
+				for _ in string.gmatch(status.stdout, "[^\n]+") do
+					changed += 1
+				end
+			end
+			table.insert(list, {
+				path = r.path,
+				branch = if branch.status == 0 and trim(branch.stdout) ~= "" then trim(branch.stdout) else nil,
+				changed = changed,
+				linked = r.linked == true,
+			})
+		end
+	end
+	return { repo = false, list = list }
 end
 
 -- -- watching -------------------------------------------------------------
@@ -1310,6 +1373,7 @@ zeron.serve("history", history, { safe = true })
 zeron.serve("branches", branches, { safe = true })
 zeron.serve("commit_info", commit_of, { safe = true })
 zeron.serve("branch_totals", branch_totals, { safe = true })
+zeron.serve("repositories", repositories, { safe = true })
 zeron.serve("stage", stage)
 zeron.serve("unstage", unstage)
 zeron.serve("discard", discard)

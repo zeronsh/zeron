@@ -128,6 +128,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
                 repo_path: repo_path.into(),
                 base: "main".into(),
                 space_id: space_id.map(str::to_string),
+                repositories: Vec::new(),
             }),
             env: Default::default(),
             extra_mcp: Vec::new(),
@@ -444,6 +445,195 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool, test_setup: b
     );
     assert_eq!(core.repos.current_branch(&repo_dir).await.unwrap(), "main");
     assert_eq!(core.workspace.read_spaces().unwrap().len(), 1);
+
+    core.shutdown().await;
+}
+
+fn repository(at: &std::path::Path, branch: &str) {
+    std::fs::create_dir_all(at).unwrap();
+    git(at, &["init", "-b", branch]);
+    git(at, &["config", "user.email", "t@example.com"]);
+    git(at, &["config", "user.name", "Test"]);
+    std::fs::write(at.join("README.md"), "hello\n").unwrap();
+    git(at, &["add", "."]);
+    git(at, &["commit", "-m", "init"]);
+}
+
+/// A project folder holding several repositories (and no `.git` of its
+/// own): `ListProjectRepositories` names them, and a Run naming some of
+/// them makes ONE folder laid out like the project with a worktree of each
+/// on one branch, runs there, stamps the chat with it, starts the project's
+/// setup Action in it, and reuses it on a retried first run.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_naming_repositories_makes_one_project_worktree() {
+    const PROJECT_CHAT: &str = "chat-project-worktree";
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let worktrees_root = tmp_path.join("worktrees");
+    let project = tmp_path.join("acme");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("AGENTS.md"), "read me first\n").unwrap();
+    repository(&project.join("api"), "main");
+    repository(&project.join("web"), "trunk");
+    repository(&project.join("docs"), "main");
+    let project_path = project.to_string_lossy().to_string();
+
+    let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
+    let core = EngineCore::assemble(
+        &tmp_path.join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    core.workspace
+        .create_space("space-acme", &core.device_id, &project_path, None, false)
+        .expect("create project");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::SET_WORKTREE_SETTINGS,
+            serde_json::json!({ "useCustomDirectory": true, "customDirectory": worktrees_root }),
+        )
+        .await
+        .expect("worktree location");
+    client
+        .call(
+            zeron_rpc::methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-acme",
+                "action": ProjectActionDraft {
+                    name: "Setup".into(),
+                    command: "printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path".into(),
+                    icon: ProjectActionIcon::Configure,
+                    run_on_worktree_create: true,
+                }
+            }),
+        )
+        .await
+        .expect("save setup Action");
+
+    // What the composer asks before offering it.
+    let listing = client
+        .call(
+            zeron_rpc::methods::LIST_PROJECT_REPOSITORIES,
+            serde_json::json!({ "path": project_path }),
+        )
+        .await
+        .expect("ListProjectRepositories");
+    assert_eq!(listing["isRepo"], false);
+    let paths: Vec<_> = listing["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(paths, ["api", "docs", "web"]);
+    assert_eq!(listing["repositories"][2]["branch"], "trunk");
+    assert_eq!(listing["repositories"][2]["hasCommits"], true);
+
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": PROJECT_CHAT,
+                "spaceId": "space-acme",
+                "deviceId": core.device_id,
+            }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(PROJECT_CHAT, "Pre-titled")
+        .expect("rename chat");
+    let mut payload = run_payload("msg-pw-1", &project_path, Some("space-acme"));
+    if let SessionCommandPayload::Run { request, .. } = &mut payload {
+        let spec = request.worktree.as_mut().unwrap();
+        spec.base = "HEAD".into();
+        spec.repositories = vec!["web".into(), "api".into()];
+    }
+    let first_command = core
+        .doc_host
+        .queue_command(PROJECT_CHAT, payload.clone())
+        .expect("queue run");
+    wait_for(|| !cwds.lock().unwrap().is_empty(), "the run").await;
+
+    let cwd = cwds.lock().unwrap()[0].clone();
+    let folder = PathBuf::from(&cwd);
+    assert!(folder.starts_with(worktrees_root.join("acme")), "{cwd}");
+    assert!(
+        !folder.join(".git").exists(),
+        "the project worktree is a folder"
+    );
+    for repo in ["api", "web"] {
+        assert!(
+            folder.join(repo).join(".git").is_file(),
+            "{repo} is a linked worktree"
+        );
+    }
+    assert!(
+        !folder.join("docs").exists(),
+        "a repository not chosen is left out"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("AGENTS.md")).unwrap(),
+        "read me first\n"
+    );
+    let chat = core.workspace.chat(PROJECT_CHAT).unwrap().unwrap();
+    assert_eq!(chat.cwd.as_deref(), Some(cwd.as_str()));
+    let branch = chat.branch.expect("branch stamped");
+    let name = folder.file_name().unwrap().to_string_lossy().to_string();
+    assert_eq!(branch, format!("zeron/{name}"));
+    for repo in ["api", "web"] {
+        assert_eq!(
+            core.repos.current_branch(&folder.join(repo)).await.unwrap(),
+            branch
+        );
+    }
+    let setup = core
+        .project_actions
+        .take_setup_handoff(&first_command, PROJECT_CHAT)
+        .expect("setup handoff");
+    assert!(setup.setup_error.is_none(), "{:?}", setup.setup_error);
+    assert!(setup.setup_action.is_some());
+    wait_for(
+        || folder.join("setup-worktree-path").is_file(),
+        "setup Action",
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(folder.join("setup-worktree-path")).unwrap(),
+        cwd
+    );
+
+    // A retried first run keeps the chat's project worktree.
+    if let SessionCommandPayload::Run { message_id, .. } = &mut payload {
+        *message_id = "msg-pw-2".into();
+    }
+    core.doc_host
+        .queue_command(PROJECT_CHAT, payload)
+        .expect("queue retry");
+    wait_for(|| cwds.lock().unwrap().len() == 2, "the retry").await;
+    assert_eq!(cwds.lock().unwrap()[1], cwd);
+    assert_eq!(
+        std::fs::read_dir(worktrees_root.join("acme"))
+            .unwrap()
+            .count(),
+        1,
+        "one project worktree for the chat"
+    );
+    // The project's own folder is as it was.
+    assert!(!project.join(".git").exists());
+    assert_eq!(
+        core.repos
+            .current_branch(&project.join("web"))
+            .await
+            .unwrap(),
+        "trunk"
+    );
 
     core.shutdown().await;
 }

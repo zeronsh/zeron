@@ -28,6 +28,9 @@ use crate::EngineError;
 use crate::WorkspaceSearch;
 use crate::workspace_search::{NameKinds, normalize_name_query};
 
+mod project_worktrees;
+pub use project_worktrees::{ProjectWorktree, repositories_in};
+
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.
 const PATH_EXISTS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -62,6 +65,21 @@ const NOUNS: &[&str] = &[
     "otter", "harbor", "falcon", "cedar", "meadow", "zeron", "delta", "ember", "lynx", "maple",
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
+
+/// A worktree's generated name (`swift-otter`): its folder's, and its
+/// `zeron/<name>` branch's. Each attempt seeds another.
+fn generated_worktree_name(attempt: u64) -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(attempt)
+        .wrapping_add(attempt.wrapping_mul(0x9E37_79B9));
+    format!(
+        "{}-{}",
+        ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
+        NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
+    )
+}
 
 /// Canonical identity shared by every chat operating in this exact worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1450,16 +1468,7 @@ impl Repos {
             .collect();
         let mut name = None;
         for attempt in 0..50u64 {
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(attempt)
-                .wrapping_add(attempt.wrapping_mul(0x9E37_79B9));
-            let candidate = format!(
-                "{}-{}",
-                ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
-                NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
-            );
+            let candidate = generated_worktree_name(attempt);
             if !base.join(&candidate).exists() && !existing.contains(&format!("zeron/{candidate}"))
             {
                 name = Some(candidate);
@@ -1473,22 +1482,8 @@ impl Repos {
         validate_windows_worktree_path(&path.to_string_lossy())?;
         std::fs::create_dir_all(&base)?;
         let branch_name = format!("zeron/{name}");
-        #[cfg(windows)]
-        self.add_worktree_in_two_steps(repo_path, &path, &branch_name, branch)
+        self.add_worktree_checkout(repo_path, &path, &branch_name, branch)
             .await?;
-        #[cfg(not(windows))]
-        self.git(
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch_name,
-                &path.to_string_lossy(),
-                branch,
-            ],
-            Some(repo_path),
-        )
-        .await?;
         let checkout = self.checkout_identity(&path).await?;
         Ok(Worktree {
             repo_path: repo_path.to_string_lossy().to_string(),
@@ -1497,6 +1492,35 @@ impl Repos {
             name,
             checkout_id: Some(checkout.id),
         })
+    }
+
+    /// `git worktree add -b <branch_name> <path> <base>` from `repo_path`, as
+    /// this platform needs it (on Windows in two steps, see
+    /// [`Self::add_worktree_in_two_steps`]).
+    async fn add_worktree_checkout(
+        &self,
+        repo_path: &Path,
+        path: &Path,
+        branch_name: &str,
+        base: &str,
+    ) -> Result<(), EngineError> {
+        #[cfg(windows)]
+        self.add_worktree_in_two_steps(repo_path, path, branch_name, base)
+            .await?;
+        #[cfg(not(windows))]
+        self.git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch_name,
+                &path.to_string_lossy(),
+                base,
+            ],
+            Some(repo_path),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Git's built-in checkout passes `<destination>/.git` in GIT_DIR, whose
@@ -1623,6 +1647,13 @@ impl Repos {
         expected_branch: &str,
         title: &str,
     ) -> Result<String, EngineError> {
+        // A project's worktree (a folder of its repositories' worktrees, not
+        // a checkout itself): every one of them, to one name.
+        if project_worktrees::is_project_worktree_folder(worktree_path).await {
+            return self
+                .rename_project_worktree_branch(worktree_path, expected_branch, title)
+                .await;
+        }
         let current = self.current_branch(worktree_path).await?;
         let folder = worktree_path
             .file_name()
@@ -1664,6 +1695,11 @@ impl Repos {
         repo_path: &Path,
         worktree_path: &Path,
     ) -> Result<(), EngineError> {
+        // A project's worktree: each repository's worktree in it, then the
+        // folder (refused for a folder holding none: never a plain one).
+        if project_worktrees::is_project_worktree_folder(worktree_path).await {
+            return self.delete_project_worktree(worktree_path).await;
+        }
         let branch = if worktree_path.exists() {
             self.current_branch(worktree_path).await.unwrap_or_default()
         } else {

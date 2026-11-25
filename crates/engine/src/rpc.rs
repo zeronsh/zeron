@@ -291,6 +291,14 @@ struct CreateWorktreeParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ListProjectRepositoriesParams {
+    /// The project's folder on this device (or a project worktree of it).
+    #[serde(alias = "repoPath")]
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DeleteWorktreeParams {
     #[serde(alias = "repo")]
     repo_path: String,
@@ -2895,6 +2903,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
+            | methods::LIST_PROJECT_REPOSITORIES
             // Project Actions live in the owning engine's private profile store.
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
@@ -6016,6 +6025,15 @@ impl RpcService for EngineRpc {
                     }
                 }
                 RpcReply::value(&outcome)
+            }
+            methods::LIST_PROJECT_REPOSITORIES => {
+                let p: ListProjectRepositoriesParams = parse_params(params)?;
+                let listing = self
+                    .repos
+                    .project_repositories(std::path::Path::new(&p.path))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&listing)
             }
             methods::DELETE_WORKTREE => {
                 let p: DeleteWorktreeParams = parse_params(params)?;

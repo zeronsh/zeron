@@ -1462,6 +1462,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // `ensure_refs`): `{ path, device? }`, the device only when it isn't this
     // one (the engine forwards it there).
     host.async_action("chat.refs", move |args| async move { refs(args).await.map_err(String::from) });
+    // The repositories in a project folder that isn't one itself, for a
+    // worktree of the whole project: `{ path, device? }` as for refs. An
+    // engine from before project worktrees refuses it, and the composer
+    // offers none (crates/proto `capabilities::PROJECT_WORKTREES_V1`).
+    host.async_action("chat.repositories", move |args| async move { repositories(args).await.map_err(String::from) });
 }
 
 /// Where a subagent's uploaded transcript is: `{chat}/{doc}`, the chat it
@@ -1518,6 +1523,63 @@ async fn refs(args: Value) -> Result<Value, Outcome> {
     }
     let found = engine::get().call("ListRefs", params).await.map_err(|e| engine::outcome(&e))?;
     Ok(refs_value(&found))
+}
+
+/// A project folder's repositories (`ListProjectRepositories`), as the
+/// composer's worktree choice lists them: `{ repo, list = { { path, branch?,
+/// empty? } } }`, `repo` when the folder is a repository itself (its own
+/// worktrees then), `empty` for one with no commit to branch from. A
+/// project worktree's own (linked) checkouts are never offered.
+async fn repositories(args: Value) -> Result<Value, Outcome> {
+    let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
+    let path = field("path").ok_or("missing")?;
+    let mut params = json!({ "path": path });
+    if let Some(device) = field("device") {
+        params["targetDeviceId"] = Json::from(device);
+    }
+    let found = engine::get().call("ListProjectRepositories", params).await.map_err(|e| engine::outcome(&e))?;
+    Ok(repositories_value(&found))
+}
+
+fn repositories_value(found: &Json) -> Value {
+    let list: Vec<Value> = found["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["linked"].as_bool() != Some(true))
+        .filter_map(|r| {
+            let path = r["path"].as_str().filter(|p| !p.is_empty())?;
+            let mut fields = vec![("path", Value::from(path))];
+            if let Some(branch) = r["branch"].as_str() {
+                fields.push(("branch", Value::from(branch)));
+            }
+            if r["hasCommits"].as_bool() != Some(true) {
+                fields.push(("empty", Value::Bool(true)));
+            }
+            Some(Value::record(fields))
+        })
+        .collect();
+    Value::record(vec![
+        ("repo", Value::Bool(found["isRepo"].as_bool() == Some(true))),
+        ("truncated", Value::Bool(found["truncated"].as_bool() == Some(true))),
+        ("list", Value::List(list.into())),
+    ])
+}
+
+/// A new chat's worktree, as its first run asks the host for it: off
+/// `branch` (HEAD with none) in the repository at `cwd`; or, naming
+/// `repositories` in the project folder at `cwd`, one worktree of the
+/// project holding each of them (`WorktreeSpec::repositories`).
+fn worktree_spec(cwd: &str, branch: Option<String>, project: Option<String>, repositories: Vec<String>) -> Json {
+    let mut spec = json!({
+        "repoPath": cwd,
+        "base": branch.unwrap_or_else(|| "HEAD".into()),
+        "spaceId": project,
+    });
+    if !repositories.is_empty() {
+        spec["repositories"] = json!(repositories);
+    }
+    spec
 }
 
 fn refs_value(found: &Json) -> Value {
@@ -3370,11 +3432,15 @@ impl View {
             request["attachments"] = json!(paths);
         }
         if fresh && req.field("worktree").is_some_and(Value::truthy) {
-            request["worktree"] = json!({
-                "repoPath": cwd,
-                "base": field("branch").unwrap_or_else(|| "HEAD".into()),
-                "spaceId": field("project"),
-            });
+            let repositories = req
+                .field("repositories")
+                .map(Value::list)
+                .unwrap_or_default()
+                .iter()
+                .map(text)
+                .filter(|path| !path.is_empty())
+                .collect();
+            request["worktree"] = worktree_spec(&cwd, field("branch"), field("project"), repositories);
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
         let sent = match set_config {
@@ -7447,6 +7513,45 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A worktree of one repository asks as it always did (no
+    /// `repositories` for an older host to misread); a project's names its
+    /// repositories.
+    #[test]
+    fn a_project_worktree_names_its_repositories() {
+        use serde_json::json;
+        let one = super::worktree_spec("/r/atlas", Some("main".into()), Some("p".into()), vec![]);
+        assert_eq!(one, json!({ "repoPath": "/r/atlas", "base": "main", "spaceId": "p" }));
+        let many = super::worktree_spec("/w/acme", None, Some("p".into()), vec!["api".into(), "packages/ui".into()]);
+        assert_eq!(many["base"], "HEAD");
+        assert_eq!(many["repositories"], json!(["api", "packages/ui"]));
+    }
+
+    /// The composer's list leaves out a project worktree's own checkouts and
+    /// says which have nothing to branch from.
+    #[test]
+    fn a_project_s_repositories_as_the_composer_lists_them() {
+        use serde_json::json;
+        use zgx_script::Value;
+        let found = json!({
+            "isRepo": false,
+            "repositories": [
+                { "path": "api", "branch": "main", "hasCommits": true },
+                { "path": "fresh", "hasCommits": false },
+                { "path": "old", "branch": "zeron/x", "hasCommits": true, "linked": true },
+            ],
+        });
+        let v = super::repositories_value(&found);
+        assert!(!v.field("repo").is_some_and(Value::truthy));
+        let list = v.field("list").map(Value::list).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].field("path").map(super::text).as_deref(), Some("api"));
+        assert_eq!(list[0].field("branch").map(super::text).as_deref(), Some("main"));
+        assert!(list[0].field("empty").is_none());
+        assert!(list[1].field("empty").is_some_and(Value::truthy));
+        let repo = super::repositories_value(&json!({ "isRepo": true, "repositories": [] }));
+        assert!(repo.field("repo").is_some_and(Value::truthy));
+    }
+
     /// A message's time reads as the shipping app's, on every platform: the
     /// formatting, and a real local time from `stamp` (Windows included,
     /// where it once was always missing and hid the message's hover strip).

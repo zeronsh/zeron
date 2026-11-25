@@ -669,6 +669,17 @@
         "capacity": "容量 {n} tokens",
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
+      },
+      "repositories": {
+        "heading": "仓库",
+        "count": "{n, plural, other {# 个仓库}}",
+        "chosen": "{chosen} / {total}",
+        "all": "全部",
+        "none": "不选",
+        "no_commits": "尚无提交",
+        "loading": "正在查找仓库…",
+        "hint": "每个仓库都会在同一个新分支上获得一个工作树，放在与项目结构相同的文件夹中。",
+        "label": "工作树中的仓库"
       }
     },
     "markdown": {
@@ -3217,7 +3228,8 @@
       },
       "blocked": {
         "project_gone": "该项目已不存在。请选择其他项目或不选择项目。",
-        "cloud_needs_project": "Cloud 对话需要在项目中运行。请选择 Cloud 可以打开的项目。"
+        "cloud_needs_project": "Cloud 对话需要在项目中运行。请选择 Cloud 可以打开的项目。",
+        "no_repositories": "请为工作树至少选择一个仓库。"
       }
     },
     "composer": {

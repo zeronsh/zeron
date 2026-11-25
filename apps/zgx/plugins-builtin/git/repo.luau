@@ -112,6 +112,9 @@ return function(zeron: any)
 	end
 
 	local models: { [string]: any } = {}
+	-- The repository last shown for each session whose folder holds several
+	-- (by session id), kept between runs.
+	M.remembered = zeron.store("repositories", {} :: { [string]: string })
 
 	-- The model of session `id`'s checkout.
 	function M.get(id: string): any
@@ -163,6 +166,12 @@ return function(zeron: any)
 			-- Each commit's whole (body, committer, stats), asked as it opens.
 			infos = ui.state(`git.{id}.infos`, {} :: { [string]: any }),
 			branches = ui.state(`git.{id}.branches`, nil :: { any }?),
+			-- A chat whose folder holds several repositories rather than being
+			-- one (a project's, or a worktree of a project's): those found
+			-- there (nil: not one of those, or not asked yet), and which of
+			-- them the tab shows (its path in the folder).
+			repos = ui.state(`git.{id}.repos`, nil :: { any }?),
+			repo = ui.state(`git.{id}.repo`, nil :: string?),
 			-- The last word changes were asked for (scope, trees, index).
 			seen = "",
 			busy = false,
@@ -181,12 +190,21 @@ return function(zeron: any)
 		models[id] = m
 
 		-- The session's record: its device and its folder.
-		local function where(): (string?, string?)
+		local function folder(): (string?, string?)
 			local s = zeron.sessions()[id]
 			if not s then
 				return nil, nil
 			end
 			return s.device, s.cwd
+		end
+		-- Where its git work is: the folder, or the repository chosen in it.
+		local function where(): (string?, string?)
+			local device, cwd = folder()
+			local repo = m.repo:peek()
+			if cwd and repo then
+				return device, `{if string.sub(cwd, -1) == "/" then string.sub(cwd, 1, -2) else cwd}/{repo}`
+			end
+			return device, cwd
 		end
 		m.where = where
 
@@ -304,10 +322,103 @@ return function(zeron: any)
 				m.answered_at = ui.now()
 				settled()
 			end, function(err: any)
-				m.problem:set(M.problem(err))
+				local p = M.problem(err)
+				-- A folder that isn't a repository may hold some: one of
+				-- them shown instead (asked once; the folder said no first).
+				if p.code == "not_a_repo" and m.repo:peek() == nil and m.repos:peek() == nil then
+					m.find_repos(function(found: boolean)
+						settled()
+						if found then
+							m.refresh(true)
+						else
+							m.problem:set(p)
+							m.asked:set(true)
+						end
+					end)
+					return
+				end
+				m.problem:set(p)
 				m.asked:set(true)
 				settled()
 			end)
+		end
+
+		-- The repositories in the session's folder (it isn't one): kept,
+		-- and one chosen (the one last shown for this session, else the
+		-- first with changes, else the first). `done(found)` after.
+		function m.find_repos(done: ((found: boolean) -> ())?)
+			local device, cwd = folder()
+			if not cwd then
+				if done then
+					done(false)
+				end
+				return
+			end
+			zeron.service(device):call("repositories", { cwd = cwd }, { timeout = 60 }):after(function(r: any)
+				local list = if type(r) == "table" and not r.repo and type(r.list) == "table" then r.list else {}
+				if #list == 0 then
+					m.repos:set(if type(r) == "table" and r.repo then nil else {})
+					if done then
+						done(false)
+					end
+					return
+				end
+				m.repos:set(list)
+				if m.repo:peek() == nil then
+					local remembered = (M.remembered:get() or {})[id]
+					local pick: string? = nil
+					for _, repo in list do
+						if repo.path == remembered then
+							pick = repo.path
+						end
+					end
+					if not pick then
+						for _, repo in list do
+							if not pick and (repo.changed or 0) > 0 then
+								pick = repo.path
+							end
+						end
+					end
+					m.repo:set(pick or list[1].path)
+				end
+				if done then
+					done(true)
+				end
+			end, function(err: any)
+				print(`git: repositories: {err}`)
+				if done then
+					done(false)
+				end
+			end)
+		end
+
+		-- Another of the folder's repositories shown: everything of the one
+		-- before let go, and this one asked.
+		function m.choose_repo(path: string)
+			if m.repo:peek() == path then
+				return
+			end
+			m.repo:set(path)
+			local kept = table.clone(M.remembered:get() or {})
+			kept[id] = path
+			M.remembered:set(kept)
+			m.status:set(nil)
+			m.problem:set(nil)
+			m.changes:set(nil)
+			m.changes_problem:set(nil)
+			m.staging:set({})
+			m.history:set(nil)
+			m.history_problem:set(nil)
+			m.history_chosen:set("")
+			m.branches:set(nil)
+			m.infos:set({})
+			m.commits = {}
+			m.diff_cache = {}
+			m.seen = ""
+			m.history_head = ""
+			m.refresh(true)
+			-- (Its counts as they stand now.)
+			m.find_repos()
 		end
 
 		local function shown(): boolean

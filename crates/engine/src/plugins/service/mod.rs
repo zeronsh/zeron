@@ -794,6 +794,30 @@ impl Ops for PluginOps {
                 let hooks = self.hooks.clone();
                 self.runtime.spawn_blocking(move || done(Ok(json!(hooks.folders()))));
             }
+            "repositories" => {
+                // (What's in a chat's folder: as much as "sessions.read" says,
+                // and only in one of this device's chats' or projects'.)
+                if !self.plan.allows("sessions.read") {
+                    return done(Err(format!("{name} wasn't allowed to see your chats")));
+                }
+                let folder = PathBuf::from(args["folder"].as_str().unwrap_or_default());
+                let hooks = self.hooks.clone();
+                self.runtime.spawn_blocking(move || {
+                    if !folder.is_absolute()
+                        || folder.components().any(|c| matches!(c, std::path::Component::ParentDir))
+                        || !hooks.folders().iter().any(|f| folder.starts_with(f))
+                    {
+                        return done(Err("That folder isn't one of this device's chats or projects".into()));
+                    }
+                    let found = crate::repos::repositories_in(&folder);
+                    done(Ok(json!(
+                        found
+                            .into_iter()
+                            .map(|(path, linked)| json!({ "path": path, "linked": linked }))
+                            .collect::<Vec<_>>()
+                    )))
+                });
+            }
             "notify" => {
                 if !self.plan.allows("notifications") {
                     return done(Err(format!("{name} wasn't allowed to send you notifications")));

@@ -669,6 +669,17 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
+      },
+      "repositories": {
+        "heading": "Repositories",
+        "count": "{n, plural, one {# repository} other {# repositories}}",
+        "chosen": "{chosen} of {total}",
+        "all": "All",
+        "none": "None",
+        "no_commits": "No commits yet",
+        "loading": "Looking for repositories…",
+        "hint": "Each gets a worktree on one new branch, in a folder laid out like the project.",
+        "label": "Repositories in the worktree"
       }
     },
     "markdown": {
@@ -3217,7 +3228,8 @@
       },
       "blocked": {
         "project_gone": "That project is no longer there. Pick another, or none.",
-        "cloud_needs_project": "Cloud chats work in a project. Pick one Cloud can open."
+        "cloud_needs_project": "Cloud chats work in a project. Pick one Cloud can open.",
+        "no_repositories": "Choose at least one repository for the worktree."
       }
     },
     "composer": {

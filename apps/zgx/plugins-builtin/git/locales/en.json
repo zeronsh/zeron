@@ -109,6 +109,11 @@
     "no_match": "No branch matches “{query}”",
     "current": "current"
   },
+  "repos": {
+    "label": "Repository",
+    "search": "Find a repository…",
+    "changed": "{n} changed"
+  },
   "history": {
     "head": "{n, plural, one {# commit} other {# commits}} on {branch}",
     "head_more": "{n} latest commits on {branch}",

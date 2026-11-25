@@ -290,6 +290,10 @@ pub mod methods {
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
+    /// The git repositories inside a project folder that isn't one itself
+    /// (`{ path }` → `ProjectRepositories`): what a worktree of the whole
+    /// project can check out (`capabilities::PROJECT_WORKTREES_V1`).
+    pub const LIST_PROJECT_REPOSITORIES: &str = "ListProjectRepositories";
     // Project Actions are private state on the device that owns the project.
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";

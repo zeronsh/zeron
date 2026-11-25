@@ -881,6 +881,44 @@ pub struct Worktree {
     pub checkout_id: Option<String>,
 }
 
+/// One git repository inside a project folder that isn't a repository
+/// itself (`ListProjectRepositories`): what a worktree of the project can
+/// check out ([`crate::WorktreeSpec::repositories`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepository {
+    /// Where it is in the folder, `/`-separated (`api`, `packages/web`):
+    /// also where its worktree goes in the project's worktree.
+    pub path: String,
+    /// The branch checked out there; `None` when detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// False for a repository with no commit yet: nothing to branch from,
+    /// so it can't be checked out.
+    #[serde(default)]
+    pub has_commits: bool,
+    /// A linked worktree (listed only in a project's worktree, where each
+    /// repository is one); never offered from a project's own folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
+}
+
+/// `ListProjectRepositories`' answer for a folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepositories {
+    /// The folder is itself inside a repository: its worktrees are that
+    /// repository's, and `repositories` is empty.
+    #[serde(default)]
+    pub is_repo: bool,
+    /// The repositories found, by path.
+    #[serde(default)]
+    pub repositories: Vec<ProjectRepository>,
+    /// More were there than are listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderEntry {
