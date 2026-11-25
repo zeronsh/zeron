@@ -31,7 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { call, whyNotTheirs } from "./ipc.mjs";
 import { pictures } from "./pictures.mjs";
 import { TEMPLATES as ALL, files } from "./templates.mjs";
-import { whyNotSeeded } from "./where.mjs";
+import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 /** Between two writes of one account: the store takes 30 a minute. */
 const PACE_MS = Number(process.env.SEED_PACE_MS ?? 2500);
@@ -59,7 +59,11 @@ const TEMPLATES = ALL.filter((t) => !ids || ids.includes(t.id));
 const dryRun = args.includes("--dry-run");
 const edge = flag("--edge")?.replace(/\/$/, "");
 const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
-if (!refusedEdge && accounts.edge !== undefined && accounts.edge.replace(/\/$/, "") !== edge) usage("the accounts file's sessions are another edge's");
+// (What an author's Zeron publishes goes to its own edge, whatever this is
+// told: the file says which that is.)
+if (!refusedEdge && (typeof accounts.edge !== "string" || accounts.edge.replace(/\/$/, "") !== edge)) usage("the accounts file's edge isn't --edge");
+const refusedWorkos = whyNotItsWorkos(accounts.workos_client_id);
+if (!refusedEdge && refusedWorkos) usage(refusedWorkos);
 if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const slots = new Set(TEMPLATES.map((t) => t.slot));

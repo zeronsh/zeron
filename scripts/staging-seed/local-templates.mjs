@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -175,6 +175,33 @@ try {
   const drawnOnly = versions.filter((v) => !v.rendered).length;
   const dry = await seed({}, ["--dry-run", "--pictures", shots]);
   check(`the CLI's check takes every version (${versions.length})`, dry.code === 0 && (dry.out.match(/^ready /gm) ?? []).length === versions.length, (dry.err || dry.out).trim().split("\n").pop());
+  // The same seed where this run's WorkOS is production's (a copy beside an
+  // edge config that says so): refused, though every other thing is right, and
+  // so is an accounts file that doesn't say its edge, or says another.
+  {
+    const copy = join(work, "as-production");
+    cpSync(here, join(copy, "scripts/staging-seed"), { recursive: true });
+    const refused = async (script, accounts, flags = []) => {
+      writeFileSync(join(work, "refused.json"), JSON.stringify(accounts));
+      const ran = await run(process.execPath, [script, "--accounts", join(work, "refused.json"), "--edge", edge.url, "--ui", ui, "--playwright", playwright, ...flags], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
+      return ran.code === 2 && !/published|ready/.test(ran.out) ? ran.err.trim().split("\n")[0] : `exit ${ran.code}: ${ran.out}${ran.err}`;
+    };
+    const right = JSON.parse(readFileSync(join(work, "accounts.json"), "utf8"));
+    const script = join(copy, "scripts/staging-seed/seed-templates.mjs");
+    mkdirSync(join(copy, "edge"), { recursive: true });
+    writeFileSync(join(copy, "edge/wrangler.jsonc"), `// its config\n${JSON.stringify({ vars: { WORKOS_CLIENT_ID: edge.clientId } })}`);
+    const named = await refused(script, right);
+    check("production's WorkOS is refused, though the accounts file names it", named.includes("production's"), named);
+    const signedIn = await refused(script, { ...right, workos_client_id: "client_other" }, []);
+    check("and a Zeron signed in to it, whatever the file names", signedIn.includes("signed in to production"), signedIn);
+    rmSync(join(copy, "edge/wrangler.jsonc"));
+    const unread = await refused(script, right);
+    check("and any when production's can't be read", unread.includes("can't be read"), unread);
+    const { edge: _edge, ...edgeless } = right;
+    const none = await refused(join(here, "seed-templates.mjs"), edgeless);
+    const other = await refused(join(here, "seed-templates.mjs"), { ...right, edge: "https://other.example.com" });
+    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("isn't --edge"), `${none} / ${other}`);
+  }
   // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
   // before it publishes anything.
   writeFileSync(join(work, "elsewhere.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(work, "accounts.json"), "utf8")), workos_client_id: "client_elsewhere" }));
