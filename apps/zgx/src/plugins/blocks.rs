@@ -98,7 +98,7 @@ fn read(path: &Path) -> Read<Json> {
     let says: Option<Json> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
     // (Written a moment ago, it may be again within the clock's grain: read
     // again until it has stood.)
-    if meta.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|since| since > SETTLES) {
+    if written_at(&meta).and_then(|at| at.elapsed().ok()).is_some_and(|since| since > SETTLES) {
         let mut kept = kept();
         if kept.len() > 1024 {
             kept.clear();
@@ -108,8 +108,25 @@ fn read(path: &Path) -> Read<Json> {
     says.map_or(Read::Bad, Read::Says)
 }
 
+/// When a file was last written, whatever time it says of itself: on unix
+/// the later of its time and its change's (a time put back is no older file).
+fn written_at(meta: &std::fs::Metadata) -> Option<SystemTime> {
+    let modified = meta.modified().ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let changed = SystemTime::UNIX_EPOCH + Duration::new(meta.ctime().max(0) as u64, meta.ctime_nsec().clamp(0, 999_999_999) as u32);
+        return Some(modified.max(changed));
+    }
+    #[allow(unreachable_code)]
+    Some(modified)
+}
+
 /// How long a file has stood before it's taken to be as it was read.
+#[cfg(not(test))]
 const SETTLES: Duration = Duration::from_secs(2);
+#[cfg(test)]
+pub const SETTLES: Duration = Duration::from_millis(200);
 
 /// Which file it is, as it stands: what any write or rename moves.
 #[derive(Clone, PartialEq)]

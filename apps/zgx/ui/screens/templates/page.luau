@@ -751,6 +751,22 @@ function M.View(): Node
 		nav.arrive()
 		state.refresh()
 	end)
+	-- While it shows: what the engine says of the store's, asked again now
+	-- and then (one not in use isn't watched; once a minute, never as it's
+	-- left).
+	local showing = true
+	ui.on_cleanup(function()
+		showing = false
+	end)
+	local function again()
+		ui.after(60000, function()
+			if showing then
+				state.refresh()
+				again()
+			end
+		end)
+	end
+	again()
 	-- Yours shown: where your templates stand in the store, read again.
 	ui.effect(function()
 		if tab:get() == "yours" and nav.view:get() == "catalog" then

@@ -67,12 +67,22 @@ local function clipped(username: string): string
 end
 
 -- Who signed it, as Zeron's directory knows the key.
+-- Who made it, as drawn: the store's publisher for one of the store's (what
+-- the engine is told was shown), else who signed it.
+local function maker(it: any): string
+	local store = if type(it.store) == "table" then it.store else nil
+	if store and type(store.publisher) == "string" and store.publisher ~= "" then
+		return store.publisher
+	end
+	return if it.author and type(it.author.username) == "string" then it.author.username else ""
+end
+
 local function signer(it: any): Node
 	local kind = it.author and it.author.kind
 	if kind == "you" then
 		return ds.Badge { ui.t("templates.consent.made_by_you"), tone = "success", icon = "shield-check" }
 	elseif kind == "verified" then
-		return ds.Badge { ui.t("templates.consent.made_by", { username = clipped(it.author.username) }), class = "template-consent-maker", tone = "info", icon = "shield-check" }
+		return ds.Badge { ui.t("templates.consent.made_by", { username = clipped(maker(it)) }), class = "template-consent-maker", tone = "info", icon = "shield-check" }
 	end
 	return ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", icon = "danger-triangle" }
 end
@@ -81,7 +91,7 @@ end
 local function whom(it: any): string
 	local kind = it.author and it.author.kind
 	if kind == "verified" then
-		return ui.t("templates.consent.whom_verified", { username = it.author.username }):get()
+		return ui.t("templates.consent.whom_verified", { username = maker(it) }):get()
 	elseif kind == "you" then
 		return ui.t("templates.consent.whom_you"):get()
 	end

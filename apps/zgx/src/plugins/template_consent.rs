@@ -61,7 +61,10 @@ fn saw(item: Option<&Json>) {
 /// Which sheet `item` is: what's asked of, and as what.
 fn sheet(item: &Json) -> String {
     let field = |k: &str| item[k].as_str().unwrap_or_default();
-    key(field("keep"), field("pending"), field("hash"))
+    // (And what the store's word on it is drawn as: a new word is a sheet to
+    // be read again.)
+    let said = drawn(item).map(|d| d.to_string()).unwrap_or_default();
+    format!("{}{said}", key(field("keep"), field("pending"), field("hash")))
 }
 
 fn key(keep: &str, pending: &str, hash: &str) -> String {
@@ -436,6 +439,8 @@ fn host(
                 && let Some(root) = super::templates_root()
                 // (The package's, as the engine says it: never read again
                 // from the disk. An engine that doesn't say: as before.)
+                // (Taken down by now: nothing of it is allowed.)
+                && super::blocks::blocked(&root, id).is_none()
                 && let digest = reply["digest"].as_str().map_or_else(|| super::preview::digest(&root.join(id)), str::to_owned)
                 && let Err(error) = super::preview::approve(id, &digest)
             {

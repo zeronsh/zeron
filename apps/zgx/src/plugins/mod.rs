@@ -270,8 +270,9 @@ pub struct Bridge {
     /// whether it's being asked.
     templates_said: RefCell<Json>,
     template_asks: RefCell<store_rows::Asks>,
-    /// The templates taken down whose approval was forgotten.
-    forgotten: RefCell<HashSet<String>>,
+    /// The templates taken down whose approval was forgotten, each with the
+    /// approvals' record as it stood after (one written since is looked at).
+    forgotten: RefCell<HashMap<String, String>>,
     /// The templates here as last published, for it.
     templates_here: RefCell<Json>,
     /// Plugins that failed, kept out until they change.
@@ -1989,15 +1990,18 @@ impl Bridge {
                 .collect();
             let blocked = blocks::blocked(&root, &t.id);
             from_store |= root.join(&t.id).join(".lineage.json").exists();
-            // (Taken down, in use or not: what was allowed of it is forgotten,
-            // once for as long as it is.)
+            // (Taken down, in use or not: what was allowed of it is forgotten:
+            // again whenever the record moves, as an Allow under way may write
+            // to it after; a stat a look otherwise.)
             let down = matches!(blocked, Some(blocks::Why::TakenDown { .. }));
             if !down {
                 self.forgotten.borrow_mut().remove(&t.id);
-            } else if self.forgotten.borrow_mut().insert(t.id.clone())
-                && let Some(approvals) = preview::approvals_path()
-            {
-                preview::forget_at(&approvals, &t.id);
+            } else if let Some(approvals) = preview::approvals_path() {
+                let stood = live::file_stamp(&approvals);
+                if self.forgotten.borrow().get(&t.id) != Some(&stood) {
+                    preview::forget_at(&approvals, &t.id);
+                    self.forgotten.borrow_mut().insert(t.id.clone(), live::file_stamp(&approvals));
+                }
             }
             here.push(row_here(&t, blocked.as_ref()));
             let (state, error) = if blocked.is_some() {
@@ -4300,6 +4304,8 @@ mod tests {
         let settle = |rel: &str| {
             let path = if rel.starts_with("trust/") { root.join(rel) } else { templates.join(rel) };
             std::fs::File::options().append(true).open(path).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(60)).unwrap();
+            // (Its change's time is now, whatever it says: stood a moment.)
+            std::thread::sleep(blocks::SETTLES + Duration::from_millis(50));
         };
         let hash = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
         let record = |version: &str| json!({ "key": null, "hash": "h", "version": version, "source": { "kind": "store", "store": { "id": "midnight", "hash": hash } } }).to_string();
