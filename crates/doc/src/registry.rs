@@ -2017,7 +2017,10 @@ impl RegistryDoc {
                 "backgroundTasks",
                 serde_json::to_value(synced_background_tasks(&session.background_tasks))?,
             ),
-            ("waiting", serde_json::to_value(&session.waiting)?),
+            (
+                "waiting",
+                serde_json::to_value(session.waiting.as_ref().map(synced_waiting))?,
+            ),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -2280,6 +2283,28 @@ fn synced_background_tasks(tasks: &[zeron_proto::BackgroundTask]) -> Vec<zeron_p
             started_at: task.started_at,
         })
         .collect()
+}
+
+/// How much of each waited-on label a session row carries. A process's
+/// label is its description or, without one, its whole command, so the
+/// same heredoc that the background task's command is capped for came
+/// through here uncut.
+pub const SYNCED_WAITING_LABEL_BYTES: usize = SYNCED_TASK_COMMAND_BYTES;
+
+/// `waiting` as a session row syncs it: each label cut to its cap.
+fn synced_waiting(waiting: &zeron_proto::SessionWaiting) -> zeron_proto::SessionWaiting {
+    zeron_proto::SessionWaiting {
+        since: waiting.since,
+        on: waiting
+            .on
+            .iter()
+            .map(|on| zeron_proto::WaitingOn {
+                id: on.id.clone(),
+                kind: on.kind,
+                label: op_budget::cut_str(&on.label, SYNCED_WAITING_LABEL_BYTES),
+            })
+            .collect(),
+    }
 }
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {

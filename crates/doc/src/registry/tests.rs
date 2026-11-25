@@ -3323,6 +3323,65 @@ fn a_session_with_a_long_background_command_queues_only_ops_that_fit() {
 }
 
 #[test]
+fn a_session_waiting_on_long_commands_queues_only_ops_that_fit_and_coalesces() {
+    // The agent waits on two heredoc shells with no description: each
+    // label is the whole command, 22 KB of `waiting` uncapped. Split to
+    // fit, every keepalive was a 2-op batch that never coalesced.
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.mark_saved();
+    let waiting_row = |at: i64| {
+        let mut row = heredoc_session("chat-1", at);
+        let heredoc = row.background_tasks[0].command.clone();
+        row.waiting = Some(zeron_proto::SessionWaiting {
+            since: ts(3_200),
+            on: ["bgsh", "bgsh2"]
+                .map(|id| zeron_proto::WaitingOn {
+                    id: id.into(),
+                    kind: zeron_proto::WaitingKind::Process,
+                    label: heredoc.clone(),
+                })
+                .into(),
+        });
+        row
+    };
+    for i in 0..176 {
+        doc.upsert_session(&waiting_row(4_000 + i * 10_000))
+            .unwrap();
+    }
+    assert!(doc.pending_ops().all(fits_op_budget));
+    assert_eq!(doc.pending_ops_len(), 2, "the keepalive rewrites coalesce");
+    let waiting = doc.read_sessions().unwrap()[0].waiting.clone().unwrap();
+    assert_eq!(waiting.since, ts(3_200));
+    assert_eq!(
+        waiting.on.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["bgsh", "bgsh2"]
+    );
+    for on in &waiting.on {
+        assert_eq!(on.kind, zeron_proto::WaitingKind::Process);
+        assert!(on.label.len() <= SYNCED_WAITING_LABEL_BYTES);
+        assert!(on.label.starts_with("cat > tests/settings.rs") && on.label.ends_with('…'));
+    }
+    let reconnect = push_frame_bytes(&doc.pending);
+    assert!(reconnect < 6 * 1024, "{reconnect}");
+}
+
+#[test]
+fn a_short_waiting_label_syncs_as_is() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
+    row.waiting = Some(zeron_proto::SessionWaiting {
+        since: ts(3_200),
+        on: vec![zeron_proto::WaitingOn {
+            id: "agent-1".into(),
+            kind: zeron_proto::WaitingKind::Agent,
+            label: "Review the diff".into(),
+        }],
+    });
+    doc.upsert_session(&row).unwrap();
+    assert_eq!(doc.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
 fn a_description_is_kept_when_it_says_something_else() {
     let mut doc = RegistryDoc::new("dev-a");
     let mut row = session("chat-1", "dev-a", SessionStatus::Working);
