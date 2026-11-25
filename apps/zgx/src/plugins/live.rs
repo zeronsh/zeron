@@ -187,8 +187,12 @@ fn mirror_reading(
     })?;
     let mut changed = changed.into_inner();
     let mut held: BTreeSet<String> = BTreeSet::new();
+    // (A file under another spelling of a wanted path is that file where
+    // the disk folds names: kept, never taken for a stray.)
+    let spelt: BTreeMap<String, &String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel)).collect();
+    let wanted_as = |rel: &str, path: &Path| spelt.get(&zeron_plugin_guard::path::fold(rel)).is_some_and(|w| same_file(&to.join(w), path));
     for (rel, path) in files(to, |_| true) {
-        if !want.contains_key(&rel) && !keep(&rel) {
+        if !want.contains_key(&rel) && !keep(&rel) && !wanted_as(&rel, &path) {
             std::fs::remove_file(path)?;
             changed += 1;
         } else {
@@ -203,10 +207,30 @@ fn mirror_reading(
     // are gone is removed; one that still holds something (a dot file, a
     // `.git`, a name no listing reads) stays as it is, unless it stands for
     // a wanted module, and then it's moved aside whole (`SET_ASIDE`).
-    let folders: BTreeSet<&str> = want.keys().map(String::as_str).chain(held.iter().map(String::as_str)).flat_map(|rel| rel.match_indices('/').map(move |(at, _)| &rel[..at])).collect();
+    let folders: BTreeMap<String, &str> = want
+        .keys()
+        .map(String::as_str)
+        .chain(held.iter().map(String::as_str))
+        .flat_map(|rel| rel.match_indices('/').map(move |(at, _)| &rel[..at]))
+        .map(|folder| (zeron_plugin_guard::path::fold(folder), folder))
+        .collect();
     let modules: BTreeSet<String> = want.keys().filter_map(|rel| rel.strip_suffix(".luau")).map(zeron_plugin_guard::path::fold).collect();
     changed += settle_folders(to, to, &folders, &modules)?;
     Ok(changed)
+}
+
+/// Whether `a` and `b` are one file (or folder) on the disk: one of another
+/// spelling where the disk folds names.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+    }
 }
 
 /// Where a lay-down moves a folder that stands for a module and still holds
@@ -217,7 +241,7 @@ pub const SET_ASIDE: &str = ".zeron-set-aside";
 /// removed if empty once its own are settled, moved to [`SET_ASIDE`] if it
 /// still holds something and stands for one of `modules` (folded paths
 /// without `.luau`), else left. How many it removed or moved.
-fn settle_folders(to: &Path, dir: &Path, folders: &BTreeSet<&str>, modules: &BTreeSet<String>) -> std::io::Result<usize> {
+fn settle_folders(to: &Path, dir: &Path, folders: &BTreeMap<String, &str>, modules: &BTreeSet<String>) -> std::io::Result<usize> {
     let mut changed = 0;
     let Ok(entries) = std::fs::read_dir(dir) else { return Ok(0) };
     for entry in entries.flatten() {
@@ -228,7 +252,9 @@ fn settle_folders(to: &Path, dir: &Path, folders: &BTreeSet<&str>, modules: &BTr
         let Ok(rel) = path.strip_prefix(to) else { continue };
         let rel = rel_path(rel);
         changed += settle_folders(to, &path, folders, modules)?;
-        if folders.contains(rel.as_str()) {
+        // (Wanted: by its name, or under another spelling of one that is
+        // the same folder where the disk folds names.)
+        if folders.get(&zeron_plugin_guard::path::fold(&rel)).is_some_and(|w| *w == rel || same_file(&to.join(w), &path)) {
             continue;
         }
         if std::fs::remove_dir(&path).is_ok() {
@@ -379,6 +405,29 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
+        // Zeron's spelling of each of its folders and files: a template's
+        // file is laid under them (`Screens/x.luau` as `screens/x.luau`), so
+        // one spelling is written of each.
+        let zeron_spelling: BTreeMap<String, String> = want
+            .keys()
+            .flat_map(|rel| rel.match_indices('/').map(|(at, _)| rel[..at].to_string()).chain([rel.clone()]))
+            .map(|p| (zeron_plugin_guard::path::fold(&p), p))
+            .collect();
+        let respelled = |rel: &str| {
+            let mut out = String::new();
+            let mut theirs = true;
+            for part in rel.split('/') {
+                let next = if out.is_empty() { part.to_string() } else { format!("{out}/{part}") };
+                out = match theirs.then(|| zeron_spelling.get(&zeron_plugin_guard::path::fold(&next))).flatten() {
+                    Some(zeron_s) => zeron_s.clone(),
+                    None => {
+                        theirs = false;
+                        next
+                    }
+                };
+            }
+            out
+        };
         for (rel, path) in files(&templates.join(id), |_| true) {
             if !composed(&rel) || failed.contains(&rel) || laid_by_zeron(&rel) {
                 continue;
@@ -396,14 +445,18 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
                 want.insert(TEMPLATE_TOKENS.to_string(), path);
                 continue;
             }
-            if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
-                && zeron_s != rel
+            let laid = respelled(&rel);
+            if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&laid), laid.clone())
+                && zeron_s != laid
             {
                 want.remove(&zeron_s);
                 from_template.remove(&zeron_s);
             }
-            from_template.insert(rel.clone());
-            want.insert(rel, path);
+            if laid != rel {
+                laid_as.insert(laid.clone(), rel);
+            }
+            from_template.insert(laid.clone());
+            want.insert(laid, path);
         }
     }
     (want, Overlay { template: id.to_string(), from_template, laid_as, clashing })
@@ -1130,8 +1183,9 @@ mod tests {
         let live = t.join(LIVE);
         assert_eq!(read(&live, "screens/plugins/page.luau"), "-- zeron plugins page");
         assert!(!overlay.from_template.iter().any(|r| r.contains("plugins")), "{:?}", overlay.from_template);
-        // One spelling of a file written: the template's, in Zeron's place.
-        assert!(overlay.from_template.contains("App.luau"));
+        // One spelling of a file written: Zeron's, with the template's in it
+        // (blamed by the template's own name).
+        assert!(overlay.from_template.contains("app.luau") && overlay.laid_as["app.luau"] == "App.luau", "{overlay:?}");
         let names: Vec<String> = files(&live, |_| true).into_keys().filter(|r| r.eq_ignore_ascii_case("app.luau")).collect();
         assert_eq!(names.len(), 1, "{names:?}");
         assert_eq!(read(&live, &names[0]), "-- the template's app");
@@ -1256,6 +1310,38 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&want["ds/tokens_template.luau"]).unwrap(), "-- t tokens, spelt");
         assert_eq!(want.keys().filter(|k| k.to_lowercase().starts_with("ds/tokens")).count(), 2, "{want:?}");
         assert_eq!(overlay.laid_as["ds/tokens_template.luau"], "DS/Tokens.luau");
+    }
+
+    /// A template's files are laid under Zeron's spelling of its folders
+    /// and files (one spelling written of each), what's protected left out
+    /// in any spelling; and a lay-down keeps Zeron's file where its folder
+    /// on the disk is spelt otherwise (the same file where the disk folds
+    /// names), never taking it for a stray. By the fold alone: so on either
+    /// kind of disk.
+    #[test]
+    fn a_template_s_files_are_laid_under_zeron_s_spelling() {
+        let t = setup("spelling");
+        write(&t, "s/zeron-template.json", r#"{"id":"s"}"#);
+        write(&t, "s/Screens/shell/x.luau", "-- s's own, beside Zeron's");
+        write(&t, "s/SCREENS/plugins/y.luau", "-- protected in any spelling");
+        write(&t, "s/Screens/Shell/Sidebar.luau", "-- s's sidebar");
+        let (want, overlay) = plan(&t, "s", &BTreeSet::new(), false);
+        assert!(want.keys().all(|k| !k.starts_with("Screens") && !k.starts_with("SCREENS")), "{want:?}");
+        assert_eq!(std::fs::read_to_string(&want["screens/shell/x.luau"]).unwrap(), "-- s's own, beside Zeron's");
+        assert_eq!(std::fs::read_to_string(&want["screens/shell/sidebar.luau"]).unwrap(), "-- s's sidebar");
+        assert!(want["screens/plugins/page.luau"].starts_with(t.join(ZERON)));
+        assert!(!want.keys().any(|k| k.ends_with("y.luau")));
+        assert!(overlay.laid_as["screens/shell/x.luau"].eq_ignore_ascii_case("Screens/shell/x.luau"));
+
+        // `.live`'s folder spelt otherwise on the disk (an older lay-down).
+        compose(&t, BUILTIN, &BTreeSet::new(), false).unwrap();
+        let live = t.join(LIVE);
+        std::fs::rename(live.join("screens"), live.join("Screens.tmp")).unwrap();
+        std::fs::rename(live.join("Screens.tmp"), live.join("Screens")).unwrap();
+        compose(&t, BUILTIN, &BTreeSet::new(), false).unwrap();
+        assert_eq!(read(&live, "screens/shell/sidebar.luau"), "-- zeron sidebar");
+        let sidebars = files(&live, |_| true).into_keys().filter(|k| k.eq_ignore_ascii_case("screens/shell/sidebar.luau")).count();
+        assert_eq!(sidebars, 1, "one copy, wherever the disk keeps it");
     }
 
     /// A template's file laid across Zeron's (a folder of Zeron's by its
