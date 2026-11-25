@@ -367,6 +367,10 @@ test("the store's refusal of a template says it in a template's words", function
 		app:frames(4)
 		expect(app:state("templates_said_failure")).to_be(said)
 	end
+	-- (The engine's taken_down of a list it can't read: its own words.)
+	app:command("failure_unreadable")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Zeron can't read which templates have been taken down from the store, so it isn't installing any")
 	app:command("failure_other")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("Something else")
