@@ -67,6 +67,15 @@ fn sheet(item: &Json) -> String {
     format!("{}{said}", key(field("keep"), field("pending"), field("hash")))
 }
 
+/// Whether a yes to `asked` (`key`: which package, as what) may be taken now:
+/// it's the sheet shown (`last`), and that sheet, store's word and all, has
+/// shown a moment (`consent::ARMED`). Both of the window's yeses ask this.
+fn armed(last: Option<&Json>, asked: &str, now: Instant) -> bool {
+    let Some(last) = last else { return false };
+    let field = |k: &str| last[k].as_str().unwrap_or_default();
+    key(field("keep"), field("pending"), field("hash")) == asked && SEEN.with(|s| super::consent::may_allow(&s.borrow(), &sheet(last), now))
+}
+
 fn key(keep: &str, pending: &str, hash: &str) -> String {
     format!("{keep}/{pending}@{hash}")
 }
@@ -332,7 +341,7 @@ fn host(
         // this one comes up under it, allows nothing.)
         let of = |k: &str| arg.field(k).map(text).unwrap_or_default();
         let asked = key(&of("keep"), &of("pending"), &hash);
-        if allow && !SEEN.with(|s| super::consent::may_allow(&s.borrow(), &asked, Instant::now())) {
+        if allow && !armed(last.borrow().as_ref(), &asked, Instant::now()) {
             return;
         }
         // Keeping a template in preview: recorded here, by the app alone
@@ -483,7 +492,7 @@ fn install_verified(host: &ScriptHost, bridge: &Rc<Bridge>, pending: &Rc<RefCell
         // (What's shown, as it's shown: never what a script names.)
         let Some(item) = last.borrow().clone().filter(|item| item["store"]["verified_alternative"].is_object()) else { return };
         let (Some(name), Some(hash)) = (item["pending"].as_str(), item["hash"].as_str()) else { return };
-        if !SEEN.with(|s| super::consent::may_allow(&s.borrow(), &key("", name, hash), Instant::now())) {
+        if !armed(Some(&item), &key("", name, hash), Instant::now()) {
             return;
         }
         let params = json!({ "pending": name, "hash": hash });
@@ -524,6 +533,40 @@ fn said(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A yes is taken of the sheet shown once it has shown a moment: a store
+    /// package's too, never again under a new word of the store's, never of
+    /// another's.
+    #[test]
+    fn a_yes_is_taken_of_the_sheet_shown_once_it_has_shown_a_moment() {
+        let store = json!({ "pending": "midnight-1", "hash": "h", "version": "1.2.0", "store": { "id": "midnight", "verified": true, "publisher": "ada", "publisher_id": "u_1" }, "author": { "kind": "verified", "username": "ada" } });
+        let file = json!({ "pending": "ledger-1", "hash": "f", "version": "2.0.0", "author": { "kind": "verified", "username": "ada" } });
+        let keep = json!({ "keep": "sleek", "id": "sleek", "hash": "k" });
+        for (item, asked) in [(&store, key("", "midnight-1", "h")), (&file, key("", "ledger-1", "f")), (&keep, key("sleek", "", "k"))] {
+            SEEN.with(|s| s.borrow_mut().take());
+            let _ = record(Some(item), false, None);
+            let t = SEEN.with(|s| s.borrow().as_ref().unwrap().1);
+            assert!(!armed(Some(item), &asked, t), "not at once: {asked}");
+            let later = t + super::super::consent::ARMED;
+            assert!(armed(Some(item), &asked, later), "{asked}");
+            assert!(!armed(Some(item), &key("", "other-1", "h"), later), "another's");
+            assert!(!armed(None, &asked, later));
+        }
+        // The store's word changed under the same package: shown anew, waited
+        // for anew.
+        SEEN.with(|s| s.borrow_mut().take());
+        let _ = record(Some(&store), false, None);
+        let t = SEEN.with(|s| s.borrow().as_ref().unwrap().1);
+        let mut now = store.clone();
+        restate(&mut now, &json!({ "verified": false, "publisher": "grace", "publisher_id": "u_2" }));
+        let asked = key("", "midnight-1", "h");
+        let later = t + super::super::consent::ARMED;
+        assert!(!armed(Some(&now), &asked, later), "drawn as it was, not as it is");
+        let _ = record(Some(&now), false, None);
+        let t2 = SEEN.with(|s| s.borrow().as_ref().unwrap().1);
+        assert!(!armed(Some(&now), &asked, t2));
+        assert!(armed(Some(&now), &asked, t2 + super::super::consent::ARMED));
+    }
 
     /// What the engine holds the store's record to is what's drawn, and only
     /// for the store's.
