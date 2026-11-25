@@ -102,6 +102,21 @@ fn shown(item: &Json) -> Json {
     out
 }
 
+/// What the window draws of the store's word on `item`, for the engine to hold
+/// the store's record to (`ReviewTemplate`'s `shown`): from what's drawn, never
+/// from what a script says of it. None for one that isn't the store's.
+fn drawn(item: &Json) -> Option<Json> {
+    let item = shown(item);
+    item["store"].is_object().then(|| {
+        json!({
+            "verified": item["store"]["verified"] == true,
+            "publisher": item["store"]["publisher"],
+            "publisher_id": item["store"]["publisher_id"],
+            "version": item["version"],
+        })
+    })
+}
+
 /// `item` as the store says of it now (`changed`, `ReviewTemplate`'s), and
 /// which of it changed since it was shown.
 fn restate(item: &mut Json, changed: &Json) {
@@ -355,6 +370,7 @@ fn host(
         eprintln!("zeron-zgx: templates: {name} {}", if allow { "allowed" } else { "not allowed (Not now)" });
         generation.set(generation.get() + 1);
         let asked_at = generation.get();
+        let drawn = last.borrow().as_ref().and_then(drawn);
         out.set(record(last.borrow().as_ref(), true, None));
         let (weak, window, out, pending, generation, last) =
             (weak.clone(), window.clone(), out.clone(), pending.clone(), generation.clone(), last.clone());
@@ -365,7 +381,10 @@ fn host(
             let mut params = json!({ "pending": name, "allow": allow, "hash": hash });
             if allow {
                 let review = crate::auth::after_setup(|| {
-                    let asked = json!({ "pending": name, "hash": hash });
+                    let mut asked = json!({ "pending": name, "hash": hash });
+                    if let Some(drawn) = &drawn {
+                        asked["shown"] = drawn.clone();
+                    }
                     async move { engine::get().call("ReviewTemplate", asked).await }
                 })
                 .await;
@@ -378,13 +397,7 @@ fn host(
                     // What the store says of it changed since it was shown:
                     // shown as it is now, and asked again (a second Allow).
                     Ok(reply) if reply["changed"].is_object() => {
-                        let mut item = last.borrow().clone();
-                        if let Some(item) = item.as_mut().filter(|item| item["store"].is_object()) {
-                            restate(item, &reply["changed"]);
-                        }
-                        SEEN.with(|s| s.borrow_mut().take());
-                        out.set(record(item.as_ref(), false, None));
-                        *last.borrow_mut() = item;
+                        ask_again(&out, &last, &reply["changed"]);
                         return;
                     }
                     Ok(reply) => params["review"] = reply["review"].clone(),
@@ -404,6 +417,16 @@ fn host(
                 async move { engine::get().call("DecideTemplate", asked).await }
             })
             .await;
+            // (The store's word changed between the two: nothing's installed,
+            // and it's asked again, unless another shows by now.)
+            if let Ok(reply) = &result
+                && reply["changed"].is_object()
+            {
+                if generation.get() == asked_at && *pending.borrow() == name {
+                    ask_again(&out, &last, &reply["changed"]);
+                }
+                return;
+            }
             // Allowed in this window: installed as you were shown it, so it
             // runs with Zeron's powers (its files as installed).
             if let Ok(reply) = &result
@@ -429,6 +452,18 @@ fn host(
         });
     });
     host
+}
+
+/// The sheet again, as the store says of it now: its wait started anew, for a
+/// second Allow.
+fn ask_again(out: &Shared, last: &Last, changed: &Json) {
+    let mut item = last.borrow().clone();
+    if let Some(item) = item.as_mut().filter(|item| item["store"].is_object()) {
+        restate(item, changed);
+    }
+    SEEN.with(|s| s.borrow_mut().take());
+    out.set(record(item.as_ref(), false, None));
+    *last.borrow_mut() = item;
 }
 
 /// The verified version of waiting package `pending`, taken instead of it (the
@@ -480,6 +515,24 @@ fn said(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the engine holds the store's record to is what's drawn, and only
+    /// for the store's.
+    #[test]
+    fn the_engine_is_told_what_the_window_draws() {
+        let item = json!({ "pending": "midnight-1", "version": "1.2.0", "store": { "id": "midnight", "verified": true, "publisher": "ada", "publisher_id": "u_1", "version": "9.9.9" }, "author": { "kind": "verified", "username": "ada" } });
+        assert_eq!(drawn(&item), Some(json!({ "verified": true, "publisher": "ada", "publisher_id": "u_1", "version": "1.2.0" })));
+        let mut now = item.clone();
+        restate(&mut now, &json!({ "verified": false, "publisher": "grace", "publisher_id": "u_2" }));
+        assert_eq!(drawn(&now), Some(json!({ "verified": false, "publisher": "grace", "publisher_id": "u_2", "version": "1.2.0" })));
+        // Drawn unverified, whatever isn't plainly true; no version drawn, none said.
+        let mut odd = item.clone();
+        odd["store"]["verified"] = json!("yes");
+        odd["version"] = json!("Verified");
+        assert_eq!(drawn(&odd).unwrap()["verified"], false);
+        assert_eq!(drawn(&odd).unwrap()["version"], "");
+        assert_eq!(drawn(&json!({ "pending": "x", "version": "1.0.0" })), None);
+    }
 
     /// What the store came to say of it is shown, and which of it changed.
     #[test]

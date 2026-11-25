@@ -270,6 +270,13 @@ fn came_from(dir: &Path) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+/// Whether any template here is the store's, or a copy of one.
+fn of_store_here(templates: &Path) -> bool {
+    std::fs::read_dir(templates).into_iter().flatten().flatten().any(|entry| {
+        live::plain(&entry.file_name().to_string_lossy()) && entry.path().is_dir() && came_from(&entry.path()).is_some_and(|from| !from.is_empty())
+    })
+}
+
 /// Whether two versions are one: by precedence, which build metadata
 /// (`+…`) is no part of.
 fn same_version(a: &str, b: &str) -> bool {
@@ -311,7 +318,9 @@ pub fn blocked(templates: &Path, id: &str) -> Option<Why> {
         (Known::Says(blocks), Some(_)) => named(&blocks),
         (Known::Unreadable, Some(from)) | (Known::Missing, Some(from)) if from.is_empty() => None,
         (Known::Unreadable, _) | (Known::Missing, Some(_)) => Some(Why::Unchecked),
-        // (None written yet, and a record that can't be read: as it was.)
+        // (A record that can't be read: off too where the list is lost, as it
+        // is with one from the store here; else none was written yet.)
+        (Known::Missing, None) if of_store_here(templates) => Some(Why::Unchecked),
         (Known::Missing, None) => None,
     }
 }
@@ -498,14 +507,16 @@ mod tests {
                 assert_eq!(r.why(id), None, "{why}: {id}");
             }
         };
-        // None there, and none kept: the store's are refused until there is;
-        // a file's whose record can't be read is as it was.
-        for id in ["midnight", "copy"] {
-            assert_eq!(r.why(id), Some(Why::Unchecked), "{id}");
-        }
-        for id in ["torn", "mine", "from-a-link"] {
-            assert_eq!(r.why(id), None, "{id}");
-        }
+        // None there, and none kept, with the store's here: it's lost. Those,
+        // and one whose record can't be read, until there is.
+        closed("no list, no copy");
+        // With none of the store's here there never was a list: as it was.
+        let alone = Rig::new("no-store");
+        alone.template("torn");
+        alone.write("torn/.imported.json", "{");
+        assert_eq!(alone.why("torn"), None);
+        drop(alone);
+        copy_for_test(Some(r.copy.clone()));
         r.write(FILE, "{");
         closed("the engine's unreadable, no copy");
         std::fs::create_dir_all(r.copy.parent().unwrap()).unwrap();
@@ -581,6 +592,46 @@ mod tests {
         assert_eq!(allowed(), [false, true, false, true]);
         r.blocks(json!([]));
         assert_eq!((r.why("midnight"), allowed()), (None, vec![false, true, false, true]));
+    }
+
+    /// The engine's own cases (docs/plugin-package-vectors.json): which
+    /// folders its list blocks, with no copy of the app's.
+    #[test]
+    fn what_s_blocked_is_the_engine_s_cases() {
+        let file = std::env::var_os("TEMPLATE_BLOCKS").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugin-package-vectors.json"), PathBuf::from);
+        let all: Json = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        // (Not there yet on a branch from before the engine's: nothing to hold
+        // it to. It comes with the engine's commit.)
+        let Some(cases) = all["template_blocks"].as_array() else { return };
+        assert!(cases.len() >= 22, "{}", cases.len());
+        for case in cases {
+            let r = Rig::new("vectors");
+            let name = &case["name"];
+            if let Some(list) = case["list"].as_str() {
+                r.write(FILE, list);
+            }
+            for (folder, has) in case["folders"].as_object().unwrap() {
+                r.template(folder);
+                for (file, text) in [(IMPORTED, &has["imported"]), (LINEAGE, &has["lineage"])] {
+                    if let Some(text) = text.as_str() {
+                        r.write(&format!("{folder}/{file}"), text);
+                    }
+                }
+            }
+            for (folder, has) in case["folders"].as_object().unwrap() {
+                let want = match &has["blocked"] {
+                    Json::Null => "free",
+                    Json::String(_) => "unchecked",
+                    _ => "taken down",
+                };
+                let is = match r.why(folder) {
+                    None => "free",
+                    Some(Why::Unchecked) => "unchecked",
+                    Some(Why::TakenDown { .. }) => "taken down",
+                };
+                assert_eq!(is, want, "{name}: {folder}");
+            }
+        }
     }
 
     /// One taken down never runs, and is let go of: what you allowed of it is
