@@ -1624,6 +1624,9 @@ describe("templates, as staff read and decide them", () => {
     expect(down.headers.get("location")).toBe("/admin/templates/dockside");
     const restored = await post("/admin/templates/dockside/1.0.0/restore", grace, { csrf, reason: "A test." });
     expect(restored.headers.get("location")).toBe("/admin/templates/dockside");
+    // (Its newest: listed again, and its flash says so.)
+    expect(flashOf(restored)).toBe("__Host-zeron_flash=version_restored");
+    expect((await html("/admin/templates/dockside", `${grace}; ${flashOf(restored)}`)).body).toContain("Restored: listed again, not verified.");
     const featured = await post("/admin/templates/night-board/actions/feature", grace, { csrf });
     expect(featured.headers.get("location")).toBe("/admin/templates/night-board");
     await post("/admin/templates/night-board/actions/unfeature", grace, { csrf });
@@ -1830,7 +1833,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(page.body).toContain("What @ada reads");
   });
 
-  test("a version taken down is restored by staff, and says so", async () => {
+  test("a version taken down is restored by staff while a newer one is there: its flash says the newer one keeps it from new installs", async () => {
     const grace = await site.signIn("user_grace");
     const before = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0", grace)).body;
     const rail = before.slice(before.indexOf('<aside class="rail rv-rail"'), before.indexOf("</aside>", before.indexOf('<aside class="rail rv-rail"')));
@@ -1838,7 +1841,10 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(rail).not.toContain("/verify");
     const response = await post("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0/restore", grace, { csrf: tokenOf(before), reason: "Its author fixed the host." });
     expect(response.headers.get("location")).toBe("/admin/plugins/worst-case-listing-at-every-limit-xyz12");
-    expect(response.headers.get("set-cookie")).toMatch(/zeron_flash=version_restored/);
+    expect(flashOf(response)).toBe("__Host-zeron_flash=version_replaced~1.2.0~1.5.0");
+    const after = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12", `${grace}; ${flashOf(response)}`)).body;
+    expect(after).toContain("Restored, not verified. 1.5.0 is newer, so 1.2.0 takes no new installs.");
+    expect(after).not.toContain("listed again");
   });
 });
 
