@@ -122,7 +122,7 @@ fn contents(dir: &Path) -> Option<BTreeMap<String, PathBuf>> {
                 if name.starts_with('.') && name.ends_with(".tmp") {
                     continue;
                 }
-                let rel = path.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/");
+                let rel = live::rel_path(path.strip_prefix(dir).ok()?);
                 out.insert(rel, path);
             } else {
                 return None;

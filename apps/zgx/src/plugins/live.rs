@@ -60,6 +60,15 @@ pub fn files(dir: &Path, keep: impl Fn(&str) -> bool) -> BTreeMap<String, PathBu
     out
 }
 
+/// A path under a folder, as a package names it: `/` between its parts. Only
+/// Windows separates them with `\`; elsewhere it's a character in a name,
+/// which no package path has (`path::is_safe`), so such a file is no file of
+/// it: `screens\sidebar.luau` is never Zeron's `screens/sidebar.luau`.
+pub fn rel_path(rel: &Path) -> String {
+    let rel = rel.to_string_lossy();
+    if cfg!(windows) { rel.replace('\\', "/") } else { rel.into_owned() }
+}
+
 /// Each regular file under `dir` that `keep` keeps, as [`files`] finds them,
 /// handed to `each` with its folder entry (which has its size and time
 /// written: on Windows without opening the file, which `fs::metadata` does).
@@ -71,12 +80,12 @@ fn walk(dir: &Path, keep: impl Fn(&str) -> bool, mut each: impl FnMut(String, Pa
             let Ok(kind) = entry.file_type() else { continue };
             let path = entry.path();
             let Ok(rel) = path.strip_prefix(dir) else { continue };
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            let rel = rel_path(rel);
             if kind.is_dir() {
                 if !entry.file_name().to_string_lossy().starts_with('.') {
                     stack.push(path);
                 }
-            } else if kind.is_file() && plain(&rel) && keep(&rel) {
+            } else if kind.is_file() && plain(&rel) && zeron_plugin_guard::path::is_safe(&rel) && keep(&rel) {
                 each(rel, path, &entry);
             }
         }
@@ -927,6 +936,28 @@ mod tests {
     /// A path a disk could open as another file (Windows by its short name,
     /// HFS+ by leaving out what isn't seen) is never laid down, on any system. A template kept with one runs without it and
     /// isn't asked about again; one byte of that file different asks, as ever.
+    #[test]
+    #[cfg(unix)]
+    fn a_backslash_in_a_name_is_never_a_folder_s() {
+        let (ui, t) = (crate::ui_dir(), std::env::temp_dir().join(format!("zgx-backslash-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&t);
+        sync_zeron(&ui, &t).unwrap();
+        let dir = t.join("odd");
+        std::fs::create_dir_all(dir.join("screens")).unwrap();
+        std::fs::write(dir.join("zeron-template.json"), r#"{"id":"odd","name":"Odd"}"#).unwrap();
+        std::fs::write(dir.join("screens/extra.luau"), "-- t only").unwrap();
+        std::fs::write(dir.join("screens\\shell"), "-- not Zeron's").unwrap();
+        std::fs::write(dir.join("a:b.luau"), "-- not a package's name").unwrap();
+        assert_eq!(files(&dir, |_| true).keys().cloned().collect::<Vec<_>>(), ["screens/extra.luau", "zeron-template.json"]);
+        let before = super::super::preview::digest(&dir);
+        std::fs::write(dir.join("screens\\shell"), "-- changed").unwrap();
+        assert_eq!(super::super::preview::digest(&dir), before, "nor counted");
+        let (want, overlay) = plan(&t, "odd", &BTreeSet::new(), false);
+        assert!(!want.keys().any(|rel| rel.contains('\\') || rel.contains(':')), "{:?}", overlay.from_template);
+        assert!(overlay.from_template.contains("screens/extra.luau"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
     #[test]
     fn a_windows_short_name_is_never_laid_down() {
         use super::super::preview::{approve_at, digest, trusted_at};
