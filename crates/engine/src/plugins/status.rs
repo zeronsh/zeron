@@ -107,6 +107,12 @@ impl State {
     pub fn template_updates(&self, id: &str) -> UpdatePreference {
         self.template_updates_for.get(id).copied().unwrap_or(self.device_updates())
     }
+
+    /// What updates of store template `id` this device takes: which, and
+    /// whether pre-releases.
+    pub fn template_choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.template_updates(id), self.template_prerelease.contains(id))
+    }
 }
 
 /// A store plugin's installed version, blocked by the store.

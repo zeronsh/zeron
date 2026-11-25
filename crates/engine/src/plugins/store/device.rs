@@ -25,7 +25,7 @@ use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
-use crate::plugins::status::{Blocked, UpdatePreference};
+use crate::plugins::status::{Blocked, State, UpdatePreference};
 use crate::plugins::version::{self, Version};
 use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks, template_packages};
 
@@ -536,7 +536,7 @@ impl Plugins {
                         return Err(failed("Only a plugin installed from the store has store updates to choose"));
                     }
                 }
-                self.update_state(|state| match (&p.id, prefer) {
+                self.choose_updates(|state| match (&p.id, prefer) {
                     (Some(id), Some(prefer)) => {
                         state.store_updates_for.insert(id.clone(), prefer);
                     }
@@ -544,7 +544,8 @@ impl Plugins {
                         state.store_updates_for.remove(id);
                     }
                     (None, prefer) => state.store_updates = prefer,
-                })?;
+                })
+                .await?;
                 let state = lock(&self.inner.state).clone();
                 let device = state.device_updates();
                 let effective = p.id.as_deref().map_or(device, |id| state.updates_for(id));
@@ -580,14 +581,15 @@ impl Plugins {
                     Some(word) => Some(UpdatePreference::parse(word).ok_or_else(|| failed("Updates are newest or verified"))?),
                 };
                 self.store_template_here(&id).await?;
-                self.update_state(|state| match prefer {
+                self.choose_updates(|state| match prefer {
                     Some(prefer) => {
                         state.template_updates_for.insert(id.clone(), prefer);
                     }
                     None => {
                         state.template_updates_for.remove(&id);
                     }
-                })?;
+                })
+                .await?;
                 let state = lock(&self.inner.state).clone();
                 RpcReply::value(&json!({ "prefer": state.template_updates(&id).word(), "device": state.device_updates().word() }))
             }
@@ -595,13 +597,14 @@ impl Plugins {
                 let p: PrereleaseParams = parse_params(params)?;
                 let id = p.id.trim().to_owned();
                 self.store_template_here(&id).await?;
-                self.update_state(|state| {
+                self.choose_updates(|state| {
                     if p.on {
                         state.template_prerelease.insert(id.clone());
                     } else {
                         state.template_prerelease.remove(&id);
                     }
-                })?;
+                })
+                .await?;
                 RpcReply::value(&json!({ "id": id, "on": p.on }))
             }
             methods::SET_PLUGIN_PRERELEASES => {
@@ -1327,6 +1330,49 @@ impl Plugins {
         tokio::task::spawn_blocking(move || template_packages::update_from_store(&dir, &id, &now, alternative)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
     }
 
+    /// `change` what updates this device takes. What was found for a template
+    /// by another choice than its own now is forgotten: the next check, or
+    /// its update, looks by this one.
+    async fn choose_updates(&self, change: impl FnOnce(&mut State)) -> Result<(), RpcError> {
+        let before = lock(&self.inner.state).clone();
+        let saved = self.update_state(change);
+        let (this, dir) = (self.clone(), self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR));
+        tokio::task::spawn_blocking(move || {
+            let _changing = template_packages::changing();
+            let now = lock(&this.inner.state).clone();
+            for (folder, store) in template_packages::from_store(&dir) {
+                if before.template_choice(&store.id) != now.template_choice(&store.id) {
+                    template_packages::forget_found(&dir, &folder);
+                }
+            }
+        })
+        .await
+        .map_err(|_| failed("Couldn't reach the templates folder"))?;
+        saved
+    }
+
+    /// Keep what a check by `choice` found for store template `t` (none:
+    /// nothing), unless another was made since.
+    async fn keep_template_found(&self, t: &template_packages::Installed, choice: (UpdatePreference, bool), found: Option<Found>, package: Option<template_packages::Package>) -> Result<(), String> {
+        let (this, dir) = (self.clone(), self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR));
+        let (id, store_id) = (t.id.clone(), t.store.id.clone());
+        tokio::task::spawn_blocking(move || {
+            let _changing = template_packages::changing();
+            if lock(&this.inner.state).template_choice(&store_id) != choice {
+                return Err("You chose other updates of it while Zeron looked; check again".into());
+            }
+            match found {
+                Some(found) => template_packages::keep_found(&dir, &id, &found, package.as_ref()),
+                None => {
+                    template_packages::forget_found(&dir, &id);
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Couldn't keep the update".to_string())?
+    }
+
     /// The update check of the store's templates here (`only`: the one in
     /// that folder): each one's update by this device's choice, its package
     /// kept, never installed: `(updates, errors)`, as a plugin's check says
@@ -1377,7 +1423,8 @@ impl Plugins {
         for t in &here {
             let Some((_, offer)) = answered.iter().find(|(asked, _)| asked.id == t.store.id && asked.version == t.version && asked.hash == t.store.hash) else { continue };
             let offer = offer.as_ref().filter(|o| install::newer_by_precedence(&o.version, &t.version));
-            let (staged, beside) = match (offer, state.template_updates(&t.store.id)) {
+            let choice = state.template_choice(&t.store.id);
+            let (staged, beside) = match (offer, choice.0) {
                 (None, _) => (None, None),
                 (Some(offer), UpdatePreference::Newest) => (Some(offer), offer.verified_update.as_deref()),
                 (Some(offer), UpdatePreference::Verified) if offer.verified => (Some(offer), None),
@@ -1393,19 +1440,9 @@ impl Plugins {
                     held: true,
                     ..Found::default()
                 });
-                let kept = {
-                    let (dir, id, held) = (dir.clone(), t.id.clone(), held.clone());
-                    tokio::task::spawn_blocking(move || match held {
-                        Some(held) => template_packages::keep_found(&dir, &id, &held, None),
-                        None => {
-                            template_packages::forget_found(&dir, &id);
-                            Ok(())
-                        }
-                    })
-                    .await
-                };
-                if let Ok(Err(error)) = kept {
+                if let Err(error) = self.keep_template_found(t, choice, held.clone(), None).await {
                     errors.push(said(t, &error));
+                    continue;
                 }
                 if let Some(held) = held {
                     let mut shown = held.shown();
@@ -1415,7 +1452,7 @@ impl Plugins {
                 }
                 continue;
             };
-            match self.found_template(&client, &caller, t, staged, beside).await {
+            match self.found_template(&client, &caller, t, choice, staged, beside).await {
                 Ok(mut shown) => {
                     shown["id"] = json!(t.id);
                     shown["name"] = json!(t.name);
@@ -1430,7 +1467,7 @@ impl Plugins {
     /// `offer` as the update found for store template `t`: its package
     /// fetched by its own record (or the one kept, when it's that), checked
     /// and kept.
-    async fn found_template(&self, client: &StoreClient, caller: &Caller, t: &template_packages::Installed, offer: &Offer, beside: Option<&Offer>) -> Result<Value, String> {
+    async fn found_template(&self, client: &StoreClient, caller: &Caller, t: &template_packages::Installed, choice: (UpdatePreference, bool), offer: &Offer, beside: Option<&Offer>) -> Result<Value, String> {
         let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
         let kept = {
             let (dir, id, hash) = (dir.clone(), t.id.clone(), t.hash.clone());
@@ -1481,13 +1518,8 @@ impl Plugins {
             ..Found::default()
         };
         let shown = found.shown();
-        let id = t.id.clone();
-        tokio::task::spawn_blocking(move || {
-            let keep = found.refused.is_none().then_some(&package);
-            template_packages::keep_found(&dir, &id, &found, keep)
-        })
-        .await
-        .map_err(|_| "Couldn't keep the update".to_string())??;
+        let keep = found.refused.is_none().then_some(package);
+        self.keep_template_found(t, choice, Some(found), keep).await?;
         Ok(shown)
     }
 

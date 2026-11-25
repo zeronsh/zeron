@@ -167,7 +167,7 @@ impl Package {
 /// Held while a package is put where a template is, from reading what's
 /// there: one allowed as another's updated never lands over what it wasn't
 /// allowed over. (File work alone: nothing waits on the network under it.)
-fn changing() -> std::sync::MutexGuard<'static, ()> {
+pub(in crate::plugins) fn changing() -> std::sync::MutexGuard<'static, ()> {
     static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -966,7 +966,7 @@ fn stage_held(dir: &Path, package: &Package, mut source: Source, at: Option<&str
     });
     let name = match waiting_already.as_ref().and_then(|item| item["pending"].as_str()) {
         Some(name) => {
-            keep_record(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
+            keep_record_held(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
             name.to_owned()
         }
         None => stage_as(dir, package, install::STORE, &source, update_of.as_deref(), older)?,
@@ -1026,6 +1026,12 @@ pub fn drop_unusable(dir: &Path) {
 /// The waiting store package `pending`'s record as the store has it now
 /// (`now`): its mark and its publisher, for the list to say.
 pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Result<(), String> {
+    let _changing = changing();
+    keep_record_held(dir, pending, now)
+}
+
+/// [`keep_record`], under [`changing`].
+fn keep_record_held(dir: &Path, pending: &str, now: &install::StoreSource) -> Result<(), String> {
     let (about_path, _) = pending_paths(dir, pending)?;
     let mut about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).ok_or("What waits can't be read")?;
     let mut source = came_from(&about["origin"]).ok_or("What waits can't be read")?;

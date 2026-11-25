@@ -1261,6 +1261,59 @@ async fn a_store_template_s_update_is_the_one_chosen() {
     assert_eq!(asks(), before);
 }
 
+/// What was found by another choice isn't what's taken: one that changes what
+/// a template takes forgets what was found of it, kept or being looked for.
+#[tokio::test]
+async fn a_changed_choice_forgets_what_was_found_by_the_other() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    let d = with_midnight(&store, &key).await;
+    let check = || d.call(methods::CHECK_TEMPLATE_UPDATES, json!({ "id": "midnight" }));
+    let set = |method: &'static str, params: Value| d.call(method, params);
+    let kept = async || template_at(&d, "midnight").await["update"]["version"].clone();
+    let update = || d.call(methods::UPDATE_TEMPLATE, json!({ "id": "midnight" }));
+    store.add_template("ada", &listed_template(&key, "1.1.0", "return 2", "# Two"), "listed");
+    store.add_template("ada", &listed_template(&key, "2.0.0-rc.1", "return 4", "# Four"), "listed");
+    set(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": true })).await.unwrap();
+    check().await.unwrap();
+    assert_eq!(kept().await, "2.0.0-rc.1");
+    // The same again, or what changes nothing of it, forgets nothing.
+    set(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": true })).await.unwrap();
+    set(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": "newest" })).await.unwrap();
+    set(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "verified" })).await.unwrap();
+    assert_eq!(kept().await, "2.0.0-rc.1", "its own choice is over the device's");
+    // Off: the pre-release found isn't brought.
+    set(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": false })).await.unwrap();
+    let updates = d._dir.path().join("templates/.updates");
+    assert_eq!((kept().await, updates.join("midnight.zeron-template").exists(), updates.join("midnight.json").exists()), (Value::Null, false, false));
+    assert_eq!(update().await.unwrap()["version"], "1.1.0");
+    // As the device does, which takes verified ones: held; then it takes any.
+    set(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": null })).await.unwrap();
+    assert!(update().await.unwrap_err().starts_with("not_verified: "));
+    assert_eq!(template_at(&d, "midnight").await["update"]["held"], true);
+    set(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "newest" })).await.unwrap();
+    assert_eq!(kept().await, Value::Null);
+    assert_eq!(update().await.unwrap()["version"], "1.1.0");
+    set(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": "verified" })).await.unwrap();
+    // Being looked for as it's chosen: not kept.
+    for (asked, next) in [("newest", "verified"), ("verified", "newest")] {
+        set(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": asked })).await.unwrap();
+        store.state.lock().unwrap().slow_updates = Some(std::time::Duration::from_secs(1));
+        let asks = store.state.lock().unwrap().asks.len();
+        let chosen = async {
+            while store.state.lock().unwrap().asks.len() == asks {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            set(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": next })).await.unwrap();
+        };
+        let (checked, ()) = tokio::join!(check(), chosen);
+        store.state.lock().unwrap().slow_updates = None;
+        let checked = checked.unwrap();
+        assert_eq!((&checked["updates"], &checked["errors"][0]["id"]), (&json!([]), &json!("midnight")), "{asked}: {checked}");
+        assert_eq!(kept().await, Value::Null, "{asked}");
+    }
+}
+
 /// The verified version instead, over one that's here: newer than a verified
 /// one; or, over one that isn't, the newest verified though it's older, by
 /// the person's own choice alone, and over the very one its window names.
