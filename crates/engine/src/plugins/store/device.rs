@@ -2314,11 +2314,9 @@ async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result
 /// than `asked`: as its pages say, and its own record too. None when there's
 /// none, the store can't say, or it can't go over what's here (`place`): it's
 /// what's installed, or older than a verified one. (Never one older than it.)
-/// A pre-release only where this device takes them of it (`prereleases`), or
-/// `asked` is one.
+/// A pre-release only where this device takes them of it (`prereleases`).
 async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, asked: &str, publisher: &client::Publisher, place: Option<&template_packages::Place>, prereleases: bool) -> Option<install::Alternative> {
     super::vouched(publisher).ok()?;
-    let prereleases = prereleases || Version::parse(asked).is_ok_and(|v| v.is_prerelease());
     let zeron = version::zeron();
     let mut cursor: Option<String> = None;
     for _ in 0..ALTERNATIVE_PAGES {

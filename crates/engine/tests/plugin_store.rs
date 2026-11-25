@@ -1343,12 +1343,12 @@ async fn an_older_verified_version_goes_over_an_unverified_one_by_choice() {
     let staged = import("1.2.0").await.unwrap();
     assert_eq!(staged["store"]["verified_alternative"]["version"], "1.0.0", "{staged}");
     decline(&staged).await.unwrap();
-    // A verified pre-release only where this device takes them of it, or the
-    // version asked for is one.
+    // A verified pre-release only where this device takes them of it,
+    // whatever version was asked for.
     store.add_template("ada", &listed_template(&key, "1.1.5-rc.1", "return 4", "# Rc"), "verified");
     store.add_template("ada", &listed_template(&key, "1.1.6-rc.2", "return 5", "# Rc"), "listed");
     let alternative = |staged: Value| staged["store"]["verified_alternative"]["version"].clone();
-    for (asked, takes, expected) in [("1.2.0", false, "1.0.0"), ("1.2.0", true, "1.1.5-rc.1"), ("1.1.6-rc.2", false, "1.1.5-rc.1")] {
+    for (asked, takes, expected) in [("1.2.0", false, "1.0.0"), ("1.2.0", true, "1.1.5-rc.1"), ("1.1.6-rc.2", false, "1.0.0"), ("1.1.6-rc.2", true, "1.1.5-rc.1")] {
         d.call(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": takes })).await.unwrap();
         let staged = import(asked).await.unwrap();
         decline(&staged).await.unwrap();
