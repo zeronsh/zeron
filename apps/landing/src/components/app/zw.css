@@ -13,10 +13,13 @@
 .zw .p code { font-family: var(--font-mono); font-size: 13.5px; padding: 0 4px; border-radius: 4px; color: var(--zw-code); background: var(--zw-wash); }
 .zw .g svg { display: block; width: 100%; height: 100%; }
 .zw .branches { fill: none; stroke-width: 1; }
-/* A session at work: the app's dashed ring, turning. */
-.zw .working circle { fill: none; stroke-width: 1.5; stroke-dasharray: 6.4 3.6; transform-origin: 8px 8px; animation: zw-turn 2.4s linear infinite; }
+/* A session at work: the app's dashed ring, turning. The ring is centred in
+   its box, so the box turns, not the circle: a rotation of a box runs on the
+   compositor, while one of a shape inside an SVG repaints the page every frame. */
+.zw .working { animation: zw-turn 2.4s linear infinite; }
+.zw .working circle { fill: none; stroke-width: 1.5; stroke-dasharray: 6.4 3.6; }
 @keyframes zw-turn { to { rotate: 1turn; } }
-@media (prefers-reduced-motion: reduce) { .zw .working circle { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .zw .working { animation: none; } }
 .zw .tl { width: 14px; height: 14px; border-radius: 50%; }
 .zw .b { background: var(--f0); }
 .zw .b.e { box-shadow: inset 0 0 0 1px var(--e0); }
