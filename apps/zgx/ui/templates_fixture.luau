@@ -280,6 +280,17 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "templates.from_store_unverified",
+	title = "Ledger arrives from the store, not verified",
+	run = function()
+		local imported = from_store("ledger", "1.2.0")
+		imported.source.verified = false
+		imported.source.verified_at = nil
+		table.insert(model, { id = "ledger-store", name = "Ledger", version = "1.2.0", builtin = false, active = false, status = "ok", imported = imported } :: any)
+		publish()
+	end,
+}
+ui.command {
 	id = "templates.edited",
 	title = "Midnight, from the store, is changed here",
 	run = function()

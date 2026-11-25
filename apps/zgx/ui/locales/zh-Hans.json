@@ -4175,7 +4175,7 @@
       "couldnt_prereleases": "无法更改{name}的预发布设置",
       "publish_link": "发布…",
       "publish_title": "发布{name}",
-      "publish_body": "把一个版本发送到插件商店。每个版本都要经过 Zeron 审核人员审阅，之后其他人才能安装；你自己的设备可以立即使用。",
+      "publish_body": "把一个版本发送到插件商店。它会立即以你的用户名出现在商店中，所有人都可以安装；在 Zeron 审核人员审阅之前，它会显示为尚未验证。",
       "checks_title": "商店需要的内容",
       "check": {
         "readme": "README",

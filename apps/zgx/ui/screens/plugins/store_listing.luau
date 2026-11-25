@@ -1610,7 +1610,8 @@ function C.make(kind: kinds.Kind, browse: any)
 							id = "store-thumbs",
 							min_w = 160,
 							least = 2,
-							most = 3,
+							-- (Two or four in pairs: a fourth alone on a row looks lost.)
+							most = if #rest == 2 or #rest == 4 then 2 else 3,
 							build = function(w: () -> number): Node
 								-- (Its height in points: an aspect's isn't one a wrapped
 								-- row's picture fills.)

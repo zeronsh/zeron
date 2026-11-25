@@ -161,7 +161,7 @@ store.detail = function(id: string, _for: string?): any
 	return answer(`detail:{id}`, function(): any
 		local d = table.clone(entry(id))
 		d.readme = `# {d.name}\n\nA whole interface, in one colour.`
-		d.screenshots = { "screenshots/one.png", "screenshots/two.png", "screenshots/three.png", "screenshots/four.png" }
+		d.screenshots = table.move({ "screenshots/one.png", "screenshots/two.png", "screenshots/three.png", "screenshots/four.png" }, 1, if id == "made-up-2" then 2 elseif id == "made-up-3" then 3 else 4, 1, {})
 		d.versions = versions_of(id)
 		d.verified_version = if d.verified then "1.2.0" else "1.1.0"
 		d.compatible = id ~= "airy"
@@ -221,7 +221,7 @@ store.prepare = function(id: string): any
 				then {
 					{ rule = "missing_listing", field = "preview", words = "no preview.png" },
 					{ rule = "bad_listing", field = "categories", words = "categories" },
-					{ rule = "protected_file", path = "app.luau", words = "protected" },
+					{ rule = "protected_file", path = "account/sessions.luau", words = "protected" },
 					{ rule = "missing_readme", words = "no README.md" },
 					{ rule = "protected_file", path = "screens/APP~1.LUA", words = "APP~1.LUA is a short name" },
 					{ rule = "bad_package", field = "id", words = "Its id isn't one the store takes" },

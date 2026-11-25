@@ -83,7 +83,7 @@ test("what's missing is said in a template's words, and nothing can be sent", fu
 			expect(tree).to_contain("Add a picture of it, preview.png")
 			expect(tree).to_contain("A template has no “categories”.")
 			expect(tree).to_contain("This file is Zeron's own")
-			expect(tree).to_contain("app.luau")
+			expect(tree).to_contain("account/sessions.luau")
 			-- (One sentence a cause: the engine's where Zeron's is of another.)
 			expect(tree).to_contain("APP~1.LUA is a short name")
 			expect(tree).to_contain("Its id isn't one the store takes")

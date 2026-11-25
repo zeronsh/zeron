@@ -46,13 +46,29 @@ local function item(): any
 	return consent:get().item
 end
 
+-- A username as its badge takes it: with "…" where the widest letters would
+-- run past the window's side (39 at most; it's whole in the red box). Cut
+-- here, by what each letter may take: zgx's own "…" goes to the last word's
+-- end, which is the whole of it.
+local NAME_W = 230
+local function clipped(username: string): string
+	local w = 0
+	for i = 1, #username do
+		w += if string.find(string.sub(username, i, i), "[mwMW]") then 10 else 7
+		if w > NAME_W then
+			return string.sub(username, 1, i - 1) .. "…"
+		end
+	end
+	return username
+end
+
 -- Who signed it, as Zeron's directory knows the key.
 local function signer(it: any): Node
 	local kind = it.author and it.author.kind
 	if kind == "you" then
 		return ds.Badge { ui.t("templates.consent.made_by_you"), tone = "success", icon = "shield-check" }
 	elseif kind == "verified" then
-		return ds.Badge { ui.t("templates.consent.made_by", { username = it.author.username }), tone = "info", icon = "shield-check" }
+		return ds.Badge { ui.t("templates.consent.made_by", { username = clipped(it.author.username) }), class = "template-consent-maker", tone = "info", icon = "shield-check" }
 	end
 	return ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", icon = "danger-triangle" }
 end
@@ -147,6 +163,9 @@ local function body(key: string): Node
 	local function change(id: string, words_of: Message)
 		table.insert(changes, ui.div { id = id, w_full = true, fact("danger-triangle", words_of, nil, "$zeron.tone.warning.ink") })
 	end
+	if store and store.verified ~= true and not keep and not alternative then
+		change("template-consent-unverified", ui.t("plugins.store.not_verified_yet", { version = it.version or "" }))
+	end
 	local changed: any = if not keep and type(it.store_changed) == "table" then it.store_changed else nil
 	if changed then
 		change(
@@ -186,7 +205,8 @@ local function body(key: string): Node
 				ui.row {
 					w_full = true,
 					gap = "$space.3",
-					items = "center",
+					-- (The tile at the title's first line, however many it takes.)
+					items = "start",
 					ds.Tile { label = it.name, hue = words.hue(it.id or it.name), size = 40 },
 					ui.column {
 						grow = 1,
@@ -239,25 +259,23 @@ local function body(key: string): Node
 						}),
 						body = ui.t("templates.consent.trust_body"),
 					},
-				-- Not verified: and the version that is, to take instead. (An
-				-- update with none to take says it in its badge alone.)
-				if store and store.verified ~= true and not keep and (alternative or not update)
+				-- Not verified, and the version that is, to take instead. (With none
+				-- to take, it's said in the first of the lines above.)
+				if alternative and not keep
 					then ui.div {
 						id = "template-consent-unverified",
 						w_full = true,
 						ds.Callout {
 							tone = "warning",
 							title = ui.t("plugins.store.not_verified_yet", { version = it.version or "" }),
-							action = if alternative
-								then {
-									label = ui.t("plugins.store.install_instead", { version = alternative }),
-									on_click = function()
-										if armed:peek() and consent:peek().busy ~= true then
-											ui.invoke("templates.install_verified", nil)
-										end
-									end,
-								}
-								else nil,
+							action = {
+								label = ui.t("plugins.store.install_instead", { version = alternative }),
+								on_click = function()
+									if armed:peek() and consent:peek().busy ~= true then
+										ui.invoke("templates.install_verified", nil)
+									end
+								end,
+							},
 						},
 					}
 					else nil,

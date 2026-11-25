@@ -521,7 +521,12 @@ local function row_body(t: state.Template, now: State<any>, store_line: boolean)
 			if store_line then
 				return publish.summary(it.id) or ui.t("templates.store.summary.unknown"):get()
 			end
-			return if it.builtin then nil else words.update(it)
+			-- (And a store version the store hasn't verified, as Plugins' rows
+			-- say it; one changed here says that instead.)
+			return if it.builtin
+				then nil
+				else words.update(it)
+					or (if it.edited == true or it.status == "blocked" then nil else words.store_unverified { source = it.imported and it.imported.source, version = it.version })
 		end,
 		detail_action = if store_line then nil else UpdateLink { now = now },
 		detail_link = if store_line

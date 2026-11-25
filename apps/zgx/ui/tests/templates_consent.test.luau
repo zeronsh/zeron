@@ -146,6 +146,13 @@ test("an update has two boxes, and what changed of it and goes is read without s
 		app:command(show)
 		app:frames(20)
 		local pane = box(app:tree("#template-consent-scroll"))
+		if show == "long" then
+			-- (Cut, it says so; whole in the red box.)
+			expect(app:tree(".template-consent-maker")).to_contain("w…")
+			local mx, mw = app:tree(".template-consent-maker"):match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
+			expect((tonumber(mx) :: number) + (tonumber(mw) :: number) <= 428).to_be(true)
+			expect(app:tree("role:alert[1]")).to_contain("trust @" .. string.rep("w", 25))
+		end
 		local x, w = app:tree(".template-consent-verified"):match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
 		expect((tonumber(x) :: number) + (tonumber(w) :: number) <= 428).to_be(true)
 		for _, id in { "#template-consent-changed", "#template-consent-owner", "#template-consent-edits" } do
@@ -159,6 +166,8 @@ test("an update has two boxes, and what changed of it and goes is read without s
 	app:frames(20)
 	expect(app:count("role:alert")).to_be(1)
 	expect(app:tree(".template-consent-verified")).to_contain("Not verified yet")
+	expect(app:tree("#template-consent-unverified")).to_contain("Zeron hasn't verified 1.3.0 yet.")
+	expect(box(app:tree("#template-consent-unverified")).y < box(app:tree("role:alert")).y).to_be(true)
 end)
 
 test("what the store says of it changed as it showed: said, and Allow armed again", function()

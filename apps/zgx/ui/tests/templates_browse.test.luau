@@ -184,9 +184,10 @@ test("a template's page says what it is beside Install, and asks for nothing", f
 	expect(string.lower(tree)).never.to_contain("plugin")
 end)
 
-test("its preview comes first, the content's width, and the rest under it three across, two in a narrow pane", function()
-	for w, across in { [1000] = 3, [420] = 2 } do
-		local app = page("midnight")
+test("its preview comes first, the content's width, and the rest under it three across (two or four, in pairs), two in a narrow pane", function()
+	for _, at in { { w = 1000, id = "midnight", n = 4, across = 2 }, { w = 1000, id = "made-up-3", n = 3, across = 3 }, { w = 1000, id = "made-up-2", n = 2, across = 2 }, { w = 420, id = "made-up-3", n = 3, across = 2 } } do
+		local w, across = at.w, at.across
+		local app = page(at.id)
 		app:resize(w, 900)
 		app:frames(20)
 		expect(app:has("#store-tile")).to_be(false)
@@ -200,7 +201,7 @@ test("its preview comes first, the content's width, and the rest under it three 
 				table.insert(thumbs, box(line))
 			end
 		end
-		expect(#thumbs).to_be(4)
+		expect(#thumbs).to_be(at.n)
 		local first_row = 0
 		for _, t in thumbs do
 			expect(t.y > lead.y + lead.h).to_be(true)

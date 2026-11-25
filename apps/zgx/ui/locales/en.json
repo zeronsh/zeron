@@ -4175,7 +4175,7 @@
       "couldnt_prereleases": "Couldn't change {name}'s pre-releases",
       "publish_link": "Publish…",
       "publish_title": "Publish {name}",
-      "publish_body": "Send a version to the plugin store. Zeron's reviewers read every version before anyone else can install it; you can use it on your own devices straight away.",
+      "publish_body": "Send a version to the plugin store. It's there at once, under your username, for everyone to install; it shows as not verified until Zeron's reviewers have read it.",
       "checks_title": "What the store needs",
       "check": {
         "readme": "A README",
