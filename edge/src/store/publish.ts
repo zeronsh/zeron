@@ -40,11 +40,12 @@ import { type PluginRow, VERSION_ORDER, auditIfChanged, filesKey, packageKey, pl
 import { purgeCatalog } from "./purge";
 import { fail, answer, rateLimited } from "./http";
 import type { JsonObject } from "./json";
-import type { Kind } from "./kind";
+import { type Kind, segmentOf } from "./kind";
 import { type Listing, type Problem, checkListing, checkTemplate, listingOf, listingOfTemplate, previewProblem } from "./listing";
 import { PackageRefusal, type VerifiedContents, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, invalidToken, readBody, signingKeyAllowed, tokenInScope, tokenNotAllowed } from "./principal";
 import { userDirectoryStub } from "../user-directory";
+import { webOrigin } from "../web-cookies";
 import { isPrerelease, preKey, precedenceText } from "./semver";
 
 /**
@@ -153,10 +154,17 @@ const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
     problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, ...causeOf(p), message: p.words }))
   });
 
-/** The publish answer: the version, and the older unverified versions it
- * superseded (now yanked by it, for good). */
-const accepted = (id: string, version: string, status: string, verified: boolean, checks: unknown, superseded: readonly string[] = []): Response =>
-  answer({ id, version, status, verified, checks, superseded }, 201);
+/** The item's page on this edge's own site (`page_url`); none where the edge
+ * names no site. */
+const pageUrl = (env: Env, kind: Kind, id: string): { page_url: string } | undefined => {
+  const origin = webOrigin(env);
+  return origin === undefined ? undefined : { page_url: `${origin}/${segmentOf(kind)}/${id}` };
+};
+
+/** The publish answer: the version, the older unverified versions it
+ * superseded (now yanked by it, for good), and its item's page. */
+const accepted = (env: Env, kind: Kind, id: string, version: string, status: string, verified: boolean, checks: unknown, superseded: readonly string[] = []): Response =>
+  answer({ id, version, status, verified, checks, superseded, ...pageUrl(env, kind, id) }, 201);
 
 export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, kind: Kind, id: string): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env, { publishing: true });
@@ -273,7 +281,7 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
       const superseded = (
         await db.prepare(`SELECT version FROM versions WHERE plugin_id = ? AND superseded_by = ? AND yanked_by = 'superseded' ORDER BY ${VERSION_ORDER}`).bind(id, existing.version).all<{ version: string }>()
       ).results.map((r) => r.version);
-      return accepted(id, existing.version, existing.status, existing.verification === "verified", JSON.parse(existing.checks), superseded);
+      return accepted(env, kind, id, existing.version, existing.status, existing.verification === "verified", JSON.parse(existing.checks), superseded);
     }
     return fail(409, "version_exists", `Version ${existing.version} was already published, with other contents. Publish a new version.`);
   }
@@ -427,7 +435,7 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
     // deletes, so the only delete that can still follow is one already
     // decided and slower than this publish's batch and these HEADs.
     for (const [key, write] of writes) if ((await bucket.head(key)) === null) await write();
-    return accepted(id, landed.version, landed.status, false, checks, superseded);
+    return accepted(env, kind, id, landed.version, landed.status, false, checks, superseded);
   }
 
   // Lost: to another publish of this version, or to a change since the

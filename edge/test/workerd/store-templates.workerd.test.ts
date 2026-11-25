@@ -367,6 +367,28 @@ describe("templates: what's refused", () => {
 });
 
 describe("templates: deploy tokens", () => {
+  it("answers with the item's page on the edge's own site, for both kinds, from a device and with a token, and none where it names no site", async () => {
+    const a = await author();
+    const plug = uniqueId("p");
+    const temp = uniqueId("t");
+    const at = { plugin: `https://site.test/plugins/${plug}`, template: `https://site.test/templates/${temp}` };
+    const first = await makeTemplate({ id: temp, version: "1.0.0", signer: a.signer });
+    expect(await json(await publish(a.userId, plug, await makePackage({ id: plug, version: "1.0.0", signer: a.signer })))).toMatchObject({ page_url: at.plugin });
+    expect(await json(await publishTemplate(a.userId, temp, first))).toMatchObject({ page_url: at.template });
+    // The same bytes again: the same answer.
+    const again = await publishTemplate(a.userId, temp, first);
+    expect([again.status, await json(again)]).toEqual([201, expect.objectContaining({ version: "1.0.0", page_url: at.template })]);
+    const { token } = await deployToken(a.userId, { plugins: [plug, temp] });
+    expect(await json(await tokenPublish(token, plug, await makePackage({ id: plug, version: "1.1.0", signer: null })))).toMatchObject({ page_url: at.plugin });
+    expect(await json(await tokenPublishTemplate(token, temp, await makeTemplate({ id: temp, version: "1.1.0", signer: null })))).toMatchObject({ page_url: at.template });
+    for (const WEB_ORIGIN of [undefined, "", "http://site.test", "https://site.test/path"]) {
+      const request = new Request(`https://edge.test/store/v1/templates/${temp}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: first });
+      const none = await handlePublish(request, { ...env, WEB_ORIGIN }, env.STORE_DB, env.PLUGIN_STORE, "template", temp);
+      expect(none.status, String(WEB_ORIGIN)).toBe(201);
+      expect(await json(none), String(WEB_ORIGIN)).not.toHaveProperty("page_url");
+    }
+  });
+
   it("publishes a template's next versions unsigned, for a scope of ids of either kind, and never a first version or a read", async () => {
     const a = await author();
     const plug = uniqueId("p");
