@@ -362,6 +362,18 @@ test("the store's refusal of a template says it in a template's words", function
 	app:command("failure_not_in_store")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("This template, or this version of it, isn't in the template store.")
+	for name, said in { taken_down = "Zeron took this version down, so it can't be installed.", not_verified = "Zeron hasn't verified this version, so it wasn't installed." } do
+		app:command(`failure_{name}`)
+		app:frames(4)
+		expect(app:state("templates_said_failure")).to_be(said)
+	end
+	app:command("failure_blocks_unreadable")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Zeron can't check whether this template was taken down from the store, so it can't be used now.")
+	-- (An older engine's taken_down of a list it can't read: its own words.)
+	app:command("failure_unreadable")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Zeron can't read which templates have been taken down from the store, so it isn't installing any")
 	app:command("failure_other")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("Something else")

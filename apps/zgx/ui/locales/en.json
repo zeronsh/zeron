@@ -4051,7 +4051,8 @@
       "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
       "template_taken_down": "Zeron took this template down, so it can't be used.",
       "template_unchecked": "Zeron couldn't check whether this template was taken down. Try again in a moment.",
-      "asked_lately": "You answered Not now to this a moment ago, so Zeron isn't asking again yet. Try again in a little while."
+      "asked_lately": "You answered Not now to this a moment ago, so Zeron isn't asking again yet. Try again in a little while.",
+      "blocks_unreadable": "Zeron can't check whether this template was taken down from the store, so it can't be used now."
     },
     "store": {
       "browse": "Browse",
@@ -4630,8 +4631,9 @@
     "failure": {
       "not_in_store": "This template, or this version of it, isn't in the template store.",
       "store_mismatch": "What came isn't what the store's record says, so it wasn't installed.",
-      "not_verified": "Zeron hasn't verified this version, so it can't be taken instead.",
-      "needs_person": "Only you can install or update a template from the store, here in Zeron."
+      "not_verified": "Zeron hasn't verified this version, so it wasn't installed.",
+      "needs_person": "Only you can install or update a template from the store, here in Zeron.",
+      "taken_down": "Zeron took this version down, so it can't be installed."
     }
   },
   "themes": {
