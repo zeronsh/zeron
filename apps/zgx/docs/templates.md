@@ -156,4 +156,31 @@ Save it with the template in use, and the next new chat shows it. If it fails, Z
 
 `import_template { path }` checks the signature over every file before anything is written; an unsigned or changed package is refused. One signed on this device installs at once, as a preview until the person keeps it. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they allow it in Zeron's own consent window, which shows who signed it. No tool can allow it for them; the reply says `needs_consent`. Protected files in a package are never installed (`ignored` names them). Once installed, `list_templates` shows it with `imported.author`.
 
+`import_template { store }` brings one from Zeron's store, by its id there. An agent brings only a version Zeron has verified, and it always waits for the person, whoever made it; its update is theirs to take too. What a device takes of one (the newest, or the newest verified; pre-releases) is chosen on its page. If Zeron takes a version down as harmful, devices that have it, or a copy made of it, stop using it within about 15 minutes.
+
 A template installed from a link is checked there for a newer version, signed by the same key. Only a later version is taken. One whose files differ from what's installed (anything but its `preview.png`) waits in Zeron's consent window like a new import, and replaces the installed one only once the person allows it there.
+
+## Publishing to the store
+
+The store lists templates people made, beside plugins and under the same rules: a version is live as soon as it's published, Zeron marks the ones it has read **verified**, a version that isn't verified stops taking new installs once a newer one is published, and each version is published once, later than every one before it. docs/plugins.md ("Publishing to the store") says all of that. What's a template's own:
+
+- **It runs as Zeron itself.** A template asks for no permissions, because it can do anything Zeron can: its page, its card and Zeron's consent window say so.
+- **Its id is one nobody has**, plugin or template: they're one list of ids, with a plugin's rules (none starting with `zeron`, none that looks like a brand's). Yours is its folder's name, and `zeron-template.json` must say the same.
+- **`zeron-template.json`** has `id`, `name` (at most 64 characters), `description` (one line, at most 300), `version` and `zeron_version` (both strict semver; `zeron_version` is the Zeron it was made from, and one older than that can't install it). It may have `keywords`, `screenshots`, `homepage`, `repository` and `license`, as a plugin's may. Nothing else is sent: a template has no categories, permissions, commands, tools or services.
+- **`README.md`** is its page, and must be yours: the one Zeron wrote with the template counts as missing.
+- **`preview.png`** is its card's cover: a still PNG, at most 4 MB. Screenshots are PNG or JPEG files under `screenshots/`, up to 8. `CHANGELOG.md` gives each version's notes. None of these is part of the interface.
+- **Files no template may replace aren't sent**, nor any whose name some disk takes for another's. Each is named by the check (`left_out`, with the manifest's members that aren't sent): changed or added ones one by one, Zeron's own untouched ones as a count. It's never in the way of publishing.
+
+### Checking it
+
+`zeron template check <folder or id>` lists every problem before anything is sent, with no Zeron running and no sign-in. Each has a stable `rule`, as a plugin's does.
+
+### Publishing it
+
+Publishing is the person's act: in Zeron, on its Templates pages, or on the command line. No tool publishes one.
+
+- **From your machine:** `zeron template publish <id>`, with Zeron running and signed in. It's signed with this device's key and sent with your session. `--dry-run` checks it without sending it.
+- **From CI:** with a deploy token in `ZERON_DEPLOY_TOKEN`, `zeron template publish <folder>` sends it with no Zeron running. The same tokens publish plugins and templates (`zeron plugin token create --plugins <id>`, an id of either; `--all --templates` for all of both); a template's first version comes from your machine. The GitHub Action (`zeronsh/zeron/actions/publish-plugin`) publishes a template from a folder with `zeron-template.json`.
+- **Yank** a version with `zeron template yank <id> <version>` (`unyank` undoes it), and see each version's state with `zeron template store [id]`. (`zeron template status <id>` is how one is on this device.)
+
+A copy of another template is yours to publish only if its author lets you; a copy of one that was taken down can't be published at all.
