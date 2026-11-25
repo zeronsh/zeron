@@ -367,6 +367,10 @@ test("the store's refusal of a template says it in a template's words", function
 		app:frames(4)
 		expect(app:state("templates_said_failure")).to_be(said)
 	end
+	-- (The word alone: the sentence.)
+	app:command("failure_taken_down_bare")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Zeron took this version down, so it can't be installed.")
 	app:command("failure_blocks_unreadable")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("Zeron can't check whether this template was taken down from the store, so it can't be used now.")
