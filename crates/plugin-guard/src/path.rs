@@ -85,7 +85,8 @@ pub fn reserved_on_windows(part: &str) -> bool {
 }
 
 /// Whether `c` is a variation selector of ordinary emoji (text's U+FE0E, the
-/// picture's U+FE0F): drawn as nothing, and allowed in a name.
+/// picture's U+FE0F): drawn as nothing, and allowed in a name, which is safe
+/// only because names are compared without it ([`fold`]).
 pub fn selector(c: char) -> bool {
     matches!(c, '\u{fe0e}' | '\u{fe0f}')
 }
@@ -94,7 +95,8 @@ pub fn selector(c: char) -> bool {
 /// as `/`, each character's uppercase then its lowercase (`ſ` → `s`,
 /// `K` (Kelvin) → `k`, `ı` → `i`), each part without the dots and spaces
 /// Windows drops from its end, and none of the [`selector`]s a name may have
-/// (no disk drops those; nothing is told apart by one). Two paths that fold the same can
+/// (some disks look names up without them, as a Linux folder that ignores
+/// case does: nothing is told apart by one). Two paths that fold the same can
 /// name the same file on macOS or Windows; compare folds for "is this the
 /// protected file".
 pub fn fold(rel: &str) -> String {
