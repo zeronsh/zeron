@@ -1984,10 +1984,17 @@ impl Bridge {
         );
         for t in installed {
             let broken = self.broken.borrow().why(&t.id).map(String::from);
-            let errors: BTreeMap<String, String> = live::files(&root.join(&t.id), |_| true)
+            let mut errors: BTreeMap<String, String> = live::files(&root.join(&t.id), |_| true)
                 .keys()
                 .filter_map(|rel| self.failed_files.borrow().why(&format!("{}:{rel}", t.id)).map(|why| (rel.clone(), why.to_string())))
                 .collect();
+            // (The active one's files laid across Zeron's folders or files:
+            // never used.)
+            let overlay = self.overlay.borrow();
+            if overlay.template == t.id {
+                errors.extend(overlay.clashing.iter().map(|rel| (rel.clone(), live::CLASHES.to_string())));
+            }
+            drop(overlay);
             let blocked = blocks::blocked(&root, &t.id);
             from_store |= root.join(&t.id).join(".lineage.json").exists();
             // (Taken down, in use or not: what was allowed of it is forgotten:

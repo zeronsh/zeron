@@ -214,6 +214,21 @@ pub fn read_template(dir: &Path) -> Result<PreparedTemplate, String> {
 }
 
 impl PreparedTemplate {
+    /// It as it would run on this device: each file never laid over Zeron's
+    /// own (in templates folder `dir`) is warned of, in the app's words.
+    pub fn against(mut self, dir: &Path) -> Self {
+        self.warnings.extend(template_packages::not_used(dir, &self.files).into_iter().map(|rel| Problem {
+            rule: listing::rule::NOT_USED,
+            field: Some("files"),
+            words: format!("\"{}\": Not used: Zeron has a folder of this name, or a file where this path has a folder.", template_packages::shown_path(&rel)),
+            path: Some(template_packages::shown_path(&rel)),
+            line: None,
+            cause: None,
+            word: None,
+        }));
+        self
+    }
+
     pub fn id(&self) -> &str {
         self.manifest["id"].as_str().unwrap_or("")
     }

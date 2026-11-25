@@ -295,6 +295,30 @@ pub fn left_out(folder: &Path, files: &BTreeMap<String, Vec<u8>>) -> LeftOut {
     LeftOut { files: left, zeron_s: zeron_s.len(), members }
 }
 
+/// A path, as it's shown.
+pub fn shown_path(rel: &str) -> String {
+    listing::shown(rel, MAX_SHOWN_PATH)
+}
+
+/// Which of a template's `files` are never laid over Zeron's own, as this
+/// device has them (`dir`'s `.zeron`; none known, none named): a path through
+/// one of Zeron's files, or a file where Zeron has a folder.
+pub fn not_used(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    use zeron_plugin_guard::{path::fold, template::composed};
+    let own: std::collections::BTreeSet<String> = templates::zeron_s_own(dir).iter().map(|rel| fold(rel)).collect();
+    let parents = |rel: &str| -> Vec<String> { rel.match_indices('/').map(|(at, _)| rel[..at].to_owned()).collect() };
+    let folders: std::collections::BTreeSet<String> = own.iter().flat_map(|rel| parents(rel)).collect();
+    files
+        .keys()
+        .filter(|rel| composed(rel))
+        .filter(|rel| {
+            let rel = fold(rel);
+            folders.contains(&rel) || parents(&rel).iter().any(|parent| own.contains(parent))
+        })
+        .cloned()
+        .collect()
+}
+
 /// `manifest` and `files` as a package's bytes: signed by `key` in the
 /// template domain, or unsigned (a deploy token's).
 pub fn pack(manifest: &Value, files: &BTreeMap<String, Vec<u8>>, key: Option<&SigningKey>) -> Result<Vec<u8>, String> {
@@ -1217,6 +1241,61 @@ pub fn imported(folder: &Path) -> Option<Value> {
     value.is_object().then_some(value)
 }
 
+/// How often marks were taken off in each templates folder: a mark whose
+/// record was read before one was isn't put on after it.
+fn unmarkings() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, u64>> {
+    static UNMARKED: std::sync::Mutex<BTreeMap<PathBuf, u64>> = std::sync::Mutex::new(BTreeMap::new());
+    UNMARKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`mark`]'s `since`, taken before the record is read.
+pub fn unmarked(dir: &Path) -> u64 {
+    unmarkings().get(dir).copied().unwrap_or(0)
+}
+
+/// Template `installed`, whose own record in the store says it's verified
+/// (`verified_at`), is marked so, unless it's down here, changed, or a mark was
+/// taken off `since` its record was read. Whether it was.
+pub fn mark(dir: &Path, installed: &Installed, verified_at: Option<i64>, since: u64) -> bool {
+    let _changing = changing();
+    let at = dir.join(&installed.id);
+    if unmarked(dir) != since || super::template_blocks::blocked(dir, &at).is_some() {
+        return false;
+    }
+    let Some(mut record) = imported(&at).filter(|record| record["hash"] == installed.hash.as_str() && source(&at).is_some_and(|s| s.store() == Some(&installed.store))) else { return false };
+    record["source"]["store"]["verified"] = json!(true);
+    if let Some(verified_at) = verified_at {
+        record["source"]["store"]["verified_at"] = json!(verified_at);
+    }
+    templates::write_atomic(&at, IMPORTED, &signing::pretty(&record)).is_ok()
+}
+
+/// Each template in `dir` that's one of `versions` (a store id and version)
+/// by its own record isn't verified any more: its record says so. The folders
+/// changed, and whether every one that should be was.
+pub fn unmark(dir: &Path, versions: &[(String, String)]) -> (Vec<String>, bool) {
+    let _changing = changing();
+    *unmarkings().entry(dir.to_owned()).or_default() += 1;
+    let (mut changed, mut all) = (Vec::new(), true);
+    for (folder, store) in from_store(dir) {
+        let at = dir.join(&folder);
+        let Some(mut record) = imported(&at).filter(|_| store.verified) else { continue };
+        let version = record["version"].as_str().unwrap_or_default();
+        if !versions.iter().any(|(id, down)| *id == store.id && super::template_blocks::same_version(down, version)) {
+            continue;
+        }
+        record["source"]["store"]["verified"] = json!(false);
+        if let Some(store) = record["source"]["store"].as_object_mut() {
+            store.remove("verified_at");
+        }
+        match templates::write_atomic(&at, IMPORTED, &signing::pretty(&record)) {
+            Ok(()) => changed.push(folder),
+            Err(_) => all = false,
+        }
+    }
+    (changed, all)
+}
+
 /// Whether `folder` has an `.imported.json` at all, one that can be read or
 /// not: it isn't Zeron's, nor made here.
 pub fn has_record(folder: &Path) -> bool {
@@ -1507,6 +1586,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
 }
 
 /// A store template here, as the update check asks about it.
+#[derive(Clone)]
 pub struct Installed {
     /// Its folder.
     pub id: String,
@@ -1992,6 +2072,35 @@ mod tests {
             let left = left_out(&t, &sent);
             assert!(rels[1..].iter().all(|rel| left.files.iter().any(|(left, _)| left == rel)), "{:?}", left.files);
         }
+    }
+
+    /// A mark is put on the record it was read for, once: not on another
+    /// install's, nor after one was taken off since.
+    #[test]
+    fn plugins_template_packages_a_mark_is_put_on_what_it_was_read_for() {
+        let d = dir("marked");
+        let t = d.join("midnight");
+        write(&t.join(MANIFEST), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#);
+        let record = json!({ "key": null, "hash": "h", "version": "1.0.0", "source": { "kind": "store", "version": "1.0.0", "installed_at": 0,
+            "store": { "id": "midnight", "publisher": "ada", "publisher_id": "pub_0123456789abcdef0123456789abcdef", "hash": "cd".repeat(32) } } });
+        super::super::template_blocks::begin(&d).unwrap();
+        let put = || write(&t.join(IMPORTED), &record.to_string());
+        let verified = || from_store(&d)[0].1.verified;
+        put();
+        let here = installed_from_store(&d, None).remove(0);
+        for other in [Installed { hash: "other".into(), ..here.clone() }, Installed { store: install::StoreSource { publisher_id: "pub_other".into(), ..here.store.clone() }, ..here.clone() }, Installed { id: "elsewhere".into(), ..here.clone() }] {
+            assert!(!mark(&d, &other, Some(7), unmarked(&d)) && !verified());
+        }
+        // (One taken off in this folder, meanwhile; not in another.)
+        let since = unmarked(&d);
+        unmark(&d, &[("other".into(), "1.0.0".into())]);
+        assert!(!mark(&d, &here, Some(7), since) && !verified());
+        let since = unmarked(&d);
+        unmark(&dir("marked-elsewhere"), &[("midnight".into(), "1.0.0".into())]);
+        assert!(mark(&d, &here, Some(7), since));
+        assert!(verified());
+        assert_eq!(unmark(&d, &[("midnight".into(), "1.0.0".into())]), (vec!["midnight".to_owned()], true));
+        assert!(!verified());
     }
 
     /// A template is for the Zeron it was made from and later.

@@ -53,7 +53,9 @@ assets/                icons and art
 
 `describe_app` lists every screen: its module (`@app/screens/shell/sidebar`), its file, what it draws, and the elements it names (`#id`, `.class`).
 
-**Never a template's**, whatever it holds (Zeron's own is used): `screens/plugins/`, `screens/templates/`, `account/`, `.luaurc`, and the window where plugins are allowed. That way a template can never sign you in, allow a plugin, or hide how to switch back.
+**Never a template's**, whatever it holds (Zeron's own is used): `screens/plugins/`, `screens/templates/`, `account/`, `.luaurc`, `ds/tokens_template.luau` (where Zeron lays your `ds/tokens.luau`), a `ds/tokens/` folder (it would stand in for Zeron's tokens), the folder of any of these files (`ds/tokens_template/`: a folder is its `init.luau`, over the file beside it), and the window where plugins are allowed. That way a template can never sign you in, allow a plugin, or hide how to switch back.
+
+**Not used:** a file laid across Zeron's own, one whose path runs through one of Zeron's files (`ds/button.luau/x.luau`) or that has the name of one of its folders (`screens`). `template_status` names it, and so does `zeron template check`, where Zeron is (`not_used`).
 
 ## The rules
 
@@ -97,24 +99,38 @@ Zeron's built-in themes used to be templates (`theme-<key>`, colour-only). They 
 
 ### Restyle the sidebar's rows through tokens
 
-A selected row in the sidebar is a flat surface (`ds/surface.luau`, `depth = "flat"`). Its fill is the token `zeron.selected.flat.bg`, and the gap between rows is `zeron.list.gap`. Change both in your template's `ds/tokens.luau` and every flat selection and list follows, in both themes:
+A selected row in the sidebar is a flat surface (`ds/surface.luau`, `depth = "flat"`). Its fill is the token `zeron.selected.flat.bg`, and the gap between rows is `zeron.list.gap`. Name both in your template's `ds/tokens.luau` and every flat selection and list follows, in both themes. This is the whole file:
 
 ```lua
--- ds/tokens.luau, inside ui.theme.tokens { zeron = { … } }
-list = { gap = 4 },                                  -- was 2: rows breathe
-selected = {
-	bg = "{selection.item}",
-	ring = "{border}",
-	highlight = "0 0 0 0 #00000000",
-	lift = "0 0 0 0 #00000000",
-	-- Flat (sidebar rows): an accent wash, not the neutral one.
-	flat = { bg = "alpha({accent}, 0.18)" },
-},
+-- ds/tokens.luau
+return {
+	setup = function()
+		ui.theme.tokens {
+			zeron = {
+				list = { gap = 4 }, -- Zeron's is 2: rows breathe
+				-- Flat (sidebar rows): an accent wash, not the neutral one.
+				selected = { flat = { bg = "alpha({accent}, 0.18)" } },
+			},
+		}
+	end,
+}
 ```
 
-**Start any `ds/tokens.luau` from Zeron's own file of the version you're on** (`.zeron/ds/tokens.luau`, what `create_template` copies) and change only your values. It's one whole file: a copy from an older Zeron is missing the tokens added since, and what draws with them goes wrong (project tiles, the ink a risky ask is said in). When `template_status` lists it in `out_of_date`, start again from the new one and put your values back.
+**Name only the tokens you change.** A template's `ds/tokens.luau` doesn't stand in for Zeron's: Zeron declares all its own first, then runs yours, token by token. One you name is yours; every other is the running Zeron's, those added after you made the template too. You can set a token, never remove one. The smallest file sets one:
 
-Keep only `ds/tokens.luau` (with this change) in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
+```lua
+return {
+	setup = function()
+		ui.theme.tokens { zeron = { list = { gap = 9 } } }
+	end,
+}
+```
+
+A full copy of Zeron's file works as well, but holds every token to what it was when you copied it. If yours fails to load or throws, Zeron's tokens stand and `template_status` names your `ds/tokens.luau`.
+
+Keep the `zeron_version` that `create_template` wrote. A file like this needs a Zeron that lays tokens over its own, as the one with this guide does; on an older one it would stand in for Zeron's whole file. So never lower it.
+
+Keep only `ds/tokens.luau` in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. (A file you do copy whole, a component or a screen, is yours until you copy it again: `out_of_date` in `template_status` says when Zeron's has changed.) For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
 
 ### Put words on the new-chat page
 
@@ -146,7 +162,7 @@ Save it with the template in use, and the next new chat shows it. If it fails, Z
 
 ## Sharing
 
-`export_template { id, path }` saves a template as one `.zeron-template` file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its `preview.png`; the files no template may replace (`screens/plugins/`, `screens/templates/`, `account/`, `.luaurc`) are left out.
+`export_template { id, path }` saves a template as one `.zeron-template` file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its `preview.png`; the files no template may replace (see "Never a template's") are left out.
 
 `import_template { path }` checks the signature over every file before anything is written; an unsigned or changed package is refused. One signed on this device installs at once, as a preview until the person keeps it. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they allow it in Zeron's own consent window, which shows who signed it. No tool can allow it for them; the reply says `needs_consent`. Protected files in a package are never installed (`ignored` names them). Once installed, `list_templates` shows it with `imported.author`.
 
