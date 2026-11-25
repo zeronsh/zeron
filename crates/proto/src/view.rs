@@ -63,8 +63,11 @@ pub fn session_expires(session: &Session) -> bool {
 
 /// Only live activity expires. Completed/error records remain useful after
 /// process exit; a lost heartbeat is never evidence of successful completion.
+/// Nor does a chat waiting for its usage limit's reset (`limited`): its host
+/// keeps the row as it is, with no heartbeat, until it resumes the chat.
 pub fn session_stale(session: &Session, now: DateTime<Utc>) -> bool {
-    matches!(
+    !session.limited.as_ref().is_some_and(crate::usage_limit::SessionLimit::waiting)
+        && matches!(
         session.activity_status(),
         SessionStatus::Working | SessionStatus::AwaitingInput
     ) && now
@@ -458,6 +461,7 @@ mod gate_tests {
             running_subagents: running,
             background_tasks: Vec::new(),
             waiting: None,
+            live: Default::default(),
         }
     }
 
@@ -585,6 +589,21 @@ mod gate_tests {
             ChatIndicator::Idle
         );
         assert!(session_stale(&session, later));
+        // Waiting for its usage limit's reset: never stale.
+        let limited = Session {
+            live: crate::SessionLive { limited: Some(crate::usage_limit::SessionLimit {
+                provider: "codex".into(),
+                account_slot: None,
+                account_label: None,
+                window: None,
+                until: None,
+                since: now,
+                attempt: 0,
+                switched_to: None,
+            }), ..Default::default() },
+            ..session.clone()
+        };
+        assert!(!session_stale(&limited, later + chrono::Duration::hours(5)));
         session.terminal_activity = None;
         session.status = SessionStatus::Idle;
         session.last_turn_outcome = Some(crate::NativeTurnOutcome {

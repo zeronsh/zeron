@@ -22,10 +22,15 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod orchestration;
 mod commands;
 mod mcp_servers;
 mod plugins;
 mod themes;
+#[cfg(test)]
+#[path = "tools/switch_tests.rs"]
+mod switch_tests;
+pub use orchestration::Role;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
 
@@ -67,6 +72,11 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
+    /// What the calling chat is to orchestration, once read
+    /// ([`Self::resolve_role`]): it picks the orchestration tools listed.
+    role: std::sync::RwLock<Option<Role>>,
+    /// The role's built-in instructions, read with it.
+    role_prompt: std::sync::RwLock<Option<String>>,
     /// Each device's folder after this chat's last command there.
     command_state: commands::CommandState,
 }
@@ -156,7 +166,7 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat", "crew"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. crew (the default from an orchestrator): a thread in your crew. Omitted: crew from an orchestrator, subagent with another parent/origin, chat otherwise." },
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
@@ -170,6 +180,9 @@ fn catalog() -> Vec<ToolDef> {
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine, unless device or project names another of the person's devices." },
+                    "item": { "type": "string", "description": "Crew threads: the board item it works on (one item per thread)." },
+                    "role": { "type": "string", "description": "Crew threads: a short role, e.g. \"auth PR\"." },
+                    "machine": { "type": "string", "description": "Only with cloud: the size of Cloud machine it starts on, a size id (small, default, large, xlarge; the ones offered are those of Settings → Cloud → Default machine, each with its vCPU, memory, disk and credit multiplier). Kept as the chat's own: it wakes on the same size. Omitted: the account's default machine. An unknown id fails, listing the valid ones. From a Cloud chat, no bigger than that chat's own machine." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -316,6 +329,7 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["task_ids"]
         }),
     });
+    tools.extend(orchestration::catalog());
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools.extend(commands::catalog());
@@ -637,6 +651,8 @@ enum ChatKind {
     Chat,
     Side,
     Subagent,
+    /// A thread in the calling orchestrator's crew.
+    Crew,
 }
 
 #[derive(Deserialize, Default)]
@@ -684,6 +700,9 @@ struct PendingTurn {
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
     kind: Option<ChatKind>,
+    /// Crew threads: the board item it works on, and its short role.
+    item: Option<String>,
+    role: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -699,6 +718,7 @@ struct CreateChatArgs {
     cwd: Option<String>,
     #[serde(default)]
     cloud: bool,
+    machine: Option<String>,
     prompt: Option<String>,
     #[serde(default)]
     wait: bool,
@@ -838,6 +858,8 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
+            role: Default::default(),
+            role_prompt: Default::default(),
             command_state: Default::default(),
         }
     }
@@ -855,14 +877,31 @@ impl Tools {
         origin.chat_id.is_some() && origin.waits_on_background
     }
 
+    /// Whether Orchestrators is on where the engine is (the engine says so
+    /// in the server's env): orchestration's tools and role prompts are
+    /// offered only then.
+    pub fn orchestration(&self) -> bool {
+        self.zeron.origin().orchestration
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
         let waits = self.waits_on_background();
+        let orchestration = self.orchestration();
+        let role = self.role();
         catalog()
             .into_iter()
             .filter(|tool| match tool.name {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
+                // `ask` is for a chat's agent; the rest by role.
+                orchestration::ASK | orchestration::PROGRESS => in_chat && orchestration,
+                name if orchestration::NAMES.contains(&name) => orchestration && role.offers(name),
+                // The Brain dump routes and never acts: no shell of its own
+                // (its CLI's are taken away too), none through here.
+                name if commands::NAMES.contains(&name) => {
+                    !matches!(role, orchestration::Role::BrainDump { .. })
+                }
                 _ => true,
             })
             .collect()
@@ -896,6 +935,9 @@ impl Tools {
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
+            tool if orchestration::NAMES.contains(&tool) => {
+                return self.orchestration_tool(tool, args).await;
+            }
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
             plugins::LIST_PLUGINS => return self.list_plugins().await,
             plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
@@ -978,7 +1020,7 @@ impl Tools {
             },
             None => Value::Null,
         };
-        Ok(json!({
+        let mut me = json!({
             "chat": chat,
             "originDeviceId": origin.device_id,
             "localDeviceId": local_device,
@@ -988,7 +1030,11 @@ impl Tools {
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
-        }))
+        });
+        if origin.orchestration {
+            me["orchestrationRole"] = json!(self.role().label());
+        }
+        Ok(me)
     }
 
     async fn list_devices(&self) -> anyhow::Result<Value> {
@@ -1086,7 +1132,22 @@ impl Tools {
             Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
             None => None,
         };
-        let models = self.zeron.models_on(harness, device.as_deref()).await?;
+        // No models is never an answer: it reads as success with nothing to
+        // pick. Say why instead (the agent's own failure, or its login).
+        let host = device.as_deref().unwrap_or("local");
+        let models = match self.fresh_models(harness, device.as_deref(), None).await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => {
+                let hint = self.catalog_hint(harness, device.as_deref()).await;
+                anyhow::bail!("{harness:?} lists no models on device {host}.{hint}")
+            }
+            Err(error) => {
+                let hint = self.catalog_hint(harness, device.as_deref()).await;
+                return Err(error.context(format!(
+                    "{harness:?} could not list its models on device {host}.{hint}"
+                )));
+            }
+        };
         Ok(json!({
             "harness": harness,
             "models": models.iter().map(|m| json!({
@@ -1096,6 +1157,43 @@ impl Tools {
                 "reasoningLevels": m.reasoning_levels,
             })).collect::<Vec<_>>()
         }))
+    }
+
+    /// A harness's models, asked of the agent again once when what the
+    /// engine kept failed, is empty, or lacks `wanted`: it keeps a failed or
+    /// empty answer for a while, and a sign-in since can have changed it.
+    async fn fresh_models(
+        &self,
+        harness: HarnessId,
+        device: Option<&str>,
+        wanted: Option<&str>,
+    ) -> anyhow::Result<Vec<zeron_proto::Model>> {
+        match self.zeron.models_on(harness, device).await {
+            Ok(models)
+                if !models.is_empty()
+                    && wanted.is_none_or(|id| models.iter().any(|m| m.id == id)) =>
+            {
+                Ok(models)
+            }
+            _ => self.zeron.models_listed(harness, device, true).await,
+        }
+    }
+
+    /// Why a harness may list no models, as far as the device tells: it
+    /// isn't there, installed, on, or signed in. Empty when nothing says.
+    async fn catalog_hint(&self, harness: HarnessId, device: Option<&str>) -> &'static str {
+        let Ok(harnesses) = self.zeron.harnesses_on(device).await else {
+            return "";
+        };
+        match harnesses.iter().find(|h| h.id == harness) {
+            None => " It isn't offered there (see list_harnesses).",
+            Some(h) if !h.installed => " It isn't installed there.",
+            Some(h) if h.enabled == Some(false) => " It is turned off there.",
+            Some(h) if h.signed_in == Some(false) => {
+                " It isn't signed in there: sign in to it (Settings → Accounts), then retry."
+            }
+            _ => "",
+        }
     }
 
     async fn list_chats(&self, args: ListChatsArgs) -> anyhow::Result<Value> {
@@ -1163,7 +1261,61 @@ impl Tools {
         Ok(summary)
     }
 
-    async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
+    /// The orchestrators, by chat id and kind, as the engine's rows say
+    /// (never an id's shape); none from an engine that predates them.
+    async fn orchestrator_kinds(&self) -> HashMap<String, zeron_proto::orchestration::OrchestratorKind> {
+        let Ok(state) = self.zeron.snapshot(zeron_rpc::methods::WATCH_ORCHESTRATION, json!({})).await else {
+            return HashMap::new();
+        };
+        serde_json::from_value::<zeron_proto::orchestration::OrchestrationState>(state)
+            .map(|state| state.orchestrators.into_iter().map(|o| (o.id, o.kind)).collect())
+            .unwrap_or_default()
+    }
+
+    /// With `cloud`: the size the new chat's machine starts on, checked
+    /// against the sizes Cloud offers (`CloudStatus.machines`). Gives the
+    /// size to send (`None`: the account's default, decided by the edge) and
+    /// the size it will be on, when known. Where the sizes can't be read (a
+    /// Cloud machine's engine, an edge that predates them), the edge checks
+    /// the one asked for.
+    async fn cloud_machine(
+        &self,
+        asked: Option<&str>,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let asked = asked.map(str::trim).filter(|m| !m.is_empty());
+        let status = self
+            .zeron
+            .call(zeron_rpc::methods::CLOUD_STATUS, json!({}))
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<zeron_proto::CloudStatus>(v).ok())
+            .filter(|status| !status.machines.is_empty());
+        let Some(status) = status else {
+            return Ok((asked.map(str::to_owned), asked.map(str::to_owned)));
+        };
+        match asked {
+            Some(id) => {
+                anyhow::ensure!(
+                    status.machines.iter().any(|m| m.id == id),
+                    "machine {id:?} is not a Cloud machine size; valid ids: {}",
+                    status
+                        .machines
+                        .iter()
+                        .map(|m| m.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Ok((Some(id.to_owned()), Some(id.to_owned())))
+            }
+            None => Ok((None, status.machine)),
+        }
+    }
+
+    async fn create_chat(&self, mut args: CreateChatArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            args.cloud || args.machine.as_deref().is_none_or(|m| m.trim().is_empty()),
+            "machine picks a Cloud machine's size: pass cloud: true with it"
+        );
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
         let explicit_parent = args
@@ -1175,6 +1327,13 @@ impl Tools {
             args.kind != Some(ChatKind::Chat) || explicit_parent.is_none(),
             "kind chat cannot have a parent"
         );
+        use zeron_proto::orchestration::OrchestratorKind;
+        let kinds = if self.orchestration() && (explicit_parent.is_some() || self.zeron.origin().chat_id.is_some()) {
+            self.orchestrator_kinds().await
+        } else {
+            HashMap::new()
+        };
+        let brain_dump = |chat: &str| kinds.get(chat) == Some(&OrchestratorKind::BrainDump);
         let parent_chat_id = if args.kind == Some(ChatKind::Chat) {
             None
         } else {
@@ -1182,24 +1341,52 @@ impl Tools {
                 Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
                 None => self.zeron.origin().chat_id.clone(),
             }
-            // A hidden voice orchestrator creates top-level sessions.
-            .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent))
+            // A hidden voice orchestrator, and the Brain dump, create
+            // top-level sessions.
+            .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent) && !brain_dump(parent))
         };
         anyhow::ensure!(
-            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent)) || parent_chat_id.is_some(),
+            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent | ChatKind::Crew))
+                || parent_chat_id.is_some(),
             "kind {} requires a parent or origin chat",
-            if args.kind == Some(ChatKind::Side) { "side" } else { "subagent" }
+            match args.kind {
+                Some(ChatKind::Side) => "side",
+                Some(ChatKind::Crew) => "crew",
+                _ => "subagent",
+            }
         );
-        // A child is a subagent unless asked for as a side chat: delegated
-        // work lists under its parent's Subagents, not its side chats.
+        // An orchestrator's children are its crew; any other child is a
+        // subagent unless asked for as a side chat: delegated work lists
+        // under its parent's Subagents, not its side chats.
+        let parent_orchestrates = parent_chat_id
+            .as_deref()
+            .is_some_and(|parent| kinds.get(parent) == Some(&OrchestratorKind::Standard));
         let kind = match (args.kind, parent_chat_id.is_some()) {
             (_, false) => ChatKind::Chat,
             (Some(ChatKind::Side), true) => ChatKind::Side,
+            (Some(ChatKind::Subagent), true) => ChatKind::Subagent,
+            (Some(ChatKind::Crew) | None, true) if parent_orchestrates => ChatKind::Crew,
+            (Some(ChatKind::Crew), true) => {
+                anyhow::bail!("kind crew is for an orchestrator's own threads")
+            }
             (_, true) => ChatKind::Subagent,
         };
+        // A crew thread starts as its orchestrator's crew policy says.
+        let crew_of = match (kind, parent_chat_id.as_deref()) {
+            (ChatKind::Crew, Some(orchestrator)) => Some(orchestrator.to_owned()),
+            _ => None,
+        };
+        // Its crew full: the work waits in Planned and starts when one frees.
+        if let Some(orchestrator) = crew_of.as_deref()
+            && let Some(waiting) = self.apply_crew_policy(orchestrator, &mut args).await?
+        {
+            return self.queue_crew_card(&args, waiting).await;
+        }
 
-        // Delegation is one level deep: a chat that has a parent never
-        // creates chats, and a new chat's parent is a top-level chat.
+        // Delegation depth: a top-level chat (an orchestrator too) creates
+        // chats, and so does a crew thread (its own subagents); any other
+        // chat with a parent creates none. A new chat's parent is a
+        // top-level chat or a crew thread.
         // The calling chat's sandbox and access cap the new one's: a
         // supervised or sandboxed agent must not hand its work to one that
         // asks nothing (the engine caps it again: rpc/agent_gate.rs).
@@ -1207,10 +1394,12 @@ impl Tools {
         let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
+            && !brain_dump(origin)
         {
             let origin = self.zeron.resolve_chat(origin).await?;
             anyhow::ensure!(
-                origin.parent_chat_id.is_none(),
+                origin.parent_chat_id.is_none()
+                    || origin.child_kind == Some(zeron_proto::ChildKind::Crew),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
             if let Some(config) = origin.config {
@@ -1221,8 +1410,9 @@ impl Tools {
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
             anyhow::ensure!(
-                parent.parent_chat_id.is_none(),
-                "{} is itself a delegated chat: only top-level chats have side chats.",
+                parent.parent_chat_id.is_none()
+                    || parent.child_kind == Some(zeron_proto::ChildKind::Crew),
+                "{} is itself a delegated chat: only top-level chats and crew threads have children.",
                 parent.title.as_deref().unwrap_or(&parent.id)
             );
         }
@@ -1254,7 +1444,13 @@ impl Tools {
         };
         // A Cloud machine's catalog is checked when it runs, not here.
         if let Some(model) = args.model.as_deref().filter(|_| !args.cloud) {
-            let models = self.zeron.models_on(harness, Some(&device_id)).await?;
+            let models = self
+                .fresh_models(harness, Some(&device_id), Some(model))
+                .await?;
+            if models.is_empty() {
+                let hint = self.catalog_hint(harness, Some(&device_id)).await;
+                anyhow::bail!("{harness:?} lists no models on device {device_id}.{hint}");
+            }
             anyhow::ensure!(
                 models.iter().any(|m| m.id == model),
                 "model {model:?} is not offered by {harness:?} on device {device_id}; available: {}",
@@ -1306,6 +1502,11 @@ impl Tools {
                 "{harness:?} on device {device_id} has no plan mode"
             );
         }
+        let (machine, machine_shown) = if args.cloud {
+            self.cloud_machine(args.machine.as_deref()).await?
+        } else {
+            (None, None)
+        };
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
@@ -1326,10 +1527,22 @@ impl Tools {
         if let Some(space) = &space {
             mutate["spaceId"] = json!(space.id);
         }
+        let title = args
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+        // Named on its row from the first write: a crew thread shows its
+        // name (the Map, the sidebar) from the moment it joins its crew.
+        if let Some(title) = &title {
+            mutate["title"] = json!(title);
+        }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
             mutate["childKind"] = json!(match kind {
                 ChatKind::Side => zeron_proto::ChildKind::Side,
+                ChatKind::Crew => zeron_proto::ChildKind::Crew,
                 _ => zeron_proto::ChildKind::Subagent,
             });
         }
@@ -1370,8 +1583,25 @@ impl Tools {
         }
         if args.cloud {
             mutate["cloud"] = json!(true);
+            if let Some(machine) = &machine {
+                mutate["machine"] = json!(machine);
+            }
         }
         let created = self.zeron.mutate(mutate).await?;
+        // Its role and item in the crew, before its first turn reads them.
+        if let Some(orchestrator) = crew_of.as_deref()
+            && (args.role.is_some() || args.item.is_some())
+        {
+            self.zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({
+                        "op": "addToCrew", "orchestratorId": orchestrator, "chatId": chat_id,
+                        "role": args.role.clone().unwrap_or_default(), "itemId": args.item,
+                    }),
+                )
+                .await?;
+        }
         // A Cloud chat's machine and checkout come back from the engine.
         let (device_id, cwd) = if args.cloud {
             (
@@ -1384,12 +1614,9 @@ impl Tools {
         } else {
             (device_id, cwd)
         };
-        if let Some(title) = args
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
+        // (A Cloud chat's row may be written by the machine's host, which
+        // an older one does without its title: named again here.)
+        if let Some(title) = title.as_deref().filter(|_| args.cloud) {
             self.zeron
                 .mutate(json!({ "op": "renameChat", "chatId": chat_id, "title": title }))
                 .await?;
@@ -1412,6 +1639,9 @@ impl Tools {
         });
         if let Some(capped) = &capped {
             result["accessCapped"] = json!(capped);
+        }
+        if let Some(machine) = &machine_shown {
+            result["machine"] = json!(machine);
         }
         if signed_out {
             result["warning"] = json!(format!(
@@ -1441,12 +1671,14 @@ impl Tools {
                 child_kind: match kind {
                     ChatKind::Side => Some(zeron_proto::ChildKind::Side),
                     ChatKind::Subagent => Some(zeron_proto::ChildKind::Subagent),
+                    ChatKind::Crew => Some(zeron_proto::ChildKind::Crew),
                     ChatKind::Chat => None,
                 },
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
                 sleep: None,
+                started_by: None,
             };
             let delivered = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
@@ -1462,7 +1694,9 @@ impl Tools {
                 .lock()
                 .await
                 .insert(chat.id.clone(), pending.clone());
-            if args.wait {
+            if let Some(note) = args.wait.then(|| self.crew_wait_note(&chat)).flatten() {
+                result["turn"] = note;
+            } else if args.wait {
                 result["turn"] = self
                     .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                     .await?;
@@ -1512,6 +1746,25 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        // To its own orchestrator, a crew thread reports.
+        if let Role::Crew { orchestrator_id } = self.role()
+            && orchestrator_id == chat.id
+        {
+            let summary = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Message");
+            let filed = self
+                .zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({ "op": "report", "state": "message", "summary": summary, "detail": text }),
+                )
+                .await?;
+            return Ok(json!({
+                "chatId": chat.id,
+                "title": chat.title,
+                "sent": { "delivery": "report", "id": filed["id"] },
+                "note": "Your orchestrator is sent this as a report (use the report tool next time). It wakes on it; there's no reply to wait for.",
+            }));
+        }
         if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",
@@ -1540,7 +1793,14 @@ impl Tools {
         let delivered = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        let held = delivered.receipt["delivery"] == "held";
         result["sent"] = delivered.receipt;
+        // Held (its card is paused by the person): no turn starts until they
+        // resume it, so there's nothing to wait on.
+        if held {
+            result["note"] = json!("Held in the thread's queue: its card is paused by the person. It runs when they resume the card.");
+            return Ok(result);
+        }
         let pending = Arc::new(PendingTurn {
             baseline,
             start: TurnStart {
@@ -1551,7 +1811,9 @@ impl Tools {
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
-        if args.wait {
+        if let Some(note) = args.wait.then(|| self.crew_wait_note(&chat)).flatten() {
+            result["turn"] = note;
+        } else if args.wait {
             // The message is on its way: not being able to watch the turn
             // must not read as not having sent it.
             result["turn"] = self
@@ -1570,6 +1832,9 @@ impl Tools {
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        if let Some(note) = self.crew_wait_note(&chat) {
+            return Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": note }));
+        }
         let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
         let turn = match pending {
             Some(pending) => {
@@ -1791,7 +2056,7 @@ impl Tools {
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
         let new_message_id = uuid::Uuid::new_v4().to_string();
-        let (id, message_id) = match chosen {
+        let (id, message_id, held) = match chosen {
             "run" => {
                 let config = chat.config.clone();
                 let cwd = chat
@@ -1825,45 +2090,44 @@ impl Tools {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                 };
-                let id = self
+                let (id, held) = self
                     .zeron
-                    .queue_command(
+                    .queue_command_or_held(
                         &chat.id,
-                        &SessionCommandPayload::Run {
+                        &SessionCommandPayload::Run { injected: None,
                             request,
                             message_id: new_message_id.clone(),
                         },
                     )
                     .await?;
-                (id, new_message_id)
+                (id, new_message_id, held)
             }
             "steer" => {
-                let id = self
+                let (id, held) = self
                     .zeron
-                    .queue_command(
+                    .queue_command_or_held(
                         &chat.id,
-                        &SessionCommandPayload::Steer {
+                        &SessionCommandPayload::Steer { injected: None,
                             prompt: text,
                             message_id: Some(new_message_id.clone()),
                         },
                     )
                     .await?;
-                (id, new_message_id)
+                (id, new_message_id, held)
             }
             // A held message keeps its row's id when it's sent.
             _ => {
-                let id = self.zeron.queue_message(&chat.id, &text).await?;
-                (id.clone(), id)
+                let (id, held) = self.zeron.queue_message_or_held(&chat.id, &text).await?;
+                (id.clone(), id, held)
             }
         };
-        Ok(Delivered {
-            receipt: json!({
-                "delivery": chosen,
-                "id": id,
-                "chatStatusAtSend": status,
-            }),
-            message_id,
-        })
+        // Held by its host (its card is paused by the person): it waits in
+        // the thread's queue, and the receipt says so, never "run".
+        let receipt = match held {
+            Some(reason) => json!({ "delivery": "held", "reason": reason, "id": id, "chatStatusAtSend": status }),
+            None => json!({ "delivery": chosen, "id": id, "chatStatusAtSend": status }),
+        };
+        Ok(Delivered { receipt, message_id })
     }
 
     async fn await_pending_turn(
@@ -2041,6 +2305,9 @@ mod tests {
     /// two chats with a two-message transcript. Writes are recorded for assertions.
     #[derive(Default)]
     struct World {
+        /// Sends are held by the host: their thread's card (this id) is
+        /// paused by the person.
+        held_by: Option<String>,
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
@@ -2055,9 +2322,18 @@ mod tests {
         remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
+        /// The local `ListModels` reply unless forced (what the engine
+        /// kept); `forced_models` is the forced one (the agent asked again).
+        kept_models: Option<Value>,
+        forced_models: Option<Value>,
         reads: Mutex<Vec<(String, Value)>>,
         /// `DeviceStats` reply; absent = an engine without the method.
         stats: Option<Value>,
+        /// `WatchOrchestration`'s orchestrators; absent = an engine that
+        /// predates them.
+        orchestrators: Option<Value>,
+        /// `CloudStatus` reply; absent = an engine without the method.
+        cloud_status: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2159,6 +2435,14 @@ mod tests {
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
                 ])),
+                methods::LIST_MODELS
+                    if !remote && params["force"] == true && self.forced_models.is_some() =>
+                {
+                    RpcReply::Value(self.forced_models.clone().unwrap())
+                }
+                methods::LIST_MODELS if !remote && self.kept_models.is_some() => {
+                    RpcReply::Value(self.kept_models.clone().unwrap())
+                }
                 methods::LIST_MODELS if remote => RpcReply::Value(json!([
                     {"id":"remote-model", "label":"Remote model"}
                 ])),
@@ -2207,7 +2491,18 @@ mod tests {
                         // A sequential batch deadlocks here, before any waits.
                         barrier.wait().await;
                     }
+                    if let Some(card) = &self.held_by
+                        && method != methods::MUTATE
+                    {
+                        return Ok(RpcReply::Value(json!({
+                            "commandId": "cmd-1", "id": "q-1", "delivery": "held",
+                            "held": { "cardId": card, "reason": format!("card {card} is paused by the person") },
+                        })));
+                    }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
+                }
+                methods::CLOUD_STATUS if self.cloud_status.is_some() => {
+                    RpcReply::Value(self.cloud_status.clone().unwrap_or_default())
                 }
                 methods::DEVICE_STATS if self.stats.is_some() => {
                     self.reads
@@ -2216,6 +2511,10 @@ mod tests {
                         .push((method.into(), params.clone()));
                     RpcReply::Value(self.stats.clone().unwrap_or_default())
                 }
+                methods::WATCH_ORCHESTRATION if self.orchestrators.is_some() => stream(json!({
+                    "orchestrators": self.orchestrators.clone(),
+                    "crew": [], "items": [], "asks": [], "dumps": []
+                })),
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -2441,6 +2740,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_send_to_a_paused_cards_thread_says_held_never_run() {
+        let world = Arc::new(World { held_by: Some("5d46d316".into()), ..World::default() });
+        let tools = tools(
+            world.clone(),
+            Origin { chat_id: Some("chat-beta-2".into()), device_id: Some("dev-local".into()), ..Default::default() },
+        );
+        // Waiting would never end: no turn starts until the person resumes it.
+        let sent = tools
+            .call("send_message", json!({ "chat": "alpha", "text": "deploy now", "wait": true, "timeout_secs": 600 }))
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "held", "{sent}");
+        assert_eq!(sent["sent"]["reason"], "card 5d46d316 is paused by the person");
+        assert!(sent.get("turn").is_none(), "{sent}");
+        for mode in ["steer", "queue"] {
+            let sent = tools.call("send_message", json!({ "chat": "alpha", "text": "x", "mode": mode })).await.unwrap();
+            assert_eq!(sent["sent"]["delivery"], "held", "{mode}: {sent}");
+        }
+        let batch = tools
+            .call("send_messages", json!({ "requests": [{ "chat": "alpha", "text": "y" }] }))
+            .await
+            .unwrap();
+        assert!(batch.to_string().contains("\"delivery\":\"held\""), "{batch}");
+    }
+
+    #[tokio::test]
     async fn send_attributes_and_refuses_self() {
         let world = Arc::new(World::default());
         let tools = tools(
@@ -2574,6 +2899,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            live: Default::default(),
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
@@ -2616,7 +2942,7 @@ mod tests {
             .unwrap();
         let chat_id = created["chatId"].as_str().unwrap().to_owned();
         let writes = world.writes.lock().unwrap();
-        assert_eq!(writes.len(), 3, "createChat, renameChat, run");
+        assert_eq!(writes.len(), 2, "createChat (named), run");
         assert_eq!(writes[0].1["op"], "createChat");
         assert_eq!(writes[0].1["chatId"], chat_id);
         assert_eq!(writes[0].1["spaceId"], "space-1");
@@ -2626,9 +2952,10 @@ mod tests {
         );
         assert_eq!(writes[0].1["config"]["harness"], "claude-code");
         assert_eq!(writes[0].1["config"]["model"], "sonnet");
-        assert_eq!(writes[1].1["op"], "renameChat");
-        assert_eq!(writes[2].0, methods::QUEUE_COMMAND);
-        assert_eq!(writes[2].1["command"]["request"]["prompt"], "go");
+        // Named in the createChat itself: no untitled row is ever written.
+        assert_eq!(writes[0].1["title"], "Review");
+        assert_eq!(writes[1].0, methods::QUEUE_COMMAND);
+        assert_eq!(writes[1].1["command"]["request"]["prompt"], "go");
     }
 
     #[tokio::test]
@@ -2823,6 +3150,12 @@ mod tests {
         }
     }
 
+    /// [`origin`] with Orchestrators on where the engine is: what an
+    /// orchestration test's chat runs with.
+    fn orch_origin(chat: &str) -> Origin {
+        Origin { orchestration: true, ..origin(chat) }
+    }
+
     fn tools_from(world: &Arc<World>, chat: &str) -> Tools {
         tools(world.clone(), origin(chat))
     }
@@ -2877,6 +3210,112 @@ mod tests {
             .find(|(_, w)| w["op"] == "createChat")
             .unwrap();
         assert!(last.1["config"].get("access").is_none());
+    }
+
+    /// An orchestrator's children are its crew, and a crew thread creates
+    /// subagents of its own. Roles come from the engine's rows.
+    #[tokio::test]
+    async fn an_orchestrators_children_are_its_crew_and_crew_threads_delegate() {
+        let orchestrator = |id: &str, kind: &str| {
+            json!({"id": id, "kind": kind, "name": "O", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})
+        };
+        let world = Arc::new(World {
+            orchestrators: Some(json!([orchestrator("chat-alpha-1", "standard")])),
+            extra_chats: vec![json!({
+                "id": "chat-crew-9", "deviceId": "dev-local", "title": "Crew",
+                "parentChatId": "chat-alpha-1", "childKind": "crew", "archived": false,
+                "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z"
+            })],
+            ..Default::default()
+        });
+        let last_kind = |world: &World| {
+            let writes = world.writes.lock().unwrap();
+            let last = writes.iter().rev().find(|(_, w)| w["op"] == "createChat").unwrap();
+            (last.1["parentChatId"].clone(), last.1["childKind"].clone())
+        };
+        tools(world.clone(), orch_origin("chat-alpha-1"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("chat-alpha-1"), json!("crew")));
+        tools(world.clone(), orch_origin("chat-alpha-1"))
+            .call("create_chat", json!({"kind":"subagent"}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world).1, json!("subagent"));
+        tools(world.clone(), orch_origin("chat-crew-9"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("chat-crew-9"), json!("subagent")));
+        // Crew is only for an orchestrator's own children.
+        let refused = tools(world.clone(), orch_origin("chat-crew-9"))
+            .call("create_chat", json!({"kind":"crew"}))
+            .await
+            .unwrap_err();
+        assert!(refused.contains("kind crew"), "{refused}");
+
+        // Without rows, an id shaped like a Brain dump's is a plain chat.
+        let world = Arc::new(World {
+            orchestrators: Some(json!([])),
+            extra_chats: vec![json!({
+                "id": "brain-dump-fake", "deviceId": "dev-local", "title": "Fake",
+                "archived": false, "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z"
+            })],
+            ..Default::default()
+        });
+        tools(world.clone(), orch_origin("brain-dump-fake"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("brain-dump-fake"), json!("subagent")));
+    }
+
+    /// A run served by the engine's own endpoint gets tools made with no
+    /// lookup: its first request reads the chat's role, so an orchestrator
+    /// is offered its tools there too; the Brain dump never a shell.
+    #[tokio::test]
+    async fn roles_are_read_on_the_first_request_and_the_brain_dump_runs_no_commands() {
+        let orchestrator = |id: &str, kind: &str| {
+            json!({"id": id, "kind": kind, "name": "O", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})
+        };
+        let world = Arc::new(World {
+            orchestrators: Some(json!([
+                orchestrator("chat-alpha-1", "standard"),
+                orchestrator("chat-brain-1", "brainDump"),
+            ])),
+            ..Default::default()
+        });
+        let listed = |tools: &Tools| -> Vec<String> {
+            tools.list().into_iter().map(|t| t.name.to_owned()).collect()
+        };
+        let names = |reply: &Value| -> Vec<String> {
+            reply["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let lead = tools(world.clone(), orch_origin("chat-alpha-1"));
+        assert!(!listed(&lead).iter().any(|n| n == orchestration::CREW_ADD), "not read yet");
+        let reply = crate::jsonrpc::handle_request(&lead, json!(1), "tools/list", Value::Null).await;
+        assert!(names(&reply).iter().any(|n| n == orchestration::CREW_ADD));
+        assert!(names(&reply).iter().any(|n| n == commands::RUN_COMMAND));
+
+        let dump = tools(world.clone(), orch_origin("chat-brain-1"));
+        let reply = crate::jsonrpc::handle_request(&dump, json!(1), "tools/list", Value::Null).await;
+        let offered = names(&reply);
+        assert!(offered.iter().any(|n| n == orchestration::ROUTE));
+        for command in commands::NAMES {
+            assert!(!offered.iter().any(|n| n == command), "{command}");
+        }
+        let refused =
+            crate::jsonrpc::handle_request(&dump, json!(2), "tools/call", json!({"name": "run_command", "arguments": {"command": "true"}}))
+                .await;
+        assert!(refused.get("result").is_none_or(|r| r["isError"] == true), "{refused}");
     }
 
     #[tokio::test]
@@ -2969,6 +3408,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.contains("built-in agents only"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_cloud_child_starts_on_the_machine_size_asked_for_else_the_default() {
+        let world = Arc::new(World {
+            cloud_status: Some(json!({
+                "state": "ready", "available": true, "awakeSessions": 0, "maxAwakeSessions": 5,
+                "machine": "large",
+                "machines": [
+                    { "id": "small", "name": "Small", "vcpu": 2, "memoryGB": 4, "diskGiB": 51.2, "creditMultiplier": 0.5 },
+                    { "id": "default", "name": "Default", "vcpu": 4, "memoryGB": 8, "diskGiB": 51.2, "creditMultiplier": 1 },
+                    { "id": "large", "name": "Large", "vcpu": 8, "memoryGB": 16, "diskGiB": 111.8, "creditMultiplier": 2 },
+                    { "id": "xlarge", "name": "Extra large", "vcpu": 16, "memoryGB": 32, "diskGiB": 251, "creditMultiplier": 5.56 }
+                ]
+            })),
+            ..Default::default()
+        });
+        let alpha = tools(world.clone(), origin("chat-alpha-1"));
+        let creates = || {
+            world
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, w)| method == methods::MUTATE && w["op"] == "createChat")
+                .map(|(_, w)| w.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // Omitted: the account's default, decided by the edge (none sent),
+        // and said in the reply.
+        let plain = alpha.call("create_chat", json!({"cloud": true})).await.unwrap();
+        assert_eq!(plain["machine"], "large");
+        assert!(creates()[0].get("machine").is_none(), "{:?}", creates()[0]);
+
+        // Asked for: sent with the create, and said.
+        let sized = alpha
+            .call("create_chat", json!({"cloud": true, "machine": "xlarge"}))
+            .await
+            .unwrap();
+        assert_eq!(sized["machine"], "xlarge");
+        assert_eq!(creates()[1]["machine"], "xlarge");
+        assert_eq!(creates()[1]["cloud"], true);
+
+        // An id Cloud doesn't offer: refused before anything is made, the
+        // valid ones listed.
+        let unknown = alpha
+            .call("create_chat", json!({"cloud": true, "machine": "huge"}))
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.contains("valid ids: small, default, large, xlarge"),
+            "{unknown}"
+        );
+        // Only with cloud.
+        let local = alpha
+            .call("create_chat", json!({"machine": "large"}))
+            .await
+            .unwrap_err();
+        assert!(local.contains("cloud: true"), "{local}");
+        assert_eq!(creates().len(), 2);
+
+        // The batch takes it per request.
+        let batch = alpha
+            .call(
+                "create_chats",
+                json!({"requests": [{"cloud": true, "machine": "small"}, {"cloud": true, "machine": "nope"}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(creates()[2]["machine"], "small");
+        assert_eq!(creates().len(), 3, "{batch}");
+
+        // No sizes to check against (an engine that can't read them): the
+        // edge checks the one asked for.
+        let bare = Arc::new(World::default());
+        let beta = tools(bare.clone(), origin("chat-alpha-1"));
+        let sent = beta
+            .call("create_chat", json!({"cloud": true, "machine": "large"}))
+            .await
+            .unwrap();
+        assert_eq!(sent["machine"], "large");
+        let defaulted = beta.call("create_chat", json!({"cloud": true})).await.unwrap();
+        assert!(defaulted.get("machine").is_none(), "{defaulted}");
+
+        // Described in the tool's schema.
+        let defs = catalog();
+        let create = defs.iter().find(|d| d.name == "create_chat").unwrap();
+        let described = create.input_schema["properties"]["machine"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(described.contains("Only with cloud"), "{described}");
+        assert!(described.contains("default"), "{described}");
     }
 
     #[tokio::test]
@@ -3282,6 +3814,109 @@ mod tests {
             );
             assert!(broken.writes.lock().unwrap().is_empty());
         }
+    }
+
+    fn forced_reads(world: &World) -> usize {
+        world
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, params)| method == methods::LIST_MODELS && params["force"] == true)
+            .count()
+    }
+
+    /// A kept empty catalog (a failure, or one from before a sign-in) is
+    /// asked again of the agent, not answered as success.
+    #[tokio::test]
+    async fn list_models_asks_again_when_the_kept_catalog_is_empty() {
+        let world = Arc::new(World {
+            kept_models: Some(json!([])),
+            forced_models: Some(json!([{ "id": "grok-4.7", "label": "Grok 4.7" }])),
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let listed = tools
+            .call("list_models", json!({"harness":"claude-code"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["models"][0]["id"], "grok-4.7");
+        assert_eq!(forced_reads(&world), 1);
+    }
+
+    #[tokio::test]
+    async fn list_models_says_why_it_has_none() {
+        let signed_out = json!({ "accounts": [{
+            "id": "a1", "harness": "claude-code", "active": false,
+            "email": null, "planLabel": null
+        }], "warnings": [] });
+        let world = Arc::new(World {
+            kept_models: Some(json!([])),
+            forced_models: Some(json!([])),
+            accounts: Some(signed_out),
+            ..Default::default()
+        });
+        let error = tools(world.clone(), Origin::default())
+            .call("list_models", json!({"harness":"claude-code"}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("lists no models"), "{error}");
+        assert!(error.contains("isn't signed in"), "{error}");
+        assert_eq!(forced_reads(&world), 1);
+
+        let world = Arc::new(World {
+            catalog_error: Some(methods::LIST_MODELS),
+            ..Default::default()
+        });
+        let error = tools(world.clone(), Origin::default())
+            .call("list_models", json!({"harness":"cursor"}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("could not list its models"), "{error}");
+        assert!(error.contains("catalog unavailable"), "{error}");
+        assert!(error.contains("isn't offered there"), "{error}");
+        assert_eq!(forced_reads(&world), 1);
+    }
+
+    /// A model the kept catalog lacks is checked against the agent's own
+    /// list before the chat is refused.
+    #[tokio::test]
+    async fn create_chat_checks_a_missing_model_against_a_fresh_catalog() {
+        let world = Arc::new(World {
+            kept_models: Some(json!([{ "id": "opus", "label": "Opus" }])),
+            forced_models: Some(json!([
+                { "id": "opus", "label": "Opus" },
+                { "id": "gemini-4-carbon", "label": "Gemini 4 Carbon" }
+            ])),
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"gemini-4-carbon"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["model"], "gemini-4-carbon");
+        assert_eq!(forced_reads(&world), 1);
+        // A model the kept catalog has needs no second ask.
+        tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"opus"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forced_reads(&world), 1);
+        let error = tools
+            .call(
+                "create_chat",
+                json!({"harness":"claude-code", "model":"nope"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("is not offered"), "{error}");
     }
 
     #[tokio::test]

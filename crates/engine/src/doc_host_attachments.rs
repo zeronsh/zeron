@@ -96,11 +96,11 @@ impl DocHost {
             .into_iter()
             .filter_map(|c| {
                 let (message_id, prompt) = match &c.payload {
-                    SessionCommandPayload::Run {
+                    SessionCommandPayload::Run { injected: _,
                         request,
                         message_id,
                     } => (Some(message_id.clone()), request.prompt.clone()),
-                    SessionCommandPayload::Steer { prompt, message_id } => {
+                    SessionCommandPayload::Steer { injected: _, prompt, message_id } => {
                         (message_id.clone(), prompt.clone())
                     }
                     _ => return None,
@@ -855,7 +855,7 @@ impl DocHost {
         let now = now_ms();
         let entry = SessionCommandEntry {
             id: new_id(),
-            payload: SessionCommandPayload::Run {
+            payload: SessionCommandPayload::Run { injected: None,
                 request,
                 message_id: row.id.clone(),
             },

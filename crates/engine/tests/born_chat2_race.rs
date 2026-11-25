@@ -150,7 +150,7 @@ async fn transcript_survives_open_racing_create_chat() {
         core.doc_host
             .queue_command(
                 CHAT,
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: None,
                     request: RunRequest {
                         mcp: None,
                         prompt: "what's the codeword?".into(),

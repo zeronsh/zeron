@@ -33,6 +33,10 @@ export type Pack = {
 	-- out to the agent; the sent message shows each as a card, as the
 	-- composer did (src/chat.rs `split_chats`).
 	chats: { { name: string, chat: string, mark: string? } },
+	-- Control room references (ds/orch_ref) dropped on Capture's composer:
+	-- never in the words nor attached, each its page's to send (a dump's
+	-- `refs`).
+	refs: { any },
 }
 
 -- The block attached chats go in after the words (src/chat.rs
@@ -82,7 +86,7 @@ end
 -- `typed`: the words taken from the draft. `text`: what the composer sent, if
 -- that's nothing.
 function M.pack(chips: { any }, typed: string, text: string): Pack
-	local p: Pack = { typed = typed, attachments = {}, quotes = {}, picks = {}, comments = {}, chats = {} }
+	local p: Pack = { typed = typed, attachments = {}, quotes = {}, picks = {}, comments = {}, chats = {}, refs = {} }
 	for _, item in chips do
 		if item.kind == "comment" then
 			table.insert(p.comments, { file = item.file, line = item.line, body = item.body, to = item.to, side = item.side, snippet = item.snippet })
@@ -98,6 +102,8 @@ function M.pack(chips: { any }, typed: string, text: string): Pack
 		elseif item.kind == "text" and item.text then
 			-- A pasted text carried as a chip: its words go in the text.
 			p.typed = p.typed .. "\n\n" .. item.text
+		elseif item.kind == "ref" and item.ref then
+			table.insert(p.refs, item.ref)
 		elseif item.kind == "chat" and item.chat then
 			-- Another chat attached (a session dropped from the sidebar):
 			-- in a block after the words, as an attachment (a chat mentioned

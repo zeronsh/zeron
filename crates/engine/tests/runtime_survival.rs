@@ -308,7 +308,7 @@ async fn sends_with_images_or_respelled_options_join_the_live_runtime() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("and one more"),
                 message_id: "m-3".into(),
             },
@@ -510,7 +510,7 @@ async fn a_send_held_for_the_turn_end_runs_as_sent_without_a_ping() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: sent,
                 message_id: "m-held".into(),
             },
@@ -583,7 +583,7 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("held before the stop"),
                 message_id: "m-held".into(),
             },
@@ -611,7 +611,7 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("after the stop"),
                 message_id: "m-after".into(),
             },
@@ -793,7 +793,7 @@ async fn a_stop_right_after_send_stops_that_turn() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("hold: the essay"),
                 message_id: "m-1".into(),
             },
@@ -841,7 +841,7 @@ async fn a_send_right_after_stop_runs_in_a_fresh_runtime() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("after the stop"),
                 message_id: "m-2".into(),
             },
@@ -934,7 +934,7 @@ async fn a_steer_sent_before_stop_is_cancelled_with_it() {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: request("hold: steer before stop"),
                 message_id: "m-steer".into(),
             },

@@ -68,5 +68,7 @@ impl McpConfig {
 pub async fn run(config: McpConfig) -> anyhow::Result<()> {
     let zeron = Zeron::new(config.ipc_port, config.data_dir, config.origin);
     let tools = Tools::new(std::sync::Arc::new(zeron));
+    // Which orchestration tools this chat's agent sees (its rows decide).
+    tools.resolve_role().await;
     serve_stdio(std::sync::Arc::new(tools)).await
 }

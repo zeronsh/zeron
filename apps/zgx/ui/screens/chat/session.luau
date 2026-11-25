@@ -24,6 +24,8 @@ local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
+-- Which of Zeron's built-in plugins run (Orchestrators' blocks here).
+local plugins = require("@account/plugins")
 
 -- The pictures replies show, read from the open chat's folder on its device.
 local pictures = ReplyImages.for_session(function(): any
@@ -196,6 +198,17 @@ local function Session(id: Id?): Node
 	local session = ui.computed(function(): string?
 		return which()
 	end)
+	-- A message asked of the session shown (route.open_session's `message`:
+	-- an ask's turn), for its transcript to go to and light. (Of the chat
+	-- the transcript shows, `shown`: it changes with its rows, `fresh`.)
+	local focus = ui.computed(function(): T.Focus?
+		local f = route.focus:get()
+		local s = shared.shown:get()
+		if not f or not s or f.session ~= s then
+			return nil
+		end
+		return { id = f.message, seq = f.seq }
+	end)
 	-- Files carried over the page (the transcript, under the composer)
 	-- attach to the composer, as a drop on it does.
 	local zone = shared.drop_zone("session")
@@ -347,6 +360,13 @@ local function Session(id: Id?): Node
 						end),
 						-- ⌘F's find (screens/chat/find): its matches marked.
 						find = Find.marks(),
+						-- A message asked for (an ask's turn), gone to and lit.
+						focus = focus,
+						-- Orchestrators' blocks, while it's on: what the engine
+						-- said into the chat, crew updates.
+						orchestrators = function(): any
+							return plugins.module("orchestrators")
+						end,
 					},
 					Find.Bar(),
 				},

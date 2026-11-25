@@ -18,7 +18,9 @@
 --                           project's, else this Mac's (an id)
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
---   route.open_session(id)  to that session
+--   route.open_session(id, { message? })  to that session; with `message`
+--                           (a message's id: an ask's turn), scrolled to it
+--                           and lit a moment (`route.focus`)
 --   route.keep_keys()       the next arrival leaves the keys where they are
 --                           (a tab strip's arrows; `take_keys_kept()`)
 --   route.new_chat(project?, device?) to a new chat (in that project, a
@@ -42,6 +44,17 @@
 --                           ids); the chats stay as they were under it
 --   route.chat:get()        the chat route (as `current`), held while
 --                           settings shows: `project` and `session` follow it
+--   route.control()         to the Control room (`control`)
+--   route.orchestrator(id)  to an orchestrator's page (`orchestrator`, its id)
+--                           (these two, and their routes, only while
+--                           Orchestrators is on: off, they're home)
+--   route.find_chat(id)     a chat wherever it's listed: top-level, archived,
+--                           or, while Orchestrators is on, under another (a
+--                           crew thread opens as a chat of its own); nil
+--                           for none
+--   route.own_page(name)    whether a route is a page of its own, with no chat
+--                           under it (a plugin's page, the Control room, an
+--                           orchestrator's)
 --   route.choose_project(id?) the project a new chat starts in
 --
 -- What it shows changes in place: each state above keeps its table while
@@ -54,10 +67,11 @@
 
 local sessions = require("@account/sessions")
 local look = require("@app/screens/shell/project_look")
+local plugins = require("@account/plugins")
 
 local M = {}
 
-export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string? }
+export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string?, orchestrator: string? }
 export type Project = { id: string, device: string?, path: string?, name: string? }
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
 export type Choice = { value: string, label: string, hue: string?, src: string?, emoji: string?, project: string? }
@@ -67,6 +81,8 @@ local ROUTES = {
 	session = "/session/:id",
 	settings = "/settings/:page",
 	plugin = "/plugin/:plugin/:page",
+	control = "/control",
+	orchestrator = "/orchestrator/:id",
 }
 -- The router, made by the shell as it's built (`M.make`, from the app's
 -- script, which runs again on every reload) rather than as this module
@@ -91,6 +107,13 @@ local function parse(path: string): Route
 	local plugin, ppage = string.match(path, "^/plugin/([^/]+)/([^/]+)$")
 	if plugin then
 		return { name = "plugin", params = { plugin = plugin, page = ppage }, path = path }
+	end
+	if path == "/control" then
+		return { name = "control", params = {}, path = path }
+	end
+	local orchestrator = string.match(path, "^/orchestrator/([^/]+)$")
+	if orchestrator then
+		return { name = "orchestrator", params = { id = orchestrator }, path = path }
 	end
 	return { name = "home", params = {}, path = "/" }
 end
@@ -284,6 +307,28 @@ local function chat_of(id: string?): sessions.Chat?
 			return c
 		end
 	end
+	-- A chat under another, opened as a chat of its own: an orchestrator's
+	-- crew thread (from the Control room, a crew card, a crew update), a
+	-- side chat. It works where its parent does unless it says otherwise.
+	-- (Orchestrators' alone: off, a chat under another isn't one to open.)
+	if not plugins.on("orchestrators") then
+		return nil
+	end
+	for parent_id, kids in now.children or {} do
+		for _, k in kids do
+			if k.id == id then
+				local c: any = table.clone(k)
+				if c.project == nil then
+					for _, p in now.chats do
+						if p.id == parent_id then
+							c.project = p.project
+						end
+					end
+				end
+				return c
+			end
+		end
+	end
 	return nil
 end
 local function project_of(id: string?): sessions.Project?
@@ -298,6 +343,10 @@ local function project_of(id: string?): sessions.Project?
 	return nil
 end
 
+-- A chat by its id, wherever it's listed: top-level, archived, or under
+-- another (a crew thread, a side chat). Tracked.
+M.find_chat = chat_of
+
 -- The route's ids, read once a change.
 local where = steady(function(): Current
 	local r = here()
@@ -308,6 +357,10 @@ local where = steady(function(): Current
 		return { name = "settings", page = r.params.page }
 	elseif r.name == "plugin" then
 		return { name = "plugin", plugin = r.params.plugin, page = r.params.page }
+	elseif r.name == "control" and plugins.on("orchestrators") then
+		return { name = "control" }
+	elseif r.name == "orchestrator" and plugins.on("orchestrators") then
+		return { name = "orchestrator", orchestrator = r.params.id }
 	end
 	local p = chosen:get()
 	-- A chosen project since deleted: none chosen.
@@ -405,6 +458,13 @@ M.projects = steady(function(): { Choice }
 	return out
 end)
 
+-- A message asked of the session opened (`open_session`'s `message`): the
+-- chat page's transcript goes to it and lights it (ds/transcript `focus`),
+-- taking each once by `seq`. The last asked, kept across a reload (its
+-- transcript, made again, knows it has taken it).
+export type Focus = { session: string, message: string, seq: number }
+M.focus = ui.state("shell_route_focus", nil :: Focus?)
+
 -- What a session opened here is told before the route moves (the chat page's
 -- store sets it: it watches that chat), in one step with the move: what
 -- follows both, the route and the chat shown (the composer, the page), then
@@ -413,18 +473,29 @@ end)
 -- says: opened another way, back or by a link, the chat follows a step later.)
 M.opening = nil :: ((id: string) -> ())?
 
-function M.open_session(id: string)
+-- To session `id`; with `message` (a message's id: an ask's turn, the
+-- message that asked), at that message, lit a moment. The session already
+-- open, it only goes there.
+function M.open_session(id: string, opts: { message: string? }?)
+	local message = if opts then opts.message else nil
+	local function ask()
+		if message and message ~= "" then
+			local was = M.focus:peek()
+			M.focus:set({ session = id, message = message, seq = (if was then was.seq else 0) + 1 })
+		end
+	end
 	local r = at()
 	if r.name == "session" and r.params.id == id then
+		ask()
 		return
 	end
 	local opening = M.opening
-	if not opening then
-		go("session", { id = id })
-		return
-	end
+	-- (The message asked, the chat shown and the route, in one step.)
 	ui.batch(function()
-		opening(id)
+		ask()
+		if opening then
+			opening(id)
+		end
 		go("session", { id = id })
 	end)
 end
@@ -724,6 +795,34 @@ function M.plugin_page(plugin: string, page: string)
 		return
 	end
 	go("plugin", { plugin = plugin, page = page })
+end
+
+-- Pages of their own, as a plugin's is: no chat under them, no composer.
+local OWN_PAGES: { [string]: boolean } = { plugin = true, control = true, orchestrator = true }
+function M.own_page(name: string?): boolean
+	return name ~= nil and OWN_PAGES[name] == true
+end
+
+-- To the Control room (Orchestrators on).
+function M.control()
+	if not plugins.on("orchestrators") then
+		return
+	end
+	if at().name ~= "control" then
+		go("control")
+	end
+end
+
+-- To an orchestrator's page (Orchestrators on).
+function M.orchestrator(id: string)
+	if not plugins.on("orchestrators") then
+		return
+	end
+	local r = at()
+	if r.name == "orchestrator" and r.params.id == id then
+		return
+	end
+	go("orchestrator", { id = id })
 end
 
 -- Out of settings, back where the chats were: a step back (so forward

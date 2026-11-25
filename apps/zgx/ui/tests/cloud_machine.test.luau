@@ -992,7 +992,8 @@ test("the disk warning opens to the same sizes; a machine that's up sleeps, then
 	expect(slept ~= nil).to_be(true)
 	expect(woke ~= nil).to_be(true)
 	expect((slept :: number) < (woke :: number)).to_be(true)
-	expect(showing(app, in_deck('~"Waking its Cloud machine…"'))).to_be(true)
+	-- Said as what it is: a restart on the size picked.
+	expect(showing(app, in_deck('~"Restarting on Large…"'))).to_be(true)
 end)
 
 test("a machine that won't go to sleep says so, and the size stays as it was", function()

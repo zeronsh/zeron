@@ -78,6 +78,11 @@ publish()
 -- The open chat: the parent, on Claude Code's Opus 5.5 at high effort (a
 -- new side chat starts as it runs); the agents and models to pick from.
 store.session:set({ id = "chat-1", state = "ready", title = "Parent", harness = "claude-code", model = "claude-code/opus-5.5", effort = "high", access = "supervised", project = "p1", device = "d", branch = "main", cwd = "/proj" } :: any)
+-- (No host here: a model picker opening, or an agent's "Retry", asks
+-- nothing.)
+local catalog_stub = store :: any
+catalog_stub.refresh_catalog = function() end
+catalog_stub.retry_catalog = function() end
 ui.command { id = "parent_in_worktree", title = "The parent works in an existing worktree", run = function()
 	parent_place = { branch = "feature", cwd = "/proj/.zeron/worktrees/feature" }
 	local parent = table.clone(store.session:peek() :: any)

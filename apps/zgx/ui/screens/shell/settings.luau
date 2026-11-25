@@ -47,6 +47,9 @@ export type Page = {
 	-- In the icon's place in the list: a tile (a plugin's, as its row on
 	-- the Plugins page has it).
 	tile: { label: string, hue: string? }?,
+	-- Listed (and opened) only while it says so: a built-in plugin's page
+	-- while the plugin is on. Read where it's listed, so the list follows.
+	shown: (() -> boolean)?,
 }
 
 -- The pages: their ids in order (a state, so the list follows them), and
@@ -77,10 +80,15 @@ local function extra_pages(): { Page }
 	return out
 end
 
+-- Whether a page added is listed now (its `shown`), tracked.
+local function listed(page: Page?): boolean
+	return page ~= nil and (page.shown == nil or page.shown())
+end
+
 -- A page added, by its id (or one listed by `extra`, while it's there).
 function M.page(id: string): Page?
 	if pages[id] then
-		return pages[id]
+		return if listed(pages[id]) then pages[id] else nil
 	end
 	for _, page in extra_pages() do
 		if page.id == id then
@@ -331,7 +339,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 					-- of its own; else each group's, where the group changes.)
 					local grouped = false
 					for _, id in order:get() do
-						grouped = grouped or (pages[id] ~= nil and pages[id].group ~= nil)
+						grouped = grouped or (pages[id] ~= nil and listed(pages[id]) and pages[id].group ~= nil)
 					end
 					if not grouped then
 						table.insert(out, { heading = ui.t("settings.shell.heading"):get() })
@@ -356,7 +364,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 					end
 					for _, id in order:get() do
 						local page = pages[id]
-						if page then
+						if page and listed(page) then
 							if page.group == EXTRAS_BEFORE then
 								add_extras()
 							end
@@ -449,7 +457,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 						end
 						-- (A page gone, or not added yet: the first one.)
 						for _, first in order:get() do
-							if pages[first] then
+							if listed(pages[first]) then
 								return first
 							end
 						end

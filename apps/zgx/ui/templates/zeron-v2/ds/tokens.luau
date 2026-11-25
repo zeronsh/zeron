@@ -346,7 +346,10 @@ function M.setup()
 			-- less, the tree hides and comes over the file instead.
 			-- Files carried over a chat: the scrim over all of it (Zeron's at
 			-- two thirds; the light theme's own in its file).
-			drop = { scrim = "#00000066" },
+			-- An element carried over Capture to be referenced: the zone washed
+			-- and ringed in the accent, its label on an accent pill (either
+			-- theme: the accent is each theme's own).
+			drop = { scrim = "#00000066", ref = { wash = "alpha({accent}, 0.12)", edge = "alpha({accent}, 0.8)" } },
 			files = {
 				guide = "alpha({text.primary}, 0.24)",
 				drop = "alpha({accent}, 0.14)",

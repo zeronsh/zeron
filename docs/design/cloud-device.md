@@ -69,7 +69,7 @@ catalog restricted to Codex + Claude Code, so opening a composer never wakes a s
 
 1. **Create.** When a chat is created with Cloud picked (`createChat {cloud: true}`), the
    creating engine looks the project's `githubRepo` up in the repositories Cloud reaches and
-   calls `POST /cloud/{org}/sessions {chatId, spaceId, repo, branch?}` (idempotent per chat),
+   calls `POST /cloud/{org}/sessions {chatId, spaceId, repo, branch?, machine?}` (idempotent per chat),
    which mints the session device id, claims its device room for the user and starts the
    ProvisionWorkflow; the chat row is written with that device as host and the machine's
    checkout as cwd. The first send queues in the chat doc as usual and is executed once the
@@ -194,7 +194,9 @@ once it holds. Enforced at the edge:
   the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
   `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
   `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
-  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  their session rows, and tombstones; never the user's own kinds, but for the account's
+  plugin switches (`pluginSwitches`), which either reach reads (never writes) so a Cloud
+  engine follows a switch like every other engine. A machine whose view
   changed (a reach changed, or one that synced while it saw only its own rows) holds a
   cursor that doesn't match what it now sees, so its next state is `full`
   (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,
@@ -332,10 +334,18 @@ reading 72.4 doesn't.
 | `large` | 8 | 16 GB | 111.8 GiB | 2× | Boat's refusal text (its table says 111) |
 | `xlarge` | 16 | 32 GB | 251 GiB | 5.56× (50/9) | Boat's table (rounded down) |
 
-A session's size starts as the account's default (`PUT /cloud/{org}/machine`, or the operator's
-`POST /admin/cloud/machine`, whichever came last, over `CLOUD_MACHINE`), and only a wake changes
-it: a provider changes size only on a resume, so a sandbox already up is stopped first. A size is
-always the user's call, and never a machine's: runner bearers can't pick one.
+A session's size starts as the one picked for it when the chat is made (`createChat {cloud,
+machine}`: the composer's Machine row under Work in, or the Zeron MCP's `create_chat {cloud: true,
+machine}`, sent on as `POST /cloud/{org}/sessions {machine}`), else the account's default (`PUT
+/cloud/{org}/machine`, or the operator's `POST /admin/cloud/machine`, whichever came last, over
+`CLOUD_MACHINE`). It is the session's own from then on: its wakes, and a fresh machine after its
+data expired, come back on it. Only a wake changes it: a provider changes size only on a resume,
+so a sandbox already up is stopped first. A size is always the user's call, and never a
+machine's: runner bearers can't wake or resize on one. The one exception is a delegate's start:
+a machine may start a delegate on a size no bigger (by credit multiplier) than its own (`403
+machine_too_big` otherwise), so a stolen runner key spends no faster than the machine it came
+from. An unknown size is `400 bad_request` naming the valid ids; a client that sends no
+`machine` gets the default, as before.
 
 **A wake refused for want of disk.** The provider module turns its refusal into a typed
 `SandboxFailure` (`disk_too_small`, with `neededGiB` when it gave a figure); nothing above

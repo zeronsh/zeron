@@ -188,7 +188,7 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: RunRequest {
                     mcp: None,
                     prompt: prompt.into(),

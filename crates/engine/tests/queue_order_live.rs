@@ -147,7 +147,7 @@ impl Rig {
             .doc_host
             .queue_command(
                 CHAT,
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: None,
                     message_id: message_id.into(),
                     request: self.request(prompt),
                 },
@@ -330,7 +330,7 @@ async fn scenario(name: &str, which: &str) {
                 .doc_host
                 .queue_command(
                     CHAT,
-                    SessionCommandPayload::Steer {
+                    SessionCommandPayload::Steer { injected: None,
                         prompt: Rig::follow_up(2),
                         message_id: Some("steer-2".into()),
                     },

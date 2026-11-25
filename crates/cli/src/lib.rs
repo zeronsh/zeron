@@ -158,8 +158,22 @@ pub enum PluginCommand {
     Sign { target: String },
     /// Check a plugin folder's signature and who made it.
     Verify { path: String },
-    /// List the plugins Zeron knows.
+    /// List the plugins Zeron knows: each one's version, who made it,
+    /// whether it's on, and `account` for one switched for your whole
+    /// account.
     List,
+    /// Turn a plugin on. One of Zeron's own whose switch is your account's
+    /// (Orchestrators) turns on on every device; anything else on this one.
+    On {
+        /// The plugin's id (`zeron plugin list` names them).
+        id: String,
+    },
+    /// Turn a plugin off (it stays installed), as `zeron plugin on` turns it
+    /// on.
+    Off {
+        /// The plugin's id (`zeron plugin list` names them).
+        id: String,
+    },
     /// Save a plugin as one signed .zeron-plugin file to share (attach it
     /// to a GitHub release, or send it): anyone installs it from that file
     /// or its link. Your own plugin is signed again first.
@@ -610,6 +624,8 @@ mod tests {
             &["mcp", "remove"],
             &["plugin", "new"],
             &["plugin", "export"],
+            &["plugin", "on"],
+            &["plugin", "off"],
             &["template", "use"],
             &["daemon", "install"],
             &["update"],
@@ -642,6 +658,8 @@ mod tests {
             &["mcp"],
             &["plugin", "list"],
             &["plugin", "export", "focus"],
+            &["plugin", "on", "orchestrators"],
+            &["plugin", "off", "orchestrators"],
             &["template", "list"],
         ] {
             assert!(parse(args).unwrap().runs_engine(), "{args:?}");
@@ -650,6 +668,28 @@ mod tests {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
+    }
+
+    /// `zeron plugin on|off <id>`: one id, required.
+    #[test]
+    fn plugin_on_and_off_take_an_id() {
+        let parse = |args: &[&str]| {
+            let argv = ["zeron", "plugin"].into_iter().chain(args.iter().copied());
+            command("0.0.0")
+                .try_get_matches_from(argv)
+                .map(|m| Cli::from_arg_matches(&m).unwrap().command)
+        };
+        match parse(&["on", "orchestrators"]) {
+            Ok(Some(Command::Plugin { command: PluginCommand::On { id } })) => assert_eq!(id, "orchestrators"),
+            _ => panic!("not plugin on"),
+        }
+        match parse(&["off", "orchestrators"]) {
+            Ok(Some(Command::Plugin { command: PluginCommand::Off { id } })) => assert_eq!(id, "orchestrators"),
+            _ => panic!("not plugin off"),
+        }
+        assert!(parse(&["on"]).is_err());
+        assert!(parse(&["off"]).is_err());
+        assert!(parse(&["on", "a", "b"]).is_err());
     }
 
     /// `--to` reaches the engine as a full path: a relative one is taken

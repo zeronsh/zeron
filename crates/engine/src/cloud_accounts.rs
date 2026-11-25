@@ -449,6 +449,8 @@ fn to_agent_account(
         switchable: !reconnect,
         saved_at: Some(account.updated_at),
         provider: group,
+        invalid: false,
+        invalid_reason: None,
     }
 }
 

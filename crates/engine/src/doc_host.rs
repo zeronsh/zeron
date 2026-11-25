@@ -273,6 +273,8 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
 
 mod relay;
 pub use relay::relay_layer_enabled;
+mod crew_inbox;
+pub use crew_inbox::WAKE_DEBOUNCE as CREW_WAKE_DEBOUNCE;
 
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
@@ -305,6 +307,17 @@ struct DocHostInner {
     /// run they start is registered — and Working — by then).
     dispatching: Arc<AtomicUsize>,
     workspace: OnceLock<WorkspaceHost>,
+    /// What a `ProgressCheck` command calls with its chat id (set by
+    /// orchestration; absent in bare tests).
+    progress_checks: OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// What a prompt about to run in a chat hosted here is offered first,
+    /// with the chat's id: `true` when orchestration filed it instead (an
+    /// agent's message to a Brain dump or an orchestrator, from any sender
+    /// and any engine version). Absent in bare tests.
+    incoming_messages: OnceLock<IncomingMessages>,
+    /// Whether Orchestrators is on (unset: off): crew reports, progress
+    /// checks and messages orchestration takes are its alone.
+    orchestration: OnceLock<crate::orchestration::OrchestrationSwitch>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
@@ -370,6 +383,10 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    /// Prompts the dead-command sweep rejected (consumed, never resolved:
+    /// the engine stopped mid-execute), by chat, until the board's resume
+    /// takes them ([`DocHost::take_cut_off_sends`]).
+    cut_off_sends: Mutex<Vec<(String, String)>>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -387,6 +404,8 @@ struct DocHostInner {
     held_status: watch::Sender<Vec<zeron_proto::HeldSendStatus>>,
     /// A Cloud host's looks in the attachment store, by `pending://` ref.
     store_looks: Mutex<HashMap<String, attachment_store::StoreLook>>,
+    /// Crew reports to orchestrators hosted here (doc_host/crew_inbox.rs).
+    crew_inbox: crew_inbox::Inbox,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -572,7 +591,10 @@ const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open th
 /// Older clients stored the already-expanded prompt in `text`; recognize the
 /// exact trailer implied by `attachments` so those rows are not expanded a
 /// second time after an upgrade.
-fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
+/// See `Inner::incoming_messages`: `(chat id, prompt) -> taken`.
+pub(crate) type IncomingMessages = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
@@ -719,6 +741,10 @@ pub struct ChatDocHandle {
     /// by the user), with the run configuration each was sent with: the row
     /// carries only its text and images.
     held_sends: Mutex<HashMap<String, zeron_proto::RunRequest>>,
+    /// The engine's messages on their way (a crew ask, an answer…), by the
+    /// user message id they'll be written under: whichever path writes it
+    /// (`write_user_message`) carries it as a [`MessagePart::Injected`].
+    injected_pending: Mutex<HashMap<String, zeron_doc::Injected>>,
     /// The latest Stop command that has acted. A prompt sent before it that
     /// only executes now (a loaded host, a slow agent) was cancelled by it:
     /// running it would start the stopped work again in a fresh runtime.
@@ -1128,24 +1154,47 @@ impl ChatDocHandle {
         lock(&self.chat2).is_some()
     }
 
+    /// The user message `message_id`, once written, is the engine's
+    /// `injected` (a command's or a queue row's, as it's taken).
+    pub fn expect_injected(&self, message_id: &str, injected: Option<&zeron_doc::Injected>) {
+        if let Some(injected) = injected {
+            lock(&self.injected_pending).insert(message_id.to_owned(), injected.clone());
+        }
+    }
+
+    /// What [`Self::expect_injected`] holds for `message_id`, still held.
+    fn injected_for(&self, message_id: &str) -> Option<zeron_doc::Injected> {
+        lock(&self.injected_pending).get(message_id).cloned()
+    }
+
     /// Write a complete user message entry, idempotent by id (the client-minted message
     /// id — a re-executed command or optimistic echo never duplicates the entry).
+    /// An engine message's ([`Self::expect_injected`]) carries its kind beside
+    /// the text, which stays what the agent was sent.
     pub fn write_user_message(
         &self,
         message_id: &str,
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        let injected = lock(&self.injected_pending).remove(message_id);
         if self.doc.read_entries_shared()?.iter().any(|e| e.id == message_id) {
             return Ok(());
+        }
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: text.to_string(),
+        }];
+        if let Some(injected) = injected {
+            parts.push(MessagePart::Injected {
+                id: "injected".into(),
+                injected,
+            });
         }
         self.doc.push_message(&SessionMessageEntry {
             id: message_id.to_string(),
             role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: text.to_string(),
-            }],
+            parts,
             created_at,
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
@@ -1376,6 +1425,9 @@ impl DocHost {
                 wake_checks: AtomicUsize::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
+                progress_checks: OnceLock::new(),
+                incoming_messages: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
@@ -1404,8 +1456,10 @@ impl DocHost {
                 held_kick: tokio::sync::Notify::new(),
                 held_status: watch::channel(Vec::new()).0,
                 store_looks: Mutex::new(HashMap::new()),
+                crew_inbox: Default::default(),
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                cut_off_sends: Mutex::new(Vec::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .pool_max_idle_per_host(2)
@@ -1716,6 +1770,52 @@ impl DocHost {
         }
     }
 
+    /// The messages whose sends the engine's stop cut off (consumed but never
+    /// resolved, found and rejected by the drain's dead-command sweep), by
+    /// chat, taken.
+    pub fn take_cut_off_sends(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *lock(&self.inner.cut_off_sends))
+    }
+
+    /// Hold `chat_id`'s queue (its card is paused on the board): queued rows
+    /// wait, as after a stop, until [`DocHost::release_queue`]. Only where
+    /// the chat is hosted; `false` elsewhere.
+    pub fn hold_queue(&self, chat_id: &str) -> bool {
+        if !self.is_host(chat_id) {
+            return false;
+        }
+        let Ok(handle) = self.open(chat_id) else { return false };
+        if !handle.queue_paused.swap(true, Ordering::AcqRel) {
+            handle.publish_queue();
+        }
+        true
+    }
+
+    /// Whether `chat_id`'s queue is held here (stopped, or its card paused).
+    pub fn queue_held(&self, chat_id: &str) -> bool {
+        self.is_host(chat_id)
+            && self.open(chat_id).is_ok_and(|h| h.queue_paused.load(Ordering::Acquire))
+    }
+
+    /// Release a queue [`DocHost::hold_queue`] held (its card resumed): the
+    /// head row is sent now, the rest drain after it. `Some(rows queued)`
+    /// where the chat is hosted (0: nothing was queued); `None` elsewhere.
+    pub async fn release_queue(&self, chat_id: &str) -> Result<Option<usize>, EngineError> {
+        if !self.is_host(chat_id) {
+            return Ok(None);
+        }
+        let handle = self.open(chat_id)?;
+        let queue = handle.doc.read_queue()?;
+        let Some(head) = queue.first() else {
+            handle.queue_paused.store(false, Ordering::Release);
+            handle.publish_queue();
+            return Ok(Some(0));
+        };
+        let head = head.id.clone();
+        let sent = self.send_queued_now(chat_id, &head).await?;
+        Ok(Some(if sent { queue.len() } else { 0 }))
+    }
+
     /// Test-only retirement sentinel: reports true once the doc-host graph
     /// has actually been freed.
     #[doc(hidden)]
@@ -1798,6 +1898,33 @@ impl DocHost {
                 host.drain_queue(&handle).await;
             });
         }
+    }
+
+    /// What a `ProgressCheck` command on a chat hosted here calls (first set
+    /// wins).
+    pub(crate) fn set_progress_checks(&self, check: Arc<dyn Fn(&str) + Send + Sync>) {
+        let _ = self.inner.progress_checks.set(check);
+    }
+
+    /// What a prompt about to run here is offered first (first set wins;
+    /// see `incoming_messages`).
+    pub(crate) fn set_incoming_messages(&self, take: IncomingMessages) {
+        let _ = self.inner.incoming_messages.set(take);
+    }
+
+    /// Follow the Orchestrators switch (engine assembly; first set wins).
+    pub(crate) fn set_orchestration(&self, switch: crate::orchestration::OrchestrationSwitch) {
+        let _ = self.inner.orchestration.set(switch);
+    }
+
+    fn orchestration_on(&self) -> bool {
+        self.inner.orchestration.get().is_some_and(crate::orchestration::OrchestrationSwitch::is_on)
+    }
+
+    /// `prompt`, about to run in `chat_id`, taken by orchestration instead
+    /// (never while Orchestrators is off: it runs as sent).
+    fn taken_by_orchestration(&self, chat_id: &str, prompt: &str) -> bool {
+        self.orchestration_on() && self.inner.incoming_messages.get().is_some_and(|take| take(chat_id, prompt))
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -1964,6 +2091,11 @@ impl DocHost {
 
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
+    }
+
+    /// The harness a chat without a config runs on.
+    pub fn default_harness(&self) -> HarnessId {
+        self.inner.config.default_harness
     }
 
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
@@ -2360,6 +2492,7 @@ impl DocHost {
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
+            injected_pending: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             queue_frozen_by_recovery: AtomicBool::new(recovered_queue_pending),
@@ -4101,6 +4234,12 @@ impl DocHost {
                 > zeron_doc::DOC_LRU_BYTE_BUDGET
     }
 
+    /// Warm docs and their resident estimate in bytes (introspection).
+    pub(crate) fn warm_stats(&self) -> (usize, usize) {
+        let handles = lock(&self.inner.handles);
+        (handles.len(), handles.values().map(|h| h.resident_estimate()).sum())
+    }
+
     /// Seed-specific activity gate: a live WRITER (a run's doc ref) or
     /// pending host commands block a seed — watchers do NOT. Pure readers
     /// cannot lose writes, and the flip drops the handle so their streams
@@ -4591,6 +4730,43 @@ impl DocHost {
         }
     }
 
+    /// `injected` as a command or row `issued_by` that device may say it:
+    /// only an engine says what its own deliveries are (`ops::deliver`), so
+    /// only this engine's, or another engine's of this account (a device row
+    /// it booted, advertising `INJECTED_MESSAGES_V1`), is kept. Callers'
+    /// RPCs never carry it (`QUEUE_COMMAND`, `RELAY_COMMAND` strip it); a
+    /// client writing the doc itself is no engine.
+    pub(crate) fn trusted_injected<'a>(
+        &self,
+        issued_by: &str,
+        injected: Option<&'a zeron_doc::Injected>,
+    ) -> Option<&'a zeron_doc::Injected> {
+        let injected = injected?;
+        if issued_by == self.inner.config.device_id {
+            return Some(injected);
+        }
+        let engine = self
+            .workspace()
+            .and_then(|ws| ws.read_devices().ok())
+            .into_iter()
+            .flatten()
+            .any(|d| {
+                d.id == issued_by
+                    && d.version.is_some()
+                    && d.supports(zeron_proto::capabilities::INJECTED_MESSAGES_V1)
+            });
+        engine.then_some(injected)
+    }
+
+    /// A queue row's `injected`, trusted as [`Self::trusted_injected`]
+    /// says, and never once its words were edited.
+    fn trusted_row_injected<'a>(&self, row: &'a QueuedMessage) -> Option<&'a zeron_doc::Injected> {
+        if row.edited_at.is_some() {
+            return None;
+        }
+        self.trusted_injected(&row.issued_by, row.injected.as_ref())
+    }
+
     /// Hold a message for later: append it to the doc's queue. Any device may
     /// write here (unlike `messages`), and the change subscription kicks
     /// [`Self::drain_queue`], so a queue that lands while the agent is already
@@ -4634,14 +4810,22 @@ impl DocHost {
         hold_for_turn_end: bool,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
-        self.queue_message_with_config(
-            chat_id,
-            text,
-            attachments,
-            hold_for_turn_end,
-            transfers,
-            None,
-        )
+        self.queue_message_with(chat_id, text, attachments, hold_for_turn_end, transfers, None, None)
+    }
+
+    /// [`Self::queue_message_with_transfers`] for the engine's own message
+    /// (`injected`: a crew ask, an answer…), which its row and then its user
+    /// entry carry.
+    pub fn queue_injected(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        injected: Option<zeron_doc::Injected>,
+    ) -> Result<String, EngineError> {
+        self.queue_message_with(chat_id, text, attachments, hold_for_turn_end, transfers, injected, None)
     }
 
     /// [`Self::queue_message_with_transfers`] plus an optional `ChatConfig`
@@ -4656,6 +4840,22 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
         config: Option<zeron_proto::ChatConfig>,
     ) -> Result<String, EngineError> {
+        self.queue_message_with(chat_id, text, attachments, hold_for_turn_end, transfers, None, config)
+    }
+
+    /// The row both of those queue: the engine's `injected` mark and the
+    /// `config` picked with it, each carried as given.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_message_with(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        injected: Option<zeron_doc::Injected>,
+        config: Option<zeron_proto::ChatConfig>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let item = QueuedMessage {
@@ -4667,6 +4867,7 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
+            injected,
             config,
         };
         if self.hold_row_if_needed(chat_id, &item, &transfers)? {
@@ -5446,11 +5647,17 @@ impl DocHost {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
         let chat_id = &handle.chat_id;
+        // An agent's message to a Brain dump or an orchestrator: filed by
+        // orchestration, never a turn (see `execute`).
+        if self.taken_by_orchestration(chat_id, &item.text) {
+            return Ok(());
+        }
         // Keep the queue row's identity when it becomes a real user message.
         // The submitting viewport learns this id from QueueMessage and can
         // therefore wait without disturbing the active turn's runway, then
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
+        handle.expect_injected(&message_id, self.trusted_row_injected(item));
         if !self.missing_row_attachments(item).is_empty() {
             return Err(EngineError::Other(
                 "this message's images are still uploading".into(),
@@ -6322,6 +6529,17 @@ impl DocHost {
                 {
                     tracing::warn!(chat = %handle.chat_id, command = %c.id,
                         "command consumed but never resolved (crash mid-execute?); rejecting");
+                    // A message cut off with it: its chat is resumed with it
+                    // quoted (orchestration::board_checks), never sent again
+                    // blind (it may have started its turn already).
+                    let prompt = match &c.payload {
+                        SessionCommandPayload::Run { request, .. } => Some(request.prompt.clone()),
+                        SessionCommandPayload::Steer { prompt, .. } => Some(prompt.clone()),
+                        _ => None,
+                    };
+                    if let Some(prompt) = prompt {
+                        lock(&self.inner.cut_off_sends).push((handle.chat_id.clone(), prompt));
+                    }
                     self.resolve_command(
                         handle,
                         &c.id,
@@ -6647,6 +6865,27 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        // An agent's message to a Brain dump or an orchestrator is filed by
+        // orchestration (an outcome, a report, an update), never a turn.
+        let prompt = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => Some(request.prompt.as_str()),
+            SessionCommandPayload::Steer { prompt, .. } => Some(prompt.as_str()),
+            _ => None,
+        };
+        if prompt.is_some_and(|prompt| self.taken_by_orchestration(chat_id, prompt)) {
+            return Ok((SessionCommandStatus::Applied, Some("filed by orchestration".into())));
+        }
+        // The engine's message (a crew ask, an answer…): its entry says so,
+        // whichever path writes it, when an engine wrote it.
+        match &entry.payload {
+            SessionCommandPayload::Run { message_id, injected, .. } => {
+                handle.expect_injected(message_id, self.trusted_injected(&entry.issued_by, injected.as_ref()));
+            }
+            SessionCommandPayload::Steer { message_id: Some(message_id), injected, .. } => {
+                handle.expect_injected(message_id, self.trusted_injected(&entry.issued_by, injected.as_ref()));
+            }
+            _ => {}
+        }
         if let Some(message_id) = self.cancelled_by_stop(handle, entry) {
             // Still the user's message: it waits at the head of the paused
             // queue, to send, edit or remove — never stranded unrun in the
@@ -6658,6 +6897,8 @@ impl DocHost {
                 SessionCommandPayload::Steer { prompt, .. } => (prompt.clone(), Vec::new()),
                 _ => (String::new(), Vec::new()),
             };
+            // (An engine's message stays one: its row carries what it is.)
+            let injected = handle.injected_for(&message_id);
             let row = QueuedMessage {
                 id: message_id,
                 text: prompt,
@@ -6667,6 +6908,7 @@ impl DocHost {
                 issued_at: entry.issued_at.min(now_ms()),
                 edited_at: None,
                 delivery_gate: None,
+                injected,
                 config: None,
             };
             let queued = handle.doc.read_queue().is_ok_and(|q| q.iter().any(|r| r.id == row.id));
@@ -6682,7 +6924,7 @@ impl DocHost {
             ));
         }
         match &entry.payload {
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: _,
                 request,
                 message_id,
             } => {
@@ -6826,7 +7068,7 @@ impl DocHost {
                 handle.queue_paused.store(false, Ordering::Release);
                 Ok((SessionCommandStatus::Applied, None))
             }
-            SessionCommandPayload::Steer { prompt, message_id } => {
+            SessionCommandPayload::Steer { injected: _, prompt, message_id } => {
                 self.deliver_prompt(
                     sessions,
                     handle,
@@ -6939,6 +7181,26 @@ impl DocHost {
                     Some("answered as new turn".into()),
                 ))
             }
+            // Orchestration's, ignored while it's off: nothing filed, no one
+            // woken.
+            SessionCommandPayload::CrewReport { .. } | SessionCommandPayload::ProgressCheck {}
+                if !self.orchestration_on() =>
+            {
+                Ok((SessionCommandStatus::Rejected, Some(crate::orchestration::switch::OFF.into())))
+            }
+            SessionCommandPayload::CrewReport { report } => {
+                self.file_crew_report(sessions, handle, report)
+            }
+            SessionCommandPayload::ProgressCheck {} => {
+                // The chat's agent never sees it: its progress row does.
+                match self.inner.progress_checks.get() {
+                    Some(check) => {
+                        check(chat_id);
+                        Ok((SessionCommandStatus::Applied, Some("progress note asked for".into())))
+                    }
+                    None => Ok((SessionCommandStatus::Rejected, Some("no progress here".into()))),
+                }
+            }
         }
     }
 
@@ -6993,6 +7255,7 @@ impl DocHost {
             issued_at: issued_at.min(now_ms()),
             edited_at: None,
             delivery_gate: None,
+            injected: handle.injected_for(message_id),
             config: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
@@ -7642,6 +7905,39 @@ mod transfer_progress_tests {
         let each = start.elapsed() / 5;
         eprintln!("waiting whale: whole read {read:?}, waiting_messages {each:?}");
         assert!(each * 5 < read, "waiting_messages ({each:?}) should cost far less than a whole read ({read:?})");
+    }
+
+    /// The engine's message: whichever path writes its user entry, the
+    /// entry carries its kind beside the words the agent was sent.
+    #[tokio::test]
+    async fn an_expected_injected_message_is_written_with_its_part() {
+        let (_dir, host) = host();
+        let handle = host.open("injected-chat").unwrap();
+        let said = zeron_doc::Injected::crew_ask("ak-1", "th-a", Some("m-9"));
+        handle.expect_injected("m1", Some(&said));
+        handle.write_user_message("m1", "[Crew ask] words", 5).unwrap();
+        handle.write_user_message("m2", "plain", 6).unwrap();
+        let entries = handle.doc().read_entries().unwrap();
+        assert_eq!(
+            entries[0].parts,
+            vec![
+                zeron_doc::MessagePart::Text { id: "t0".into(), text: "[Crew ask] words".into() },
+                zeron_doc::MessagePart::Injected { id: "injected".into(), injected: said },
+            ]
+        );
+        assert_eq!(entries[1].parts.len(), 1, "a person's: its words alone");
+        // Only an engine says what its deliveries are: this one, never a
+        // device that isn't a known engine's (a client writing the doc).
+        let said = zeron_doc::Injected::scheduled();
+        assert!(host.trusted_injected("dev-test", Some(&said)).is_some());
+        assert!(host.trusted_injected("phone", Some(&said)).is_none());
+        // An edited row's words are no longer the engine's.
+        let mut row = super::QueuedMessage::new("q1", "[Dump d] words", "dev-test");
+        row.injected = Some(said);
+        assert!(host.trusted_row_injected(&row).is_some());
+        row.edited_at = Some(1);
+        assert!(host.trusted_row_injected(&row).is_none());
+        host.shutdown_workers().await;
     }
 
     #[tokio::test]
@@ -8354,7 +8650,7 @@ mod publication_eviction_tests {
         );
         assert!(host.open("").is_err());
         assert!(host.open_local("").is_err());
-        let steer = SessionCommandPayload::Steer { prompt: "hi".into(), message_id: None };
+        let steer = SessionCommandPayload::Steer { injected: None, prompt: "hi".into(), message_id: None };
         assert!(host.queue_command_with_transfers("", steer, Vec::new()).is_err());
         assert!(lock(&host.inner.handles).is_empty());
         host.shutdown_workers().await;

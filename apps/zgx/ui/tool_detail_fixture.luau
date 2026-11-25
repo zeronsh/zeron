@@ -6,7 +6,7 @@
 -- "Exit code 2" leading it, colours and a progress line's carriage
 -- returns in it), a huge one, one still running whose output is
 -- `test_tool_stream`, and one whose output the chat cut to its last ten
--- lines (of 300), the whole of it read from its host as
+-- lines (of 300; its last three when `test_tool_short_tail` is set), the whole of it read from its host as
 -- `test_tool_whole` says: "ok", "hold" (it comes when `test_tool_release`
 -- moves), or a failure's word ("offline", "update", "unavailable"). Fetches are stubbed (`test_tool_fetches`, one line
 -- each; the output's first fetch fails while `test_tool_fail` is set). The
@@ -27,6 +27,9 @@ local generation = ui.state("test_tool_generation", 1)
 local stream = ui.state("test_tool_stream", "Compiling zeron\n")
 local whole = ui.state("test_tool_whole", "ok")
 local release = ui.state("test_tool_release", 0)
+-- The chat's tail of `cargo test --workspace` when set: fewer lines than a
+-- fold (its byte budget spent on long lines), still cut short of the whole.
+local short_tail = ui.state("test_tool_short_tail", false)
 
 local function settled(value: any, err: any?): any
 	return {
@@ -148,6 +151,15 @@ local TOOLS = {
 
 local function tools(): { any }
 	local all = table.clone(TOOLS)
+	if short_tail:get() then
+		for i, t in all do
+			if t.id == "p9" then
+				local cut = table.clone(t)
+				cut.output = table.concat(THREE_HUNDRED, "\n", 298, 300)
+				all[i] = cut
+			end
+		end
+	end
 	table.insert(all, { id = "p8", kind = "exec", verb = "Ran", target = "cargo build", output = stream:get() })
 	return all
 end

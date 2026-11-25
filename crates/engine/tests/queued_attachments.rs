@@ -116,7 +116,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 }
 
 fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
-    SessionCommandPayload::Run {
+    SessionCommandPayload::Run { injected: None,
         request: RunRequest {
             mcp: None,
             prompt: format!(

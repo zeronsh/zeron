@@ -27,6 +27,7 @@ local FadeText = require("@self/fade_text")
 local RollText = require("@self/roll_text")
 local Kbd = require("@self/kbd")
 local Menu = require("@self/menu")
+local menu_point = require("@self/menu_point")
 local glass_of = require("@self/glass")
 local control = require("@self/control")
 local locale = require("@self/locale")
@@ -37,7 +38,9 @@ local locale = require("@self/locale")
 -- more, as a first choice arms it and a second does it), `disabled` (true,
 -- or why: said under its name), `checked` (a check at its end while true;
 -- `keep_open` leaves the menu open as it toggles) and `submenu` (its own
--- entries, beside it).
+-- entries, beside it), `lead` (a mark in its glyph's place, built as the
+-- menu opens: an orchestrator's colour dot) and `detail` (a line under its
+-- name, with its own glyph: `{ icon, text }`).
 -- (Its words may be messages, `ui.t`: read as text as the menu opens.)
 export type Entry = {
 	label: (string | Message)?,
@@ -50,6 +53,8 @@ export type Entry = {
 	checked: (() -> boolean)?,
 	keep_open: boolean?,
 	submenu: { Entry }?,
+	lead: (() -> Node)?,
+	detail: { icon: Icon.Name?, text: string }?,
 	heading: (string | Message)?,
 	separator: boolean?,
 }
@@ -512,7 +517,10 @@ local function build_panel(props: PanelProps): Node
 		local said = function(): string
 			return if armed:get() == i then e.confirm or "" else e.label or ""
 		end
-		local glyph = if e.icon then Menu.glyph(e.icon, glyph_ink) else nil
+		local glyph = if e.lead
+			then ui.div { w = "$zeron.menu.glyph.box", h = "$zeron.menu.glyph.box", shrink = 0, items = "center", justify = "center", e.lead() }
+			elseif e.icon then Menu.glyph(e.icon, glyph_ink)
+			else nil
 		local name: Node = if e.confirm then RollText { said, text_size = "$font.size.md", color = ink, grow = 1, min_w = 0 } else FadeText {
 			e.label or "",
 			text_size = "$font.size.md",
@@ -527,6 +535,25 @@ local function build_panel(props: PanelProps): Node
 				gap = "$zeron.space.hair",
 				ui.text { e.label or "", text_size = "$font.size.md", line_height = "$font.line.md", color = ink },
 				ui.text { reason, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true },
+			}
+		end
+		local detail = e.detail
+		if detail and not reason then
+			-- What tells it apart, under its name.
+			name = ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				ui.text { e.label or "", text_size = "$font.size.md", line_height = "$font.line.md", color = ink, truncate = true },
+				ui.row {
+					class = "menu-row-detail",
+					gap = "$space.1",
+					items = "center",
+					min_w = 0,
+					color = "$text.tertiary",
+					if detail.icon then Icon { name = detail.icon, size = 12 } else nil,
+					ui.text { detail.text, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", truncate = true, min_w = 0 },
+				},
 			}
 		end
 		local trail: { Node } = {}
@@ -601,7 +628,7 @@ local function build_panel(props: PanelProps): Node
 		}
 		-- The menus' row (its height, padding, corner); with a reason
 		-- under its name, as tall as that needs.
-		Menu.look(look, reason ~= nil)
+		Menu.look(look, reason ~= nil or (detail ~= nil))
 
 		local row: Node
 		if e.submenu and props.still then
@@ -782,7 +809,7 @@ return ui.component(function(props: Props): Node
 			return false
 		end
 		local list = items(e)
-		if not list or #list == 0 then
+		if not menu_point.has_items(list) then
 			return false
 		end
 		claimed = true
@@ -792,8 +819,10 @@ return ui.component(function(props: Props): Node
 		ui.batch(function()
 			-- Opened again elsewhere: closed first, so it opens anew there.
 			open:set(false)
-			entries = list
-			at:set({ x = e.local_x, y = e.local_y })
+			entries = list :: { Entry }
+			-- (On whole window points: ds/menu_point.)
+			local x, y = menu_point.at(e.x, e.y, e.x - e.local_x, e.y - e.local_y)
+			at:set({ x = x, y = y })
 		end)
 		ui.after(0, function()
 			asked = true
@@ -846,7 +875,14 @@ return ui.component(function(props: Props): Node
 				local h = if el then el.height or 0 else 0
 				local x, y = if el then el.x or 0 else 0, if el then el.y or 0 else 0
 				entries = items({ x = x, y = y + h, local_x = 0, local_y = h }) or {}
-				at:set({ x = 0, y = h })
+				local px, py = menu_point.at(x, y + h, x, y)
+				at:set({ x = px, y = py })
+				-- Nothing to choose: closed again, no panel.
+				if not menu_point.has_items(entries) then
+					ui.after(0, function()
+						open:set(false)
+					end)
+				end
 				keyed = true
 				ringed:set(true)
 			end
@@ -895,6 +931,7 @@ return ui.component(function(props: Props): Node
 		}))
 	end
 	table.insert(box, ui.div {
+		class = "context-menu-point",
 		absolute = true,
 		left = function(): number
 			return at:get().x

@@ -308,7 +308,7 @@ async fn registry_writes_per_turn_and_parked_minute() {
         .doc()
         .queue_command(&SessionCommandEntry {
             id: "cmd-1".into(),
-            payload: SessionCommandPayload::Run { request: run_request(), message_id: "m-1".into() },
+            payload: SessionCommandPayload::Run { injected: None, request: run_request(), message_id: "m-1".into() },
             issued_by: VIEWER.into(),
             issued_at: chrono::Utc::now().timestamp_millis(),
             based_on: None::<CommandBasedOn>,

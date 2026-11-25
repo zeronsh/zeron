@@ -33,6 +33,7 @@ local cloud = require("@account/cloud")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
 local Held = require("@app/screens/chat/held")
+local CardHold = require("@app/screens/chat/card_hold")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
 local Warm = require("@app/screens/chat/warm")
@@ -193,6 +194,10 @@ local function Composer(): Node
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
 	local project = ui.state("chat_project", nil :: string?)
+	-- On Cloud: the size of machine a new chat starts on (Work in's Machine).
+	local machine_size = ui.state("chat_machine", nil :: string?)
+	-- An open Cloud chat's size, as its machine says (its chip's Machine menu).
+	local fixed_size = ui.state("chat_fixed_machine", nil :: string?)
 	-- On Cloud, what a new chat's machine reaches (nil: the account's
 	-- default, Settings → Cloud). Each new chat starts from the default.
 	local reach = ui.state("chat_reach", nil :: string?)
@@ -510,6 +515,22 @@ local function Composer(): Node
 		branch = branch,
 		active = new_chat,
 	}
+	-- The sizes a new Cloud chat can start on, as Settings → Cloud lists them,
+	-- the account's default tagged. It starts on the default: as that changes
+	-- (Settings → Cloud), or the size picked is no longer offered, the pick
+	-- goes back to it.
+	local function machine_choices(): { CloudMachine.SizeChoice }
+		return CloudMachine.size_choices(cloud.machines(), cloud.machine())
+	end
+	local seen_default: string? = nil
+	ui.effect(function()
+		local default = cloud.machine()
+		local size = CloudMachine.size_for(cloud.machines(), if default == seen_default then machine_size:peek() else nil, default)
+		seen_default = default
+		if machine_size:peek() ~= size then
+			machine_size:set(size)
+		end
+	end)
 	-- A new chat's agent, started as the person opens it or types (see
 	-- screens/chat/warm), with the send's own choices.
 	local warm = Warm.bind {
@@ -581,6 +602,12 @@ local function Composer(): Node
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- A paused card's thread (screens/chat/card_hold): its queue held.
+	local card_held, resume_card = CardHold.bind(function(): string?
+		return session_id:get()
+	end, function()
+		own_notice:set { tone = "danger", key = "chat.composer.didnt_resume", dismissable = true }
+	end)
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
@@ -1121,8 +1148,12 @@ local function Composer(): Node
 			-- (Down with its prompt: the dock's one slide.)
 			slide_to = chat_id
 			route.open_session(chat_id)
+			-- On the size picked (Work in's Machine), the account's default
+			-- until another is; the next new chat starts on the default again.
+			local size = CloudMachine.size_for(cloud.machines(), machine_size:peek(), cloud.machine())
+			machine_size:set(CloudMachine.size_for(cloud.machines(), nil, cloud.machine()))
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek() })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, machine = size, reach = reach:peek() })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
@@ -1251,6 +1282,14 @@ local function Composer(): Node
 	end)
 	-- (The catalog's device, a new chat's project's host included.)
 	local accounts = shared.model_accounts(run_device)
+	-- (The chip's chosen size: the one its machine is on, or will come back on.)
+	ui.effect(function()
+		local s = machine.session()
+		local size = if s then cloud.resizing:get()[s.chat] or s.machine else nil
+		if fixed_size:peek() ~= size then
+			fixed_size:set(size)
+		end
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1270,12 +1309,25 @@ local function Composer(): Node
 				on = d.name
 			end
 		end
-		-- On Cloud: its machine's session (a side chat shares its parent's).
-		local machine = if cloud.on_device((s :: any).device) then cloud.session_for(s.id, (s :: any).device) else nil
+		-- On Cloud: its machine's session (a side chat shares its parent's),
+		-- and the size of its machine (`size`: "Large", after the size's glyph).
+		local on_cloud = cloud.on_device((s :: any).device)
+		local machine = if on_cloud then cloud.session_for(s.id, (s :: any).device) else nil
+		local restarting = false
+		local size: { string }? = nil
+		if on_cloud then
+			-- (Its size as picked while its machine restarts on it.)
+			local to = cloud.resizing:get()[s.id]
+			on = "Cloud"
+			size = CloudMachine.size_words(CloudMachine.size_name(cloud.machines(), to or (machine and machine.machine)))
+			restarting = to ~= nil
+		end
 		return {
 			device = on,
+			size = size,
+			cloud = on_cloud,
+			restarting = restarting,
 			name = name,
-			cloud = cloud.on_device((s :: any).device),
 			reach = if machine then machine.reach else nil,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
@@ -1288,7 +1340,7 @@ local function Composer(): Node
 	local dictation = Dictation.bind(shared.text, function(): string
 		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
 	end, function(): boolean
-		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.own_page(route.current:get().name)
 	end, "main")
 
 	local composer_sizes = ui.state("chat_composer_sizes", nil :: ds.ComposerSizes?)
@@ -1375,6 +1427,17 @@ local function Composer(): Node
 			account_group = accounts.account_group,
 			on_account = accounts.on_account,
 			on_accounts_open = accounts.on_accounts_open,
+			-- The picker opened: the host looks again at agents short of
+			-- models (none, a failed look), in the background; one's
+			-- "Retry" asks for its models alone, its "Sign in" opens
+			-- Settings → Providers.
+			on_models_open = function()
+				store.refresh_catalog()
+			end,
+			on_models_retry = function(harness: string)
+				store.retry_catalog(harness)
+			end,
+			on_models_sign_in = accounts.on_sign_in,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?
@@ -1401,10 +1464,29 @@ local function Composer(): Node
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
+			machine = machine_size,
+			machines = machine_choices,
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,
 			branch_fixed = branch_fixed,
+			-- On Cloud: the chip opens its machine's sizes; a pick restarts
+			-- it on the size (or wakes it there), as the tray's sizes do.
+			fixed_machine = {
+				value = fixed_size,
+				items = function(): { any }
+					return CloudMachine.chat_size_choices(cloud.machines(), cloud.machine(), running:get()) :: any
+				end,
+				on_choose = function(size: string)
+					local s = machine.session()
+					if s and s.machine ~= size then
+						machine.pick(size)
+					end
+				end,
+				note = function(): string?
+					return CloudMachine.size_note(machine.session(), running:get())
+				end,
+			},
 			-- (Only ever the person's: the engine takes it from this app alone.)
 			on_reach = function(r: string)
 				local s = open()
@@ -1456,6 +1538,9 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = shown_queue,
+			-- A paused card's thread: its queue held, said atop it, Resume.
+			held = card_held,
+			on_held_action = resume_card,
 			-- (Steer only where its agent takes a word mid-turn: else the row's
 			-- Send now stops the turn, as the host does.)
 			can_steer = function(): boolean
@@ -1752,7 +1837,7 @@ local function Composer(): Node
 		-- Not seen over a plugin's page (the chat's is kept unseen under it),
 		-- nor anything placed round the composer: the page takes the pointer.
 		opacity = function(): number
-			return if route.current:get().name == "plugin" then 0 else 1
+			return if route.own_page(route.current:get().name) then 0 else 1
 		end,
 		on_resize = function(size: { w: number, h: number })
 			-- (Hidden, Settings standing in its place, it has no height: not somewhere to
@@ -1830,7 +1915,7 @@ local function Composer(): Node
 				-- (And not over a plugin's page: the chat's page is kept unseen
 				-- under it, and so is this.)
 				ui.show(function(): boolean
-					return not route.needs_project:get() and route.current:get().name ~= "plugin"
+					return not route.needs_project:get() and not route.own_page(route.current:get().name)
 				end, composer()),
 			},
 		},

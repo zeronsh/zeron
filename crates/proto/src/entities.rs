@@ -341,6 +341,38 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    /// The agent that started this chat for the person: the Brain dump
+    /// (a dump's route) or an orchestrator (its crew). Provenance only: a
+    /// top-level chat it started stays top-level and the person's. Set by
+    /// the engine; missing on older rows and peers, and a shape this build
+    /// can't read decodes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_started_by")]
+    pub started_by: Option<StartedBy>,
+}
+
+/// Who started a chat ([`Chat::started_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedBy {
+    /// The starting chat: a Brain dump's or an orchestrator's.
+    pub chat_id: String,
+    /// The dump and route it was started for, when a route started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    /// The board card it was started for (`startItem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+/// [`Chat::started_by`], leniently.
+pub fn lenient_started_by<'de, D>(deserializer: D) -> Result<Option<StartedBy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A chat put to sleep ([`Chat::sleep`]).
@@ -377,6 +409,10 @@ pub enum ChildKind {
     Side,
     /// Delegated work: shown under the parent's subagents.
     Subagent,
+    /// A thread in an orchestrator's crew (the parent is an orchestrator's
+    /// chat; see `orchestration`). A full thread: it may delegate to
+    /// subagents of its own.
+    Crew,
 }
 
 impl ChildKind {
@@ -384,6 +420,7 @@ impl ChildKind {
         match self {
             ChildKind::Side => "side",
             ChildKind::Subagent => "subagent",
+            ChildKind::Crew => "crew",
         }
     }
 
@@ -392,6 +429,7 @@ impl ChildKind {
         match value {
             "side" => Some(ChildKind::Side),
             "subagent" => Some(ChildKind::Subagent),
+            "crew" => Some(ChildKind::Crew),
             _ => None,
         }
     }
@@ -409,9 +447,11 @@ where
 
 impl Chat {
     /// A session the user sees in chat lists: neither another chat's worker
-    /// (`parent_chat_id`) nor a hidden voice orchestrator.
+    /// (`parent_chat_id`) nor a hidden voice orchestrator or Brain dump.
     pub fn is_top_level(&self) -> bool {
-        self.parent_chat_id.is_none() && !crate::voice::is_orchestrator_chat(&self.id)
+        self.parent_chat_id.is_none()
+            && !crate::voice::is_orchestrator_chat(&self.id)
+            && !crate::orchestration::is_brain_dump_chat(&self.id)
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -612,6 +652,48 @@ pub struct Session {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<SessionWaiting>,
+    /// What its host writes of the turn as it runs beside its status (its
+    /// live activity and todo progress, a usage limit it stopped on):
+    /// flattened, so the row's fields are `activity`, `todo` and `limited`
+    /// as before. Read through the row itself (`session.limited`, by
+    /// `Deref`).
+    #[serde(flatten)]
+    pub live: SessionLive,
+}
+
+/// A session row's [`Session::live`] fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLive {
+    /// What the agent is doing right now (testing, merging…), classified
+    /// from its running tool. Host-written while `Working`, and only while
+    /// Orchestrators is on there; `None` otherwise and on older peers. See
+    /// `orchestration::ChatActivity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::orchestration::ChatActivity>,
+    /// Progress through the agent's newest todo/plan list. Host-written
+    /// while Orchestrators is on there; missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<crate::orchestration::TodoProgress>,
+    /// Stopped by its provider's usage limit, waiting for the reset (or
+    /// running on another account meanwhile): host-written, kept until the
+    /// chat is resumed. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limited: Option<crate::usage_limit::SessionLimit>,
+}
+
+impl std::ops::Deref for Session {
+    type Target = SessionLive;
+
+    fn deref(&self) -> &SessionLive {
+        &self.live
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut SessionLive {
+        &mut self.live
+    }
 }
 
 /// What a chat's agent waits on after its turn ended.
@@ -1686,6 +1768,15 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The provider REJECTED this login's credential (a revoked or expired
+    /// key — Cursor's minted SDK keys): switching to it would only break the
+    /// agent, so the engine refuses to unless forced, and the UI offers to
+    /// remove it instead. Absent (false) from older engines.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invalid: bool,
+    /// Why `invalid` ("Key rejected — sign in again"). `None` when valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2613,5 +2704,49 @@ mod child_kind_tests {
             assert_eq!(chat.child_kind, None);
             assert!(serde_json::to_value(&chat).unwrap().get("childKind").is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod session_live_wire {
+    use super::*;
+
+    /// A session row's `activity`, `todo` and `limited` sit at the top of
+    /// its JSON as they always have ([`Session::live`] is flattened): a row
+    /// from before reads the same and is written back byte for byte.
+    #[test]
+    fn the_live_fields_keep_their_wire_shape() {
+        let full = serde_json::json!({
+            "lastCompletedTurn": "t1",
+            "chatId": "c1",
+            "deviceId": "d1",
+            "status": "working",
+            "startedAt": "2026-11-22T10:00:00Z",
+            "updatedAt": "2026-11-22T10:01:00Z",
+            "runningSubagents": 0,
+            "activity": {"kind": "testing", "label": "cargo test", "since": "2026-11-22T10:00:30Z"},
+            "todo": {"done": 1, "total": 3, "current": "wire it"},
+            "limited": {"provider": "claude", "since": "2026-11-22T09:00:00Z", "attempt": 0},
+        });
+        let row: Session = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(row.todo.as_ref().map(|t| t.total), Some(3), "read through the row");
+        assert_eq!(row.limited.as_ref().map(|l| l.provider.as_str()), Some("claude"));
+        let back = serde_json::to_value(&row).unwrap();
+        assert_eq!(back["activity"], full["activity"]);
+        assert_eq!(back["todo"], full["todo"]);
+        assert_eq!(back["limited"]["provider"], "claude");
+        assert!(back.get("live").is_none(), "no nesting: {back}");
+        assert_eq!(serde_json::from_value::<Session>(back.clone()).unwrap(), row);
+
+        // None of them: none of the keys, as a row without them always read.
+        let mut bare = full.as_object().unwrap().clone();
+        for key in ["activity", "todo", "limited"] {
+            bare.remove(key);
+        }
+        let row: Session = serde_json::from_value(serde_json::Value::Object(bare.clone())).unwrap();
+        assert_eq!(row.live, SessionLive::default());
+        let back = serde_json::to_value(&row).unwrap();
+        let keys: Vec<&String> = back.as_object().unwrap().keys().collect();
+        assert!(!keys.iter().any(|k| ["activity", "todo", "limited", "live"].contains(&k.as_str())), "{keys:?}");
     }
 }

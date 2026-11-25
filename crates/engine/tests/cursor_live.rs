@@ -70,7 +70,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
     core.doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 message_id: uuid::Uuid::new_v4().to_string(),
                 request: RunRequest {
                     mcp: None,
@@ -138,7 +138,7 @@ async fn remote_steer_batch_reaches_real_muse_with_every_message() {
     for (i, token) in tokens.iter().enumerate().skip(1) {
         handle.doc().queue_command(&zeron_doc::SessionCommandEntry {
             id: format!("remote-{i}"),
-            payload: SessionCommandPayload::Steer {prompt: format!("Remember {token}. Reply with the immediately previous user token and this token. Do not use tools."), message_id: Some(format!("message-{i}"))},
+            payload: SessionCommandPayload::Steer { injected: None, prompt: format!("Remember {token}. Reply with the immediately previous user token and this token. Do not use tools."), message_id: Some(format!("message-{i}"))},
             issued_by: "remote-viewer".into(), issued_at: now + i as i64,
             based_on: None, expires_at: None, status: zeron_doc::SessionCommandStatus::Pending, resolution: None,
         }).unwrap();

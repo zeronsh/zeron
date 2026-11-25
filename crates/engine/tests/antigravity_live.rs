@@ -269,6 +269,7 @@ async fn antigravity_1_5_live_e2e_discovery_steer_stop_and_corrupt_recovery() {
                     "Remember the exact secret code word OBSIDIAN-742. Do not call any tools. Reply with only the single word STORED.",
                 ),
                 message_id: "msg-1".into(),
+                injected: None,
             },
         )
         .unwrap();
@@ -323,6 +324,7 @@ async fn antigravity_1_5_live_e2e_discovery_steer_stop_and_corrupt_recovery() {
                     "Write a detailed 500-word essay about the history of the printing press. Do not use any tools.",
                 ),
                 message_id: "msg-2".into(),
+                injected: None,
             },
         )
         .unwrap();
@@ -390,6 +392,7 @@ async fn antigravity_1_5_live_e2e_discovery_steer_stop_and_corrupt_recovery() {
                     "Write a 500-word essay about ocean currents. Do not use any tools.",
                 ),
                 message_id: "msg-3".into(),
+                injected: None,
             },
         )
         .unwrap();
@@ -460,6 +463,7 @@ async fn antigravity_1_5_live_e2e_discovery_steer_stop_and_corrupt_recovery() {
                     "What was the exact secret code word I asked you to remember in our very first message? Do not call tools. Reply with only that code word.",
                 ),
                 message_id: "msg-4".into(),
+                injected: None,
             },
         )
         .unwrap();
@@ -581,6 +585,7 @@ async fn antigravity_live_neon_streams_reasoning_summaries() {
             SessionCommandPayload::Run {
                 request: req,
                 message_id: "neon-think-1".into(),
+                injected: None,
             },
         )
         .expect("queue_command succeeds");

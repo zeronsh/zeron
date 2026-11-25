@@ -21,6 +21,8 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    CrewReport,
+    ProgressCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,11 +44,17 @@ pub enum SessionCommandPayload {
         request: RunRequest,
         /// Client-minted message id for the optimistic user entry (dedup key).
         message_id: String,
+        /// The engine's message this is (a crew ask, an answer…): its user
+        /// entry carries it ([`crate::MessagePart::Injected`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        injected: Option<crate::Injected>,
     },
     #[serde(rename_all = "camelCase")]
     Steer {
         prompt: String,
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        injected: Option<crate::Injected>,
     },
     Interrupt {},
     #[serde(rename_all = "camelCase")]
@@ -54,15 +62,37 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    /// A crew thread's report for this chat, an orchestrator (any device
+    /// queues it; the host files it in the transcript and decides whether
+    /// to wake). Hosts that predate it skip the entry.
+    CrewReport {
+        report: zeron_proto::orchestration::Report,
+    },
+    /// Someone wants this chat's progress note fresh (`progressCheck` from
+    /// another device): the host writes one on its progress row, rate
+    /// limited. Never reaches the chat's agent. Hosts that predate it skip
+    /// the entry.
+    ProgressCheck {},
 }
 
 impl SessionCommandPayload {
+    /// The payload without what only the engine's own deliveries may say
+    /// ([`crate::Injected`]): what a caller sends never claims it.
+    pub fn without_injected(mut self) -> Self {
+        if let SessionCommandPayload::Run { injected, .. } | SessionCommandPayload::Steer { injected, .. } = &mut self {
+            *injected = None;
+        }
+        self
+    }
+
     pub fn kind(&self) -> SessionCommandKind {
         match self {
             SessionCommandPayload::Run { .. } => SessionCommandKind::Run,
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::CrewReport { .. } => SessionCommandKind::CrewReport,
+            SessionCommandPayload::ProgressCheck {} => SessionCommandKind::ProgressCheck,
         }
     }
 }
@@ -192,7 +222,7 @@ mod tests {
     fn steer(id: &str, issued_at: i64) -> SessionCommandEntry {
         entry(
             id,
-            SessionCommandPayload::Steer {
+            SessionCommandPayload::Steer { injected: None,
                 prompt: "go".into(),
                 message_id: None,
             },
@@ -253,7 +283,7 @@ mod tests {
                 .map(|i| {
                     entry(
                         &format!("c{i}"),
-                        SessionCommandPayload::Steer {
+                        SessionCommandPayload::Steer { injected: None,
                             prompt: format!("unique message {i}"),
                             message_id: Some(format!("m{i}")),
                         },
@@ -313,11 +343,28 @@ mod tests {
     }
 
     #[test]
+    fn a_command_without_injected_reads_as_before_and_one_with_it_keeps_it() {
+        let old: SessionCommandPayload =
+            serde_json::from_value(serde_json::json!({ "kind": "steer", "prompt": "go", "messageId": "m1" })).unwrap();
+        assert_eq!(old, SessionCommandPayload::Steer { prompt: "go".into(), message_id: Some("m1".into()), injected: None });
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(json.get("injected").is_none(), "absent, as older hosts wrote it");
+        let said = SessionCommandPayload::Steer {
+            prompt: "go".into(),
+            message_id: Some("m1".into()),
+            injected: Some(crate::Injected::scheduled()),
+        };
+        let json = serde_json::to_value(&said).unwrap();
+        assert_eq!(json["injected"]["kind"], "scheduled");
+        assert_eq!(serde_json::from_value::<SessionCommandPayload>(json).unwrap(), said);
+    }
+
+    #[test]
     fn runs_are_not_superseded_by_newer_runs() {
         // Two queued runs both execute (in order); supersession applies to interrupts only.
         let r1 = entry(
             "r1",
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run_request(),
                 message_id: "m1".into(),
             },
@@ -325,7 +372,7 @@ mod tests {
         );
         let r2 = entry(
             "r2",
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request: run_request(),
                 message_id: "m2".into(),
             },

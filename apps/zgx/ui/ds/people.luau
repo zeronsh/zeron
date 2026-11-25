@@ -216,16 +216,11 @@ export type TimestampProps = { at: number, compact: boolean?, size: ("xs" | "sm"
 
 M.Timestamp = ui.component(function(props: TimestampProps): Node
 	local now = ui.use_state(os.time())
-	-- A minute's tick: the words move on while it shows.
-	local timer = anime.createTimer {
-		duration = 60000,
-		loop = true,
-		onLoop = function()
-			now:set(os.time())
-		end,
-	}
-	ui.on_cleanup(function()
-		timer:cancel()
+	-- A minute's tick: the words move on while it shows. (A timer that
+	-- sleeps between ticks: an anime timer is played every frame, and kept
+	-- the window drawing, and Linux's event loop turning, for good.)
+	ui.every(60000, function()
+		now:set(os.time())
 	end)
 	local size = props.size or "sm"
 	return ui.text {

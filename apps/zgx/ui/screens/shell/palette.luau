@@ -25,6 +25,7 @@ local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
+local plugins = require("@account/plugins")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -48,7 +49,17 @@ local function session_items(): { Item }
 		pinned[id] = true
 	end
 	local out: { Item } = {}
+	-- (An orchestrator's chat is found as the orchestrator, its page, while
+	-- Orchestrators is on.)
+	local orchestrators: { [string]: boolean } = {}
+	local orch = plugins.module("orchestrators")
+	for _, o in (if orch then (orch.orchestration.now:get() or {}).orchestrators else nil) or {} do
+		orchestrators[o.id] = true
+	end
 	local function add(c: sessions.Chat, archived: boolean)
+		if orchestrators[c.id] then
+			return
+		end
 		local p = if c.project then projects[c.project] else nil
 		table.insert(out, {
 			id = `session:{c.id}`,
@@ -529,6 +540,55 @@ local function root(): { Item }
 					route.settings(id)
 				end,
 			})
+		end
+	end
+	-- Orchestrators, while it's on: a new one, the Control room, and each
+	-- orchestrator (not archived), to its page.
+	local orch = plugins.module("orchestrators")
+	if orch then
+		local orch_actions = orch.actions
+		local at = 1
+		for i, item in out do
+			if item.id == "a-sidebar" then
+				at = i
+				break
+			end
+		end
+		table.insert(out, at, {
+			id = "a-new-orchestrator",
+			label = locale.s("orch.palette.new_orchestrator"),
+			section = locale.s("shell.palette.actions"),
+			icon = "users-group-rounded",
+			keywords = "orchestrator crew manager agent",
+			run = function()
+				orch_actions.new()
+			end,
+		})
+		table.insert(out, at + 1, {
+			id = "a-control-room",
+			label = locale.s("orch.palette.control_room"),
+			section = locale.s("shell.palette.actions"),
+			icon = "monitor",
+			keywords = "control room board asks needs brain dump orchestrators",
+			run = function()
+				route.control()
+			end,
+		})
+		for _, o in (orch.orchestration.now:get() or {}).orchestrators or {} do
+			if o.kind == "standard" and not o.archived then
+				local id = o.id
+				table.insert(out, {
+					id = `orchestrator:{id}`,
+					label = o.name,
+					section = locale.s("orch.palette.orchestrators"),
+					icon = "users-group-rounded",
+					keywords = `orchestrator {o.goal or ""}`,
+					verb = locale.s("orch.palette.go"),
+					run = function()
+						orch_actions.open(id)
+					end,
+				})
+			end
 		end
 	end
 	table.insert(out, { id = "t-theme", label = locale.s("shell.palette.theme"), section = locale.s("shell.palette.settings"), scope = "settings", icon = "palette-search", keywords = "dark light appearance", page = theme_page })

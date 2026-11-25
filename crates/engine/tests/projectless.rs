@@ -334,7 +334,7 @@ async fn exercise_projectless(mode: Mode) {
         core.doc_host
             .queue_command(
                 CHAT,
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: None,
                     request: RunRequest {
                         mcp: None,
                         prompt: "hello from no project".into(),

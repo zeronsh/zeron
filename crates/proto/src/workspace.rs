@@ -50,6 +50,29 @@ pub mod capabilities {
     /// such a host until its bytes are stored; older hosts get them over the
     /// peer link, as they always did.
     pub const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
+    /// The host writes its chats' `orchestration::Progress` rows and makes
+    /// a fresh note for a `ProgressCheck` command. For a chat on a host
+    /// without it, a viewing engine works its progress out itself (by
+    /// proxy, never written to the registry).
+    pub const ORCHESTRATION_PROGRESS_V1: &str = "orchestration-progress-v1";
+    /// The host files what comes of Brain dump routes to its chats (their
+    /// turn-end replies) and catches agent messages to a Brain dump or an
+    /// orchestrator it hosts, whoever sent them. For a route to a chat on a
+    /// host without it, the dump's own engine reads the outcome from the
+    /// synced session row and transcript.
+    pub const ORCHESTRATION_ROUTES_V1: &str = "orchestration-routes-v1";
+
+    /// The host works out where the cards of the boards it keeps are
+    /// (`orchestration::BoardCard` rows) and acts for them: its own asks,
+    /// the wake of a stalled card's orchestrator. A board whose natural
+    /// keeper is a host without it is kept by the next in line that has it;
+    /// with none, its cards show by their old column.
+    pub const ORCHESTRATION_PLACES_V1: &str = "orchestration-places-v1";
+
+    /// The engine writes `injected` on the commands and queue rows it
+    /// delivers itself (a crew ask, an answer…): a host trusts a row's
+    /// `injected` only from a device that says so.
+    pub const INJECTED_MESSAGES_V1: &str = "injected-messages-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -66,6 +89,10 @@ pub mod capabilities {
         ZGX_INTERFACE_V1,
         UPDATE_ABILITY_V1,
         ATTACHMENT_STORE_V1,
+        ORCHESTRATION_PROGRESS_V1,
+        ORCHESTRATION_ROUTES_V1,
+        ORCHESTRATION_PLACES_V1,
+        INJECTED_MESSAGES_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -187,6 +214,10 @@ mod tests {
                     "zgx-interface-v1",
                     "update-ability-v1",
                     "attachment-store-v1",
+                    "orchestration-progress-v1",
+                    "orchestration-routes-v1",
+                    "orchestration-places-v1",
+                    "injected-messages-v1",
                     "voice-client-media-v1"
                 ],
             })

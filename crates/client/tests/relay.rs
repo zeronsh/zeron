@@ -85,6 +85,7 @@ fn chat_row(id: &str, generation: u32, has_messages: bool) -> Chat {
         parent_chat_id: None,
         child_kind: None,
         sleep: None,
+        started_by: None,
     }
 }
 

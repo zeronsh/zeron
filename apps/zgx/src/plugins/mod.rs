@@ -57,6 +57,7 @@ pub mod host_bar;
 pub mod locales;
 pub mod network;
 pub mod plugin_menus;
+pub mod switch;
 
 use std::{
     cell::{Cell, RefCell},
@@ -128,6 +129,11 @@ impl Item {
     pub fn hash(&self) -> &str {
         self.str("hash")
     }
+    /// One of Zeron's own whose switch is the account's (`"scope":
+    /// "account"`): one switch for every device, set on this engine alone.
+    pub fn account_switch(&self) -> bool {
+        self.str("scope") == "account"
+    }
     fn list(&self, at: &Json) -> Vec<String> {
         at.as_array()
             .into_iter()
@@ -152,28 +158,85 @@ impl Item {
     pub fn may(&self, permission: &str) -> bool {
         self.status() == "on" && self.permissions().iter().any(|p| p == permission)
     }
-    /// What it loads as, if it runs: its snapshot's entry and its grants.
+    /// What it loads as, if it runs: its snapshot's entry and its grants
+    /// (one of Zeron's own shipped in this app: from the app's folder, with
+    /// the trust that gives, `plugin_with`).
     pub fn plugin(&self) -> Option<Plugin> {
+        self.plugin_with(&builtin_dir())
+    }
+
+    /// `plugin`, Zeron's own plugins shipped in `builtin` (the app's
+    /// plugins-builtin folder): a bundled built-in (`bundled`) loads from
+    /// its folder there and may replace the app modules it names; any
+    /// other loads from its snapshot with what its permissions give.
+    pub(crate) fn plugin_with(&self, builtin: &Path) -> Option<Plugin> {
         if self.status() != "on" || RESERVED.contains(&self.id()) {
             return None;
         }
-        let snapshot = PathBuf::from(self.json["snapshot"].as_str()?);
         let entry = self.json["entry"].as_str().filter(|e| !e.is_empty()).unwrap_or("init.luau");
         if entry.contains("..") || entry.starts_with('/') {
             return None;
         }
         let ui = &self.json["ui"];
+        let mut grants = grants::capabilities(
+            self.id(),
+            &self.permissions(),
+            &self.list(&ui["change"]),
+            &self.list(&ui["replace"]),
+        );
+        let dir = match self.bundled(builtin) {
+            Some(bundled) => {
+                grants.extend(grants::bundled(&bundled.modules));
+                bundled.dir
+            }
+            None => PathBuf::from(self.json["snapshot"].as_str()?),
+        };
         Some(Plugin {
             name: self.id().into(),
-            entry: snapshot.join(entry),
-            grants: grants::capabilities(
-                self.id(),
-                &self.permissions(),
-                &self.list(&ui["change"]),
-                &self.list(&ui["replace"]),
-            ),
+            entry: dir.join(entry),
+            grants,
         })
     }
+
+    /// One of Zeron's own, shipped inside this app: the engine lists it as
+    /// a built-in by Zeron, from the folder `builtin/<id>` as this window
+    /// finds it on its own disk, whose manifest there names the same id.
+    /// None for any other: a plugin you installed is never this, whatever
+    /// its id or name (its folder is yours, and the engine lists one with a
+    /// built-in's id as broken), nor is a list that says "built-in" of a
+    /// folder elsewhere. What it's trusted with is read from the app's own
+    /// folder, not the list: the app modules its manifest names
+    /// (`app_modules`), which it may replace as the app's own code
+    /// (`grants::bundled`). docs/plugins.md, "Zeron's own plugins".
+    pub fn bundled(&self, builtin: &Path) -> Option<Bundled> {
+        let id = self.id();
+        let plain = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !plain || self.json["builtin"] != Json::Bool(true) || self.json["author"]["kind"] != "zeron" {
+            return None;
+        }
+        let shipped = builtin.join(id).canonicalize().ok()?;
+        let listed = Path::new(self.json["dir"].as_str()?).canonicalize().ok()?;
+        // (Canonical both: a link in the app's folder reaching out of it is
+        // no folder of the app's.)
+        if listed != shipped || !shipped.starts_with(builtin.canonicalize().ok()?) {
+            return None;
+        }
+        let manifest: Json = serde_json::from_slice(&std::fs::read(shipped.join("zeron-plugin.json")).ok()?).ok()?;
+        if manifest["id"].as_str() != Some(id) {
+            return None;
+        }
+        let modules = self.list(&manifest["app_modules"]);
+        Some(Bundled { dir: shipped, modules })
+    }
+}
+
+/// One of Zeron's own plugins as this window ships it (`Item::bundled`):
+/// its folder in the app's plugins-builtin, and the app modules its
+/// manifest there names (`app_modules`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bundled {
+    pub dir: PathBuf,
+    pub modules: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1483,15 +1546,32 @@ impl Bridge {
         self.publish_page();
         let (sources, list) = self.sources(false);
         self.publish_records(&sources, &list);
-        if *self.loaded.borrow() == want {
-            return;
+        if *self.loaded.borrow() != want {
+            *self.loaded.borrow_mut() = want.clone();
+            self.host.set_plugins(want);
+            // (Before the window's first load: that load takes them.)
+            if !self.first_load.get() {
+                // Said before the reload too, so what the window declares
+                // once per load (commands, keys, built rows) reads the new
+                // set, not the one being let go.
+                self.publish_on();
+                self.reload();
+            }
         }
-        *self.loaded.borrow_mut() = want.clone();
-        self.host.set_plugins(want);
-        // (Before the window's first load: that load takes them.)
-        if !self.first_load.get() {
-            self.reload();
-        }
+        self.publish_on();
+    }
+
+    /// Which plugins run in this window (`plugins.on`, `{ [id] = true }`),
+    /// for the app's own hooks gated on one (`@account/plugins`): on in the
+    /// engine's list, and loaded. Said after the load that brings a
+    /// built-in's app modules in, and as loaded then (a plugin that failed
+    /// and was set aside isn't on).
+    fn publish_on(&self) {
+        let on = Value::record(self.loaded.borrow().iter().map(|p| (p.name.as_str(), Value::from(true))).collect::<Vec<_>>());
+        self.host.shared("plugins.on", Value::Nil).set(on);
+        // (The app's Rust behind those hooks, at the same moment.)
+        let loaded = self.loaded.borrow().clone();
+        switch::set(loaded.iter().map(|p| p.name.as_str()));
     }
 
     fn reload(&self) {
@@ -1742,12 +1822,25 @@ impl Bridge {
             None => {}
         }
         self.publish_templates();
-        self.publish_page();
-        if (kept || (changed > 0 && template))
-            && let Err(error) = self.host.reload()
-        {
+        // Settings → Plugins again only for a look that found something: its
+        // elements report reads and scans every script on this thread, and
+        // off macOS and Windows a look comes every `TEMPLATES_LOOK` (an idle
+        // window's largest cost, growing with `ui/`). The same `.live`, the
+        // same template and trust: the same scripts, the same report.
+        if compose || kept || retry || was != id || cached.is_none() {
+            self.publish_page();
+        }
+        let reloads = kept || (changed > 0 && template);
+        if reloads && let Err(error) = self.host.reload() {
             eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
             self.blame_as(&error, true);
+        }
+        // Only Zeron's own ui/ changed: the host's watch hears it only for
+        // the modules it watched at its last load, never one first required
+        // after it (the Board's, required as it opens). Every required file's
+        // time looked at: nothing when the watch already reloaded.
+        if !reloads && changed > 0 {
+            self.host.reload_if_changed();
         }
         // What failed as a preview, laid down as it is now.
         if retry {
@@ -3586,6 +3679,12 @@ fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
         async move {
             preview::refuse("plugins.set_off")?;
             let (id, device) = remote::id_and_device(&arg);
+            // (An account's switch is set here, never forwarded: another
+            // device's engine may not have the plugin's files.)
+            let account = me.upgrade().is_some_and(|b| {
+                [None, device.as_deref()].into_iter().any(|on| b.item_on(on, &id).is_some_and(|i| i.account_switch()))
+            });
+            let device = device.filter(|_| !account);
             let off = arg.field("off").is_some_and(Value::truthy);
             eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
             call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
@@ -3659,6 +3758,14 @@ mod tests {
         let now = vec![at("focus", "https://a/focus"), at("ping", "https://evil/ping")];
         let gone: Vec<String> = gone(&before, &now).into_iter().map(|(id, _)| id).collect();
         assert_eq!(gone, vec!["clock".to_string(), "ping".to_string()]);
+    }
+
+    /// `"scope": "account"` on an item: its switch is the account's.
+    #[test]
+    fn an_account_scoped_item_has_the_accounts_switch() {
+        assert!(item(json!({ "id": "orchestrators", "scope": "account", "default_off": true })).account_switch());
+        assert!(!item(json!({ "id": "focus" })).account_switch());
+        assert!(!item(json!({ "id": "focus", "scope": "device" })).account_switch());
     }
 
     /// `zeron.compose(text)` adds its words as ever; with options, it says
@@ -3807,6 +3914,8 @@ mod hotkeys_tests;
 mod markdown_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod bundled_tests;
 
 #[cfg(test)]
 mod menu_tests {

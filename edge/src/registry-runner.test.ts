@@ -123,6 +123,16 @@ describe("runner registry reads", () => {
     expect(runnerCanSee(CLOUD, row("sidebarPins", "c1", { pinned: true }), "devices")).toBe(false);
   });
 
+  it("both reaches read the account's plugin switches, and never write them", () => {
+    const sw = row("pluginSwitches", "orchestrators", { on: true });
+    expect(runnerCanSee(CLOUD, sw, "devices")).toBe(true);
+    expect(runnerCanSee(CLOUD, sw, "isolated")).toBe(true);
+    for (const reach of ["devices", "isolated"] as const) {
+      expect(runnerOpRefusal(CLOUD, sw, upsert("pluginSwitches", "orchestrators", { on: false }), reach)).toMatch(/not writable/);
+      expect(runnerOpRefusal(CLOUD, undefined, upsert("pluginSwitches", "orchestrators", { on: true }), reach)).toMatch(/not writable/);
+    }
+  });
+
   it("isolated: every device, its own rows, its projects and delegates, and tombstones", () => {
     const scope = { spaces: new Set(["s1"]), children };
     expect(runnerCanSee(CLOUD, row("devices", LAPTOP, { name: "Mac" }), "isolated")).toBe(true);

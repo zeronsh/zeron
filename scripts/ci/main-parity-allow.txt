@@ -1,0 +1,72 @@
+# Main's test files this branch may edit (scripts/ci/main-parity.sh): a
+# path, then why. Each is a general change main's test had to follow. An
+# orchestrator-motivated edit never goes here: revert it, or move the case
+# to a test of its own.
+
+# SessionCommandPayload::Run/Steer gained `injected` (the engine's own
+# messages: usage-limit resume and engine-start resume write it with
+# Orchestrators off). An enum variant's field: no `..Default::default()`
+# can spare a struct literal or a pattern from naming it.
+crates/doc/tests/attachments_roundtrip.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/acp_lifecycle.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/adapter_chaos_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/antigravity_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/born_chat2_race.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/cloud_attachments.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/cloud_killed_turn.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/cloud_sleep_quiesce.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/cloud_wake_update.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/cursor_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/e2e.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/message_queue.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/projectless.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/queue_order_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/queued_attachments.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/registry_writes_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/relay_delivery.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/restart_resume.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/run_recovery.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/runtime_survival.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/runtime_survival_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/steer_now.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/steer_now_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/steer_tool_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/steering_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/unarchive_on_send.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/worktree_on_run.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+
+# Cloud machine size, picked at creation (app, MCP create_chat, edge).
+crates/engine/tests/cloud_rpc.rs  Cloud machine size: create_chat's "machine" rides the start request, refused without Cloud; plus injected: None
+apps/zgx/ui/cloud_stub.luau  Cloud machine size: the edge's real catalogue and the default-size commands
+apps/zgx/ui/tests/cloud_machine.test.luau  Cloud machine size: a restart on a picked size says "Restarting on Large…" in place of "Waking its Cloud machine…"
+
+# Cursor catalog and model picker (parameter sets from the catalog, a
+# harness with no models isn't offered, the picker's Retry).
+crates/engine/tests/device_routing.rs  Cursor catalog: MCP offers only agents with models, so the stub harness lists one and list_models is asserted; plus injected: None
+crates/harness/tests/cursor.rs  Cursor catalog: a Max Mode default starts on its first non-Max variant; picks of parameters a model lacks aren't sent
+crates/harness/tests/fixtures/fake-cursor-shim.sh  Cursor catalog: the shim's variants as cursor-agent 1.0.28 sends them, and the 256k start it expects
+apps/zgx/ui/lanes_fixture.luau  Model picker: stubs for the catalog's refresh_catalog and retry_catalog
+apps/zgx/ui/parity_fixture.luau  Model picker: stubs for the catalog's refresh_catalog and retry_catalog
+apps/zgx/ui/chat_fixture.luau  General only: model picker stubs (refresh_catalog, retry_catalog) and the catalog_cursor_* commands, the Cloud machine size a create names, and go_<chat>_at_<message> (a chat opened at a message)
+apps/zgx/ui/shell_fixture.luau  Model picker stubs (refresh_catalog, retry_catalog), and fixture.limited for the usage-limit row mark
+
+# tool_detail: a kept tail shorter than a fold (nil concat fix).
+apps/zgx/ui/tool_detail_fixture.luau  tool_detail: test_tool_short_tail, a kept tail shorter than a fold
+apps/zgx/ui/tests/tool_detail.test.luau  tool_detail: one new case for a kept tail shorter than a fold (additive)
+
+# Chat gained `started_by` (who started it: the Brain dump or an
+# orchestrator; None with Orchestrators off). The one orchestrator-born line
+# left in main's tests: a struct literal must name every field, and moving
+# the field off Chat would change WatchChats. Mechanical, value None. The
+# session rows' `live: Default::default()` is the general usage limit
+# (`limited`, flattened with activity/todo into SessionLive, wire unchanged);
+# `injected` as above.
+crates/client/tests/cloud_attachments.rs  started_by: None on a Chat literal; injected on Run/Steer
+crates/client/tests/live.rs  started_by: None on a Chat literal; injected on Run
+crates/client/tests/relay.rs  started_by: None on a Chat literal
+crates/engine/tests/workspace_sync.rs  started_by: None on a Chat literal; live: Default::default() (usage limit); injected on Run
+crates/sync/tests/registry_client.rs  started_by: None on a Chat literal; live: Default::default() (usage limit)
+crates/sync/tests/registry_edge.rs  started_by: None on a Chat literal; live: Default::default() (usage limit)
+
+# zgx integration tests.
+apps/zgx/tests/reload.rs  The reload test's host answers the model picker's catalog_fresh and catalog_retry (Cursor catalog)

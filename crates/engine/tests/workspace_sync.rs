@@ -190,7 +190,7 @@ fn queue_run_with(
         .doc()
         .queue_command(&SessionCommandEntry {
             id: command_id.into(),
-            payload: SessionCommandPayload::Run {
+            payload: SessionCommandPayload::Run { injected: None,
                 request,
                 message_id: message_id.into(),
             },
@@ -423,7 +423,7 @@ async fn projectless_claim_syncs_after_offline_creation_and_survives_viewer_rest
     a.doc_host
         .queue_command(
             "projectless-offline",
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request,
                 message_id: "projectless-msg".into(),
             },
@@ -766,6 +766,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
                 sleep: None,
+                started_by: None,
             })
             .unwrap();
         legacy
@@ -781,6 +782,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 started_at: Some(now),
                 updated_at: now,
                 waiting: None,
+                live: Default::default(),
             })
             .unwrap();
         store

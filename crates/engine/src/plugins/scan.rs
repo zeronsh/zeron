@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::capability;
 use super::files::hash_files;
-use super::manifest::{MANIFEST_FILE, Manifest, McpSpec, ToolSpec, UiSpec, check_id};
+use super::manifest::{MANIFEST_FILE, Manifest, McpSpec, SwitchSpec, ToolSpec, UiSpec, check_id};
 use super::signing::{FileHashes, SigCheck, check, content_hash};
 use super::status::{Author, Decision, Facts, State, Status, Verdict, decide};
 
@@ -170,6 +170,15 @@ pub struct PluginItem {
     /// it ships, on unless turned off, never removed or edited.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub builtin: bool,
+    /// Zeron's own whose switch is the account's (its manifest's
+    /// `"switch": { "scope": "account" }`): `"account"`, one switch for
+    /// every device, synced. Absent: each device's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Zeron's own that's off until it's turned on (`"switch": { "default":
+    /// "off" }`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default_off: bool,
     /// Where someone else's came from (`{kind, url?, ref?}`, install.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
@@ -292,6 +301,8 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
         mcp: manifest.is_some_and(|m| m.mcp.is_some()),
         error: inspected.error.clone(),
         builtin: false,
+        scope: None,
+        default_off: false,
         source: None,
         update: None,
         icon_svg: manifest.and_then(|m| icon_svg(&inspected.dir, &m.raw)),
@@ -307,20 +318,31 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
 }
 
 /// One of Zeron's own plugins, from the app's folder of them: allowed
-/// exactly what its manifest asks (a new version's asks come with it), on
-/// unless you turned it off (`off`), its author Zeron.
-pub fn builtin_entry(inspected: Inspected, off: bool) -> Entry {
+/// exactly what its manifest asks (a new version's asks come with it), its
+/// author Zeron. On or off as `chosen` says (this device's decision, or the
+/// account's switch when its manifest makes the switch the account's), and
+/// with nothing chosen, as its manifest's `"switch"` defaults (on).
+pub fn builtin_entry(inspected: Inspected, chosen: Option<bool>) -> Entry {
+    let switch = builtin_switch(&inspected);
     let mut entry = entry(inspected, Author::Zeron, &State::default());
     entry.item.builtin = true;
     entry.item.own = false;
+    entry.item.scope = switch.account.then(|| "account".to_owned());
+    entry.item.default_off = switch.default_off;
     if entry.item.status != Status::Broken {
-        entry.item.status = if off { Status::Off } else { Status::On };
+        let on = chosen.unwrap_or(!switch.default_off);
+        entry.item.status = if on { Status::On } else { Status::Off };
         entry.item.allowed = entry.item.permissions.clone();
         entry.item.allowed.sort();
         entry.item.ask = Vec::new();
         entry.item.digest_diff = None;
     }
     entry
+}
+
+/// How one of Zeron's own plugins is switched (its manifest's `"switch"`).
+pub fn builtin_switch(inspected: &Inspected) -> SwitchSpec {
+    inspected.manifest.as_ref().map(|m| m.switch).unwrap_or_default()
 }
 
 /// The plugin folders under `<data>/plugins/` (dot entries are not plugins).

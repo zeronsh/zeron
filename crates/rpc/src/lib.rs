@@ -197,6 +197,40 @@ pub mod methods {
     /// `DeviceStats`. Another of the account's devices answers through its
     /// relay within a few seconds, or the call says it's offline or too old.
     pub const DEVICE_STATS: &str = "DeviceStats";
+    /// Orchestrators, crews, the board, asks and dumps
+    /// (`orchestration::OrchestrationState`), whole on subscribe and on every
+    /// change (coalesced). See docs/design/orchestrators.md.
+    pub const WATCH_ORCHESTRATION: &str = "WatchOrchestration";
+    /// One `orchestration::OrchestrateOp` (tagged `{op, …}`) → op-specific
+    /// reply (`{id}` for creates). Agent callers get the ops the design doc
+    /// marks (agent), scoped to their own chat.
+    pub const ORCHESTRATE: &str = "Orchestrate";
+    /// `Vec<orchestration::DeviceLoad>` for every device of the account,
+    /// sampled every ~5 s while subscribed.
+    pub const WATCH_DEVICE_LOADS: &str = "WatchDeviceLoads";
+    /// Live `orchestration::CommEvent`s this engine sees: agent messages,
+    /// reports, asks, answers, routes and spawns. Every frame is a JSON
+    /// ARRAY of events, oldest first: the first frame is the backlog (the
+    /// newest ≤ 100), each later frame the events since. A subscriber that
+    /// fell behind gets the whole backlog again, so clients merge frames and
+    /// dedupe by `id` (never replace the list with a frame). Agents see only
+    /// their own traffic.
+    pub const WATCH_COMMS: &str = "WatchComms";
+    /// `Vec<orchestration::Progress>`: how far each chat's work has got,
+    /// for every chat that is working (or waiting to go on), finished in the
+    /// last 24 h, or in a crew. Whole on subscribe and on every change
+    /// (coalesced ≤ 4/s); clients tick the clocks. Agents see the chats they
+    /// may check (`Orchestrate{op: progressCheck}`).
+    pub const WATCH_PROGRESS: &str = "WatchProgress";
+    /// The Control Room's Scratchpad: one `scratchpad::ScratchpadOp` per
+    /// call. Never routes, never makes work. The person may do every op; an
+    /// agent: the Brain dump reads, writes and appends, an orchestrator and
+    /// its crew only read (the engine checks the calling chat's role).
+    pub const SCRATCHPAD: &str = "Scratchpad";
+    /// `scratchpad::ScratchpadState`: the Scratchpad and its history, whole
+    /// on subscribe and on every change. Not open to agents (they read with
+    /// `Scratchpad{op: read}`).
+    pub const WATCH_SCRATCHPAD: &str = "WatchScratchpad";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -896,6 +930,14 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // Orchestration: the board, crews, reports, asks and routes,
+            // each op scoped to the calling chat's role by the engine.
+            | methods::WATCH_ORCHESTRATION
+            | methods::ORCHESTRATE
+            | methods::WATCH_COMMS
+            // The Scratchpad: read (and, for the Brain dump, write), the
+            // engine checks the role.
+            | methods::SCRATCHPAD
             // Commands on any of the person's devices (Zeron MCP's
             // run_command & co.): full access only (the engine's agent gate).
             | methods::RUN_COMMAND

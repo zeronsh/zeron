@@ -533,11 +533,13 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     assert_eq!(chat.space_id.as_deref(), Some("sp-app"));
     assert_eq!(chat.cwd.as_deref(), Some("/home/user/app"));
 
-    // A second one, from the branch picked in the composer: a second machine.
+    // A second one, from the branch and on the size picked in the composer:
+    // a second machine.
     create(
         &client,
         serde_json::json!({
-        "chatId": "chat-2", "spaceId": "sp-app", "cloud": true, "branch": "dev" }),
+        "chatId": "chat-2", "spaceId": "sp-app", "cloud": true, "branch": "dev",
+        "machine": "large" }),
     )
     .await
     .unwrap();
@@ -557,6 +559,16 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     let side = core.workspace.chat("side-1").unwrap().unwrap();
     assert_eq!(side.device_id, "cloud-s-chat-1");
     assert_eq!(side.cwd.as_deref(), Some("/home/user/app"));
+
+    // A size is a Cloud machine's: refused without Cloud, no row made.
+    let sized = create(
+        &client,
+        serde_json::json!({ "chatId": "chat-sized", "spaceId": "sp-app", "machine": "large" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(sized.to_string().contains("only with cloud"), "{sized}");
+    assert!(core.workspace.chat("chat-sized").unwrap().is_none());
 
     // An agent naming another of the person's devices starts its chat
     // there; naming the parent's machine, or none, it shares that machine.
@@ -683,7 +695,7 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
         .filter(|(request, _)| request.starts_with("POST ") && request.ends_with("/sessions"))
         .map(|(_, body)| serde_json::from_str(body).unwrap())
         .collect();
-    let summary: Vec<(&str, &str, &str, Option<&str>)> = sessions
+    let summary: Vec<(&str, &str, &str, Option<&str>, Option<&str>)> = sessions
         .iter()
         .map(|body| {
             (
@@ -691,35 +703,48 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
                 body["spaceId"].as_str().unwrap(),
                 body["repo"]["cloneUrl"].as_str().unwrap(),
                 body["branch"].as_str(),
+                body["machine"].as_str(),
             )
         })
         .collect();
+    // The size rides the start request only when one was picked: without
+    // one, the edge starts it on the account's default.
     assert_eq!(
         summary,
         [
-            ("chat-1", "sp-app", "https://github.com/acme/app.git", None),
+            (
+                "chat-1",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None,
+                None
+            ),
             (
                 "chat-2",
                 "sp-app",
                 "https://github.com/acme/app.git",
-                Some("dev")
+                Some("dev"),
+                Some("large")
             ),
             (
                 "chat-isolated",
                 "sp-app",
                 "https://github.com/acme/app.git",
+                None,
                 None
             ),
             (
                 "chat-by-agent",
                 "sp-app",
                 "https://github.com/acme/app.git",
+                None,
                 None
             ),
             (
                 "chat-fail",
                 "sp-app",
                 "https://github.com/acme/app.git",
+                None,
                 None
             ),
         ]
@@ -1283,7 +1308,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
     let handle = core.doc_host.open("cloud-chat").unwrap();
     const DAY: i64 = 24 * 60 * 60 * 1000;
     let now = chrono::Utc::now().timestamp_millis();
-    let run = |prompt: &str, message: &str| SessionCommandPayload::Run {
+    let run = |prompt: &str, message: &str| SessionCommandPayload::Run { injected: None,
         request: zeron_proto::RunRequest {
             mcp: None,
             prompt: prompt.into(),

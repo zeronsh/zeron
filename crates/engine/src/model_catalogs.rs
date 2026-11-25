@@ -210,9 +210,11 @@ async fn list_inner(
                 None => {
                     let models = harness.fallback_models();
                     if models.is_empty() {
-                        return Err(HarnessError::Protocol(
-                            "model catalog unavailable; retry".into(),
-                        ));
+                        // (Its own reason when it gave one, so the picker can say it.)
+                        return Err(match result {
+                            Some(Ok(Err(error))) => CatalogFailure::from(error).into(),
+                            _ => HarnessError::Protocol("model catalog unavailable; retry".into()),
+                        });
                     }
                     ModelCatalog {
                         models,
@@ -255,6 +257,7 @@ mod tests {
         cached: std::sync::atomic::AtomicBool,
         failure: std::sync::Mutex<String>,
         harness: zeron_proto::HarnessId,
+        no_fallback: std::sync::atomic::AtomicBool,
     }
     impl Probe {
         fn new() -> Arc<Self> {
@@ -266,6 +269,7 @@ mod tests {
                 cached: false.into(),
                 failure: std::sync::Mutex::new("offline".into()),
                 harness: zeron_proto::HarnessId::Codex,
+                no_fallback: false.into(),
             })
         }
     }
@@ -291,6 +295,9 @@ mod tests {
             Ok(Some(context(&self.account.load(SeqCst).to_string())))
         }
         fn fallback_models(&self) -> Vec<Model> {
+            if self.no_fallback.load(SeqCst) {
+                return Vec::new();
+            }
             let mut rows = models();
             rows[0].id = "static".into();
             rows
@@ -469,6 +476,31 @@ mod tests {
         probe.delay.store(true, SeqCst);
         assert_eq!(list(dir.path(), probe, true).await.unwrap(), models());
     }
+    #[tokio::test]
+    async fn a_forced_list_waits_for_the_agent_instead_of_its_disk_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        let context = probe.model_context().unwrap().unwrap();
+        let path = location(dir.path(), probe.as_ref(), &context);
+        let mut old = models();
+        old[0].id = "old-live".into();
+        save(&path, &context, &old).unwrap();
+        probe.delay.store(true, SeqCst);
+        assert_eq!(list(dir.path(), probe, true).await.unwrap(), models());
+    }
+
+    #[tokio::test]
+    async fn no_models_anywhere_says_the_agents_own_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut probe = Probe::new();
+        Arc::get_mut(&mut probe).unwrap().harness = zeron_proto::HarnessId::Cursor;
+        probe.no_fallback.store(true, SeqCst);
+        probe.fail.store(true, SeqCst);
+        *probe.failure.lock().unwrap() = "cursor model discovery failed: 503 upstream".into();
+        let error = list(dir.path(), probe, true).await.unwrap_err();
+        assert!(error.to_string().contains("503"), "{error}");
+    }
+
     #[tokio::test]
     async fn account_swap_during_probe_never_publishes_or_persists_old_account() {
         let dir = tempfile::tempdir().unwrap();

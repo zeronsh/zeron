@@ -223,9 +223,149 @@ pub enum SubagentStatus {
     Failed,
 }
 
+/// What the engine said into a chat (a crew ask, an answer, a relay, a
+/// board check…), as the transcript shows it: which kind, and the ids it
+/// points at. Rides beside the text the agent was sent, which it never
+/// changes, from the delivery (`Run`/`Steer`/a queued row) to the user entry
+/// ([`MessagePart::Injected`]). Kinds are words so a newer one degrades to
+/// its text on an older client.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Injected {
+    /// One of the [`injected`] kinds.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<String>,
+    /// The chat it's about: the thread that asked, the thread a relay is
+    /// for, a quoted message's sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    /// The message in `chat_id` it's about (the one that asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// Several board items (a board check's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    /// Who: an answer's answerer (`"you"` | `"orchestrator"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+}
+
+/// The kinds of [`Injected`].
+pub mod injected {
+    pub const CREW_ASK: &str = "crew_ask";
+    pub const ANSWER: &str = "answer";
+    pub const FOR_THREAD: &str = "for_thread";
+    pub const ON_CARD: &str = "on_card";
+    pub const CHANGES: &str = "changes";
+    pub const RETRACTION: &str = "retraction";
+    pub const DUMP: &str = "dump";
+    pub const SCHEDULED: &str = "scheduled";
+    pub const BOARD_CHECK: &str = "board_check";
+    pub const RESUMED: &str = "resumed";
+    /// A chat its usage limit stopped, resumed at the reset (or switched to
+    /// another account meanwhile).
+    pub const LIMIT_RESET: &str = "limit_reset";
+}
+
+impl Injected {
+    pub fn of(kind: &str) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            ..Default::default()
+        }
+    }
+    /// A crew thread's turn-end ask, told to its orchestrator.
+    pub fn crew_ask(ask_id: &str, chat_id: &str, turn_id: Option<&str>) -> Self {
+        Self {
+            ask_id: Some(ask_id.to_owned()),
+            chat_id: Some(chat_id.to_owned()),
+            turn_id: turn_id.map(str::to_owned),
+            ..Self::of(injected::CREW_ASK)
+        }
+    }
+    /// An ask's answer, sent to the chat that asked; `by_orchestrator` when
+    /// its orchestrator answered it.
+    pub fn answer(ask_id: &str, chat_id: &str, turn_id: Option<&str>, by_orchestrator: bool) -> Self {
+        Self {
+            ask_id: Some(ask_id.to_owned()),
+            chat_id: Some(chat_id.to_owned()),
+            turn_id: turn_id.map(str::to_owned),
+            by: Some(if by_orchestrator { "orchestrator" } else { "you" }.to_owned()),
+            ..Self::of(injected::ANSWER)
+        }
+    }
+    /// A message for a crew thread, relayed through its orchestrator.
+    pub fn for_thread(chat_id: &str) -> Self {
+        Self {
+            chat_id: Some(chat_id.to_owned()),
+            ..Self::of(injected::FOR_THREAD)
+        }
+    }
+    pub fn on_card(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::ON_CARD)
+        }
+    }
+    pub fn changes(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::CHANGES)
+        }
+    }
+    pub fn retraction(dump_id: &str, route_id: &str) -> Self {
+        Self {
+            dump_id: Some(dump_id.to_owned()),
+            route_id: Some(route_id.to_owned()),
+            ..Self::of(injected::RETRACTION)
+        }
+    }
+    /// The person's words, sent to the Brain dump to route.
+    pub fn dump(dump_id: &str) -> Self {
+        Self {
+            dump_id: Some(dump_id.to_owned()),
+            ..Self::of(injected::DUMP)
+        }
+    }
+    pub fn scheduled() -> Self {
+        Self::of(injected::SCHEDULED)
+    }
+    /// Cards whose column isn't true, told to their orchestrator.
+    pub fn board_check<I: IntoIterator<Item = S>, S: Into<String>>(item_ids: I) -> Self {
+        Self {
+            item_ids: item_ids.into_iter().map(Into::into).collect(),
+            ..Self::of(injected::BOARD_CHECK)
+        }
+    }
+    /// A paused card the person resumed, told to its thread.
+    pub fn resumed(item_id: &str) -> Self {
+        Self {
+            item_id: Some(item_id.to_owned()),
+            ..Self::of(injected::RESUMED)
+        }
+    }
+}
+
 /// One rendered part of an assistant message.
+///
+/// (De)serialized by hand around the derived shape (`remote = "Self"`: the
+/// derive's inherent `MessagePart::serialize`/`MessagePart::deserialize`),
+/// for the two kinds released builds don't know: [`MessagePart::Injected`]
+/// and [`MessagePart::CrewReports`] go on the wire as a text part with no
+/// text, `{"kind":"text","id":…,"text":"","injected":{…}}` /
+/// `{…,"crewReports":[…]}`, which a released build's `Text` reads (it
+/// ignores the field) where `kind: "injected"` failed its whole frame. Read
+/// back from that, and from the `kind: "injected"` / `kind: "crewReports"`
+/// shapes written before. (The doc keeps its own part shape, `schema.rs`.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(remote = "Self", tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {
     Text {
         id: String,
@@ -377,6 +517,86 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_harness: Option<String>,
     },
+    /// Reports from an orchestrator's crew threads, filed into the
+    /// orchestrator's transcript by its host (never a user turn). Clients
+    /// render the message that carries it as a "Crew updates" card and hide
+    /// its text parts, which are there only for builds that don't know this
+    /// kind. Reports since the orchestrator's last turn extend one message.
+    #[serde(rename_all = "camelCase")]
+    CrewReports {
+        id: String,
+        reports: Vec<zeron_proto::orchestration::Report>,
+    },
+    /// What kind of engine message the user entry carrying it is, and the
+    /// ids it points at ([`Injected`]); its text parts are what the agent
+    /// was sent. Clients render the entry as that kind's block; old ones
+    /// drop the part (an empty text) and show the text.
+    #[serde(rename_all = "camelCase")]
+    Injected { id: String, injected: Injected },
+}
+
+/// [`MessagePart::Injected`] / [`MessagePart::CrewReports`] as they go on
+/// the wire: a text part with no text, carrying the one or the other.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextCarrier<'a> {
+    kind: &'static str,
+    id: &'a str,
+    text: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    injected: Option<&'a Injected>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crew_reports: Option<&'a [zeron_proto::orchestration::Report]>,
+}
+
+impl Serialize for MessagePart {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let carrier = |id, injected, crew_reports| TextCarrier {
+            kind: "text",
+            id,
+            text: "",
+            injected,
+            crew_reports,
+        };
+        match self {
+            MessagePart::Injected { id, injected } => carrier(id, Some(injected), None).serialize(serializer),
+            MessagePart::CrewReports { id, reports } => carrier(id, None, Some(reports)).serialize(serializer),
+            // (The derived shape: `remote = "Self"`'s inherent fn.)
+            _ => MessagePart::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessagePart {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        use serde_json::Value;
+        let value = Value::deserialize(deserializer)?;
+        if let Some(part) = value.as_object()
+            && part.get("kind").and_then(Value::as_str) == Some("text")
+        {
+            let id = || part.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if let Some(injected) = part.get("injected").filter(|v| !v.is_null()) {
+                // (One a newer peer wrote that this build can't read: the
+                // empty text it rides as, below.)
+                if let Ok(injected) = Injected::deserialize(injected) {
+                    return Ok(MessagePart::Injected { id: id(), injected });
+                }
+            } else if let Some(reports) = part.get("crewReports").filter(|v| !v.is_null()) {
+                // A report this build can't read costs that report, not the card.
+                let reports = reports
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| zeron_proto::orchestration::Report::deserialize(r).ok())
+                    .collect();
+                return Ok(MessagePart::CrewReports { id: id(), reports });
+            }
+        }
+        // (The derived shape: `remote = "Self"`'s inherent fn. The
+        // `kind: "injected"` / `"crewReports"` written before are its.)
+        MessagePart::deserialize(value).map_err(D::Error::custom)
+    }
 }
 
 impl MessagePart {
@@ -390,7 +610,9 @@ impl MessagePart {
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. }
-            | MessagePart::Switch { id, .. } => id,
+            | MessagePart::Switch { id, .. }
+            | MessagePart::CrewReports { id, .. }
+            | MessagePart::Injected { id, .. } => id,
         }
     }
 
@@ -437,8 +659,30 @@ impl MessagePart {
                 ..
             } => source_chat_id.len() + source_title.len(),
             MessagePart::Switch { from, to, .. } => from.len() + to.len(),
+            MessagePart::CrewReports { reports, .. } => {
+                serde_json::to_vec(reports).map_or(0, |v| v.len())
+            }
+            MessagePart::Injected { injected, .. } => {
+                serde_json::to_vec(injected).map_or(0, |v| v.len())
+            }
         }
     }
+}
+
+/// The text a [`MessagePart::CrewReports`] message carries beside the part,
+/// for builds that don't know the kind: one line per report.
+pub fn crew_reports_fallback_text(reports: &[zeron_proto::orchestration::Report]) -> String {
+    use zeron_proto::orchestration::prompt_text::{SUMMARY_MAX, one_line};
+    let mut out = String::from("Crew updates");
+    for r in reports {
+        let from: String = one_line(&r.from_chat, 8);
+        out.push_str(&format!(
+            "\n- {from} {}: {}",
+            r.state.as_str(),
+            one_line(&r.summary, SUMMARY_MAX)
+        ));
+    }
+    out
 }
 
 /// Fold one agent event into a parts accumulator, in place.
@@ -758,6 +1002,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::PlanUsage { .. }
+        | AgentEvent::LimitReached { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::UserMessage { .. } => {}

@@ -38,6 +38,7 @@ thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+iana-time-zone = "0.1"
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"

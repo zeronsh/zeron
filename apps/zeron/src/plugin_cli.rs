@@ -220,6 +220,8 @@ pub async fn run(
                 println!("{}", line(item));
             }
         }
+        PluginCommand::On { id } => switch(&client, &id, true).await?,
+        PluginCommand::Off { id } => switch(&client, &id, false).await?,
         PluginCommand::Export { id, to } => {
             // `to` is already a full path (the parser made it one).
             let mut params = json!({ "id": id });
@@ -236,6 +238,63 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// `zeron plugin on|off <id>`: the switch set, then the list read back and
+/// what's in effect said. Fails (non-zero) with the engine's words when it's
+/// refused, and when what's in effect isn't what was asked.
+async fn switch(client: &zeron_rpc::RpcClient, id: &str, on: bool) -> anyhow::Result<()> {
+    let id = id.trim();
+    let reply = call(client, methods::SET_PLUGIN_OFF, json!({ "id": id, "off": !on }))
+        .await
+        .map_err(|error| match error.to_string() {
+            // Zeron's own are known once a window has told the engine where
+            // they are.
+            message if message.starts_with("There's no plugin") => anyhow::anyhow!(
+                "{message}. Zeron's own plugins are known once Zeron's window has opened."
+            ),
+            message => anyhow::anyhow!("{message}"),
+        })?;
+    let list = call(client, methods::LIST_PLUGINS, json!({})).await?;
+    let item = find(&list, id).unwrap_or(&reply);
+    let said = switched(item);
+    if str_of(item, "status") != if on { "on" } else { "off" } {
+        anyhow::bail!("{said}");
+    }
+    println!("{said}");
+    Ok(())
+}
+
+/// Plugin `id` in a `ListPlugins` reply: Zeron's own first, as the engine
+/// reads its switch (a folder of yours under its id is broken anyway).
+fn find<'a>(list: &'a Value, id: &str) -> Option<&'a Value> {
+    let plugins = list["plugins"].as_array()?;
+    let mut matching = plugins.iter().filter(|p| str_of(p, "id") == id);
+    let first = matching.clone().next();
+    matching.find(|p| p["builtin"] == true).or(first)
+}
+
+/// `Orchestrators is on for your whole account.`, `Focus is off on this
+/// device.`, or what it is instead (`Focus is waiting for you to allow it.`).
+fn switched(item: &Value) -> String {
+    let name = match str_of(item, "name") {
+        "" => str_of(item, "id"),
+        name => name,
+    };
+    let where_ = if str_of(item, "scope") == "account" {
+        "for your whole account"
+    } else {
+        "on this device"
+    };
+    match str_of(item, "status") {
+        status @ ("on" | "off") => format!("{name} is {status} {where_}."),
+        "pending" => format!("{name} is waiting for you to allow it."),
+        "tampered" => format!("{name} has changed since you allowed it."),
+        _ => match item["error"].as_str() {
+            Some(error) => format!("{name} is broken: {error}"),
+            None => format!("{name} is broken."),
+        },
+    }
 }
 
 /// `512 bytes`, `12.3 KB`, `4.1 MB`.
@@ -259,10 +318,11 @@ fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// `you`, `@ada`, or `someone unknown`.
+/// `you`, `Zeron`, `@ada`, or `someone unknown`.
 fn author(author: &Value) -> String {
     match str_of(author, "kind") {
         "you" => "you".into(),
+        "zeron" => "Zeron".into(),
         "verified" => match author["username"].as_str() {
             Some(name) => format!("@{name}"),
             None => "a verified author".into(),
@@ -271,7 +331,7 @@ fn author(author: &Value) -> String {
     }
 }
 
-/// `focus 1.2.0  by @ada  on`.
+/// `focus 1.2.0  by @ada  on`, `orchestrators 1.0.0  by Zeron  off  account`.
 fn line(item: &Value) -> String {
     let status = str_of(item, "status");
     let mut line = format!(
@@ -285,6 +345,10 @@ fn line(item: &Value) -> String {
             status
         }
     );
+    // One switch for every device of the account, not this one's.
+    if str_of(item, "scope") == "account" {
+        line.push_str("  account");
+    }
     if let Some(ask) = item["ask"]
         .as_array()
         .filter(|a| !a.is_empty() && status == "pending")
@@ -311,7 +375,49 @@ fn plain(error: zeron_rpc::RpcError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::size;
+    use super::{find, line, size, switched};
+    use serde_json::json;
+
+    fn orchestrators(status: &str) -> serde_json::Value {
+        json!({
+            "id": "orchestrators", "name": "Orchestrators", "version": "1.0.0",
+            "author": { "kind": "zeron" }, "status": status, "builtin": true,
+            "scope": "account", "default_off": true,
+        })
+    }
+
+    #[test]
+    fn a_switch_says_what_is_in_effect_and_where() {
+        assert_eq!(switched(&orchestrators("on")), "Orchestrators is on for your whole account.");
+        assert_eq!(switched(&orchestrators("off")), "Orchestrators is off for your whole account.");
+        let git = json!({ "id": "git", "name": "Git", "status": "off", "builtin": true });
+        assert_eq!(switched(&git), "Git is off on this device.");
+        let focus = json!({ "id": "focus", "name": "Focus", "status": "pending" });
+        assert_eq!(switched(&focus), "Focus is waiting for you to allow it.");
+        let broken = json!({ "id": "x", "status": "broken", "error": "Its entry file init.luau is missing" });
+        assert_eq!(switched(&broken), "x is broken: Its entry file init.luau is missing");
+    }
+
+    #[test]
+    fn the_list_says_on_or_off_and_an_account_switch() {
+        assert_eq!(line(&orchestrators("on")), "orchestrators 1.0.0  by Zeron  on  account");
+        let focus = json!({ "id": "focus", "version": "1.2.0", "author": { "kind": "verified", "username": "ada" }, "status": "off" });
+        assert_eq!(line(&focus), "focus 1.2.0  by @ada  off");
+    }
+
+    /// A folder of yours under a built-in's id is listed too (broken): the
+    /// switch read back is Zeron's own.
+    #[test]
+    fn the_switch_read_back_is_zeron_s_own() {
+        let list = json!({ "plugins": [
+            { "id": "orchestrators", "status": "broken", "author": { "kind": "you" } },
+            orchestrators("on"),
+            { "id": "focus", "status": "on" },
+        ] });
+        assert_eq!(find(&list, "orchestrators").unwrap()["status"], "on");
+        assert_eq!(find(&list, "focus").unwrap()["status"], "on");
+        assert!(find(&list, "nope").is_none());
+    }
 
     #[test]
     fn sizes_read_in_plain_words() {

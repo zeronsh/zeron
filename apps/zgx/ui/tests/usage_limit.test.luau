@@ -1,0 +1,229 @@
+-- A thread its provider's usage limit stopped (its session's `limited`,
+-- ds/usage_limit): waiting for the reset ("Waiting for limit", "resets
+-- 14:05", local) or running on another account meanwhile ("On <account>",
+-- "<original> resets 14:05"), each fact apart, on Progress's row (its countdown moving with
+-- its clock), the Map's node and hover card; the Board's card as the
+-- engine's row says it (waiting for the limit, till when); and the
+-- orchestrator's settings writing `crew.onLimit`.
+
+local limit = require("@ds/usage_limit")
+
+local function has(t: string, s: string): boolean
+	return string.find(t, s, 1, true) ~= nil
+end
+
+-- (A test's own VM reads no catalog: the words themselves are read where
+-- they're drawn, below.)
+test("usage limit: the reset in local time; waiting or switched", function()
+	local day = 1_800_040_000
+	local reset = limit.local_at(day, 14, 5)
+	expect(limit.clock(reset)).to_be("14:05")
+	local waiting: any = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600 }
+	local switched: any = { provider = "claude", account_label = "me@work.dev", until_at = reset, since = reset - 3600,
+		switched_to = { account_slot = "s2", account_label = "me@home.dev", at = reset - 3000 } }
+	expect(limit.waiting({ limited = waiting })).to_be(true)
+	expect(limit.waiting({ limited = switched })).to_be(false)
+	expect(limit.switched(switched)).to_be(true)
+	expect(limit.waiting({})).to_be(false)
+	expect(limit.of({ limited = "nope" })).to_be(nil)
+	-- Its facts apart, each its own words (their words are read where
+	-- they're drawn, below): waiting, and till when if that's known; where
+	-- it runs, and its own account's reset.
+	expect(#limit.parts(waiting)).to_be(2)
+	expect(#limit.parts(switched)).to_be(2)
+	expect(#limit.parts({ provider = "claude", since = 0 } :: any)).to_be(1)
+	expect(#limit.parts(nil)).to_be(0)
+	expect(limit.text(nil)).to_be("")
+	-- No countdown once past, or with no reset known.
+	expect(limit.left(waiting, reset + 1)).to_be("")
+	expect(limit.left({ since = 0 }, reset)).to_be("")
+end)
+
+-- The Board.
+
+-- (ui/orch_board_places_fixture.luau: "iOS Live screen" is Running, its
+-- row's status `limited` until 100 minutes past the fixture's 8 PM.)
+test("usage limit: a Board card says it waits for the usage limit, and till when", function()
+	local app = mount("orch_board_places_fixture.luau")
+	app:resize(1500, 1000)
+	app:frames(30)
+	local card = "#orch-col-running >> #orch-card-it-ios"
+	expect(app:text(`{card} >> .orch-card-status`)).to_be("Waiting for usage limit")
+	-- (9:40 PM, or 21:40, as the person's clock says it.)
+	local tail = app:text(`{card} >> .orch-card-clock`) :: string
+	expect(string.match(tail, "^until %d%d?:40") ~= nil).to_be(true)
+	-- (Its glyph, before its words.)
+	expect(app:has(`{card} >> .orch-status-glyph`)).to_be(true)
+	-- A card at work otherwise says nothing of it.
+	local running = app:tree("#orch-col-running") :: string
+	expect(select(2, string.gsub(running, "Waiting for usage limit", ""))).to_be(1)
+	expect(select(2, string.gsub(running, "until ", ""))).to_be(1)
+	expect(app:error()).to_be_nil()
+end)
+
+-- Progress.
+
+local function progress(): any
+	local app = mount("orch_progress_fixture.luau")
+	app:resize(1240, 1400)
+	app:frames(10)
+	app:command("fixture.limited")
+	app:frames(10)
+	return app
+end
+
+-- What a countdown reads `secs` before the reset.
+local function left_words(secs: number): string
+	local m = secs // 60
+	if m < 60 then
+		return `resets in {m}m`
+	end
+	return if m % 60 == 0 then `resets in {m // 60}h` else `resets in {m // 60}h {m % 60}m`
+end
+
+test("usage limit: Progress's row waits for the limit in its own state, its countdown moving with its clock", function()
+	local app = progress()
+	local reset = app:state("limit_reset") :: number
+	local now = app:state("now") :: number
+	local full = app:tree("#fx-full-th-limit") :: string
+	-- Its facts apart, spaced: no typed separator.
+	expect(app:has('#fx-full-th-limit >> .orch-progress-doing >> "Waiting for limit"')).to_be(true)
+	expect(app:has('#fx-full-th-limit >> .orch-progress-limit-fact >> "resets 14:05"')).to_be(true)
+	expect(string.find(full, "\u{b7}", 1, true)).to_be(nil)
+	expect(has(full, left_words(reset - now))).to_be(true)
+	local strip = app:tree("#fx-strip-th-limit") :: string
+	expect(app:has('#fx-strip-th-limit >> .orch-progress-doing >> "Waiting for limit"')).to_be(true)
+	expect(app:has('#fx-strip-th-limit >> .orch-progress-limit-fact >> "resets 14:05"')).to_be(true)
+	expect(string.find(strip, "\u{b7}", 1, true)).to_be(nil)
+	expect(has(strip, left_words(reset - now))).to_be(true)
+	-- A minute on (the clock it already has), a minute less.
+	app:command("fixture.later")
+	app:frames(5)
+	expect(has(app:tree("#fx-full-th-limit") :: string, left_words(reset - now - 60))).to_be(true)
+end)
+
+test("usage limit: Progress's row of a thread switched says where it runs meanwhile", function()
+	local app = progress()
+	for _, id in { "#fx-full-th-switch", "#fx-strip-th-switch" } do
+		expect(app:has(`{id} >> .orch-progress-doing >> "On me@home.dev"`)).to_be(true)
+		expect(app:has(`{id} >> .orch-progress-limit-fact >> "me@work.dev resets 14:05"`)).to_be(true)
+		expect(string.find(app:tree(id) :: string, "\u{b7}", 1, true)).to_be(nil)
+	end
+end)
+
+-- The Map.
+
+local function map(): any
+	local app = mount("orch_map_fixture.luau")
+	app:resize(1440, 2400)
+	app:command("map_only")
+	app:set_state("control_map_force_pivot", "orchestrator")
+	app:command("show_all")
+	app:command("card_limited")
+	app:command("map_force")
+	app:frames(90)
+	app:wait(400)
+	app:frames(20)
+	return app
+end
+local function hover(app: any, id: string): string
+	app:set_state("control_map_force_hover", id)
+	app:frames(3)
+	app:hover(".orch-force-anchor-box")
+	expect(app:wait(".orch-force-card", { timeout_ms = 1500 })).to_be(true)
+	app:wait(700)
+	app:frames(10)
+	return app:tree(".orch-force-card") :: string
+end
+
+test("usage limit: the Map's node wears the limited glyph, its hover card says till when", function()
+	local app = map()
+	-- (The limited node's glyph over its ring, as asking or failed ones have.)
+	expect(app:has(".orch-force-glyph")).to_be(true)
+	local t = hover(app, "th-reins-notes")
+	-- (Its facts apart, spaced: no typed separator on the card.)
+	expect(has(t, "Waiting for limit")).to_be(true)
+	expect(has(t, "resets 14:05")).to_be(true)
+	expect(has(t, "Limited")).to_be(true)
+	expect(has(t, "resets in")).to_be(true)
+	expect(string.find(t, "·", 1, true)).to_be(nil)
+end)
+
+test("usage limit: the Map's hover card of a thread switched says where it runs", function()
+	local app = map()
+	local t = hover(app, "th-reins-win")
+	-- (Its facts apart, spaced: no typed separator on the card.)
+	expect(has(t, "On me@home.dev")).to_be(true)
+	expect(has(t, "me@work.dev resets 14:05")).to_be(true)
+	expect(string.find(t, "·", 1, true)).to_be(nil)
+	-- (Still at work, on the other account.)
+	expect(has(t, "Working")).to_be(true)
+end)
+
+-- The sidebar.
+
+test("usage limit: a sidebar row stopped by its limit shows the limited glyph, its tooltip till when", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("fixture.limited")
+	app:frames(30)
+	local side = app:tree("#shell-sidebar") :: string
+	expect(has(side, 'button "Tidy the tests')).to_be(true)
+	-- (Its label one phrase, no separator typed in it.)
+	expect(has(side, '"Waiting for limit, resets 14:05"')).to_be(true)
+	expect(has(side, "Waiting for limit \u{b7}")).to_be(false)
+end)
+
+-- The orchestrator's settings.
+
+local function settings(): any
+	local app = mount("orchestrator_fixture.luau")
+	app:resize(1440, 1400)
+	app:frames(30)
+	app:command("orch.settings")
+	app:frames(30)
+	return app
+end
+local ACCOUNT = '#orch-settings-on-limit >> role:checkbox "When limited, continue on another account"'
+local HARNESS = '#orch-settings-on-limit >> role:checkbox "And with none left, another harness or model"'
+
+test("usage limit: Settings' checkboxes, off by default, the second only with the first, write crew.onLimit", function()
+	local app = settings()
+	expect(app:has(ACCOUNT)).to_be(true)
+	expect(app:has(HARNESS)).to_be(true)
+	expect(app:state("orch_set_on_limit_account")).to_be(false)
+	expect(app:state("orch_set_on_limit_harness")).to_be(false)
+	-- (The second stands disabled while the first is off: a click does nothing.)
+	expect(has(app:tree(HARNESS) :: string, "disabled")).to_be(true)
+	app:click(HARNESS)
+	app:frames(5)
+	expect(app:state("orch_set_on_limit_harness")).to_be(false)
+	-- On: another account; then the second, now enabled.
+	app:click(ACCOUNT)
+	app:frames(10)
+	expect(app:state("orch_set_on_limit_account")).to_be(true)
+	expect(has(string.match(app:tree(HARNESS) :: string, "[^\n]+") or "", "disabled")).to_be(false)
+	app:click(HARNESS)
+	app:frames(5)
+	expect(app:state("orch_set_on_limit_harness")).to_be(true)
+	app:click("#orch-settings-save")
+	app:frames(10)
+	expect(app:state("orch_calls")).to_contain("updateOrchestrator:crew={…},id=orc-orch")
+	expect(app:state("orch_on_limit")).to_be("switchAccount=true,switchHarness=true")
+end)
+
+test("usage limit: Settings with the first alone sends another account only; nothing changed sends no crew", function()
+	local app = settings()
+	app:click("#orch-settings-save")
+	app:frames(10)
+	-- Nothing changed: no crew sent.
+	expect(app:state("orch_on_limit")).to_be("")
+	app:command("orch.settings")
+	app:frames(30)
+	app:click(ACCOUNT)
+	app:frames(5)
+	app:click("#orch-settings-save")
+	app:frames(10)
+	expect(app:state("orch_on_limit")).to_be("switchAccount=true,switchHarness=false")
+end)

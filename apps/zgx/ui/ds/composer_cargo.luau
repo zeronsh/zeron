@@ -513,6 +513,10 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	elseif item.kind == "chat" then
 		-- Another chat mentioned: its agent's mark, as the sidebar's row.
 		glyph = if item.mark then Mark { name = item.mark, size = glyph_size - 2, bare = true } else Icon { name = "side-chat", size = glyph_size - 2 }
+	elseif item.kind == "ref" then
+		-- Something in the Control room referenced: its kind's glyph, as
+		-- the chip carries it (screens/chat/shared `mention_ref`).
+		glyph = Icon { name = (item :: any).icon or "tag", size = glyph_size - 2 }
 	else
 		glyph = Icon { name = "wrap-text", size = glyph_size - 2 }
 	end

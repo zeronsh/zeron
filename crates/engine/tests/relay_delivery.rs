@@ -242,7 +242,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
 
     // The send: a durable local write on A. Rows go nowhere; the escort's
     // grace elapses; the entry crosses the peer link instead.
-    let command = serde_json::to_value(SessionCommandPayload::Run {
+    let command = serde_json::to_value(SessionCommandPayload::Run { injected: None,
         request: RunRequest {
             mcp: None,
             prompt: "over the relay".into(),

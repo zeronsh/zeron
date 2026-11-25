@@ -827,6 +827,22 @@ impl McpServer {
             .is_some_and(|value| value == "1")
     }
 
+    /// Set to `1` on Zeron's own server for the Brain dump's runs: it only
+    /// routes, so the driver launches it without tools that act (shell, file
+    /// edits, the web, its own subagents) and with its routing rules in the
+    /// system prompt, where they outweigh a dump that reads like a task.
+    pub const ROUTER_ONLY_ENV: &'static str = "ZERON_ROUTER_ONLY";
+
+    pub fn router_only(&self) -> bool {
+        self.env.get(Self::ROUTER_ONLY_ENV).is_some_and(|value| value == "1")
+    }
+
+    /// Set to `1` on Zeron's own server while Orchestrators is on where the
+    /// run's engine is: its server then offers the orchestration tools (by
+    /// the chat's role, and `ask`/`progress` to every chat) and the role's
+    /// instructions. Unset, the server is as it is without orchestration.
+    pub const ORCHESTRATION_ENV: &'static str = "ZERON_ORCHESTRATION";
+
     /// The chat Zeron's own server speaks for, set when the engine launched
     /// it for a chat's run (its in-chat tools are offered only then).
     pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";
@@ -1319,6 +1335,18 @@ pub enum AgentEvent {
         windows: Vec<crate::AgentUsageWindow>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_label: Option<String>,
+    },
+    /// The account's usage limit stopped this turn (a plan window, a quota:
+    /// one that resets by itself), with which window and when it resets if
+    /// the provider said. Beside the `Error`/`Done` text that tells the
+    /// person; the engine keeps it for the wait and the resume at the reset
+    /// ([`crate::usage_limit`]), never journals it or writes it to docs.
+    #[serde(rename_all = "camelCase")]
+    LimitReached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]

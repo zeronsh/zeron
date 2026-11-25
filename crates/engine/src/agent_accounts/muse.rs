@@ -400,6 +400,7 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             store_key: None,
+            user_id: None,
         })?;
         if self.muse_active().is_none() {
             self.set_muse_active(Some(&id))?;

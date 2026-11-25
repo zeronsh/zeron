@@ -156,6 +156,9 @@ pub fn mirror(to: &Path, want: &BTreeMap<String, PathBuf>, keep: impl Fn(&str) -
 /// a time on the thread doing it, so a thousand files laid down one by one
 /// (a first launch, Zeron's own copied twice over) took six seconds before
 /// the window could open, and a few at once take a fraction of that.
+///
+/// The words (`locales/`) are laid down before anything else, all of them
+/// in place before the first script is: see [`laid_first`].
 fn mirror_reading(
     to: &Path,
     want: &BTreeMap<String, PathBuf>,
@@ -163,15 +166,17 @@ fn mirror_reading(
     read: impl Fn(&str, &[u8]) + Sync,
 ) -> std::io::Result<usize> {
     let changed = std::sync::atomic::AtomicUsize::new(0);
-    let jobs: Vec<(&String, &PathBuf)> = want.iter().collect();
-    in_parallel(&jobs, |&(rel, from)| {
-        let bytes = std::fs::read(from)?;
-        read(rel, &bytes);
-        if put(&to.join(rel), &bytes)? {
-            changed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(())
-    })?;
+    let (first, rest): (Vec<(&String, &PathBuf)>, Vec<(&String, &PathBuf)>) = want.iter().partition(|(rel, _)| laid_first(rel));
+    for jobs in [first, rest] {
+        in_parallel(&jobs, |&(rel, from)| {
+            let bytes = std::fs::read(from)?;
+            read(rel, &bytes);
+            if put(&to.join(rel), &bytes)? {
+                changed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        })?;
+    }
     let mut changed = changed.into_inner();
     for (rel, path) in files(to, |_| true) {
         if !want.contains_key(&rel) && !keep(&rel) {
@@ -180,6 +185,23 @@ fn mirror_reading(
         }
     }
     Ok(changed)
+}
+
+/// Whether `rel` is one of the window's words (`locales/<locale>.json`,
+/// the catalog `with_catalog` loads): laid down before the scripts.
+///
+/// The host reads its locale files again in place, before running any
+/// script that changed, but only those that changed by the time it looks;
+/// and its watcher looks before a mirror is done: it waits for writes to
+/// stop for 10 ms, but gives up waiting after ten bursts of them, however
+/// close together (zgx counts each burst as 10 ms), which a release's few
+/// dozen files laid down on eight threads reach in a few milliseconds. In
+/// path order `ds/` comes before `locales/`, so a module new in this release
+/// ran against the words of the last one, and a key new with it was a key
+/// "no locale has" (once: the next look read the words, and the text came
+/// right in place). Words first, a script never runs ahead of its words.
+fn laid_first(rel: &str) -> bool {
+    rel.strip_prefix("locales/").is_some_and(|name| !name.contains('/') && name.ends_with(".json"))
 }
 
 /// The most threads [`in_parallel`] uses: past this, laying files down
@@ -833,6 +855,100 @@ mod tests {
         })
         .unwrap();
         assert_eq!(done.into_inner(), jobs.len(), "all of them, once");
+    }
+
+    /// A mirror lays every locale file down before it reads the first of
+    /// the rest, on however many threads; nothing else under `locales/` (a
+    /// folder in it, a file that isn't a locale's) goes first.
+    #[test]
+    fn a_mirror_lays_the_words_before_the_scripts() {
+        let root = dir("words-first");
+        let (from, to) = (root.join("from"), root.join("to"));
+        for i in 0..120 {
+            write(&from, &format!("ds/m{i}.luau"), &format!("-- module {i}"));
+        }
+        write(&from, "app.luau", "-- app");
+        write(&from, "account/a.luau", "-- a");
+        write(&from, "locales/en.json", "{}");
+        write(&from, "locales/zh-Hans.json", "{}");
+        write(&from, "locales/notes/readme.json", "{}");
+        write(&from, "locales/readme.md", "words");
+        let want = files(&from, |_| true);
+        let order = std::sync::Mutex::new(Vec::new());
+        mirror_reading(&to, &want, |_| false, |rel, _| order.lock().unwrap().push(rel.to_string())).unwrap();
+        let order = order.into_inner().unwrap();
+        assert_eq!(order.len(), want.len());
+        let mut first: Vec<&str> = order[..2].iter().map(String::as_str).collect();
+        first.sort();
+        assert_eq!(first, ["locales/en.json", "locales/zh-Hans.json"], "{order:?}");
+        assert!(!laid_first("locales/notes/readme.json") && !laid_first("locales/readme.md") && !laid_first("ds/locales/en.json"));
+        assert_eq!(read(&to, "locales/en.json"), "{}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Why: the host's watcher can reload while a release is still being
+    /// laid down. A module new in it that says a key new in it, run before
+    /// the words are, is a key "no locale has" (the warning the live app
+    /// gave for `orch.board.more_asks`); the words first, it never is,
+    /// whenever the reload comes. Each file is laid in turn, the host
+    /// looking after each one, as its watcher may.
+    #[test]
+    fn a_reload_mid_lay_never_runs_a_module_ahead_of_its_words() {
+        use zgx_script::{ScriptHost, testing::TestApp};
+        const APP: &str = "local asks = require(\"./ds/asks\")\nreturn ui.column { asks(), id = \"root\" }\n";
+        let release = |root: &Path| {
+            let from = root.join("from");
+            write(&from, "app.luau", APP);
+            write(&from, "ds/asks.luau", "return function() return ui.text { ui.t(\"board.more_asks\", { n = 2 }), id = \"more\" } end\n");
+            write(&from, "locales/en.json", r#"{ "board": { "title": "Board", "more_asks": "{n} more" } }"#);
+            write(&from, "screens/z.luau", "return 2\n");
+            files(&from, |_| true)
+        };
+        // Laid as `order` has it, the host looking after each file: the
+        // warnings it gave.
+        let lay = |name: &str, order: &dyn Fn(&BTreeMap<String, PathBuf>) -> Vec<String>| -> (Vec<String>, String) {
+            let root = dir(name);
+            let live = root.join("live");
+            write(&live, "app.luau", APP);
+            write(&live, "ds/asks.luau", "return function() return ui.text { ui.t(\"board.title\"), id = \"more\" } end\n");
+            write(&live, "locales/en.json", r#"{ "board": { "title": "Board" } }"#);
+            write(&live, "screens/z.luau", "return 1\n");
+            let (entry, words) = (live.join("app.luau"), live.join("locales"));
+            let mut app = TestApp::new(move |runtime| ScriptHost::new(runtime, entry).i18n(words, "en"));
+            assert_eq!(app.text("more"), "Board");
+            let want = release(&root);
+            // Each laid file dated later than the last load read it (mtime
+            // granularity).
+            let later = SystemTime::now() + std::time::Duration::from_secs(10);
+            for (i, rel) in order(&want).iter().enumerate() {
+                put(&live.join(rel), &std::fs::read(&want[rel]).unwrap()).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(live.join(rel))
+                    .unwrap()
+                    .set_modified(later + std::time::Duration::from_secs(i as u64))
+                    .unwrap();
+                app.host.reload_if_changed();
+                app.settle();
+            }
+            let shown = app.text("more");
+            let _ = std::fs::remove_dir_all(&root);
+            (app.host.warnings(), shown)
+        };
+        let missing = |warnings: &[String]| warnings.iter().any(|w| w.contains("no locale has"));
+        // In path order (`ds/` before `locales/`), as the mirror once laid
+        // them: the warning, then the text right once the words come.
+        let (warnings, shown) = lay("mid-lay-path-order", &|want| want.keys().cloned().collect());
+        assert!(missing(&warnings), "path order runs the module ahead of its words: {warnings:?}");
+        assert_eq!(shown, "2 more");
+        // As the mirror lays them now.
+        let (warnings, shown) = lay("mid-lay-words-first", &|want| {
+            let (mut first, rest): (Vec<String>, Vec<String>) = want.keys().cloned().partition(|rel| laid_first(rel));
+            first.extend(rest);
+            first
+        });
+        assert!(!missing(&warnings), "{warnings:?}");
+        assert_eq!(shown, "2 more");
     }
 
     /// `.zeron`'s hashes, taken from the bytes its copy read, are each file's.

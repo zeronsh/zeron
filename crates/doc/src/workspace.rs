@@ -513,6 +513,18 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("terminalActivity")?,
         }
+        match &session.activity {
+            Some(activity) => row.insert("activity", LoroValue::from(serde_json::to_value(activity)?))?,
+            None => row.delete("activity")?,
+        }
+        match &session.todo {
+            Some(todo) => row.insert("todo", LoroValue::from(serde_json::to_value(todo)?))?,
+            None => row.delete("todo")?,
+        }
+        match &session.limited {
+            Some(limited) => row.insert("limited", LoroValue::from(serde_json::to_value(limited)?))?,
+            None => row.delete("limited")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -772,6 +784,9 @@ pub(crate) struct RawChat {
     slept_at: Option<i64>,
     #[serde(default)]
     sleep_woke_at: Option<i64>,
+    /// LENIENT: who started it ([`zeron_proto::Chat::started_by`]).
+    #[serde(default, deserialize_with = "zeron_proto::lenient_started_by")]
+    started_by: Option<zeron_proto::StartedBy>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -820,6 +835,7 @@ impl From<RawChat> for Chat {
                 at: dt(raw.slept_at.unwrap_or(until)),
                 woke_at: raw.sleep_woke_at.map(dt),
             }),
+            started_by: raw.started_by,
         }
     }
 }
@@ -848,6 +864,23 @@ pub(crate) struct RawSession {
     /// peer's) costs the wait, not the row.
     #[serde(default, deserialize_with = "lenient_waiting")]
     waiting: Option<zeron_proto::SessionWaiting>,
+    /// LENIENT like `waiting`.
+    #[serde(default, deserialize_with = "lenient_value")]
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
+    /// LENIENT like `waiting`.
+    #[serde(default, deserialize_with = "lenient_value")]
+    limited: Option<zeron_proto::usage_limit::SessionLimit>,
+}
+
+fn lenient_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
@@ -872,6 +905,7 @@ impl From<RawSession> for Session {
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
             waiting: raw.waiting,
+            live: zeron_proto::SessionLive { activity: raw.activity, todo: raw.todo, limited: raw.limited },
         }
     }
 }
@@ -959,6 +993,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            started_by: None,
         }
     }
 
@@ -991,6 +1026,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            live: Default::default(),
         }
     }
 
@@ -1067,6 +1103,31 @@ mod tests {
             .delete("lastCompletedTurn")
             .unwrap();
         assert_eq!(ws.read_sessions().unwrap()[0].last_completed_turn, None);
+    }
+
+    #[test]
+    fn live_activity_and_todo_round_trip_and_bad_values_cost_only_themselves() {
+        use zeron_proto::orchestration::{ActivityKind, ChatActivity, TodoProgress};
+        let ws = WorkspaceDoc::new();
+        let mut row = session("chat-1", "dev-a", SessionStatus::Working);
+        row.activity = Some(ChatActivity {
+            kind: ActivityKind::Testing,
+            label: "cargo test".into(),
+            since: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        });
+        row.todo = Some(TodoProgress { done: 2, total: 5, current: Some("wire it".into()) });
+        ws.upsert_session(&row).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![row.clone()]);
+        // A newer peer's shape this build can't read: the row survives.
+        ws.row("sessions", "chat-1").unwrap().insert("activity", "not an object").unwrap();
+        let read = ws.read_sessions().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].activity, None);
+        assert_eq!(read[0].todo, row.todo);
+        row.activity = None;
+        row.todo = None;
+        ws.upsert_session(&row).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![row]);
     }
 
     #[test]

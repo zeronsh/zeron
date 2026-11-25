@@ -28,7 +28,7 @@ fn run_request_attachments_survive_command_round_trip() {
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),
-        payload: SessionCommandPayload::Run {
+        payload: SessionCommandPayload::Run { injected: None,
             request,
             message_id: "m1".into(),
         },

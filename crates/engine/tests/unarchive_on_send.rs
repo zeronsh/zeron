@@ -98,7 +98,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 }
 
 fn run_payload(message_id: &str) -> SessionCommandPayload {
-    SessionCommandPayload::Run {
+    SessionCommandPayload::Run { injected: None,
         request: RunRequest {
             mcp: None,
             prompt: "back from the archive".into(),

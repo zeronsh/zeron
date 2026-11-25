@@ -238,7 +238,7 @@ end
 -- preset's, else a name's, as the engine groups them
 -- (crates/engine mcp_servers `assign_agent_names`).
 
--- A server's name with its account's, where it has one ("Linear · Work").
+-- A server's name with its account's, where it has one ("Linear (Work)").
 local function full_name(s: mcp.Server): string
 	local label = s.accountLabel
 	if label and label ~= "" then

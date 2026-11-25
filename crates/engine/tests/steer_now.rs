@@ -279,7 +279,7 @@ fn steer(rig: &Rig, prompt: &str, id: &str) {
         .doc_host
         .queue_command(
             CHAT,
-            SessionCommandPayload::Steer {
+            SessionCommandPayload::Steer { injected: None,
                 prompt: prompt.into(),
                 message_id: Some(id.into()),
             },

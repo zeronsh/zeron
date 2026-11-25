@@ -104,6 +104,21 @@ pub const BLOCKED: &[&str] = &[
     "cloud.sleep",
     "cloud.retry",
     "cloud.set_machine",
+    // (What an orchestrator, its crew or the Brain dump is told, and what
+    // the machines are asked.)
+    "orchestration.op",
+    "orchestration.loads_wanted",
+    "orchestration.progress_check",
+    // (An agent's ask answered or put off for the person.)
+    "orchestration.answer_ask",
+    "orchestration.defer_ask",
+    // (A card's delete, sent once its Undo has passed, and that Undo.)
+    "orchestration.remove_later",
+    "orchestration.remove_undo",
+    // (The Scratchpad written: a preview reads it, never changes it.)
+    "scratchpad.set_text",
+    "scratchpad.set_shapes",
+    "scratchpad.restore",
     // (What a Cloud chat reaches: the person's own choice.)
     "cloud.set_reach",
     "cloud.set_session_reach",

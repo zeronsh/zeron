@@ -41,6 +41,21 @@ const readyChild = async (u: TestUser, runner: string, parent: string) => {
 const rand = () => crypto.randomUUID().slice(0, 8);
 
 describe("a machine and machine sizes", () => {
+  it("starts a delegate on its own size or smaller, never bigger", async () => {
+    const u: TestUser = { ...newUser("dg"), orgId: "org1" };
+    const main = await readySession(u);
+    const bearer = `Bearer ${await runnerToken(u, main.deviceId, main.key)}`;
+    const start = (machine: string) =>
+      call("POST", `/cloud/${u.orgId}/sessions`, bearer, { chatId: `child-${rand()}`, parentChatId: main.chatId, machine });
+    const bigger = await start("large");
+    expect(bigger.status).toBe(403);
+    expect(await bigger.json()).toMatchObject({ error: "machine_too_big", machine: "default" });
+    expect((await start("huge")).status).toBe(400);
+    const smaller = await start("small");
+    expect(smaller.status, await smaller.clone().text()).toBe(200);
+    expect(await smaller.json()).toMatchObject({ machine: "small" });
+  });
+
   it("can wake its delegate, but never chooses the size it wakes on", async () => {
     const u: TestUser = { ...newUser("dg"), orgId: "org1" };
     const main = await readySession(u);

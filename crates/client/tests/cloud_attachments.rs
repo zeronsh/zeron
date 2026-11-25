@@ -57,6 +57,7 @@ fn chat() -> Chat {
         parent_chat_id: None,
         child_kind: None,
         sleep: None,
+        started_by: None,
     }
 }
 
@@ -202,7 +203,7 @@ fn host_marks(edge: &MockEdge, status: zeron_doc::SessionCommandStatus, ran: boo
         .set_command_status(&command.id, status, None)
         .unwrap();
     if ran
-        && let SessionCommandPayload::Run {
+        && let SessionCommandPayload::Run { injected: _,
             message_id,
             request,
         } = &command.payload
@@ -461,7 +462,7 @@ async fn a_month_old_failed_send_is_still_there_to_retry_or_remove() {
         let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
         let payload = zeron_sync::attachment_store::HeldPayload {
             body: zeron_sync::attachment_store::HeldBody::Command {
-                payload: SessionCommandPayload::Steer {
+                payload: SessionCommandPayload::Steer { injected: None,
                     prompt: "from a month ago".into(),
                     message_id: Some("m-old".into()),
                 },

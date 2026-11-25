@@ -295,7 +295,7 @@ impl Chat<'_> {
             .doc_host
             .queue_command(
                 &self.id,
-                SessionCommandPayload::Run {
+                SessionCommandPayload::Run { injected: None,
                     request,
                     message_id: uuid::Uuid::new_v4().to_string(),
                 },
@@ -1179,7 +1179,7 @@ fn send_to(core: &EngineCore, request: RunRequest) {
     core.doc_host
         .queue_command(
             RESTART_CHAT,
-            SessionCommandPayload::Run {
+            SessionCommandPayload::Run { injected: None,
                 request,
                 message_id: uuid::Uuid::new_v4().to_string(),
             },

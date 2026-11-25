@@ -101,7 +101,27 @@ ui.effect(function()
 			moved = true
 		end
 	end
-	seen:set(after)
+	-- (Written only when something in it moved: rewritten every push, its
+	-- hundreds of chats were converted again each time for nothing.)
+	local changed = false
+	for id, a in after do
+		local b = before[id]
+		if not b or b.status ~= a.status or b.turn ~= a.turn then
+			changed = true
+			break
+		end
+	end
+	if not changed then
+		for id in before do
+			if after[id] == nil then
+				changed = true
+				break
+			end
+		end
+	end
+	if changed then
+		seen:set(after)
+	end
 	if moved then
 		settling:set(waits)
 	end

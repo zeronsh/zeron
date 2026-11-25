@@ -163,8 +163,17 @@ impl Harness for InstantHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// The one model it runs: an agent with no models isn't one MCP offers.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
+        Ok(vec![Model {
+            default: false,
+            id: "instant-1".into(),
+            label: "Instant 1".into(),
+            provider: None,
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        }])
     }
     /// (Parks nothing: enough for a warm start's routing.)
     fn prewarms(&self) -> bool {
@@ -999,7 +1008,7 @@ async fn target_device_id_routes_over_the_relay() {
     .expect("quiet remote transcript released its view");
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
-    let command = serde_json::to_value(SessionCommandPayload::Run {
+    let command = serde_json::to_value(SessionCommandPayload::Run { injected: None,
         request: RunRequest {
             mcp: None,
             prompt: "run remotely".into(),
@@ -2101,7 +2110,7 @@ async fn a_run_from_another_device_names_the_hosts_copy_of_its_upload() {
     );
     let entry = SessionCommandEntry {
         id: "cmd-foreign-1".into(),
-        payload: SessionCommandPayload::Run {
+        payload: SessionCommandPayload::Run { injected: None,
             request: RunRequest {
                 mcp: None,
                 prompt,
@@ -2514,13 +2523,14 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         .await
         .unwrap();
     let project = projects["projects"][0]["id"].as_str().unwrap();
-    tools
+    let models = tools
         .call(
             "list_models",
             json!({"device":"device-b", "harness":"codex"}),
         )
         .await
         .unwrap();
+    assert_eq!(models["models"][0]["id"], "instant-1", "{models}");
     let created = tools
         .call(
             "create_chat",

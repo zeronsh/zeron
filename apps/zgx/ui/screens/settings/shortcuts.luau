@@ -22,11 +22,25 @@ M.TITLE = "Shortcuts"
 
 export type Key = { id: string, title: string, key: string?, group: string?, menu: string? }
 
--- The shell's table, or none while it isn't there yet.
+-- The shell's table, or none while it isn't there yet: those there now
+-- (a built-in plugin's only while it's on, keys.shown).
 local function keys(): { Key }
 	local ok, shell_keys = pcall(require, "@app/screens/shell/keys")
 	local list = if ok and type(shell_keys) == "table" then (shell_keys :: any).LIST else nil
-	return if type(list) == "table" then list :: { Key } else {}
+	if type(list) ~= "table" then
+		return {}
+	end
+	local shown: ((k: any) -> boolean)? = (shell_keys :: any).shown
+	if not shown then
+		return list :: { Key }
+	end
+	local out: { Key } = {}
+	for _, k in list :: { any } do
+		if (shown :: (k: any) -> boolean)(k) then
+			table.insert(out, k)
+		end
+	end
+	return out
 end
 
 -- The shell's names for a shortcut and a group in the locale shown
