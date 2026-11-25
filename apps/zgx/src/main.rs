@@ -361,7 +361,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine::start_ahead();
     }
 
-    let mut application = Application::new();
+    // Linux: the windows' Wayland app_id and X11 class, which docks, task
+    // switchers and bars match to a desktop file for the app's name and
+    // icon. dist/zeron.desktop is installed as `zeron.desktop`
+    // (StartupWMClass=zeron). Without this the id is the application id
+    // below (`sh.zeron.app`) or, in a development build, the executable's
+    // name (`zeron-zgx`), and neither matches, so Zeron shows without its
+    // icon. Elsewhere it does nothing.
+    let mut application = Application::new().desktop_id("zeron");
     for font in fonts() {
         application = application.font(font?);
     }
