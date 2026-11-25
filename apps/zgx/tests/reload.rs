@@ -433,6 +433,37 @@ fn a_reload_keeps_the_project_editor_open() {
     assert!(app.tree().contains("dialog"), "the editor's dialog is open again after the reload");
 }
 
+/// What's in a dialog stands at its own size from the first frame it's laid
+/// out: a choice's thumb doesn't slide in from the width its scroll had first,
+/// and what it holds is as wide as the dialog's own words and buttons.
+#[test]
+fn a_dialog_opens_with_its_content_at_its_size() {
+    let log: Log = Rc::default();
+    let mut app = mount("main", "signin", &log);
+    app.frames(120);
+    app.host.set_state("shell_project_editor_used", Value::Bool(true)).expect("the sidebar's flag");
+    app.frames(2);
+    app.host.set_state("project_edit_open", Value::Bool(true)).expect("the editor's state, once loaded");
+    // Each frame's width of the node whose line starts with `what`.
+    fn width(app: &mut TestApp, what: &str) -> Option<f32> {
+        let tree = app.tree();
+        let line = tree.lines().find(|l| l.contains(&format!(" {what} ")))?;
+        let size = line.split_whitespace().find(|w| w.split_once('x').is_some_and(|(a, b)| a.parse::<f32>().is_ok() && b.parse::<f32>().is_ok()))?;
+        size.split_once('x')?.0.parse().ok()
+    }
+    let mut seen = Vec::new();
+    for _ in 0..30 {
+        app.frames(1);
+        seen.push((width(&mut app, "#project-edit-kind-thumb"), width(&mut app, "#project-edit-kind")));
+    }
+    assert_eq!(app.error(), None, "the script failed");
+    let last = seen[seen.len() - 1];
+    assert!(last.0.is_some() && last.1.is_some(), "the choice never showed:\n{}", app.tree());
+    assert!(seen.iter().all(|at| *at == last), "the choice changed size as it opened (thumb, track): {seen:?}");
+    // The dialog's 460, less its padding and border either side.
+    assert_eq!(width(&mut app, "#project-edit"), Some(410.), "the content isn't as wide as the dialog's column");
+}
+
 #[test]
 fn a_reload_of_setup_moves_and_fetches_nothing() {
     let mut failed = Vec::new();

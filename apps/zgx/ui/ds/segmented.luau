@@ -123,6 +123,20 @@ return function(props: Props): Node
 		end
 		return true
 	end
+	-- The layout the thumb stands in: one for each the segments take, so it
+	-- springs as another is chosen and never as they're laid out again (a
+	-- dialog's first few layouts, a window resizing), where it's made anew, in
+	-- its place.
+	local function laid_out(): string?
+		if not measured() then
+			return nil
+		end
+		local widths: { string } = {}
+		for i in refs do
+			table.insert(widths, tostring(width(i)))
+		end
+		return table.concat(widths, " ")
+	end
 	local SPRING: SpringOptions = { stiffness = 380, damping = 30 }
 	local track: ContainerProps = {
 		role = "radiogroup",
@@ -154,9 +168,8 @@ return function(props: Props): Node
 		-- The thumb, under the labels: flat, the selected wash alone (as a
 		-- sidebar's selected row); concentric with the track (its radius less
 		-- the inset).
-		ui.show(
-			measured,
-			ui.div {
+		ui.presence(laid_out, function(): Node
+			return ui.div {
 				id = if props.id then `{props.id}-thumb` else nil,
 				absolute = true,
 				left = PAD,
@@ -175,7 +188,7 @@ return function(props: Props): Node
 					return x
 				end), SPRING),
 			}
-		),
+		end),
 		table.unpack(segments),
 	}
 	control.contain(track, { radius = TRACK_RADIUS, inset = "$zeron.space.hair" })
