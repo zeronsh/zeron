@@ -362,6 +362,11 @@ test("the store's refusal of a template says it in a template's words", function
 	app:command("failure_not_in_store")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("This template, or this version of it, isn't in the template store.")
+	for name, said in { taken_down = "Zeron took this version down, so it can't be installed.", not_verified = "Zeron hasn't verified this version, so it wasn't installed." } do
+		app:command(`failure_{name}`)
+		app:frames(4)
+		expect(app:state("templates_said_failure")).to_be(said)
+	end
 	app:command("failure_other")
 	app:frames(4)
 	expect(app:state("templates_said_failure")).to_be("Something else")

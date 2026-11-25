@@ -154,7 +154,7 @@ ui.command {
 	end,
 }
 local said_failure = ui.state("templates_said_failure", "")
-for name, message in { not_in_store = "not_in_store: midnight 9.9.9 isn't in the store", offline = "offline", other = "Something else" } do
+for name, message in { not_in_store = "not_in_store: midnight 9.9.9 isn't in the store", taken_down = "taken_down: It reads your keys", not_verified = "not_verified: 1.3.0 isn't verified", offline = "offline", other = "Something else" } do
 	ui.command { id = `failure_{name}`, title = name, run = function()
 		said_failure:set(page._failure(message))
 	end }

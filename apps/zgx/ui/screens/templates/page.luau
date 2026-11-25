@@ -157,7 +157,7 @@ end
 
 -- The engine's reason in a template's words where a plugin's would say
 -- "plugin" (the store's refusals), else as every page says it.
-local OWN_FAILURES: { [string]: boolean } = { not_in_store = true, store_mismatch = true, not_verified = true, needs_person = true }
+local OWN_FAILURES: { [string]: boolean } = { not_in_store = true, store_mismatch = true, not_verified = true, needs_person = true, taken_down = true }
 local function failure(message: string): string
 	local reason = string.match(message, "^([%l_]+): ") or string.match(message, "^([%l_]+)$")
 	return if reason and OWN_FAILURES[reason] then ui.t(`templates.failure.{reason}`):get() else words.failure(message)

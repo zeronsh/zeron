@@ -4630,8 +4630,9 @@
     "failure": {
       "not_in_store": "This template, or this version of it, isn't in the template store.",
       "store_mismatch": "What came isn't what the store's record says, so it wasn't installed.",
-      "not_verified": "Zeron hasn't verified this version, so it can't be taken instead.",
-      "needs_person": "Only you can install or update a template from the store, here in Zeron."
+      "not_verified": "Zeron hasn't verified this version, so it wasn't installed.",
+      "needs_person": "Only you can install or update a template from the store, here in Zeron.",
+      "taken_down": "Zeron took this version down, so it can't be installed."
     }
   },
   "themes": {

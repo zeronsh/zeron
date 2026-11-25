@@ -4630,8 +4630,9 @@
     "failure": {
       "not_in_store": "模板商店里没有这个模板或这个版本。",
       "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不能改为安装它。",
-      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。"
+      "not_verified": "Zeron 尚未验证这个版本，所以没有安装。",
+      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。",
+      "taken_down": "Zeron 已将这个版本下架，无法安装。"
     }
   },
   "themes": {
