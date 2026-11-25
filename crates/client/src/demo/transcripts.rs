@@ -963,23 +963,29 @@ fn release(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         input: Some(serde_json::json!({ "requests": [
             { "title": "Audit the parser", "harness": "codex", "device": "dev-vps", "prompt": "Audit crates/parser for panics on untrusted input." },
             { "title": "Draft the release notes", "harness": "claude-code", "prompt": "Draft release notes for the commits since 0.3.19." },
+            { "title": "Cut the release branch", "harness": "claude-code", "prompt": "Cut the 0.3.21 release branch." },
             { "title": "Time the benchmark", "harness": "claude-code", "prompt": "Run bench.py and report its time." },
         ] })),
     };
     let mut handed = tool("k1", call, false, None);
     if let MessagePart::Tool { chats, .. } = &mut handed {
-        *chats = vec!["chat-release-audit".into(), "chat-release-notes".into(), "chat-release-bench".into()];
+        *chats = vec![
+            "chat-release-audit".into(),
+            "chat-release-notes".into(),
+            "chat-release-branch".into(),
+            "chat-release-bench".into(),
+        ];
     }
     vec![
-        user("m1", now - 240_000, "Get 0.3.21 ready: audit the parser, draft the notes, and time the benchmark."),
+        user("m1", now - 240_000, "Get 0.3.21 ready: audit the parser, draft the notes, cut the branch, and time the benchmark."),
         assistant(
             "m2",
             host,
             now - 230_000,
             vec![
-                text("t0", "Those three don't depend on each other, so I'll hand them out and carry on."),
+                text("t0", "Those don't depend on each other, so I'll hand them out and carry on."),
                 handed,
-                text("t1", "Three subagents are on it; I'll summarise when they report back."),
+                text("t1", "Four subagents are on it; I'll summarise when they report back."),
             ],
         ),
     ]
@@ -1004,6 +1010,37 @@ fn release_audit(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                         header: "Approve command".into(),
                         question: "Codex wants to run `cargo fuzz run parse -- -max_total_time=60`. Allow it?".into(),
                         options: vec!["Yes".into(), "No".into()],
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                    }],
+                    resolved: false,
+                    answers: None,
+                },
+            ],
+        ),
+    ]
+}
+
+/// A delegated child that asks the person a question.
+fn release_branch(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user("m1", now - 230_000, "Cut the 0.3.21 release branch."),
+        assistant(
+            "m2",
+            host,
+            now - 40_000,
+            vec![
+                text("t0", "`main` is 82 commits past `release/0.3`, and `next` has the new sync protocol."),
+                MessagePart::Input {
+                    id: "req-branch".into(),
+                    request_id: "req-branch".into(),
+                    questions: vec![UserInputQuestion {
+                        note: None,
+                        id: "q1".into(),
+                        header: "Branch".into(),
+                        question: "Which branch should 0.3.21 be cut from?".into(),
+                        options: vec!["main".into(), "release/0.3".into(), "next".into()],
                         prefill: None,
                         multiline: false,
                         multi_select: false,
@@ -1048,6 +1085,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         ),
         "chat-release" => release(host, now),
         "chat-release-audit" => release_audit(host, now),
+        "chat-release-branch" => release_branch(host, now),
         "chat-release-notes" => vec![user("m1", now - 230_000, "Draft release notes for the commits since 0.3.19.")],
         "chat-release-bench" => short(host, now, "Run bench.py and report its time.", "`bench.py` reported **0.90s** for 60 runs (10.9s wall clock, most of it the script's own 10s sleep)."),
         "chat-side" => side(host, now),

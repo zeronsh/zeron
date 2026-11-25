@@ -249,9 +249,9 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 "## Outline",
             )
         },
-        // Background delegation: a parent that handed work to three
-        // subagents and waits on the two still open, one of them on another
-        // device asking to run a command.
+        // Background delegation: a parent that handed work to four
+        // subagents and waits on the three still open: one on another device
+        // asking to run a command, one asking a question.
         DemoChat {
             last_ago_ms: 3 * MIN,
             created_ago_ms: 20 * MIN,
@@ -261,7 +261,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 Some("space-zeron"),
                 MAC,
                 "Release check",
-                "Three subagents are on it; I'll summarise when they report back.",
+                "Four subagents are on it; I'll summarise when they report back.",
             )
         },
         DemoChat {
@@ -295,6 +295,22 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 MAC,
                 "Draft the release notes",
                 "Reading the commits since 0.3.19.",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-release"),
+            delegated: true,
+            model: "claude-haiku-5-5",
+            reasoning: Medium,
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 40_000,
+            created_ago_ms: 4 * MIN - 1_500,
+            ..chat(
+                "chat-release-branch",
+                Some("space-zeron"),
+                MAC,
+                "Cut the release branch",
+                "Which branch should 0.3.21 be cut from?",
             )
         },
         DemoChat {
