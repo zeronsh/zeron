@@ -1450,8 +1450,12 @@ impl Plugins {
     /// next check, or its update, looks by this one.
     async fn choose_updates(&self, change: impl FnOnce(&mut State)) -> Result<(), RpcError> {
         self.ensure_scanned().await;
-        let before = lock(&self.inner.state).clone();
-        let saved = self.update_state(change);
+        // (In the one lock: two at once each see what the other chose.)
+        let mut before = State::default();
+        let saved = self.update_state(|state| {
+            before = state.clone();
+            change(state);
+        });
         let plugins: Vec<String> = {
             let now = lock(&self.inner.state).clone();
             let entries = lock(&self.inner.entries);
