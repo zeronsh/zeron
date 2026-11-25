@@ -82,6 +82,36 @@ ui.effect(function()
 		project(store, id, false)
 	end
 end)
+-- Two made-up conversations, for pictures of a template: a1 ("Fix the
+-- build") and b1 ("Ship the release"), words and code a chat has.
+ui.command { id = "fixture.sample_chats", title = "Fixture: sample conversations", menu = "Fixture", run = function()
+	fixture_chats:set({
+		a1 = {
+			session = { id = "a1", state = "ready" },
+			messages = {
+				{ id = "a1-1", role = "user", text = "The build fails on CI since this morning. Can you find out why?" },
+				{
+					id = "a1-2",
+					role = "assistant",
+					text = "It's the date parser. `parse_day` reads the month before the day, and today is the first date where that matters.\n\n```rust\nfn parse_day(text: &str) -> Option<Date> {\n    let (day, month) = text.split_once('/')?;\n    Date::new(month.parse().ok()?, day.parse().ok()?)\n}\n```\n\nI've swapped them and added a test for the 13th. All 214 tests pass now.",
+				},
+				{ id = "a1-3", role = "user", text = "Nice. Does anything else call it?" },
+				{ id = "a1-4", role = "assistant", text = "Two places: the **release notes** and the **invoice export**. Both pass dates as day/month, so they were already right." },
+			},
+		},
+		b1 = {
+			session = { id = "b1", state = "ready" },
+			messages = {
+				{ id = "b1-1", role = "user", text = "Draft the release notes for 2.4." },
+				{
+					id = "b1-2",
+					role = "assistant",
+					text = "## 2.4\n\n- **Faster search**: results come as you type.\n- **Dark mode** follows the system.\n- Dates in exports are day/month everywhere.\n\n> Thanks to everyone who reported the export bug.\n\nShall I add the upgrade steps too?",
+				},
+			},
+		},
+	})
+end }
 -- Settings' host calls, answered as the host would (settings_stub.luau).
 -- (Answered at once, as the host's calls do a beat later.)
 local function answered(value: any): any
@@ -147,6 +177,19 @@ for _, scheme in { "light", "dark" } do
 		run = function()
 			ui.theme.follow_system(false)
 			ui.theme.current:set(`zeron-{scheme}`)
+		end,
+	}
+end
+-- (Or as the app wears a scheme: the running template's own theme on it,
+-- as ds/palettes registers it; Zeron's where it has none.)
+for _, scheme in { "light", "dark" } do
+	ui.command {
+		id = `fixture.worn_{scheme}`,
+		title = `Fixture: {scheme}, as worn`,
+		menu = "Fixture",
+		run = function()
+			ui.theme.follow_system(false)
+			ui.theme.current:set(`theme-{scheme}`)
 		end,
 	}
 end

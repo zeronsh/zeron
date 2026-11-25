@@ -162,7 +162,7 @@ local function failure(message: string): string
 	local reason = string.match(message, "^([%l_]+): ") or string.match(message, "^([%l_]+)$")
 	-- (An engine from before `blocks_unreadable` says taken_down of a list it
 	-- can't read too: its own words for that, which never say a version was.)
-	if reason == "taken_down" and not string.find(message, "was taken down", 1, true) then
+	if reason == "taken_down" and string.find(message, ": ", 1, true) and not string.find(message, "was taken down", 1, true) then
 		return string.match(message, "^[%l_]+: (.+)$") or message
 	end
 	return if reason and OWN_FAILURES[reason] then ui.t(`templates.failure.{reason}`):get() else words.failure(message)
