@@ -20,9 +20,10 @@ import { join } from "node:path";
 /** The Zeron they were made from. */
 export const ZERON = "0.3.20";
 
-export const USERNAMES = { 7: "stg-gil", 8: "stg-hana" };
-
-/** What each is drawn and coloured with: `scheme` and its palette. */
+/** What each is drawn and coloured with: `scheme` and its palette. A
+ * version's `like` is the earlier one (by index) whose files it has, but its
+ * pictures, number and notes; `rendered`: its pictures are the app's own
+ * rendering of it (seed-templates.mjs `--pictures`), not drawn here. */
 export const TEMPLATES = [
   // ── slot 7 ──
   {
@@ -33,7 +34,8 @@ export const TEMPLATES = [
     change: "roomy", keep: ["ds/icon_button.luau"],
     versions: [
       { v: "1.0.0", by: "device", notes: "First release." },
-      { v: "1.1.0", by: "token", notes: "Rows have a little more air." }
+      { v: "1.1.0", by: "token", notes: "Rows have a little more air." },
+      { v: "1.1.1", by: "device", like: 1, rendered: true, notes: "The same files. Its pictures are now what it draws." }
     ]
   },
   {
@@ -42,7 +44,10 @@ export const TEMPLATES = [
     about: ["A cream page with ink that keeps its contrast.", "A quieter welcome on a new chat."],
     look: { scheme: "light", layout: "desk", background: "#f4ecdd", raised: "#fbf6ec", text: "#2c2419", muted: "#6b5e4b", faint: "#978a76", accent: "#b5442e", danger: "#b3261e", warning: "#9a6700", success: "#3c7a3f", radius: 6 },
     home: ["A clean sheet.", "Write the first line, or drop a file on the desk."],
-    versions: [{ v: "1.0.0", by: "device", notes: "First release." }]
+    versions: [
+      { v: "1.0.0", by: "device", notes: "First release." },
+      { v: "1.0.1", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." }
+    ]
   },
   {
     slot: 7, id: "green-phosphor", name: "Green Phosphor", keywords: ["dark", "retro", "terminal"],
@@ -50,7 +55,10 @@ export const TEMPLATES = [
     about: ["A single hue, in four strengths.", "A prompt for a welcome."],
     look: { scheme: "dark", layout: "terminal", background: "#020a04", raised: "#06140a", text: "#8dffa6", muted: "#4fbf6b", faint: "#2f8047", accent: "#33ff66", danger: "#ff7a6b", warning: "#e8ff6b", success: "#33ff66", radius: 0 },
     home: ["READY.", "Type a command and press return."],
-    versions: [{ v: "1.0.0", by: "device", notes: "First release." }]
+    versions: [
+      { v: "1.0.0", by: "device", notes: "First release." },
+      { v: "1.0.1", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." }
+    ]
   },
   {
     slot: 7, id: "wide-margin", name: "Wide Margin", keywords: ["light", "minimal", "focus"],
@@ -60,7 +68,9 @@ export const TEMPLATES = [
     change: "roomy",
     versions: [
       { v: "1.0.0", by: "device", notes: "First release." },
-      { v: "1.1.0-beta.1", by: "device", notes: "Trying even more room. Tell me if it's too much." }
+      { v: "1.1.0-beta.1", by: "device", notes: "Trying even more room. Tell me if it's too much." },
+      { v: "1.1.0", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." },
+      { v: "1.2.0-beta.1", by: "device", like: 1, rendered: true, notes: "The roomier lists again, beside the release. Its pictures are what it draws." }
     ]
   },
   // ── slot 8 ──
@@ -72,7 +82,8 @@ export const TEMPLATES = [
     keep: ["ds/icon_button.luau"],
     versions: [
       { v: "1.0.0", by: "device", notes: "First release." },
-      { v: "1.1.0", by: "token", notes: "Warmer coral, clearer comments." }
+      { v: "1.1.0", by: "token", notes: "Warmer coral, clearer comments." },
+      { v: "1.1.1", by: "device", like: 1, rendered: true, notes: "The same files. Its pictures are now what it draws." }
     ]
   },
   {
@@ -80,7 +91,10 @@ export const TEMPLATES = [
     description: "Cool slate and straight lines, for screens full of work.",
     about: ["A neutral grey palette.", "A grid's worth of calm."],
     look: { scheme: "dark", layout: "grid", background: "#1f242b", raised: "#2a313a", text: "#e8ebef", muted: "#adb5c0", faint: "#7c8693", accent: "#7aa2ff", danger: "#ff6b6b", warning: "#f2c14e", success: "#63d297", radius: 4 },
-    versions: [{ v: "1.0.0", by: "device", notes: "First release." }]
+    versions: [
+      { v: "1.0.0", by: "device", notes: "First release." },
+      { v: "1.0.1", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." }
+    ]
   },
   {
     slot: 8, id: "sunday-morning", name: "Sunday Morning", keywords: ["light", "colour", "calm"],
@@ -88,7 +102,10 @@ export const TEMPLATES = [
     about: ["Peach, lilac and mint, kept readable.", "A slower welcome on a new chat."],
     look: { scheme: "light", layout: "pastel", background: "#fff3ee", raised: "#ffffff", text: "#3a2a3f", muted: "#74617a", faint: "#9c8aa1", accent: "#8a5cd6", danger: "#c2334d", warning: "#8f5f00", success: "#2e7d5b", radius: 28 },
     home: ["Nothing's urgent.", "What would be nice to get done?"],
-    versions: [{ v: "1.0.0", by: "device", notes: "First release." }]
+    versions: [
+      { v: "1.0.0", by: "device", notes: "First release." },
+      { v: "1.0.1", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." }
+    ]
   },
   {
     slot: 8, id: "contrast-plus", name: "Contrast Plus", keywords: ["light", "contrast", "reading"],
@@ -96,7 +113,10 @@ export const TEMPLATES = [
     about: ["Every text colour at 7:1 or better on the page.", "One strong blue for what you can press."],
     look: { scheme: "light", layout: "contrast", background: "#ffffff", raised: "#ffffff", text: "#000000", muted: "#303030", faint: "#4a4a4a", accent: "#0037b3", danger: "#9b0000", warning: "#5c3d00", success: "#00501f", radius: 2 },
     change: "roomy",
-    versions: [{ v: "1.0.0", by: "device", notes: "First release." }]
+    versions: [
+      { v: "1.0.0", by: "device", notes: "First release." },
+      { v: "1.0.1", by: "token", like: 0, rendered: true, notes: "The same files. Its pictures are now what it draws." }
+    ]
   }
 ];
 
@@ -166,19 +186,20 @@ export const manifest = (t, i) => ({
 });
 
 /** Every file of `t` at version index `i`, path → bytes: `ui` is Zeron's own
- * (apps/zgx/ui of the release), `pictures` its three (pictures.mjs). */
+ * (apps/zgx/ui of the release), `pictures` its three. */
 export const files = (t, i, { ui, pictures }) => {
+  const as = t.versions[i].like ?? i;
   const out = new Map([
     ["zeron-template.json", Buffer.from(`${JSON.stringify(manifest(t, i), null, 2)}\n`)],
     ["README.md", Buffer.from(readme(t))],
     ["CHANGELOG.md", Buffer.from(changelog(t, i))],
-    ["theme.luau", Buffer.from(theme(t, i > 0 && t.id === "coral-reef" ? "#ff9270" : undefined))],
+    ["theme.luau", Buffer.from(theme(t, as > 0 && t.id === "coral-reef" ? "#ff9270" : undefined))],
     ["preview.png", pictures.preview],
     ["screenshots/chat.png", pictures.chat],
     ["screenshots/new-chat.png", pictures.home]
   ]);
   if (t.home) out.set("screens/chat/home.luau", Buffer.from(home(t.home)));
-  if (t.change === "roomy") out.set("ds/tokens.luau", Buffer.from(roomy(ui, 4 + 2 * i)));
+  if (t.change === "roomy") out.set("ds/tokens.luau", Buffer.from(roomy(ui, 4 + 2 * as)));
   for (const path of t.keep ?? []) out.set(path, readFileSync(join(ui, path)));
   return out;
 };

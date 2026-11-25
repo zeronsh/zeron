@@ -8,7 +8,14 @@
 // publish <folder>`, unsigned). The store is otherwise only read, to skip
 // what's already there, so a run that stopped part way picks up where it was.
 //
-//   node seed-templates.mjs --accounts accounts-templates.json --ui <Zeron's apps/zgx/ui at the release> --playwright <dir> [--only 7,8] [--dry-run]
+//   node seed-templates.mjs --accounts accounts-templates.json --ui <Zeron's apps/zgx/ui at the release> --playwright <dir> [--host <the edge's host>] [--pictures <folder>] [--only 7,8] [--dry-run]
+//
+// Writes only to a loopback edge, or a staging one named by --host too, from
+// a Zeron signed in to the accounts file's WorkOS (where.mjs).
+//
+// `--pictures` has the app's own renderings, <id>/preview.png, chat.png and
+// new-chat.png (a pre-release's under <id>-beta), for the versions that use
+// them; without it those versions wait.
 //
 // The accounts file is seed.mjs's (sessions.mjs writes it). Two passes, as
 // seed.mjs: exits 3 when the first versions are published and tokens are
@@ -23,6 +30,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pictures } from "./pictures.mjs";
 import { TEMPLATES, files } from "./templates.mjs";
+import { whyNotItsSession, whyNotSeeded } from "./where.mjs";
 
 /** Between two writes of one account: the store takes 30 a minute. */
 const PACE_MS = Number(process.env.SEED_PACE_MS ?? 2500);
@@ -43,8 +51,11 @@ const require = createRequire(join(resolve(flag("--playwright") ?? usage("give -
 const { chromium } = require("playwright");
 const WebSocket = require("ws");
 const only = flag("--only")?.split(",").map(Number);
+const rendered = flag("--pictures");
 const dryRun = args.includes("--dry-run");
 const edge = String(accounts.edge ?? usage("the accounts file names no edge")).replace(/\/$/, "");
+const refusedEdge = whyNotSeeded(edge, flag("--host"));
+if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const slots = new Set(TEMPLATES.map((t) => t.slot));
 const authors = (accounts.authors ?? []).filter((a) => slots.has(a.slot) && (!only || only.includes(a.slot)));
@@ -91,6 +102,23 @@ const call = (a, method, params) =>
     });
   });
 
+/** The app's own renderings of `t` at `version`, or undefined without them:
+ * three still 16:10 PNGs. */
+const renderings = (t, version) => {
+  if (!rendered) return undefined;
+  const dir = join(resolve(rendered), version.v.includes("-") ? `${t.id}-beta` : t.id);
+  const out = {};
+  for (const [name, file] of [["preview", "preview.png"], ["chat", "chat.png"], ["home", "new-chat.png"]]) {
+    const path = join(dir, file);
+    if (!existsSync(path)) usage(`there's no ${path}`);
+    const bytes = readFileSync(path);
+    const png = bytes.length > 24 && bytes.readUInt32BE(0) === 0x89504e47;
+    if (!png || bytes.readUInt32BE(16) * 10 !== bytes.readUInt32BE(20) * 16) usage(`${path} isn't a 16:10 PNG`);
+    out[name] = bytes;
+  }
+  return out;
+};
+
 /** The versions the store lists of `id`. */
 const listed = async (id) => {
   const res = await fetch(`${edge}/store/v1/templates/${id}/versions?limit=50`);
@@ -116,6 +144,13 @@ const publishVersion = async (a, t, i, have, drawn) => {
     skipped++;
     console.log(`have ${what} (${have.get(version.v).status})`);
     return;
+  }
+  if (version.rendered) {
+    drawn = renderings(t, version);
+    if (!drawn) {
+      console.log(`waits ${what} (give --pictures)`);
+      return;
+    }
   }
   // The author's own copy: the template in their Zeron's folder.
   const own = join(a.data_dir, "templates", t.id);
@@ -144,6 +179,15 @@ const publishVersion = async (a, t, i, have, drawn) => {
   if (!dryRun) await sleep(PACE_MS);
 };
 
+// Each author's Zeron is this edge's, before any of them publishes.
+if (!dryRun) {
+  for (const a of authors) {
+    const bearer = await call(a, "AccessToken", {}).then((r) => r?.token, (e) => usage(`author ${a.slot}'s Zeron doesn't answer: ${e.message}`));
+    const why = whyNotItsSession(bearer, accounts.workos_client_id);
+    if (why) usage(`author ${a.slot}'s Zeron: ${why}`);
+  }
+}
+
 const browser = await chromium.launch();
 const drawn = new Map();
 try {
@@ -161,7 +205,7 @@ for (const a of authors) {
   }
 }
 // Pass 2: the rest.
-const later = (a) => TEMPLATES.filter((t) => t.slot === a.slot).some((t) => t.versions.slice(1).some((v) => v.by === "token" && !haves.get(t.id).has(v.v)));
+const later = (a) => TEMPLATES.filter((t) => t.slot === a.slot).some((t) => t.versions.slice(1).some((v) => v.by === "token" && (rendered || !v.rendered) && !haves.get(t.id).has(v.v)));
 const tokenless = authors.filter((a) => !process.env[a.token_env] && later(a));
 if (tokenless.length && !dryRun) {
   console.log(`\nThe first versions are published. Now a deploy token for their templates too:\n  zeron plugin token create --all --templates --name "Seed CI"\nset as ${tokenless.map((a) => `$${a.token_env} (author ${a.slot})`).join(", ")}. Then run this again.`);

@@ -46,6 +46,13 @@ The accounts file names them:
 `PATH`. Deploy tokens are never in the file, only in the environment, under
 each author's `token_env`.
 
+## Where it may write (where.mjs)
+
+An id published is never released, so the seeds and `sessions.mjs` refuse any
+edge but a loopback one, or a staging one whose host is named twice: in the
+address and by `--host`. `seed-templates.mjs` also refuses an author's Zeron
+that's signed in to another WorkOS than the accounts file's.
+
 ## Making the sessions (sessions.mjs)
 
 `sessions.mjs` makes them through the real paths, on one machine. It runs one
@@ -63,11 +70,11 @@ password: nothing is bypassed.
 
 ```sh
 node scripts/staging-seed/sessions.mjs up --zeron <zeron build> --edge https://staging.zeron.sh \
-  --client-id client_01KWD0E9SYPV2WE4QN9TP9DP0W --logins <logins.json> --dir <folder> --playwright <folder with playwright and ws>
-node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json            # pass 1, exit 3
+  --client-id client_01KWD0E9SYPV2WE4QN9TP9DP0W --host <the edge's host> --logins <logins.json> --dir <folder> --playwright <folder with playwright and ws>
+node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json --host <the edge's host>   # pass 1, exit 3
 node scripts/staging-seed/sessions.mjs tokens …the same…                        # writes <folder>/tokens.env (0600)
 node scripts/staging-seed/sessions.mjs up …the same…                            # restarts the engines `tokens` stopped
-(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json)
+(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json --host <the edge's host>)
 node scripts/staging-seed/sessions.mjs down --dir <folder>                      # stops the engines by their own pids
 ```
 
@@ -87,7 +94,7 @@ engine at a time.
 ## Running it
 
 ```sh
-node scripts/staging-seed/seed.mjs --accounts accounts.json
+node scripts/staging-seed/seed.mjs --accounts accounts.json --host <the edge's host>
 ```
 
 1. **The first pass** publishes every plugin's first version from its author's
@@ -119,8 +126,8 @@ The store's limits shape the catalog:
 
 ## Templates (seed-templates.mjs)
 
-`templates.mjs` is eight templates by two more authors (`stg-gil`, `stg-hana`),
-eleven versions. They have accounts of their own because an account claims at
+`templates.mjs` is eight templates by two more authors (slots 7 and 8 of the
+logins file). They have accounts of their own because an account claims at
 most 5 new ids in 7 days, plugins and templates together. `pictures.mjs` draws
 each one's preview and two screenshots (1280×800) in a headless browser.
 
@@ -137,13 +144,16 @@ each one's preview and two screenshots (1280×800) in a headless browser.
 
 ```sh
 git archive v0.3.20 apps/zgx/ui | tar -x -C <folder>      # Zeron's own files, for the copies
-node scripts/staging-seed/sessions.mjs up --only 7,8 …as above…   # writes accounts-templates.json
-node scripts/staging-seed/seed-templates.mjs --accounts <folder>/accounts-templates.json --ui <folder>/apps/zgx/ui --playwright <folder>   # pass 1, exit 3
+node scripts/staging-seed/sessions.mjs up --only 7,8 --host <the edge's host> …as above…   # writes accounts-templates.json
+node scripts/staging-seed/seed-templates.mjs --accounts <folder>/accounts-templates.json --ui <folder>/apps/zgx/ui --playwright <folder> --host <the edge's host>   # pass 1, exit 3
 node scripts/staging-seed/sessions.mjs tokens --only 7,8 --templates …
 node scripts/staging-seed/sessions.mjs up --only 7,8 …
 (set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed-templates.mjs …the same…)
 node scripts/staging-seed/sessions.mjs down --only 7,8 --dir <folder>
 ```
+
+The versions that only replace pictures use the app's own renderings
+(`--pictures <folder>`) and wait without them.
 
 `--dry-run` checks every version with `zeron template check`. The engine must
 be one that publishes templates. `local-templates.mjs` runs it all against a

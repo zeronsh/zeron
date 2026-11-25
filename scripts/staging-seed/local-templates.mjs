@@ -14,7 +14,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { TEMPLATES, USERNAMES, ZERON } from "./templates.mjs";
+import { pictures } from "./pictures.mjs";
+import { TEMPLATES, ZERON } from "./templates.mjs";
+import { whyNotItsSession, whyNotSeeded } from "./where.mjs";
+
+/** This run's authors, by slot (the staging ones are the logins file's). */
+const USERNAMES = Object.fromEntries([...new Set(TEMPLATES.map((t) => t.slot))].map((slot) => [slot, `looks-${slot}`]));
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../..");
@@ -58,6 +63,17 @@ const run = (cmd, argv, opts = {}) =>
 
 const engines = [];
 let edge;
+// Where a seed may write.
+{
+  const refused = (edge, host) => typeof whyNotSeeded(edge, host) === "string";
+  check("a seed is refused anything but a loopback or a named staging edge",
+    ["https://edge.zeron.sh", "https://zeron.sh", "https://staged.example.com", "https://notstaging.example.com", "http://staging.example.com", "https://staging.example.com/x", "https://a:b@staging.example.com", "ftp://127.0.0.1x", "nonsense"].every((e) => refused(e, URL.canParse(e) ? new URL(e).hostname : "")) &&
+      refused("https://staging.example.com") && refused("https://staging.example.com", "staging.example.org") &&
+      !refused("https://staging.example.com", "staging.example.com") && !refused("https://x-staging.example.com/", "x-staging.example.com") && !refused("http://127.0.0.1:9") && !refused("http://localhost:9"));
+  const jwt = (iss) => `x.${Buffer.from(JSON.stringify({ iss })).toString("base64url")}.y`;
+  check("and a Zeron signed in to another WorkOS", whyNotItsSession(jwt("https://w/client_a"), "client_a") === undefined && [whyNotItsSession(jwt("https://w/client_ab"), "client_a"), whyNotItsSession(jwt("https://w/client_a"), undefined), whyNotItsSession("", "client_a")].every((w) => typeof w === "string"));
+}
+
 try {
   mkdirSync(join(edgeDir, "public"), { recursive: true });
   const bundled = await run("npx", ["wrangler", "deploy", "--dry-run", "--outdir", join(work, "bundle")], { cwd: edgeDir });
@@ -141,8 +157,20 @@ try {
     JSON.stringify({ edge: edge.url, workos_client_id: edge.clientId, zeron, authors: authors.map((d) => ({ slot: d.slot, home: d.home, data_dir: d.data, ipc_port: d.port, token_env: `SEED_TOKEN_${d.slot}` })) })
   );
   const seed = (env, extra = []) => run(process.execPath, [join(here, "seed-templates.mjs"), "--accounts", join(work, "accounts.json"), "--ui", ui, "--playwright", playwright, ...extra], { env: { ...process.env, SEED_PACE_MS: "0", ...env } });
+  // Stand-ins for the app's renderings (other bytes than the drawn ones).
+  const shots = join(work, "pictures");
+  const browser = await createRequire(join(playwright, "package.json"))("playwright").chromium.launch();
+  for (const t of TEMPLATES) {
+    const drawn = await pictures(browser, { ...t, name: `${t.name} as it is`, home: ["As it is", "Nothing more."] });
+    for (const dir of [t.id, `${t.id}-beta`]) {
+      mkdirSync(join(shots, dir), { recursive: true });
+      for (const [name, file] of [["preview", "preview.png"], ["preview", "chat.png"], ["home", "new-chat.png"]]) writeFileSync(join(shots, dir, file), drawn[name]);
+    }
+  }
+  await browser.close();
   const versions = TEMPLATES.flatMap((t) => t.versions.map((v) => ({ id: t.id, ...v })));
-  const dry = await seed({}, ["--dry-run"]);
+  const drawnOnly = versions.filter((v) => !v.rendered).length;
+  const dry = await seed({}, ["--dry-run", "--pictures", shots]);
   check(`the CLI's check takes every version (${versions.length})`, dry.code === 0 && (dry.out.match(/^ready /gm) ?? []).length === versions.length, (dry.err || dry.out).trim().split("\n").pop());
   const first = await seed({});
   process.stdout.write(first.out);
@@ -151,7 +179,14 @@ try {
   const tokens = Object.fromEntries(authors.map((d) => [`SEED_TOKEN_${d.slot}`, d.token]));
   const second = await seed(tokens);
   process.stdout.write(second.out);
-  check("the second run publishes the rest", second.code === 0 && second.out.includes(`done: ${versions.length - TEMPLATES.length} written, ${TEMPLATES.length} already there`), (second.err || second.out).trim().split("\n").pop());
+  check("the second run publishes the rest", second.code === 0 && second.out.includes(`done: ${drawnOnly - TEMPLATES.length} written, ${TEMPLATES.length} already there`), (second.err || second.out).trim().split("\n").pop());
+  // (The store takes ten versions an account an hour: an hour later, on this
+  // local edge alone.)
+  const { EDGE_NAME } = await import(pathToFileURL(join(e2e, "edge.mjs")));
+  await (await edge.mf.getD1Database("STORE_DB", EDGE_NAME)).prepare("UPDATE versions SET published_at = published_at - 7200000").run();
+  const third = await seed(tokens, ["--pictures", shots]);
+  process.stdout.write(third.out);
+  check("with the app's renderings, the versions that use them", third.code === 0 && third.out.includes(`done: ${versions.length - drawnOnly} written, ${drawnOnly} already there`), (third.err || third.out).trim().split("\n").pop());
 
   const get = async (path, bearer) => {
     const res = await fetch(`${edge.url}${path}`, bearer ? { headers: { authorization: `Bearer ${bearer}` } } : {});
@@ -167,6 +202,18 @@ try {
     const right = t.versions.every((v) => got.get(v.v)?.via === (v.by === "device" ? "device" : "deploy_token") && (got.get(v.v)?.key === null) === (v.by === "token"));
     const release = t.versions.filter((v) => !v.v.includes("-")).at(-1).v;
     check(`${t.id}: its versions, device's signed and token's not, ${release} shown`, right && d.version === release && d.engines?.zeron === `>=${ZERON}` && d.cover === "preview.png" && d.icon === null && !("permissions" in d), { version: d.version, versions: [...got].map(([k, v]) => `${k}:${v.via}`) });
+    // A version that only replaces pictures: those, its number and its notes.
+    for (const [i, v] of t.versions.entries()) {
+      if (!v.rendered) continue;
+      const read = async (version) => {
+        const pkg = JSON.parse((await get(`/store/v1/templates/${t.id}/versions/${version}/package`)).body);
+        const { signature: _s, version: _v, ...manifest } = pkg.manifest;
+        return { manifest: JSON.stringify(manifest), files: pkg.files };
+      };
+      const [was, now] = [await read(t.versions[v.like].v), await read(v.v)];
+      const names = [...new Set([...Object.keys(was.files), ...Object.keys(now.files)])].filter((f) => was.files[f] !== now.files[f]).sort();
+      check(`${t.id} ${v.v}: only its pictures and notes differ from ${t.versions[v.like].v}`, was.manifest === now.manifest && JSON.stringify(names) === JSON.stringify(["CHANGELOG.md", "preview.png", "screenshots/chat.png", "screenshots/new-chat.png"]), [i, names]);
+    }
     const pics = [];
     for (const path of ["preview.png", "screenshots/chat.png", "screenshots/new-chat.png"]) {
       const p = await get(`/store/v1/templates/${t.id}/files/${d.version}/${path}`);
@@ -175,12 +222,12 @@ try {
     check(`${t.id}: its pictures are served, 1280×800`, pics.every(Boolean), pics);
   }
   const beta = (await get("/store/v1/templates/wide-margin/versions")).body.versions.find((v) => v.prerelease);
-  check("wide-margin's 1.1.0-beta.1 is a pre-release", beta?.version === "1.1.0-beta.1", beta?.version);
+  check("wide-margin's newest, 1.2.0-beta.1, is a pre-release", beta?.version === "1.2.0-beta.1", beta?.version);
   const focus = (await get("/store/v1/templates?keyword=focus")).body.items.map((x) => x.id).sort();
   check("a keyword filters", JSON.stringify(focus) === JSON.stringify(["nightfall-cards", "wide-margin"]), focus.join(","));
   const q = (await get("/store/v1/templates?q=slate")).body.items.map((x) => x.id);
   check("a search finds one by its name", q.includes("slate-grid"), q.join(","));
-  const again = await seed(tokens);
+  const again = await seed(tokens, ["--pictures", shots]);
   check("a run again writes nothing", again.code === 0 && again.out.includes(`done: 0 written, ${versions.length} already there`), again.out.trim().split("\n").pop());
   const plug = await get("/store/v1/plugins/paper-desk");
   const temp = await get("/store/v1/templates/no-such-one");

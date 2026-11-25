@@ -18,7 +18,10 @@
 // the two and says which to make; run it again once they're set. See
 // README.md for the accounts file.
 //
-//   node scripts/staging-seed/seed.mjs --accounts accounts.json [--only 1,3] [--dry-run]
+//   node scripts/staging-seed/seed.mjs --accounts accounts.json [--host <the edge's host>] [--only 1,3] [--dry-run]
+//
+// Writes only to a loopback edge, or a staging one named by --host too
+// (where.mjs).
 //
 // Exits 0 once every version of every plugin of the authors named is
 // published (or already was), 1 at the first refusal (with what the CLI
@@ -30,6 +33,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PLUGINS, files, manifestFields } from "./catalog.mjs";
+import { whyNotSeeded } from "./where.mjs";
 
 const MANIFEST = "zeron-plugin.json";
 /** Between two writes of one account: the store takes 30 a minute. */
@@ -51,6 +55,8 @@ const dryRun = args.includes("--dry-run");
 
 const accounts = JSON.parse(readFileSync(accountsFile, "utf8"));
 const edge = String(accounts.edge ?? usage("the accounts file names no edge")).replace(/\/$/, "");
+const refusedEdge = whyNotSeeded(edge, flag("--host"));
+if (refusedEdge) usage(refusedEdge);
 const zeron = accounts.zeron ?? "zeron";
 const authors = (accounts.authors ?? []).filter((a) => !only || only.includes(a.slot));
 if (authors.length === 0) usage("no authors to seed");
