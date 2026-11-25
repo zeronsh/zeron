@@ -93,6 +93,8 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           MAIN_PARITY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # (Against the merge's own first parent, the branch as merged.)
+          MAIN_PARITY_MERGED: "1"
         run: scripts/ci/main-parity.sh
       - id: plan
         env:

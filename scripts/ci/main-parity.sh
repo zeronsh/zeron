@@ -22,12 +22,24 @@
 #
 # BASE: the argument, else $MAIN_PARITY_BASE, else the merge-base of HEAD
 # with upstream/main (or origin/main). It's fetched if it isn't here.
+# MAIN_PARITY_MERGED=1 (CI, where HEAD is GitHub's merge of the pull request
+# into its branch): the merge's first parent instead, the very commit of the
+# branch it was merged with. The event's base sha can be older than that
+# (the branch moved on since), and main's own newer tests would then read as
+# edits. A shallow checkout keeps no parents to walk, so they're read from
+# the commit object itself.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 cd "$root"
 allow="scripts/ci/main-parity-allow.txt"
 
 base="${1:-${MAIN_PARITY_BASE:-}}"
+if [ -z "${1:-}" ] && [ "${MAIN_PARITY_MERGED:-}" = 1 ]; then
+  parents="$(git cat-file -p HEAD | sed -n 's/^parent //p')"
+  if [ "$(printf '%s\n' "$parents" | grep -c .)" = 2 ]; then
+    base="$(printf '%s\n' "$parents" | head -1)"
+  fi
+fi
 if [ -z "$base" ]; then
   for upstream in upstream/main origin/main; do
     if base="$(git merge-base HEAD "$upstream" 2>/dev/null)"; then
