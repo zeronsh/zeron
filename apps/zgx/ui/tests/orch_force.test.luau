@@ -949,10 +949,11 @@ test("force pivot: each pivot keeps its own pan and zoom, through a relaunch", f
 	expect(v(again).machine.x).to_be(b.x)
 end)
 
--- The field's own controls (the legend bottom left, the pivot bottom
--- right, Fit top right) keep their corners: no name under one, in either
--- pivot, as it opens and once a pan has settled. Their room is the
--- controls' own boxes (read from the tree), a little round them.
+-- The field's own controls (the legend bottom left, Fit top right; the
+-- pivot is in the Control room Map's head, not the field) keep their
+-- corners: no name under one, in either pivot, as it opens and once a pan
+-- has settled. Their room is the controls' own boxes (read from the
+-- tree), a little round them.
 local function box_of(app: any, target: string): { number }?
 	for line in (app:tree(target) :: string):gmatch("[^\n]+") do
 		local x, y, w, h = line:match("(%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
@@ -971,10 +972,11 @@ local function names_clear_of_controls(app: any, label: string): number
 	local d = read_labels(app)
 	local v, cs = d.view, d.corners or {}
 	assert(v, `{label}: no view read`)
-	expect(`{label}: {#cs} corners`).to_be(`{label}: 3 corners`)
+	expect(`{label}: {#cs} corners`).to_be(`{label}: 2 corners`)
+	expect(`{label}: pivot in the field {app:has(".orch-force-pivot")}`).to_be(`{label}: pivot in the field false`)
 	-- (Each control within its corner's room.)
 	local field = box_of(app, "#orch-force-field") :: { number }
-	for _, t in { ".orch-force-legend", ".orch-force-pivot", "#orch-force-fit" } do
+	for _, t in { ".orch-force-legend", "#orch-force-fit" } do
 		local b = box_of(app, t)
 		assert(b, `{label}: no {t}`)
 		local x0, y0 = b[1] - field[1], b[2] - field[2]
@@ -1003,7 +1005,7 @@ local function names_clear_of_controls(app: any, label: string): number
 	return #d.labels
 end
 for _, p in { "machine", "orchestrator" } do
-	test(`force names: clear of the legend, the pivot and Fit ({p} pivot), as it opens and after a pan`, function()
+	test(`force names: clear of the legend and Fit ({p} pivot), as it opens and after a pan`, function()
 		local app = open(900)
 		settle(app, 240)
 		pivot(app, p)

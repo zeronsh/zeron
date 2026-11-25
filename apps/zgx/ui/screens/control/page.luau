@@ -39,6 +39,9 @@ local decide = require("@ds/orch_decide")
 local function OrchMap(): any
 	return require("@ds/orch_map")
 end
+local function OrchForce(): any
+	return require("@ds/orch_force")
+end
 local rows = require("@account/rows")
 local function MapMenu(): any
 	return require("@app/screens/control/map_menu")
@@ -1027,6 +1030,9 @@ local function map(fill: boolean?): Node
 					return OrchMap().fill_h:get()
 				end
 				else nil,
+			-- (On its tab, the Graph's pivot in the Map's head: nothing that
+			-- floats over the page ever covers it.)
+			pivot_outside = fill,
 			-- (Each thread's chat and name by itself, account/rows through
 			-- the Overview's held readers: a push wakes the Map rows of the
 			-- chats it changed, none while the Overview is hidden.)
@@ -1723,7 +1729,7 @@ end
 
 -- A block of a tab's (ds/orch_block): its title, its figures beside it, and
 -- a … menu of `entries` at its end when given.
-local function panel(p: { id: string, title: string, figures: Node?, entries: (() -> { any })?, [number]: Node }): Node
+local function panel(p: { id: string, title: string, figures: Node?, tools: Node?, entries: (() -> { any })?, [number]: Node }): Node
 	local menu: Node? = nil
 	local head: ((row: Node) -> Node)? = nil
 	if p.entries then
@@ -1748,6 +1754,10 @@ local function panel(p: { id: string, title: string, figures: Node?, entries: ((
 				row,
 			}
 		end
+	end
+	-- (Its own controls, before its menu.)
+	if p.tools then
+		menu = ui.row { class = "control-panel-tools", gap = "$space.2", items = "center", shrink = 0, p.tools, menu }
 	end
 	return Block.Block {
 		id = p.id,
@@ -1849,6 +1859,11 @@ local MapTab = ui.component(function(): Node
 				id = "control-map",
 				title = "control.tabs.map",
 				figures = map_figures(),
+				-- The Graph's pivot (orchestrators or machines as its hubs),
+				-- while the Graph shows.
+				tools = ui.show(function(): boolean
+					return OrchMap().valid(M.map_view:get()).variant == "force"
+				end, OrchForce().Pivot()),
 				entries = function(): { any }
 					local out = OrchMap().menu(M.map_view)
 					table.insert(out, { separator = true })
