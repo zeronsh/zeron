@@ -67,7 +67,9 @@ export type Message = {
 	id: string,
 	-- A person's, a reply, or the seam where the chat moved to another
 	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	-- ("wake": Zeron's, not a person's: what the chat's subagents came to.)
+	-- ("wake": Zeron's, not a person's: its subagents came to something, and
+	-- the agent goes on. Nothing of it shows but the working line while its
+	-- turn starts, as a native subagent's return shows nothing.)
 	role: "user" | "assistant" | "switch" | "wake",
 	text: string,
 	-- A person's: what came with it.
@@ -113,10 +115,7 @@ export type Message = {
 	to_mark: Mark.Name?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
-	-- A wake's: the subagents it's about, and how many still run.
-	wake: { kind: "results" | "question", tasks: { WakeTask }, open: number }?,
 }
-export type WakeTask = { chat: string, title: string, device: string?, agent: Mark.Name?, status: "done" | "failed" | "stopped" | "input", said: string? }
 
 export type Props = {
 	messages: State<{ Message }>,
@@ -277,6 +276,7 @@ local ROW_ESTIMATE: any = {
 	by = "role",
 	cases = {
 		user = { height = 64, text = { field = "text", size = 15, line = 24, most = 520 } },
+		wake = { height = 0 },
 		assistant = {
 			height = 40,
 			has = {
@@ -289,7 +289,7 @@ local ROW_ESTIMATE: any = {
 							tools = { height = 38 },
 							work = { height = 38 },
 							display_failed = { height = 36 },
-							delegated = { height = 70 },
+							delegated = { height = 82 },
 						},
 						default = { height = 320 },
 					},
@@ -482,45 +482,6 @@ local function standing_note(rows: { Delegation.Row }): string?
 		return locale.s("ds.transcript.delegated.running", { n = running })
 	end
 	return nil
-end
-
--- What woke the chat: its subagents' results (or a question of one's), each a
--- row with a line of what it said, which opens its chat. Never a bubble:
--- nobody said it. (How each ended, as it was told.)
-local function wake_row(m: Message, props: Props): Node
-	local wake = m.wake :: { kind: string, tasks: { WakeTask }, open: number }
-	local chat_of = props.chat_of :: ChatOf
-	local STANDS: { [string]: Delegation.Standing } = { failed = "failed", input = "input", stopped = "stopped" }
-	return Delegation.Delegation {
-		key = m.id,
-		hook = "chat.message.wake",
-		class = "message message-wake",
-		said = function(): string
-			return locale.s(if wake.kind == "question" then "ds.transcript.delegated.question" else "ds.transcript.delegated.results", { n = #wake.tasks })
-		end,
-		note = function(): string?
-			return if wake.open > 0 and wake.kind ~= "question" then locale.s("ds.transcript.delegated.open", { n = wake.open }) else nil
-		end,
-		rows = function(): { Delegation.Row }
-			local out: { Delegation.Row } = {}
-			for i, t in wake.tasks do
-				local live = if chat_of and t.chat then chat_of(t.chat) else nil
-				table.insert(out, {
-					id = tostring(i),
-					title = (live and live.title) or t.title or locale.s("ds.transcript.delegated.untitled"),
-					agent = (live and live.mark) or t.agent,
-					-- (A question stands while its chat still asks; answered, the
-					-- row keeps its words.)
-					state = if t.status == "input" and live and live.status ~= "input" then "done" else STANDS[t.status] or "done",
-					wordless = t.status == "input" or nil,
-					detail = t.said,
-					chat = if live or not chat_of then t.chat else nil,
-				})
-			end
-			return out
-		end,
-		on_open = props.open_sender,
-	}
 end
 
 -- Work handed to other chats, as the agent hands it over: whom to, each as a
@@ -2662,6 +2623,11 @@ local function Transcript(props: Props): Node
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
 		local function pt(): number
+			-- (A wake takes no room of its own: the reply after it goes on
+			-- from the one before.)
+			if m.role == "wake" then
+				return 0
+			end
 			if mine and index:get() > 1 then
 				local prev = messages:at(index:get() - 1)
 				if prev and prev.role == "switch" then
@@ -2752,7 +2718,6 @@ local function Transcript(props: Props): Node
 					elseif m.role == "wake" then ui.column {
 						w_full = true,
 						provide = { message = m.id },
-						wake_row(m, props),
 						waiting_line(state, nil, props.turn_state),
 					}
 					elseif mine then ui.column {

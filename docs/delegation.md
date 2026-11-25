@@ -57,9 +57,9 @@ A turn whose only open tool calls block on another chat (`wait_for_turn`, or `mo
 When the parent has no turn in flight, everything settled within 800 ms of the last goes in one message
 (`wake: "all"`: once the whole cohort has). It is marked `Delivered` before it's sent and `Acknowledged` once its turn
 starts; a stop between the two finds it missing from the transcript on boot and sends it again. It isn't a queue row, so
-a paused queue never holds it. Transcripts show it as a line and a row a child, each with a line of its reply
-(`delegation::wake_excerpts`); the replies are quoted so nothing in them can end their block or pass for another chat's
-message.
+a paused queue never holds it. Transcripts show nothing of it: the agent goes on with what came back, as after a native subagent's return
+(the working line shows while its turn starts). The children's replies in it are quoted so nothing in them can end
+their block or pass for another chat's message.
 
 A result a tool call already returned (`mode: "wait"`, `wait_for_turn`) is acknowledged and not sent again. A blocking
 call that times out goes on in the background.

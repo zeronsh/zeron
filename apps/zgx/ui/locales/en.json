@@ -765,9 +765,6 @@
       "image_failed": "Couldn't show this image",
       "visual_failed": "Couldn't show this visual",
       "delegated": {
-        "results": "{n, plural, one {A subagent reported back} other {# subagents reported back}}",
-        "question": "{n, plural, one {A subagent asks} other {# subagents ask}}",
-        "open": "{n, plural, one {# still running} other {# still running}}",
         "stopped": "Stopped",
         "open_chat": "Open {title}",
         "delegating": "{n, plural, one {Delegating to a subagent} other {Delegating to # subagents}}",

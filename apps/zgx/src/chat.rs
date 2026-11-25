@@ -5594,47 +5594,12 @@ impl Subagents {
     }
 }
 
-/// Zeron's wake of a chat that delegated (`role = "wake"`): what settled, or
-/// which child asks, each openable.
-fn wake_row(id: &str, notice: &zeron_proto::WakeNotice, body: &str) -> Value {
-    let said = zeron_proto::delegation::wake_excerpts(notice, body);
-    let tasks = notice.tasks.iter().zip(said).map(|(task, said)| {
-        Value::record([
-            ("chat", Value::from(task.chat_id.as_str())),
-            ("title", Value::from(task.title.as_str())),
-            ("device", Value::from(task.device_id.as_str())),
-            ("agent", crate::agents::glyph(task.harness.as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
-            (
-                "status",
-                Value::from(match task.status {
-                    zeron_proto::DelegatedStatus::Failed => "failed",
-                    zeron_proto::DelegatedStatus::Cancelled => "stopped",
-                    zeron_proto::DelegatedStatus::AwaitingInput => "input",
-                    _ => "done",
-                }),
-            ),
-            ("said", said.as_deref().map_or(Value::Nil, Value::from)),
-        ])
-    });
-    Value::record([
-        ("id", Value::from(id)),
-        ("role", Value::from("wake")),
-        ("text", Value::from("")),
-        (
-            "wake",
-            Value::record([
-                (
-                    "kind",
-                    Value::from(match notice.kind {
-                        zeron_proto::WakeKind::Results => "results",
-                        zeron_proto::WakeKind::Question => "question",
-                    }),
-                ),
-                ("tasks", Value::List(tasks.collect())),
-                ("open", Value::from(notice.open as f64)),
-            ]),
-        ),
-    ])
+/// Zeron's wake of a chat that delegated (`role = "wake"`): nobody's words,
+/// and nothing to show of what came back (the agent goes on with it, as with
+/// a native subagent's return). A row only so the working line has somewhere
+/// to be while its turn starts.
+fn wake_row(id: &str) -> Value {
+    Value::record([("id", Value::from(id)), ("role", Value::from("wake")), ("text", Value::from(""))])
 }
 
 /// An entry as ds/transcript's message; nil for one it doesn't show.
@@ -5659,8 +5624,8 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             }
             // What a chat's children came to, as Zeron woke it with: a row of
             // its own, never the person's bubble (its words are the agent's).
-            if let Some((notice, body)) = zeron_proto::delegation::wake_notice(&text) {
-                return Some(wake_row(id, &notice, body));
+            if zeron_proto::delegation::wake_notice(&text).is_some() {
+                return Some(wake_row(id));
             }
             // A message from another chat: its routing header is the agent's to
             // read; the transcript shows who sent it, over its words.

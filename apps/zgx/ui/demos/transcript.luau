@@ -80,7 +80,7 @@ local function with_tools(list: { Message }): { Message }
 	})
 	return list
 end
--- Work handed to other chats (ds/delegation), and what woke the chat after.
+-- Work handed to other chats (ds/delegation).
 local function with_delegation(list: { Message }): { Message }
 	table.insert(list, {
 		id = "handed",
@@ -98,16 +98,6 @@ local function with_delegation(list: { Message }): { Message }
 					{ title = "Time the benchmark", agent = "claude", failed = true },
 				},
 			},
-		},
-	} :: any)
-	table.insert(list, {
-		id = "woke",
-		role = "wake",
-		text = "",
-		wake = {
-			kind = "results",
-			open = 1,
-			tasks = { { chat = "demo-audit", title = "Audit the parser", agent = "openai", status = "done", said = "No unsafe paths left: 3 fuzz targets, 41 million inputs, no crash" } },
 		},
 	} :: any)
 	return list

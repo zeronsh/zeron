@@ -146,7 +146,7 @@ fn agent_messages_show_their_sender_over_the_bubble() {
 }
 
 #[test]
-fn a_wake_shows_a_line_per_subagent_and_no_bubble() {
+fn a_wake_shows_nothing_and_its_reply_reads_on() {
     let mut w = worker(390.0);
     let item = |title: &str, status| zeron_proto::WakeItem {
         task_id: "t".into(),
@@ -165,15 +165,18 @@ fn a_wake_shows_a_line_per_subagent_and_no_bubble() {
         open: 0,
     };
     let text = zeron_proto::delegation::wake_message(&notice, "<result>clean</result>");
-    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    w.input = debug_input(
+        vec![
+            DebugEntry { id: "u".into(), user: true, text, streaming: false },
+            DebugEntry { id: "a".into(), user: false, text: "The audit is clean.".into(), streaming: false },
+        ],
+        false,
+    );
     let frame = w.pass();
-    assert_eq!(frame.row_count(), 2);
-    let first = frame.display(0).unwrap();
-    assert!(first.text.starts_with("Result from"), "{}", first.text);
-    assert!(first.text.ends_with("Audit the parser"), "{}", first.text);
-    assert!(frame.display(1).unwrap().text.starts_with("Failed:"));
-    assert!(first.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
-    assert!(!first.text.contains("delegated"), "{}", first.text);
+    assert_eq!(frame.row_count(), 1);
+    let only = frame.display(0).unwrap();
+    assert!(only.text.contains("The audit is clean."), "{}", only.text);
+    assert!(only.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
 }
 
 #[test]

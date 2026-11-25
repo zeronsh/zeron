@@ -366,15 +366,6 @@ impl RowBuilder {
         let Some(MessagePart::Text { text, .. }) = entry.parts.iter().find(|p| matches!(p, MessagePart::Text { .. })) else {
             return gaps;
         };
-        if let Some((notice, _)) = zeron_proto::delegation::wake_notice(text) {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            gaps.hash(&mut h);
-            for task in notice.tasks {
-                let sender = zeron_proto::agent_messages::AgentSender { chat_id: task.chat_id, title: task.title };
-                sender_chat(&sender, workspace).hash(&mut h);
-            }
-            return h.finish();
-        }
         let Some((sender, _)) = zeron_proto::agent_messages::agent_message_sender(text) else {
             return gaps;
         };
@@ -420,13 +411,10 @@ impl RowBuilder {
                 .collect::<Vec<_>>()
                 .join("\n");
             let gap = if first { Gap::First } else { Gap::Turn };
-            // What its subagents came to, as Zeron woke it: a line each,
-            // never the person's bubble.
-            if let Some((notice, _)) = zeron_proto::delegation::wake_notice(&text) {
-                for (i, task) in notice.tasks.iter().enumerate() {
-                    let core = wake_row_core(ctx, &entry.id, i, notice.kind, task, workspace);
-                    rows.push(Placed { core: Arc::new(core), gap: if i == 0 { gap } else { Gap::Block } });
-                }
+            // Zeron waking it with what its subagents came to: nobody's words,
+            // and nothing to show (the agent goes on, as after a native
+            // subagent's return).
+            if zeron_proto::delegation::wake_notice(&text).is_some() {
                 return rows;
             }
             rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false, workspace)), gap });
@@ -959,47 +947,6 @@ fn delegated_row_core(
         content: Content::Caption {
             text: chat_caption(ctx, lead, &title, harness.as_deref(), opens.as_deref()),
             pending,
-        },
-        copy_text: format!("{lead} {title}"),
-    }
-}
-
-/// One subagent of a wake: how it ended (or that it asks), its provider mark
-/// and title, which opens its chat where the workspace lists it.
-fn wake_row_core(
-    ctx: &mut Ctx,
-    entry_id: &str,
-    index: usize,
-    kind: zeron_proto::WakeKind,
-    task: &zeron_proto::WakeItem,
-    workspace: Option<&WorkspaceSnapshot>,
-) -> RowCore {
-    let lead = match (kind, task.status) {
-        (zeron_proto::WakeKind::Question, _) => "Question from",
-        (_, zeron_proto::DelegatedStatus::Failed) => "Failed:",
-        (_, zeron_proto::DelegatedStatus::Cancelled) => "Stopped:",
-        _ => "Result from",
-    };
-    let sender = zeron_proto::agent_messages::AgentSender {
-        chat_id: task.chat_id.clone(),
-        title: task.title.clone(),
-    };
-    let (title, _, known) = sender_chat(&sender, workspace);
-    RowCore {
-        key: row_key(&format!("{entry_id}#w{index}")),
-        version: next_version(),
-        // Nobody's prompt: user rows anchor the turn scroll.
-        kind: RowKind::Markdown,
-        entry_id: Arc::from(entry_id),
-        content: Content::Caption {
-            text: chat_caption(
-                ctx,
-                lead,
-                &title,
-                Some(task.harness.as_str()),
-                known.then_some(task.chat_id.as_str()),
-            ),
-            pending: false,
         },
         copy_text: format!("{lead} {title}"),
     }

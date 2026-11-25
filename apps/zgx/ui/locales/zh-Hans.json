@@ -765,9 +765,6 @@
       "image_failed": "无法显示这张图片",
       "visual_failed": "无法显示这个可视化",
       "delegated": {
-        "results": "{n, plural, other {# 个子代理已返回结果}}",
-        "question": "{n, plural, other {# 个子代理有问题}}",
-        "open": "{n, plural, other {# 个仍在运行}}",
         "stopped": "已停止",
         "open_chat": "打开 {title}",
         "delegating": "{n, plural, other {正在委派给 # 个子代理}}",
