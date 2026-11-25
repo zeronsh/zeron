@@ -64,7 +64,10 @@ fn sheet(item: &Json) -> String {
     // (And what the store's word on it is drawn as: a new word is a sheet to
     // be read again.)
     let said = drawn(item).map(|d| d.to_string()).unwrap_or_default();
-    format!("{}{said}", key(field("keep"), field("pending"), field("hash")))
+    // (And the lines over it the engine may add under the same package: what
+    // it replaces and how.)
+    let lines: Json = ["instead", "update_of", "replaces_edits", "new_owner", "also_installed"].iter().map(|k| (k.to_string(), item[*k].clone())).collect::<serde_json::Map<_, _>>().into();
+    format!("{}{said}{lines}{}", key(field("keep"), field("pending"), field("hash")), item["from"]["replaced"])
 }
 
 /// Whether a yes to `asked` (`key`: which package, as what) may be taken now:
@@ -111,11 +114,49 @@ fn shown(item: &Json) -> Json {
     if item["version"].as_str().is_some_and(|v| !reads(v) || !v.starts_with(|c: char| c.is_ascii_digit())) {
         out["version"] = json!("");
     }
+    // (What a verified version taken instead replaces: a version, or none.)
+    if let Some(was) = item["from"]["replaced"]["version"].as_str() {
+        let was = Some(was).filter(|v| reads(v) && v.starts_with(|c: char| c.is_ascii_digit())).unwrap_or("");
+        out["from"]["replaced"]["version"] = json!(was);
+        // (Whether it goes back to an older one: said, where it can be told.)
+        out["from"]["replaced"]["older"] = json!(out["version"].as_str().and_then(|to| precedes(to, was)) == Some(true));
+    }
     if let Some(files) = item["ignored"].as_array() {
         out["ignored_n"] = json!(files.len());
         out["ignored"] = files.iter().filter_map(Json::as_str).take(20).map(|f| super::consent::plain(f, 120)).collect::<Vec<_>>().into();
     }
     out
+}
+
+/// Whether version `a` comes before `b` by SemVer precedence (build metadata
+/// aside); None for one that isn't a version.
+fn precedes(a: &str, b: &str) -> Option<bool> {
+    fn parse(v: &str) -> Option<(Vec<u64>, Option<Vec<&str>>)> {
+        let v = v.split('+').next()?;
+        let (core, pre) = match v.split_once('-') {
+            Some((core, pre)) => (core, Some(pre.split('.').collect::<Vec<_>>())),
+            None => (v, None),
+        };
+        let nums: Vec<u64> = core.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
+        (nums.len() == 3).then_some((nums, pre))
+    }
+    let ((an, ap), (bn, bp)) = (parse(a)?, parse(b)?);
+    if an != bn {
+        return Some(an < bn);
+    }
+    Some(match (ap, bp) {
+        (None, None) | (None, Some(_)) => false,
+        (Some(_), None) => true,
+        (Some(ap), Some(bp)) => {
+            let part = |x: &str, y: &str| match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                _ => x.cmp(y),
+            };
+            ap.iter().zip(&bp).map(|(x, y)| part(x, y)).find(|o| o.is_ne()).map_or(ap.len() < bp.len(), |o| o.is_lt())
+        }
+    })
 }
 
 /// What the window draws of the store's word on `item`, for the engine to hold
@@ -566,6 +607,11 @@ mod tests {
         let t2 = SEEN.with(|s| s.borrow().as_ref().unwrap().1);
         assert!(!armed(Some(&now), &asked, t2));
         assert!(armed(Some(&now), &asked, t2 + super::super::consent::ARMED));
+        // A line the engine adds under the same package (an edit made as it
+        // showed): waited for anew too.
+        let mut edited = now.clone();
+        edited["replaces_edits"] = json!(true);
+        assert!(!armed(Some(&edited), &asked, t2 + super::super::consent::ARMED));
     }
 
     /// What the engine holds the store's record to is what's drawn, and only
@@ -603,6 +649,16 @@ mod tests {
         now["store"]["verified"] = json!(false);
         restate(&mut now, &json!({ "verified": true, "verified_at": 9, "publisher": "ada", "publisher_id": "u_1" }));
         assert_eq!(now["store_changed"], json!({ "verified": true, "unverified": false, "publisher": false }));
+    }
+
+    #[test]
+    fn which_of_two_versions_comes_first() {
+        for (a, b, first) in [("1.2.0", "1.3.0", true), ("1.3.0", "1.2.0", false), ("1.2.0", "1.2.0", false), ("1.2.0-beta", "1.2.0", true), ("1.2.0", "1.2.0-beta", false), ("1.0.0-alpha.1", "1.0.0-alpha.beta", true), ("1.0.0-2", "1.0.0-10", true), ("1.0.0+b", "1.0.0", false), ("2.0.0", "10.0.0", true)] {
+            assert_eq!(precedes(a, b), Some(first), "{a} {b}");
+        }
+        assert_eq!(precedes("Verified", "1.0.0"), None);
+        let older = |to: &str, was: &str| shown(&json!({ "version": to, "store": {}, "from": { "replaced": { "version": was } } }))["from"]["replaced"]["older"].clone();
+        assert_eq!((older("1.2.0", "1.3.0"), older("1.4.0", "1.3.0"), older("1.2.0", "nope")), (json!(true), json!(false), json!(false)));
     }
 
     /// What a package says of itself can't read as Zeron's own words.

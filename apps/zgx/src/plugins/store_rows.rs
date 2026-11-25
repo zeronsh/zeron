@@ -110,10 +110,13 @@ pub fn choices(said: &Json) -> Json {
 
 /// What the engine says of package `name` waiting, beyond what's on the disk.
 pub fn waiting(said: &Json, pending: &mut Json) {
-    const ENGINES: [&str; 5] = ["store", "update_of", "replaces_edits", "new_owner", "also_installed"];
+    const ENGINES: [&str; 6] = ["store", "update_of", "replaces_edits", "new_owner", "also_installed", "instead"];
     // (Its own file's word on any of it is nothing.)
     if let Some(pending) = pending.as_object_mut() {
         pending.retain(|key, _| !ENGINES.contains(&key.as_str()));
+    }
+    if let Some(from) = pending.get_mut("from").and_then(Json::as_object_mut) {
+        from.remove("replaced");
     }
     let name = pending["pending"].clone();
     let Some(item) = said["pending"].as_array().and_then(|all| all.iter().find(|p| p["pending"] == name && p["hash"] == pending["hash"])) else { return };
@@ -121,6 +124,12 @@ pub fn waiting(said: &Json, pending: &mut Json) {
         if !item[key].is_null() {
             pending[key] = item[key].clone();
         }
+    }
+    // (What a verified version taken instead replaces: the engine's word.)
+    if item["from"]["replaced"].is_object()
+        && let Some(from) = pending.get_mut("from").and_then(Json::as_object_mut)
+    {
+        from.insert("replaced".into(), item["from"]["replaced"].clone());
     }
 }
 
@@ -206,8 +215,13 @@ mod tests {
         let mut same = json!({ "pending": "midnight-1", "hash": "h1", "key": "k" });
         waiting(&said, &mut same);
         assert_eq!(same, json!({ "pending": "midnight-1", "hash": "h1", "key": "k", "store": { "id": "midnight" }, "replaces_edits": true }));
-        let mut other = json!({ "pending": "midnight-1", "hash": "h2", "store": { "id": "midnight", "verified": true }, "update_of": "x", "also_installed": [] });
+        // (A verified version taken instead, and what it replaces.)
+        let said = json!({ "pending": [{ "pending": "midnight-2", "hash": "h3", "instead": true, "from": { "kind": "store", "replaced": { "version": "1.3.0" } } }] });
+        let mut taken = json!({ "pending": "midnight-2", "hash": "h3", "from": { "kind": "store" } });
+        waiting(&said, &mut taken);
+        assert_eq!((&taken["instead"], &taken["from"]["replaced"]["version"]), (&json!(true), &json!("1.3.0")));
+        let mut other = json!({ "pending": "midnight-1", "hash": "h2", "store": { "id": "midnight", "verified": true }, "update_of": "x", "also_installed": [], "instead": true, "from": { "kind": "store", "replaced": { "version": "9.0.0" } } });
         waiting(&said, &mut other);
-        assert_eq!(other, json!({ "pending": "midnight-1", "hash": "h2" }), "what its own file says of the store isn't the store's word");
+        assert_eq!(other, json!({ "pending": "midnight-1", "hash": "h2", "from": { "kind": "store" } }), "what its own file says of the store isn't the store's word");
     }
 }

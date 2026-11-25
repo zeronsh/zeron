@@ -326,7 +326,7 @@ test("an install that fails says why, and Install is there to try again", functi
 	settle(app)
 	expect(app:has('#store-offer >> role:button "Install"')).to_be(true)
 	-- In Zeron's words, not the engine's.
-	expect(calls(app)).to_contain("toast:What came isn't what the plugin store reviewed")
+	expect(calls(app)).to_contain("toast:What came isn't what the store's record says")
 end)
 
 test("an update shows what's new and what it asks for more or no longer, before Update", function()
