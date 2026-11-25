@@ -784,15 +784,20 @@ return ui.component(function(props: Props): Node
 			function(): boolean
 				return #owned:get() > 0
 			end,
-			ui.each(owned, function(it: Owned): Node
-				return option_row(it.option)
-			end, {
-				key = function(it: Owned): string
-					return `{it.model.value}/{it.option.id}`
-				end,
+			-- (The column is what keeps the rows the menu's width: a list
+			-- straight in a show is as wide as its own rows.)
+			ui.column {
 				w_full = true,
-				gap = "$zeron.list.gap",
-			})
+				ui.each(owned, function(it: Owned): Node
+					return option_row(it.option)
+				end, {
+					key = function(it: Owned): string
+						return `{it.model.value}/{it.option.id}`
+					end,
+					w_full = true,
+					gap = "$zeron.list.gap",
+				}),
+			}
 		),
 		ui.show(
 			function(): boolean
