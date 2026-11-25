@@ -34,7 +34,7 @@ import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { join, resolve } from "node:path";
 import { PLUGINS } from "./catalog.mjs";
 import { TEMPLATES } from "./templates.mjs";
-import { quiet, secretsOf } from "./quiet.mjs";
+import { quiet, quietLibraries, secretsOf } from "./quiet.mjs";
 import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 
@@ -117,6 +117,7 @@ for (const slot of only) {
   const l = logins[slot - 1] ?? {};
   for (const key of ["username", "email", "user_id", "password"]) if (typeof l[key] !== "string" || !l[key]) throw new Error(`sessions: account ${slot} of the logins file has no ${key}`);
 }
+quietLibraries();
 const require = createRequire(join(resolve(flag("--playwright") ?? "."), "package.json"));
 const { chromium } = require("playwright");
 const WebSocket = require("ws");
@@ -159,7 +160,13 @@ const engine = async (slot) => {
   let next = 1;
   const waiting = new Map();
   ws.on("message", (raw) => {
-    const frame = JSON.parse(String(raw));
+    // (A frame that isn't JSON is no answer, and an error would quote it.)
+    let frame;
+    try {
+      frame = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
     const done = waiting.get(frame.id);
     if (!done) return;
     waiting.delete(frame.id);
@@ -176,7 +183,13 @@ const engine = async (slot) => {
 
 /** The account a bearer is (its JWT's `sub`), without verifying it: the
  * edge does that; this only checks the right person signed in. */
-const subject = (bearer) => JSON.parse(Buffer.from(bearer.split(".")[1], "base64url").toString()).sub;
+const subject = (bearer) => {
+  try {
+    return JSON.parse(Buffer.from(String(bearer).split(".")[1], "base64url").toString()).sub;
+  } catch {
+    return undefined;
+  }
+};
 
 /** Complete AuthKit's hosted page at `url` as `login`, until the browser
  * reaches `until` (a URL prefix). Answers the page it lands on. */
@@ -187,7 +200,7 @@ const hostedSignIn = async (browser, url, login, until) => {
     await page.goto(url);
     const started = Date.now();
     while (!page.url().startsWith(until)) {
-      if (Date.now() - started > 90_000) throw new Error(`the sign-in page never finished (at ${new URL(page.url()).origin}${new URL(page.url()).pathname})`);
+      if (Date.now() - started > 90_000) throw Object.assign(new Error(), { name: "Timeout" });
       const email = page.locator('input[type="email"], input[name="email"]').first();
       const password = page.locator('input[type="password"]').first();
       if (await password.isVisible().catch(() => false)) {
@@ -205,8 +218,10 @@ const hostedSignIn = async (browser, url, login, until) => {
     await page.waitForLoadState("domcontentloaded");
     return { page, context };
   } catch (error) {
-    await context.close();
-    throw error;
+    // (Its own sentence: the browser's errors quote what it typed.)
+    const at = URL.parse(page.url());
+    await context.close().catch(() => {});
+    throw new Error(`the sign-in page didn't finish (${error.name}, at ${at ? at.origin + at.pathname : "no page"})`);
   }
 };
 
