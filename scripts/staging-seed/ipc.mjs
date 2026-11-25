@@ -13,7 +13,13 @@ export const call = (a, method, params = {}) =>
     ws.onclose = () => rej(new Error("it closed the call"));
     ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params }));
     ws.onmessage = ({ data }) => {
-      const frame = JSON.parse(String(data));
+      // (A frame that isn't JSON is no answer, and an error would quote it.)
+      let frame;
+      try {
+        frame = JSON.parse(String(data));
+      } catch {
+        return;
+      }
       if (frame.id !== 1) return;
       frame.err !== undefined ? rej(new Error(typeof frame.err === "string" ? frame.err : JSON.stringify(frame.err))) : res(frame.ok);
       ws.close();
