@@ -67,10 +67,6 @@ export type Session = {
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
-	-- Its second line, said in place of those (what a waiting one waits on).
-	note: string?,
-	-- Its second line, said in place of those (what a waiting one waits on).
-	note: string?,
 	-- Subagents and side chats working under it (Zeron's "● N" pill beside
 	-- its corner).
 	subagents: number?,
@@ -79,7 +75,7 @@ export type Session = {
 	-- When it was made (as `time`), for sorting by it.
 	created: (number | string)?,
 	-- The Activity view's (`activity` on): the shelf it's on ("working",
-	-- "waiting", "asleep"; nil, the list itself), and its place there (higher, nearer
+	-- "asleep"; nil, the list itself), and its place there (higher, nearer
 	-- the top).
 	shelf: string?,
 	rank: number?,
@@ -699,15 +695,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- panel home's lists' too).
 	local function detail(s: Session, by: Organize): string
 		local p = project_of(s.id)
-		-- (What it waits on says more than where it runs, compact too.)
-		if s.note then
-			return s.note
-		end
 		return SessionRow.detail(if p then p.name else nil, s.device, s.branch, by, details.location:get(), details.branch:get())
 	end
 	-- A session's height: regular, two lines while it has a second to show.
 	local function session_h(s: Session, by: Organize): number
-		if (compact:get() and not s.note) or detail(s, by) == "" then
+		if compact:get() or detail(s, by) == "" then
 			return SLOT
 		end
 		return TALL
@@ -1277,14 +1269,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- The session as it stands: what the row shows of it follows it.
 		local cur = now_of(s)
 		local function second_line(): boolean
-			return (cur().note ~= nil or not compact:get()) and detail(cur(), by_here:get()) ~= ""
+			return not compact:get() and detail(cur(), by_here:get()) ~= ""
 		end
 		-- Regular's second line: where it runs, and on what (its branch's
 		-- glyph leading while the branch shows).
 		local second = SessionRow.second_line(function(): string
 			return detail(cur(), by_here:get())
 		end, function(): boolean
-			return details.branch:get() and cur().branch ~= nil and cur().note == nil
+			return details.branch:get() and cur().branch ~= nil
 		end, second_line, fades)
 		-- Whether it's open, and whether it can be picked out with others (in
 		-- the list itself, off the shelf) and is.
@@ -2860,10 +2852,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 		-- The Activity view: one list (every session not pinned, the one back
 		-- last first), then its shelves at the list's foot, each folded until
-		-- opened: Working, Waiting, Asleep, Archived. No sections, no groups.
+		-- opened: Working, Asleep, Archived. No sections, no groups.
 		if act then
 			local list: { Session } = {}
-			local shelved: { [string]: { Session } } = { working = {}, waiting = {}, asleep = {} }
+			local shelved: { [string]: { Session } } = { working = {}, asleep = {} }
 			for _, s in index:get().everything do
 				if placed[s.id] == "pinned" then
 					continue
@@ -2888,13 +2880,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 			local shelves = {
 				{ key = "working", title = "ds.sidebar.working", sessions = ranked(shelved.working) },
-				{ key = "waiting", title = "ds.sidebar.waiting", sessions = ranked(shelved.waiting) },
 				{ key = "asleep", title = "ds.sidebar.asleep", sessions = ranked(shelved.asleep) },
 			}
 			local stored: { Session } = if props.archived then follow(props.archived, {} :: { Session }) else {}
 			-- (The room the rest leave, so the shelves stand at the foot: its
 			-- height is the list's to work out, `heights`.)
-			if #shelved.working + #shelved.waiting + #shelved.asleep + #stored > 0 then
+			if #shelved.working + #shelved.asleep + #stored > 0 then
 				add({ kind = "spacer", key = "spacer", place = "regular", chain = {}, base = function(): number
 					return 0
 				end })

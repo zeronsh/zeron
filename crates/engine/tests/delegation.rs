@@ -211,6 +211,7 @@ fn assemble(dir: &Path, stage: &Arc<Stage>, parent_persistent: bool) -> EngineCo
     }
     let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None).unwrap();
     core.sessions.delegations().set_timing(fast());
+    core.sessions.set_no_ipc_port();
     core
 }
 
@@ -613,6 +614,7 @@ fn remote_row(chat: &str, completed: Option<&str>, status: SessionStatus) -> Ses
         last_turn_outcome: completed.map(|_| NativeTurnOutcome {
             status: DoneStatus::Completed,
             finished_at: now,
+            resumes: false,
         }),
         terminal_activity: None,
         last_completed_turn: completed.map(str::to_owned),
@@ -868,5 +870,36 @@ async fn a_follow_up_is_a_task_of_its_own() {
     .await;
     assert_eq!(rig.wakes().len(), 2);
     assert!(rig.wakes()[1].1.contains("result second"));
+    rig.core.shutdown().await;
+}
+
+/// A child cut off by the same engine stopping, which the next start picks
+/// back up: its parent isn't told it stopped, and gets its result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_the_engines_stop_cut_off_goes_on_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path(), true);
+    rig.child("a", HarnessId::Codex, &rig.core.device_id);
+    rig.parent_working().await;
+    rig.delegate("a", HarnessId::Codex, "hold a", "always").await;
+    rig.until("a works", |r| r.status_of("a") == Some(SessionStatus::Working)).await;
+    rig.parent_parked().await;
+    let stage = rig.stage.clone();
+    rig.core.shutdown().await;
+    assert!(rig.wakes().is_empty());
+    drop(rig);
+
+    let rig = Rig::watch(assemble(dir.path(), &stage, true), stage);
+    rig.until("a is picked back up", |r| r.status_of("a") == Some(SessionStatus::Working)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(rig.wakes().is_empty(), "{:?}", rig.wakes());
+    rig.until("its parent waits on", |r| {
+        r.core.sessions.session_status("parent").is_some_and(|s| s.waiting.is_some())
+    })
+    .await;
+    rig.stage.open("a");
+    rig.finished().await;
+    assert_eq!(rig.wakes().len(), 1);
+    assert_eq!(rig.wakes()[0].0.tasks[0].status, DelegatedStatus::Completed);
     rig.core.shutdown().await;
 }

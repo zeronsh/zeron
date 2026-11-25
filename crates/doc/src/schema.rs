@@ -162,6 +162,8 @@ struct DocPartJson {
     /// The agent's own reviewer's verdict on the call (additive; Auto).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     review: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chats: Option<Vec<String>>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -219,6 +221,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             output_truncated,
             output_lines,
             review,
+            chats,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -247,6 +250,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             output_truncated: output_truncated.then_some(true),
             output_lines: *output_lines,
             review: review.as_ref().map(serde_json::to_value).transpose()?,
+            chats: (!chats.is_empty()).then(|| chats.clone()),
             ..Default::default()
         },
         MessagePart::Input {
@@ -340,6 +344,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 review: p
                     .review
                     .and_then(|value| serde_json::from_value(value).ok()),
+                chats: p.chats.unwrap_or_default(),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1700,6 +1705,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(review) = &doc_part.review {
         map.insert("review", loro_value_from_json(review))?;
     }
+    if let Some(chats) = &doc_part.chats {
+        map.insert("chats", loro_value_from_json(&serde_json::json!(chats)))?;
+    }
     Ok(())
 }
 
@@ -1880,6 +1888,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             review: obj
                 .get("review")
                 .and_then(|value| serde_json::from_value(value.clone()).ok()),
+            chats: obj
+                .get("chats")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -2242,6 +2254,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(review) = &doc_part.review {
         map.insert("review", loro_value_from_json(review))?;
+    }
+    if let Some(chats) = &doc_part.chats {
+        map.insert("chats", loro_value_from_json(&serde_json::json!(chats)))?;
     }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
@@ -3033,6 +3048,7 @@ mod tests {
             output_truncated: false,
             output_lines: None,
             review: None,
+            chats: Vec::new(),
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -3102,6 +3118,7 @@ mod tests {
             output_truncated: false,
             output_lines: None,
             review: None,
+            chats: Vec::new(),
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -3159,6 +3176,7 @@ mod tests {
             output_truncated: false,
             output_lines: None,
             review: None,
+            chats: Vec::new(),
         };
         let parts = vec![
             tool(
@@ -3721,6 +3739,7 @@ mod tests {
                 output_truncated: false,
                 output_lines: None,
                 review: None,
+                chats: Vec::new(),
             }],
             created_at: 1,
             device_id: "dev-a".into(),

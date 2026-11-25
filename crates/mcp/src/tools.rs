@@ -723,6 +723,7 @@ struct ReadChatArgs {
 #[derive(Deserialize)]
 struct SendArgs {
     chat: String,
+    #[serde(alias = "message", alias = "prompt")]
     text: String,
     mode: Option<String>,
     #[serde(default)]
@@ -920,11 +921,11 @@ impl Tools {
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => Box::pin(self.list_chats(parse(args)?)).await,
             "get_chat" => Box::pin(self.get_chat(parse(args)?)).await,
-            "create_chat" => Box::pin(self.create_chat(parse(args)?)).await,
+            "create_chat" => Box::pin(self.create_chat(parse(args)?, 0)).await,
             "create_chats" => Box::pin(self.batch(parse(args)?, true)).await,
             "send_messages" => Box::pin(self.batch(parse(args)?, false)).await,
             "read_chat" => self.read_chat(parse(args)?).await,
-            "send_message" => Box::pin(self.send_message(parse(args)?)).await,
+            "send_message" => Box::pin(self.send_message(parse(args)?, 0)).await,
             "wait_for_turn" => Box::pin(self.wait_for_turn(parse(args)?)).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
@@ -980,12 +981,12 @@ impl Tools {
             |(index, args)| async move {
                 let result = if create {
                     match serde_json::from_value(args) {
-                        Ok(args) => Box::pin(self.create_chat(args)).await,
+                        Ok(args) => Box::pin(self.create_chat(args, index)).await,
                         Err(error) => Err(error.into()),
                     }
                 } else {
                     match serde_json::from_value(args) {
-                        Ok(args) => Box::pin(self.send_message(args)).await,
+                        Ok(args) => Box::pin(self.send_message(args, index)).await,
                         Err(error) => Err(error.into()),
                     }
                 };
@@ -1201,7 +1202,8 @@ impl Tools {
         Ok(summary)
     }
 
-    async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
+    /// `index`: its place in the call.
+    async fn create_chat(&self, args: CreateChatArgs, index: usize) -> anyhow::Result<Value> {
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
         let explicit_parent = args
@@ -1243,6 +1245,7 @@ impl Tools {
         // asks nothing (the engine caps it again: rpc/agent_gate.rs).
         let mut ceiling = AccessMode::FullAccess;
         let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
+        let mut own: Option<Chat> = None;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
         {
@@ -1251,10 +1254,11 @@ impl Tools {
                 origin.parent_chat_id.is_none(),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
-            if let Some(config) = origin.config {
+            if let Some(config) = &origin.config {
                 ceiling = config.access;
                 sandbox_ceiling = config.sandbox;
             }
+            own = Some(origin);
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
@@ -1268,6 +1272,18 @@ impl Tools {
             .zeron
             .resolve_target(args.project.as_deref(), args.device.as_deref())
             .await?;
+        // Delegated with no place named, it works where its parent does, as a
+        // subagent of the agent's own would: an empty folder of its own has
+        // none of what it was asked about.
+        let inherited = own
+            .filter(|_| kind == ChatKind::Subagent && self.delegation() == Delegation::Parent)
+            .filter(|own| {
+                args.project.is_none() && !args.cloud && own.device_id == device_id && parent_chat_id.as_deref() == Some(own.id.as_str())
+            });
+        let space = match inherited.as_ref().and_then(|own| own.space_id.as_deref()) {
+            Some(id) if space.is_none() => self.zeron.spaces().await?.into_iter().find(|s| s.id == id),
+            _ => space,
+        };
         let harnesses = self.zeron.harnesses_on(Some(&device_id)).await?;
         let harness = match args.harness.as_deref() {
             // Cloud runs its own agents, with your Cloud accounts.
@@ -1392,7 +1408,8 @@ impl Tools {
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty())
-            .map(str::to_owned);
+            .map(str::to_owned)
+            .or_else(|| inherited.as_ref().and_then(|own| own.cwd.clone()));
         // A projectless chat runs in its own scratch folder on a host that
         // creates them; naming it here keeps createChat and the first run
         // in agreement.
@@ -1440,6 +1457,8 @@ impl Tools {
                 .mutate(json!({ "op": "renameChat", "chatId": chat_id, "title": title }))
                 .await?;
         }
+
+        Box::pin(self.note_handed(index, &chat_id, args.title.as_deref(), false)).await;
 
         let signed_out = harnesses
             .iter()
@@ -1497,12 +1516,10 @@ impl Tools {
             let wait = args.wait || args.mode == Some(delegation::Mode::Wait);
             let message_id = uuid::Uuid::new_v4().to_string();
             // Recorded before it's sent: a turn that ends at once is seen.
-            let task = self
-                .delegate(&chat, &message_id, wait, args.wake, args.title.as_deref())
-                .await?;
-            let delivered = self
-                .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run", message_id)
-                .await;
+            let task =
+                Box::pin(self.delegate(&chat, &message_id, wait, args.wake, args.title.as_deref())).await?;
+            let delivered =
+                Box::pin(self.deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run", message_id)).await;
             let delivered = self.sent_or_discard(task.as_ref(), delivered).await?;
             result["sent"] = delivered.receipt;
             if let Some(task) = &task {
@@ -1566,7 +1583,8 @@ impl Tools {
         }))
     }
 
-    async fn send_message(&self, args: SendArgs) -> anyhow::Result<Value> {
+    /// `index`: its place in the call.
+    async fn send_message(&self, args: SendArgs, index: usize) -> anyhow::Result<Value> {
         let text = args.text.trim();
         if text.is_empty() {
             anyhow::bail!("text is empty");
@@ -1621,6 +1639,7 @@ impl Tools {
                 .delegate(&chat, &delivered.message_id, wait, args.wake, chat.title.as_deref())
                 .await?;
         }
+        Box::pin(self.note_handed(index, &chat.id, None, true)).await;
         result["sent"] = delivered.receipt;
         if let Some(task) = &task {
             task.describe(&mut result, wait);
@@ -2140,6 +2159,8 @@ mod tests {
     #[derive(Default)]
     struct World {
         writes: Mutex<Vec<(String, Value)>>,
+        /// Which chat each request became (`NoteHanded`).
+        handed: Mutex<Vec<Value>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
         /// Adds two more chats below Beta: Beta → Gamma → Delta.
@@ -2256,6 +2277,10 @@ mod tests {
                         "mode": params["mode"], "status": "queued",
                         "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z",
                     }))
+                }
+                methods::NOTE_HANDED => {
+                    self.handed.lock().unwrap().push(params.clone());
+                    RpcReply::Value(json!({ "ok": true }))
                 }
                 methods::UPDATE_DELEGATED_TASK => {
                     self.writes.lock().unwrap().push((method.into(), params.clone()));
@@ -2832,6 +2857,66 @@ mod tests {
         assert_eq!(registered["messageId"], sent["command"]["messageId"]);
     }
 
+    /// With no place named, a delegate works where its parent does; a place,
+    /// another device, or another kind of chat is its own.
+    #[tokio::test]
+    async fn a_delegate_works_in_its_parents_folder_unless_told_where() {
+        let world = Arc::new(World {
+            extra_chats: vec![json!({
+                "id": "chat-tree-7", "deviceId": "dev-local", "title": "Tree", "archived": false,
+                "spaceId": "space-1", "cwd": "/repo/comet-worktree", "createdAt": "2026-09-01T00:00:00Z",
+                "config": { "harness": "claude-code", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+            })],
+            ..Default::default()
+        });
+        let tools = parent_tools(&world, "chat-tree-7");
+        let made = |args: Value| {
+            let (tools, world) = (&tools, world.clone());
+            async move {
+                tools.call("create_chat", args).await.unwrap();
+                let writes = world.writes.lock().unwrap();
+                writes
+                    .iter()
+                    .rev()
+                    .find(|(m, p)| m == methods::MUTATE && p["op"] == "createChat")
+                    .unwrap()
+                    .1
+                    .clone()
+            }
+        };
+        let here = made(json!({ "title": "x" })).await;
+        assert_eq!((here["spaceId"].as_str(), here["cwd"].as_str()), (Some("space-1"), Some("/repo/comet-worktree")));
+        let elsewhere = made(json!({ "title": "x", "cwd": "/tmp/y" })).await;
+        assert_eq!(elsewhere["cwd"], "/tmp/y");
+        let remote = made(json!({ "title": "x", "device": "dev-remote", "harness": "codex" })).await;
+        assert!(remote.get("spaceId").is_none() && remote["cwd"] != "/repo/comet-worktree", "{remote}");
+        let alone = made(json!({ "title": "x", "kind": "chat" })).await;
+        assert!(alone.get("spaceId").is_none(), "{alone}");
+    }
+
+    /// Each request says which chat it became, at its place in the call.
+    #[tokio::test]
+    async fn a_batch_says_which_chat_each_request_became() {
+        let world = Arc::new(World::default());
+        let tools = parent_tools(&world, "chat-alpha-1");
+        let made = tools
+            .call("create_chats", json!({ "requests": [{ "title": "A" }, { "title": "B", "model": "nope" }, { "title": "C" }] }))
+            .await
+            .unwrap();
+        let mut noted: Vec<(u64, Value, Value)> = world
+            .handed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| (p["index"].as_u64().unwrap(), p["title"].clone(), p["handedChatId"].clone()))
+            .collect();
+        noted.sort_by_key(|(index, ..)| *index);
+        assert_eq!(noted.len(), 2, "the one refused became nothing");
+        assert_eq!((noted[0].0, &noted[0].1), (0, &json!("A")));
+        assert_eq!((noted[1].0, &noted[1].1), (2, &json!("C")));
+        assert_eq!(noted[1].2, made["results"][2]["result"]["chatId"]);
+    }
+
     #[tokio::test]
     async fn only_a_subagent_with_a_prompt_is_a_task_and_only_where_its_on() {
         let world = Arc::new(World::default());
@@ -2886,8 +2971,7 @@ mod tests {
             !methods_written(&world).contains(&methods::REGISTER_DELEGATED_TASK.to_owned()),
             "another chat's turn wakes nobody here"
         );
-        // Reading is open to all; its own child needs no flag, nor does a
-        // child's own parent.
+        // Reading is open to all; its own child needs no flag.
         parent.call("get_chat", json!({ "chat": "Other" })).await.unwrap();
         parent.call("send_message", json!({ "chat": "Beta", "text": "more" })).await.unwrap();
         let child = tools(
@@ -2898,7 +2982,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        child.call("send_message", json!({ "chat": "Alpha", "text": "stuck" })).await.unwrap();
+        // A child's result reaches its parent by itself: it's told so, and
+        // messages it only when it says it must.
+        let told = child.call("send_message", json!({ "chat": "Alpha", "text": "done: 3" })).await.unwrap_err();
+        assert!(told.contains("final reply goes back"), "{told}");
+        child
+            .call("send_message", json!({ "chat": "Alpha", "text": "stuck", "peer": true }))
+            .await
+            .unwrap();
         child.call("send_message", json!({ "chat": "Other", "text": "hi" })).await.unwrap_err();
     }
 

@@ -503,8 +503,7 @@
       "empty_projects": "{n, plural, other {# 个空项目}}",
       "activity": "动态",
       "working": "进行中",
-      "asleep": "已休眠",
-      "waiting": "等待中"
+      "asleep": "已休眠"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -770,7 +769,14 @@
         "question": "{n, plural, other {# 个子代理有问题}}",
         "open": "{n, plural, other {# 个仍在运行}}",
         "stopped": "已停止",
-        "open_chat": "打开 {title}"
+        "open_chat": "打开 {title}",
+        "delegating": "{n, plural, other {正在委派给 # 个子代理}}",
+        "delegated": "{n, plural, other {已委派给 # 个子代理}}",
+        "starting": "{n, plural, other {正在启动 # 个对话}}",
+        "started": "{n, plural, other {已启动 # 个对话}}",
+        "messaging": "{n, plural, other {正在向 # 个对话发送消息}}",
+        "messaged": "{n, plural, other {已向 # 个对话发送消息}}",
+        "untitled": "子代理"
       }
     },
     "user_message": {
@@ -3327,12 +3333,10 @@
       "unreachable": "已中断——无法连接到{host}"
     },
     "delegates": {
-      "asks": "{title} 请求运行",
-      "asks_approval": "{title} 请求批准",
       "allow": "允许一次",
       "deny": "拒绝",
       "open": "打开其对话",
-      "failed": "无法回复 {title}",
+      "failed": "无法回复该子代理",
       "stop_failed": "无法停止该子代理"
     }
   },

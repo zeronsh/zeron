@@ -575,6 +575,10 @@ pub enum SessionStatus {
 pub struct NativeTurnOutcome {
     pub status: crate::DoneStatus,
     pub finished_at: DateTime<Utc>,
+    /// Interrupted by its engine's own stop, which its next start picks back
+    /// up: the turn isn't over, whoever waits for it. Missing on older peers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumes: bool,
 }
 
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.

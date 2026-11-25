@@ -1403,6 +1403,21 @@ pub enum AgentEvent {
         parent_tool_use_id: String,
         event: Box<AgentEvent>,
     },
+    /// One request of the Zeron call now running (`create_chats`,
+    /// `send_message`, …) is chat `chat_id`: Zeron's own MCP server says so
+    /// as it goes, whatever the harness does with the call's result.
+    #[serde(rename_all = "camelCase")]
+    Handed {
+        /// The request's place in the call.
+        index: usize,
+        chat_id: String,
+        /// The title it was created with; none for a message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// A message to a chat already there.
+        #[serde(default)]
+        message: bool,
+    },
 }
 
 #[cfg(test)]

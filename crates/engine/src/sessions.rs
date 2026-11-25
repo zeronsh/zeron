@@ -374,6 +374,10 @@ struct Inner {
     /// outcome its turn would have marked, and when it ended. A turn starting
     /// supersedes one; the last result reaching nobody releases it.
     held_ends: Mutex<HashMap<String, HeldEnd>>,
+    /// Chats whose turn this engine's stop cut off (or the last one's did)
+    /// and a start picks back up: their rows' outcome says so
+    /// ([`zeron_proto::NativeTurnOutcome::resumes`]).
+    resuming: Mutex<std::collections::HashSet<String>>,
     /// What each chat's own runtime waits on ([`ParkedWait`]), which its row
     /// shows together with what it delegated.
     runtime_waits: Mutex<HashMap<String, zeron_proto::SessionWaiting>>,
@@ -572,6 +576,7 @@ impl SessionsEngine {
                 delegations: OnceLock::new(),
                 async_delegation: OnceLock::new(),
                 held_ends: Mutex::new(HashMap::new()),
+                resuming: Mutex::default(),
                 runtime_waits: Mutex::new(HashMap::new()),
             }),
         }
@@ -599,6 +604,13 @@ impl SessionsEngine {
             .get()
             .expect("the setting is set as the engine is assembled")
             .clone()
+    }
+
+    /// Which chat a request of the Zeron call its agent makes became
+    /// ([`AgentEvent::Handed`]), for the call's row to open. False with no
+    /// turn to show it in.
+    pub(crate) fn note_handed(&self, chat_id: &str, handed: AgentEvent) -> bool {
+        self.turn_in_flight(chat_id) && self.inject_event(chat_id, handed)
     }
 
     /// What `chat_id` delegated changed: its row shows what it waits on, and
@@ -2600,6 +2612,9 @@ impl SessionsEngine {
                     handle.note_turn_failure(&last.id, &note)?;
                 }
             }
+            if pickup == Pickup::Resume {
+                lock(&self.inner.resuming).insert(chat_id.clone());
+            }
             self.inner.set_status_with_completion(
                 &chat_id,
                 SessionStatus::Idle,
@@ -2690,6 +2705,16 @@ impl SessionsEngine {
                         );
                         if let Err(err) = handle.note_turn_failure(&user_id, &note) {
                             tracing::warn!(chat = %chat_id, error = %err, "noting a failed resume failed");
+                        }
+                        // It's over after all.
+                        if lock(&sessions.inner.resuming).remove(&chat_id) {
+                            sessions.inner.set_status_with_completion(
+                                &chat_id,
+                                SessionStatus::Idle,
+                                false,
+                                None,
+                                Some(DoneStatus::Interrupted),
+                            );
                         }
                     }
                 }
@@ -3219,6 +3244,13 @@ impl Inner {
         // (whatever harness ran it): the mark it would leave is held back.
         // (Looked up first: what changes meanwhile refreshes the row.)
         let delegated = self.delegated_waits(chat_id);
+        let resumes = {
+            let mut resuming = lock(&self.resuming);
+            if status == SessionStatus::Working {
+                resuming.remove(chat_id);
+            }
+            resuming.contains(chat_id)
+        };
         let (mut completed_turn, mut outcome) = (completed_turn, outcome);
         if status == SessionStatus::Idle && delegated.is_some() {
             let mut held = lock(&self.held_ends);
@@ -3284,11 +3316,13 @@ impl Inner {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
                     finished_at: now,
+                    resumes: resumes && outcome == DoneStatus::Interrupted,
                 });
             } else if status == SessionStatus::Errored {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: DoneStatus::Errored,
                     finished_at: now,
+                    resumes: false,
                 });
             } else if status == SessionStatus::Working && (fresh_start || !was_active) {
                 entry.last_turn_outcome = None;
@@ -3960,6 +3994,7 @@ impl Inner {
             });
         if cut {
             self.journal.note_shutdown_interrupt(chat_id, now_ms());
+            lock(&self.resuming).insert(chat_id.to_owned());
         }
         cut
     }
@@ -4841,6 +4876,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 output_truncated,
                 output_lines,
                 review,
+                chats,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -4870,6 +4906,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                     reason: r.reason.as_deref().map(|why| cap_review_text(why, 600)),
                     ..r.clone()
                 }),
+                chats: chats.clone(),
             },
             other => other.clone(),
         })

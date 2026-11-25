@@ -1207,6 +1207,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
                     output_truncated: false,
                     output_lines: None,
                     review: None,
+                    chats: Vec::new(),
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),

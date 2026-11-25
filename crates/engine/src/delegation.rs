@@ -39,6 +39,8 @@ const KEEP_SETTLED: chrono::Duration = chrono::Duration::days(3);
 const KEEP_PER_PARENT: usize = 100;
 /// A Cloud machine stays up for a child heard from this recently.
 const HOLDS_MACHINE: chrono::Duration = chrono::Duration::minutes(30);
+/// Between looks for what a child asks, while its transcript is behind.
+const QUESTION_RETRY: Duration = Duration::from_millis(500);
 /// A wake that can't be sent is given up on after this many tries.
 const MAX_WAKE_TRIES: u32 = 8;
 
@@ -488,7 +490,10 @@ fn evidence(task: &DelegatedTask, row: Option<&Session>, now: DateTime<Utc>) -> 
             if row.last_completed_turn.is_some() && row.last_completed_turn != task.baseline.last_completed_turn {
                 return Some(DelegatedStatus::Completed);
             }
-            match outcome?.status {
+            let outcome = outcome?;
+            match outcome.status {
+                // Its engine stopped, and its next start goes on with it.
+                DoneStatus::Interrupted if outcome.resumes => None,
                 DoneStatus::Interrupted => Some(DelegatedStatus::Cancelled),
                 DoneStatus::Errored => Some(DelegatedStatus::Failed),
                 // (A turn whose completion goes on into the next one.)
@@ -580,6 +585,7 @@ impl Supervisor {
     /// that's sooner than a tick.
     async fn look(&self, sessions: &[Session], chats: &[Chat]) -> Option<Duration> {
         let now = Utc::now();
+        let mut next: Option<Duration> = None;
         for parent in self.tasks.parents() {
             let archived = chats.iter().find(|c| c.id == parent).is_some_and(|c| c.archived);
             if archived || self.workspace.chat_deleted(&parent) {
@@ -626,11 +632,10 @@ impl Supervisor {
                     lock(&self.tasks.inner.asked).remove(&task.task_id);
                 }
             }
-            if status == DelegatedStatus::AwaitingInput {
-                self.note_question(&task);
+            if status == DelegatedStatus::AwaitingInput && !self.note_question(&task) {
+                next = Some(QUESTION_RETRY);
             }
         }
-        let mut next: Option<Duration> = None;
         for parent in self.tasks.parents() {
             if let Some(due) = self.wake(&parent) {
                 next = Some(next.map_or(due, |n| n.min(due)));
@@ -716,16 +721,17 @@ impl Supervisor {
 
     /// A child asks something: noted for its parent when it's the kind an
     /// agent may answer. An approval is the person's, always: it shows on the
-    /// parent's chat instead.
-    fn note_question(&self, task: &DelegatedTask) {
+    /// parent's chat instead. False while its transcript doesn't say yet (it
+    /// syncs apart from its row).
+    fn note_question(&self, task: &DelegatedTask) -> bool {
         let Some((request_id, questions)) = open_question(&self.doc_host, &task.child_chat_id) else {
-            return;
+            return false;
         };
         if zeron_proto::is_approval(&questions) {
-            return;
+            return true;
         }
         if task.input.as_ref().is_some_and(|input| input.request_id == request_id) {
-            return;
+            return true;
         }
         lock(&self.tasks.inner.asked).insert(task.task_id.clone(), tokio::time::Instant::now());
         self.tasks.update_task(&task.task_id, |task| {
@@ -734,6 +740,7 @@ impl Supervisor {
                 message_id: None,
             });
         });
+        true
     }
 
     /// Send `parent` what it hasn't been told, if it can be told now. Returns
@@ -1192,14 +1199,20 @@ mod tests {
         idle.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
             status: DoneStatus::Interrupted,
             finished_at: now,
+            resumes: false,
         });
         assert_eq!(evidence(&task, Some(&idle), now), Some(DelegatedStatus::Cancelled));
+        // (Not one its engine's own stop cut off: that goes on.)
+        idle.last_turn_outcome.as_mut().unwrap().resumes = true;
+        assert_eq!(evidence(&task, Some(&idle), now), None);
+        idle.last_turn_outcome.as_mut().unwrap().resumes = false;
         task.baseline.last_outcome_at = Some(now);
         assert_eq!(evidence(&task, Some(&idle), now), None);
         let mut errored = row(SessionStatus::Errored);
         errored.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
             status: DoneStatus::Errored,
             finished_at: now + chrono::Duration::seconds(1),
+            resumes: false,
         });
         assert_eq!(evidence(&task, Some(&errored), now), Some(DelegatedStatus::Failed));
     }

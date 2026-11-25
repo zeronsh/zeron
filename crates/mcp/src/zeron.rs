@@ -742,9 +742,11 @@ impl Zeron {
                         last = Some(session);
                     }
                     SessionStatus::Idle => {
+                        // (Cut off by its engine's own stop, the turn goes on
+                        // once that starts again.)
                         if session
                             .last_turn_outcome
-                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
+                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted && !o.resumes)
                             && (!expect_turn
                                 || saw_working
                                 || advanced

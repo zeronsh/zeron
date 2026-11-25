@@ -503,8 +503,7 @@
       "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
       "activity": "Activity",
       "working": "Working",
-      "asleep": "Asleep",
-      "waiting": "Waiting"
+      "asleep": "Asleep"
     },
     "git": {
       "pull_request": "Pull request",
@@ -770,7 +769,14 @@
         "question": "{n, plural, one {A subagent asks} other {# subagents ask}}",
         "open": "{n, plural, one {# still running} other {# still running}}",
         "stopped": "Stopped",
-        "open_chat": "Open {title}"
+        "open_chat": "Open {title}",
+        "delegating": "{n, plural, one {Delegating to a subagent} other {Delegating to # subagents}}",
+        "delegated": "{n, plural, one {Delegated to a subagent} other {Delegated to # subagents}}",
+        "starting": "{n, plural, one {Starting a chat} other {Starting # chats}}",
+        "started": "{n, plural, one {Started a chat} other {Started # chats}}",
+        "messaging": "{n, plural, one {Messaging a chat} other {Messaging # chats}}",
+        "messaged": "{n, plural, one {Messaged a chat} other {Messaged # chats}}",
+        "untitled": "Subagent"
       }
     },
     "user_message": {
@@ -3327,12 +3333,10 @@
       "unreachable": "Interrupted — can't reach {host}"
     },
     "delegates": {
-      "asks": "{title} asks to run",
-      "asks_approval": "{title} asks for approval",
       "allow": "Allow once",
       "deny": "Deny",
       "open": "Open its chat",
-      "failed": "Couldn't answer {title}",
+      "failed": "Couldn't answer that subagent",
       "stop_failed": "Couldn't stop that subagent"
     }
   },

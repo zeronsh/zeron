@@ -83,11 +83,13 @@ pub(super) fn inherited_access(ceiling: AccessMode, modes: &[AccessMode]) -> Acc
         .unwrap_or(ceiling)
 }
 
-const CREATE_CHAT: &str = "Delegate work to a child of your chat (kind subagent, the default): any connected provider (see list_harnesses), whichever you run on, on this device or another of the person's. Put the whole task in `prompt`. It runs in the background: this returns a taskId at once, you carry on or end your turn, your chat then reads as waiting, and Zeron wakes you with the result. Don't wait or poll. `mode: \"wait\"` blocks instead: only for something short you can't go on without. For several at once use create_chats. Delegation is one level deep: a chat that has a parent cannot create chats. kind side is a side conversation for the person; kind chat is a standalone session with no parent, on any device: only when the person asks for one, or the work has to live outside this chat. With cloud, the chat runs on a Cloud machine of its own (any built-in agent), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host.";
+const CREATE_CHAT: &str = "Delegate work to a child of your chat (kind subagent, the default): any connected provider (see list_harnesses), whichever you run on, on this device or another of the person's. Put the whole task in `prompt`. It runs in the background: this returns a taskId at once, you carry on or end your turn, your chat then reads as waiting, and Zeron wakes you with the result. Don't wait or poll. `mode: \"wait\"` blocks instead: only for something short you can't go on without. For several at once use create_chats. Delegation is one level deep: a chat that has a parent cannot create chats. kind side is a side conversation for the person; kind chat is a standalone session with no parent, on any device: only when the person asks for one, or the work has to live outside this chat. With cloud, the chat runs on a Cloud machine of its own (any built-in agent), from a Cloud chat or a project with a GitHub repository. Without a project, device or cwd it works in your own folder; name a project and/or device to put it elsewhere (catalogs are validated on that host).";
 const CREATE_CHATS: &str = "Delegate to several children at once (create_chat's arguments per request, each with its prompt). All run together in the background and wake you as they settle (`wake: \"all\"` on each: once, when every one has). End your turn when you have nothing else to do. Results preserve request order and include per-request errors; successful requests are not rolled back.";
 const SEND_MESSAGE: &str = "Send one of your child chats more work or a correction. Messages are attributed to your chat. A child that's idle starts a turn, one that's working reads it at its next step, and either way its result wakes you (mode async, the default: returns at once). mode 'wait' blocks for the reply instead; 'queue' holds it until the child's turn ends. Any other chat needs peer: true.";
 const SEND_MESSAGES: &str = "Send messages to several of your child chats at once (send_message's arguments per request). Results preserve request order and include per-request errors; successful sends are not rolled back. Do not include dependent messages to the same chat.";
 const WAIT_FOR_TURN: &str = "Block until a chat's turn settles: completed, awaitingInput, interrupted, errored, or timedOut. Your children's results come to you without it: end your turn and you're woken. Use it only when the person asked you to wait, or for a chat that isn't your child. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion.";
+
+const WAIT_ON_BACKGROUND: &str = "Say that you'll wait on background commands your own tools started (a test run, a build), so this chat reads as waiting after your turn ends, until they end and you're woken. Pass the ids your tools gave them. Never for a dev server or a file watcher. Not for chats you delegated to: their tasks are waited on already, and their task ids aren't taken here. `waiting: false` takes a mark back.";
 
 /// The catalog as an agent of `delegation` is offered it.
 pub(super) fn adapt(tools: &mut Vec<ToolDef>, delegation: Delegation) {
@@ -96,7 +98,7 @@ pub(super) fn adapt(tools: &mut Vec<ToolDef>, delegation: Delegation) {
     }
     let parent = delegation == Delegation::Parent;
     let wake = json!({ "type": "string", "enum": ["each", "all"], "default": "each", "description": "When the result wakes you: each as it settles (with whatever else settled by then), or once all the tasks this turn started have." });
-    let peer = json!({ "type": "boolean", "default": false, "description": "For a chat that isn't your child (nor your parent): set only when the person asked for this, when you're answering a message that chat sent you, or when there is no other way." });
+    let peer = json!({ "type": "boolean", "default": false, "description": "For a chat that isn't your child: set only when the person asked for this, when you're answering a message that chat sent you, or when there is no other way." });
     for tool in tools.iter_mut() {
         let properties = match tool.name {
             "create_chats" | "send_messages" => &mut tool.input_schema["properties"]["requests"]["items"]["properties"],
@@ -124,6 +126,7 @@ pub(super) fn adapt(tools: &mut Vec<ToolDef>, delegation: Delegation) {
             }
             "interrupt_chat" | "respond_to_input" | "archive_chat" => properties["peer"] = peer.clone(),
             "wait_for_turn" if parent => tool.description = WAIT_FOR_TURN,
+            super::WAIT_ON_BACKGROUND if parent => tool.description = WAIT_ON_BACKGROUND,
             _ => {}
         }
     }
@@ -158,7 +161,7 @@ impl Tools {
             && chat.child_kind == Some(ChildKind::Subagent)
     }
 
-    /// An agent works with its children (and answers its parent). Another
+    /// An agent works with its children. Another
     /// chat is somebody else's to run: only when it says why it must.
     pub(super) async fn ensure_within_reach(&self, chat: &Chat, peer: bool) -> anyhow::Result<()> {
         if peer || self.delegation() == Delegation::Off {
@@ -170,15 +173,20 @@ impl Tools {
         if chat.id == origin || chat.parent_chat_id.as_deref() == Some(origin) {
             return Ok(());
         }
-        if self
-            .zeron
-            .resolve_chat(origin)
-            .await
-            .ok()
-            .and_then(|own| own.parent_chat_id)
-            .is_some_and(|parent| parent == chat.id)
+        // What a child came to reaches its parent by itself; a message says
+        // it again, in the middle of whatever the parent is doing.
+        if self.delegation() == Delegation::Child
+            && self
+                .zeron
+                .resolve_chat(origin)
+                .await
+                .ok()
+                .and_then(|own| own.parent_chat_id)
+                .is_some_and(|parent| parent == chat.id)
         {
-            return Ok(());
+            anyhow::bail!(
+                "That chat delegated this work to you, and your final reply goes back to it by itself: put your result there and end your turn. Set peer: true only if it must hear something before you can finish."
+            );
         }
         anyhow::bail!(
             "{} isn't your child chat. Work with the chats you created (create_chat starts one). Set peer: true only if the person asked you to act on it, you're answering a message it sent you, or there is no other way.",
@@ -215,6 +223,26 @@ impl Tools {
                 .await?,
         )?;
         Ok(Some(Started { task_id: task.task_id }))
+    }
+
+    /// Which chat request `index` of this call became, for the row of it in
+    /// the caller's transcript. Never the call's failure: an engine from
+    /// before this doesn't know the method, and the row just says less.
+    pub(super) async fn note_handed(&self, index: usize, chat: &str, title: Option<&str>, message: bool) {
+        let Some(origin) = self.origin_chat() else { return };
+        if let Err(error) = self
+            .zeron
+            .call(
+                methods::NOTE_HANDED,
+                json!({
+                    "chatId": origin, "index": index, "handedChatId": chat,
+                    "title": title.map(str::trim).filter(|t| !t.is_empty()), "message": message,
+                }),
+            )
+            .await
+        {
+            tracing::debug!(%error, "the engine wasn't told which chat a call made");
+        }
     }
 
     async fn update_task(&self, task_id: &str, action: &str, status: Option<DelegatedStatus>) -> anyhow::Result<bool> {

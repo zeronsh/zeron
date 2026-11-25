@@ -139,9 +139,32 @@ local CHILD = "chat:"
 -- subagent's or a side chat's, made through Zeron's tools) are among them,
 -- listed as a subagent is; those the person started aren't. A child chat's
 -- says what it runs on and, when that's another device than the chat's own,
--- where; what it asks the person (`asks`, as `chat.asks` says
--- it); and can be stopped.
+-- where; what it asks the person, answered on its row; and can be stopped.
 local asks = ui.shared("chat.asks", {} :: { [string]: string })
+local ask_details = ui.shared("chat.ask_details", {} :: { [string]: any })
+-- What a child asks, as its row shows it: an approval, what it would do, to
+-- allow or not; a question, its words (the parent answers those it can;
+-- whoever does, it's answered in the child's chat).
+local function ask_of(child: string): any
+	local kind = asks:get()[child]
+	local ask = ask_details:get()[child]
+	if not kind or not ask then
+		return nil
+	end
+	local open = { id = "open", label = locale.s("chat.delegates.open") }
+	if ask.kind == "approval" then
+		return {
+			code = ask.command,
+			words = if ask.command then nil else ask.detail,
+			answers = {
+				{ id = "once", label = locale.s("chat.delegates.allow") },
+				{ id = "deny", label = locale.s("chat.delegates.deny") },
+				open,
+			},
+		}
+	end
+	return { words = ask.detail, answers = { open } }
+end
 local function device_name(id: string): string?
 	for _, d in sessions.now:get().devices or {} do
 		if d.id == id then
@@ -197,6 +220,7 @@ function M.tasks(session: string?): { any }
 				task.stops = true
 				if st == "input" then
 					task.state = if asks:get()[c.id] == "approval" then "approval" else "input"
+					task.ask = ask_of(c.id)
 				elseif st == "waiting" then
 					task.state = "waiting"
 				end
@@ -238,6 +262,18 @@ end
 -- The child chat a tray row stands for, nil for a subagent of its own.
 function M.child_of(ref: string): string?
 	return if string.sub(ref, 1, #CHILD) == CHILD then string.sub(ref, #CHILD + 1) else nil
+end
+
+-- An answer picked on a child's row ("once", "deny"; "open" its chat).
+-- `failed`: it didn't reach it.
+function M.answer_task(session: string, ref: string, answer: string, failed: () -> ())
+	local child = M.child_of(ref)
+	if answer == "open" then
+		M.open_task(session, ref)
+	elseif child then
+		local ask = ask_details:peek()[child]
+		store.respond_child(child, if ask then ask.request else "", answer):after(function() end, failed)
+	end
 end
 
 -- A lane's chat, as the host watches it in `slot`.

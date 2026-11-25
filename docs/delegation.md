@@ -35,6 +35,12 @@ with backoff, two minutes for another device); unread in time, the wake says so 
 
 A later message to the same child supersedes its open task.
 
+A turn cut off by its own engine stopping isn't over: its row's outcome says `resumes`, and the next start picks it up.
+
+With no project, device or folder named, a child works in its parent's folder. The message a parent sends a child tells
+it that its final reply goes back by itself; messaging the parent to report is refused unless the child says it must
+(`peer: true`).
+
 ## Waiting, and the end held back
 
 `Inner::set_status_with_completion` is where every turn's end is published. While the chat has a task whose result it
@@ -57,11 +63,22 @@ them can end their block or pass for another chat's message.
 A result a tool call already returned (`mode: "wait"`, `wait_for_turn`) is acknowledged and not sent again. A blocking
 call that times out goes on in the background.
 
+## In the transcript
+
+The call that hands work over is a row of chips, one per chat: how each stands now (it follows the chat), its agent and
+title; a click opens it. Which chat each request became is said by Zeron's MCP server as the call goes
+(`NoteHanded` → `AgentEvent::Handed`), since harnesses drop MCP results before the engine sees them. The transcript keeps
+titles, agents, recipients and chat ids of these calls, never the prompt or message (`delegation::badge`).
+
+A parent waiting is under way: it stays on the sidebar's Working shelf, its row as it was, with Waiting's glyph. What it
+waits on, and for how long, is on its hover card.
+
 ## Questions and approvals
 
 A child's question wakes a waiting parent after 5 s, with its request id for `respond_to_input`; answered or dismissed
-first, the wake is dropped. An approval is never an agent's to give here: it shows over the parent's composer (Allow
-once, Deny, Open) and on the parent's row.
+first, the wake is dropped. An approval is never an agent's to give here. Both show on the child's row in the
+parent's Subagents tray (an approval with Allow once and Deny), whose tab and pill wear the ask, and on the parent's own
+row in the sidebar. Nothing opens itself.
 
 ## Stop
 
@@ -71,7 +88,7 @@ reads stopped, not finished. Each child also has its own Stop in the Subagents t
 
 ## Reaching other chats
 
-With it on, an agent acts on its own children (and answers its parent). `send_message`, `interrupt_chat`,
+With it on, an agent acts on its own children. `send_message`, `interrupt_chat`,
 `respond_to_input` and `archive_chat` on any other chat need `peer: true`, for when the person asked, it's answering a
 message that chat sent, or there is no other way. Standalone chats (`kind: "chat"`, on any device) are still there for
 the same cases. Reading chats is open.

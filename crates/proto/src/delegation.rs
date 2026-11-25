@@ -236,24 +236,166 @@ pub fn quoted_result(text: &str) -> String {
         .replace("<result", "<\\result")
 }
 
+// ---- what a call starts -------------------------------------------------------
+
+/// One chat a Zeron call starts (or messages), as its arguments say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegating {
+    /// What it's called: its title, else its prompt's first line.
+    pub title: Option<String>,
+    /// The agent asked for, when one was.
+    pub harness: Option<String>,
+    /// The chat messaged, as the call named it ([`DelegatingKind::Message`]).
+    pub chat: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegatingKind {
+    /// Subagents started.
+    Subagents,
+    /// A side chat or a standalone chat, or several kinds at once.
+    Chats,
+    /// Messages to chats already there.
+    Message,
+}
+
+/// The Zeron tool `call` is, and its arguments.
+fn zeron_tool(call: &crate::ToolCall) -> Option<(&str, Option<&serde_json::Value>)> {
+    match call {
+        crate::ToolCall::Mcp { server, tool, input } if server == "zeron" => Some((tool, input.as_ref())),
+        // (Drivers that don't split an MCP tool's name.)
+        crate::ToolCall::Unknown { name, input } => ["mcp__zeron__", "zeron__", "zeron.", "zeron/"]
+            .iter()
+            .find_map(|prefix| name.strip_prefix(prefix))
+            .map(|tool| (tool, input.as_ref())),
+        _ => None,
+    }
+}
+
+/// What a `create_chat(s)` or `send_message(s)` call starts. `None` for any
+/// other call, and until its arguments have come.
+pub fn delegating(call: &crate::ToolCall) -> Option<(DelegatingKind, Vec<Delegating>)> {
+    let (tool, input) = zeron_tool(call)?;
+    let input = input?;
+    let requests: Vec<&serde_json::Value> = match tool {
+        "create_chat" | "send_message" => vec![input],
+        "create_chats" | "send_messages" => input.get("requests")?.as_array()?.iter().collect(),
+        _ => return None,
+    };
+    let text = |args: &serde_json::Value, key: &str| {
+        args.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    if requests.is_empty() {
+        return None;
+    }
+    let kind = if tool.starts_with("send") {
+        // (Named before its text: an empty recipient is arguments still coming.)
+        if requests.iter().any(|args| text(args, "chat").is_none()) {
+            return None;
+        }
+        DelegatingKind::Message
+    } else if requests
+        .iter()
+        .all(|args| text(args, "kind").is_none_or(|kind| kind == "subagent"))
+    {
+        DelegatingKind::Subagents
+    } else {
+        DelegatingKind::Chats
+    };
+    let started = requests
+        .into_iter()
+        .map(|args| Delegating {
+            title: text(args, "title").or_else(|| {
+                let prompt = text(args, "prompt")?;
+                let line: String = prompt.lines().next().unwrap_or_default().chars().take(60).collect();
+                Some(line.trim().to_owned()).filter(|l| !l.is_empty())
+            }),
+            harness: text(args, "harness"),
+            chat: text(args, "chat"),
+        })
+        .collect();
+    Some((kind, started))
+}
+
+/// The slice of a [`delegating`] call's arguments a transcript keeps: whom it
+/// starts or messages, never what it tells them. `None` for any other call.
+pub fn badge(call: &crate::ToolCall) -> Option<serde_json::Value> {
+    const KEPT: [&str; 4] = ["title", "harness", "kind", "chat"];
+    delegating(call)?;
+    let (tool, input) = zeron_tool(call)?;
+    let keep = |args: &serde_json::Value| {
+        let kept: serde_json::Map<String, serde_json::Value> = KEPT
+            .iter()
+            .filter_map(|key| {
+                let value: String = args.get(key)?.as_str()?.trim().chars().take(120).collect();
+                (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect();
+        serde_json::Value::Object(kept)
+    };
+    let input = input?;
+    Some(if tool.ends_with('s') {
+        serde_json::json!({ "requests": input.get("requests")?.as_array()?.iter().map(keep).collect::<Vec<_>>() })
+    } else {
+        keep(input)
+    })
+}
+
+/// The chats a [`delegating`] call's result names: one per request, in order,
+/// empty where one failed. However the harness wraps an MCP result (its JSON,
+/// or its content blocks).
+pub fn result_chats(output: &str) -> Vec<String> {
+    fn walk(value: &serde_json::Value, depth: u8) -> Option<Vec<String>> {
+        let id = |v: &serde_json::Value| v.get("chatId").and_then(serde_json::Value::as_str).map(str::to_owned);
+        if depth == 0 {
+            return None;
+        }
+        if let Some(text) = value.as_str() {
+            return walk(&serde_json::from_str(text).ok()?, depth - 1);
+        }
+        if let Some(results) = value.get("results").and_then(serde_json::Value::as_array) {
+            return Some(
+                results
+                    .iter()
+                    .map(|one| one.get("result").and_then(id).unwrap_or_default())
+                    .collect(),
+            );
+        }
+        if let Some(chat) = id(value) {
+            return Some(vec![chat]);
+        }
+        if let Some(list) = value.as_array() {
+            return list.iter().find_map(|one| walk(one, depth - 1));
+        }
+        ["structuredContent", "structured_content", "content", "text", "result", "Ok", "output"]
+            .iter()
+            .find_map(|key| walk(value.get(key)?, depth - 1))
+    }
+    let trimmed = output.trim();
+    let parsed = serde_json::from_str(trimmed).or_else(|error| {
+        // (A harness may lead or trail the JSON with words of its own.)
+        match (trimmed.find('{'), trimmed.rfind('}')) {
+            (Some(from), Some(to)) if from < to => serde_json::from_str(&trimmed[from..=to]),
+            _ => Err(error),
+        }
+    });
+    parsed
+        .ok()
+        .and_then(|value| walk(&value, 6))
+        .unwrap_or_default()
+}
+
 // ---- blocking waits ---------------------------------------------------------
 
 /// Whether `call` is one of Zeron's tools blocking its turn on another chat:
 /// `wait_for_turn`, or a create or send asked to wait.
 pub fn is_blocking_wait(call: &crate::ToolCall) -> bool {
-    let (tool, input) = match call {
-        crate::ToolCall::Mcp { server, tool, input } if server == "zeron" => (tool.as_str(), input),
-        // (Drivers that don't split an MCP tool's name.)
-        crate::ToolCall::Unknown { name, input } => {
-            let Some(tool) = ["mcp__zeron__", "zeron__", "zeron.", "zeron/"]
-                .iter()
-                .find_map(|prefix| name.strip_prefix(prefix))
-            else {
-                return false;
-            };
-            (tool, input)
-        }
-        _ => return false,
+    let Some((tool, input)) = zeron_tool(call) else {
+        return false;
     };
     let waits = |args: &serde_json::Value| {
         args.get("mode").and_then(serde_json::Value::as_str) == Some("wait")
@@ -261,9 +403,8 @@ pub fn is_blocking_wait(call: &crate::ToolCall) -> bool {
     };
     match tool {
         "wait_for_turn" => true,
-        "create_chat" | "send_message" => input.as_ref().is_some_and(waits),
+        "create_chat" | "send_message" => input.is_some_and(waits),
         "create_chats" | "send_messages" => input
-            .as_ref()
             .and_then(|input| input.get("requests")?.as_array())
             .is_some_and(|requests| requests.iter().any(waits)),
         _ => false,
@@ -329,6 +470,48 @@ mod tests {
             input: None,
         }));
         assert!(!is_blocking_wait(&crate::ToolCall::Exec { command: "wait".into() }));
+    }
+
+    #[test]
+    fn a_call_says_what_it_starts_and_its_result_which_chats() {
+        let mcp = |tool: &str, input| crate::ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: Some(input),
+        };
+        let (kind, started) = delegating(&mcp(
+            "create_chats",
+            serde_json::json!({ "requests": [
+                { "title": "Audit", "harness": "codex", "prompt": "Audit it" },
+                { "prompt": "Draft the notes\nfor 1.2" },
+            ] }),
+        ))
+        .unwrap();
+        assert_eq!(kind, DelegatingKind::Subagents);
+        assert_eq!(started[0].title.as_deref(), Some("Audit"));
+        assert_eq!(started[0].harness.as_deref(), Some("codex"));
+        assert_eq!(started[1].title.as_deref(), Some("Draft the notes"));
+        let (kind, _) = delegating(&mcp("create_chat", serde_json::json!({ "kind": "chat" }))).unwrap();
+        assert_eq!(kind, DelegatingKind::Chats);
+        let (kind, sent) = delegating(&mcp("send_message", serde_json::json!({ "chat": "Audit", "text": "more" }))).unwrap();
+        assert_eq!((kind, sent[0].chat.as_deref()), (DelegatingKind::Message, Some("Audit")));
+        assert!(delegating(&mcp("send_message", serde_json::json!({}))).is_none());
+        assert!(delegating(&mcp("read_chat", serde_json::json!({ "chat": "x" }))).is_none());
+
+        let one = serde_json::json!({ "chatId": "c1", "taskId": "t", "sent": { "id": "x" } });
+        let many = serde_json::json!({ "results": [
+            { "index": 0, "isError": false, "result": one },
+            { "index": 1, "isError": true, "error": "no" },
+        ] });
+        assert_eq!(result_chats(&one.to_string()), ["c1"]);
+        assert_eq!(result_chats(&many.to_string()), ["c1", ""]);
+        // As other harnesses hand an MCP result back.
+        let blocks = serde_json::json!({ "content": [{ "type": "text", "text": many.to_string() }] });
+        assert_eq!(result_chats(&blocks.to_string()), ["c1", ""]);
+        let list = serde_json::json!([{ "type": "text", "text": one.to_string() }]);
+        assert_eq!(result_chats(&list.to_string()), ["c1"]);
+        assert_eq!(result_chats(&format!("Wall time: 0.1s\nOutput:\n{one}")), ["c1"]);
+        assert!(result_chats("isn't a child of yours").is_empty());
     }
 
     #[test]

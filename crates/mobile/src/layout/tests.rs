@@ -197,6 +197,7 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         output_truncated: false,
         output_lines: None,
         review: None,
+        chats: Vec::new(),
     };
     let mut w = worker(390.0);
     w.input = TranscriptInput {
@@ -227,6 +228,40 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
     // Left-aligned at the column's edge.
     assert!(d.runs.first().unwrap().x < 40.0);
     assert!(frame.display(3).unwrap().text.ends_with(" b"));
+}
+
+#[test]
+fn work_handed_over_shows_a_line_per_chat() {
+    let mut w = worker(390.0);
+    let call = zeron_proto::ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "create_chats".into(),
+        input: Some(serde_json::json!({ "requests": [
+            { "title": "Audit the parser", "harness": "codex", "prompt": "secret" },
+            { "title": "Draft the notes", "prompt": "secret" },
+        ] })),
+    };
+    let mut parts = Vec::new();
+    zeron_doc::fold_event_into_parts(&mut parts, &zeron_proto::AgentEvent::ToolCall { id: "k".into(), call });
+    let MessagePart::Tool { resolved, chats, .. } = &mut parts[0] else { panic!("{parts:?}") };
+    (*resolved, *chats) = (true, vec!["c1".into(), String::new()]);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 2);
+    assert_eq!(frame.display(0).unwrap().text, "Delegated to \u{2060} Audit the parser");
+    assert_eq!(frame.display(1).unwrap().text, "Couldn't delegate to \u{2060} Draft the notes");
 }
 
 fn transcript_one(text: &str) -> TranscriptInput {
@@ -722,6 +757,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         output_truncated: false,
         output_lines: None,
         review: None,
+        chats: Vec::new(),
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);

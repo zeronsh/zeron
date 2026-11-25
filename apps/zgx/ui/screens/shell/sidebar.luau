@@ -575,8 +575,6 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			title = c.title,
 			status = status :: any,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
-			-- (Waiting, its second line says for how long, and on what.)
-			note = if status == "waiting" then activity.waiting_on(c, names) else nil,
 			shelf = on_shelf,
 			rank = rank,
 			created = c.created,

@@ -340,7 +340,18 @@ impl RowBuilder {
             // Messages this agent sent: each recipient as the workspace lists it.
             let mut h = None::<std::collections::hash_map::DefaultHasher>;
             for part in &entry.parts {
-                let MessagePart::Tool { call, .. } = part else { continue };
+                let MessagePart::Tool { call, chats, .. } = part else { continue };
+                // And the chats it handed work to.
+                if zeron_proto::delegation::delegating(call).is_some() {
+                    let h = h.get_or_insert_with(|| {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        gaps.hash(&mut h);
+                        h
+                    });
+                    for chat in chats {
+                        recipient_chat(chat, workspace).hash(h);
+                    }
+                }
                 for message in zeron_proto::agent_messages::outgoing_messages(call).into_iter().flatten() {
                     let h = h.get_or_insert_with(|| {
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -452,6 +463,29 @@ impl RowBuilder {
                         let gap = gap_for(&rows, false);
                         let row = self.outgoing_row(ctx, &entry.id, &format!("{id}.m{mi}"), message, !*resolved, *is_error, workspace);
                         rows.push(Placed { core: Arc::new(row), gap });
+                    }
+                }
+                MessagePart::Tool { id, call, is_error, resolved, chats, .. }
+                    if let Some((kind, started)) = zeron_proto::delegation::delegating(call) =>
+                {
+                    // Work handed to other chats, the same: a line each.
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    for (mi, one) in started.iter().enumerate() {
+                        let gap = gap_for(&rows, false);
+                        let chat = chats.get(mi).filter(|chat| !chat.is_empty());
+                        let failed = *is_error || (!chats.is_empty() && chat.is_none());
+                        let lead = delegated_lead(kind, failed);
+                        let core = delegated_row_core(
+                            ctx,
+                            &entry.id,
+                            &format!("{id}.d{mi}"),
+                            lead,
+                            chat.or(one.chat.as_ref()),
+                            one,
+                            !*resolved,
+                            workspace,
+                        );
+                        rows.push(Placed { core: Arc::new(core), gap });
                     }
                 }
                 MessagePart::Tool { call, .. } => {
@@ -882,6 +916,51 @@ fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str) -> Ro
             action,
         }),
         copy_text: message.to_owned(),
+    }
+}
+
+fn delegated_lead(kind: zeron_proto::delegation::DelegatingKind, failed: bool) -> &'static str {
+    use zeron_proto::delegation::DelegatingKind;
+    match (kind, failed) {
+        (DelegatingKind::Subagents, false) => "Delegated to",
+        (DelegatingKind::Subagents, true) => "Couldn't delegate to",
+        (DelegatingKind::Chats, false) => "Started",
+        (DelegatingKind::Chats, true) => "Couldn't start",
+        (DelegatingKind::Message, false) => "Message to",
+        (DelegatingKind::Message, true) => "Couldn't message",
+    }
+}
+
+/// A chat work was handed to: its title as the workspace lists it (else as it
+/// was called) and its provider's mark, which opens it.
+#[allow(clippy::too_many_arguments)]
+fn delegated_row_core(
+    ctx: &mut Ctx,
+    entry_id: &str,
+    part: &str,
+    lead: &str,
+    chat: Option<&String>,
+    one: &zeron_proto::delegation::Delegating,
+    pending: bool,
+    workspace: Option<&WorkspaceSnapshot>,
+) -> RowCore {
+    let listed = chat.map(|chat| recipient_chat(chat, workspace));
+    let opens = listed.as_ref().and_then(|(_, _, id)| id.clone());
+    let called = one.title.clone();
+    let (title, harness) = match listed {
+        Some((title, harness, Some(_))) => (title, harness),
+        _ => (called.unwrap_or_else(|| "a subagent".into()), one.harness.clone()),
+    };
+    RowCore {
+        key: row_key(&format!("{entry_id}#{part}")),
+        version: next_version(),
+        kind: RowKind::Markdown,
+        entry_id: Arc::from(entry_id),
+        content: Content::Caption {
+            text: chat_caption(ctx, lead, &title, harness.as_deref(), opens.as_deref()),
+            pending,
+        },
+        copy_text: format!("{lead} {title}"),
     }
 }
 

@@ -1345,6 +1345,7 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         output_truncated: false,
         output_lines: None,
         review: None,
+        chats: Vec::new(),
     }
 }
 

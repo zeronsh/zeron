@@ -88,6 +88,7 @@ impl EngineRpc {
             methods::AWAIT_BACKGROUND
                 | methods::REGISTER_DELEGATED_TASK
                 | methods::UPDATE_DELEGATED_TASK
+                | methods::NOTE_HANDED
                 | methods::LIST_DELEGATED_TASKS
         ) {
             let Some(chat) = chat else {
@@ -105,11 +106,21 @@ impl EngineRpc {
         }
         let chats = self.workspace.read_chats().unwrap_or_default();
         let calling = chat.as_deref().map(|id| self.calling(id, &chats));
+        let background = self.sessions.async_delegation().enabled();
         let attributed = |target: &str, text: &str| {
+            let delegated = background
+                && calling.as_ref().is_some_and(|c| {
+                    chats.iter().any(|chat| {
+                        chat.id == target
+                            && chat.child_kind == Some(zeron_proto::ChildKind::Subagent)
+                            && chat.parent_chat_id.as_deref() == Some(c.id.as_str())
+                    })
+                });
             agent_messages::attributed(
                 calling.as_ref().map(|c| (c.id.as_str(), c.label.as_str())),
                 target,
                 text,
+                delegated,
             )
         };
         if command {

@@ -354,6 +354,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
         status: DoneStatus::Interrupted,
         finished_at: now,
+        resumes: false,
     });
     row.terminal_activity = Some(TerminalActivity {
         terminal_id: "pty".into(),
@@ -379,6 +380,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
         status: DoneStatus::Completed,
         finished_at: now,
+        resumes: false,
     });
     host.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);

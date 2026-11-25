@@ -118,6 +118,10 @@ struct Chats {
     /// approval would do, and the request answering it
     /// (`chat.ask_details`, for the chat that delegated to it).
     ask_parts: RefCell<HashMap<String, Json>>,
+    /// Looks so far for what a chat asks that its transcript didn't say yet,
+    /// and the requests answered from here.
+    ask_tries: RefCell<HashMap<String, u32>>,
+    answered: RefCell<std::collections::HashSet<String>>,
     ask_parts_shared: RefCell<Vec<Shared>>,
     /// A look at a waiting chat's latest entries, to tell which, until
     /// its first frame comes.
@@ -413,6 +417,7 @@ fn guess_block(block: &Value) -> f64 {
             let tools = block.field("tools").map_or(0, |t| t.list().len());
             if live { 26. * tools.max(1) as f64 } else { 26. }
         }
+        Some("delegated") => 62.,
         _ => 240.,
     }
 }
@@ -434,7 +439,9 @@ fn block_sum(block: &Value) -> u64 {
         Some(Value::Str(s)) => s.len().hash(&mut h),
         _ => 0usize.hash(&mut h),
     }
-    block.field("tools").map_or(0, |t| t.list().len()).hash(&mut h);
+    for list in ["tools", "tasks"] {
+        block.field(list).map_or(0, |t| t.list().len()).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -790,6 +797,10 @@ const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// How long after a device's catalog didn't come it's asked again: each
 /// try waits the next, the last one again after that (`load_remote`).
+/// Between looks for what a chat asks while its transcript doesn't say (longer
+/// each time), and how many before it's left at that.
+const ASK_LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(400);
+const ASK_LOOKS_MOST: u32 = 30;
 const RETRY_AFTER: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(3),
@@ -1633,6 +1644,7 @@ impl Chats {
         });
         self.ask_looks.borrow_mut().retain(|id, _| waiting.contains(id));
         self.ask_parts.borrow_mut().retain(|id, _| waiting.contains(id));
+        self.ask_tries.borrow_mut().retain(|id, _| waiting.contains(id));
         let rpc = self.rpc.borrow().clone().filter(|r| !r.is_closed());
         for id in waiting {
             if self.asks.borrow().contains_key(&id) || self.ask_looks.borrow().contains_key(&id) {
@@ -1647,10 +1659,7 @@ impl Chats {
                 })
             });
             if let Some((kind, part)) = open {
-                if let Some(part) = part {
-                    self.ask_parts.borrow_mut().insert(id.clone(), part);
-                }
-                self.asks.borrow_mut().insert(id, kind);
+                self.note_ask(&id, kind, part);
                 changed = true;
                 continue;
             }
@@ -1663,11 +1672,8 @@ impl Chats {
                 move |item| {
                     let Some(me) = weak.upgrade() else { return };
                     let Some(entries) = item["reset"].as_array() else { return };
-                    let kind = ask_kind(entries.iter().rev());
-                    if let Some(part) = asked(entries.iter().rev()) {
-                        me.ask_parts.borrow_mut().insert(chat.clone(), part.clone());
-                    }
-                    me.asks.borrow_mut().insert(chat.clone(), kind);
+                    let part = asked(entries.iter().rev()).cloned();
+                    me.note_ask(&chat, ask_kind(entries.iter().rev()), part);
                     // Seen: let it go (dropped once this callback returns).
                     let done = me.ask_looks.borrow_mut().remove(&chat);
                     me.publish_asks();
@@ -1679,6 +1685,41 @@ impl Chats {
         if changed {
             self.publish_asks();
         }
+    }
+
+    /// What `id` was seen asking. Its session says it asks before its
+    /// transcript does (they're apart, and further on another device): until
+    /// it's there, it's looked for again.
+    fn note_ask(self: &Rc<Self>, id: &str, kind: &'static str, part: Option<Json>) {
+        // (One answered here isn't asked again while its chat hears of it.)
+        let part = part.filter(|part| {
+            part["requestId"].as_str().is_none_or(|request| !self.answered.borrow().contains(request))
+        });
+        self.asks.borrow_mut().insert(id.to_owned(), kind);
+        if let Some(part) = part {
+            self.ask_tries.borrow_mut().remove(id);
+            self.ask_parts.borrow_mut().insert(id.to_owned(), part);
+            return;
+        }
+        let tries = {
+            let mut tries = self.ask_tries.borrow_mut();
+            let tries = tries.entry(id.to_owned()).or_default();
+            *tries += 1;
+            *tries
+        };
+        if tries > ASK_LOOKS_MOST {
+            return;
+        }
+        let (weak, id) = (Rc::downgrade(self), id.to_owned());
+        engine::get().spawn(async move {
+            zgx::timer::sleep(ASK_LOOK_AGAIN * tries.min(5)).await;
+            let Some(me) = weak.upgrade() else { return };
+            if me.asks.borrow().contains_key(&id) && !me.ask_parts.borrow().contains_key(&id) {
+                // (What's shown stays as it is until the look says better.)
+                me.asks.borrow_mut().remove(&id);
+                me.follow_asks();
+            }
+        });
     }
 
     fn asks_value(&self) -> Value {
@@ -1723,7 +1764,7 @@ impl Chats {
 
     /// An approval answered where it isn't shown (`chat.respond_child`: a
     /// child's, on the chat that delegated to it): allowed once, or not.
-    async fn respond_child(&self, args: Value) -> Result<(), Outcome> {
+    async fn respond_child(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("chat").map(text).unwrap_or_default();
         let request = args.field("request").map(text).unwrap_or_default();
         let part = self.ask_parts.borrow().get(&id).cloned().ok_or("missing")?;
@@ -1741,9 +1782,15 @@ impl Chats {
             json!({ "kind": "respondInput", "requestId": request, "answers": single(&questions, label) }),
         )
         .await?;
-        // (Answered: not offered again while its chat moves on.)
+        // (Answered: not offered again while its chat moves on; another
+        // asked straight after is.)
+        self.answered.borrow_mut().insert(request);
         self.ask_parts.borrow_mut().remove(&id);
         self.publish_asks();
+        let kind = self.asks.borrow().get(&id).copied();
+        if let Some(kind) = kind {
+            self.note_ask(&id, kind, None);
+        }
         Ok(())
     }
 
@@ -3035,7 +3082,10 @@ impl View {
                     _ if running || fresh || awaited => Some(("sending", sent)),
                     _ => None,
                 };
-                if let Some((waiting, since)) = waiting
+                // (Zeron's own wake is nobody's send: nothing to say of it until
+                // its turn runs.)
+                let wake = list.last().and_then(|row| row.field("role")) == Some(&Value::from("wake"));
+                if let Some((waiting, since)) = waiting.filter(|(waiting, _)| !wake || *waiting == "working")
                     && let Some(shown) = list.pop()
                 {
                     list.push(with_fields(
@@ -4832,7 +4882,7 @@ const LIVE_ROWS_MOST: usize = 16;
 fn plain_part(p: &Json) -> bool {
     match p["kind"].as_str() {
         Some("tool") => {
-            !display_tool(p) && !is_agent(p) && p["outputTruncated"].as_bool() != Some(true)
+            !display_tool(p) && !is_agent(p) && delegating_part(p).is_none() && p["outputTruncated"].as_bool() != Some(true)
         }
         Some("reasoning") => !p["text"].as_str().unwrap_or_default().trim().is_empty(),
         _ => false,
@@ -5646,7 +5696,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|p| !display_tool(p))
+                .filter(|p| !display_tool(p) && delegating_part(p).is_none())
                 .filter_map(tool)
                 .collect();
             // A settled reply with nothing to show (only an empty thought,
@@ -5769,6 +5819,69 @@ fn blocks(entry: &Json) -> Value {
     blocks_of(&parts, entry["status"].as_str() == Some("streaming"))
 }
 
+/// What a Zeron call hands to other chats (`create_chats`, `send_message`, …),
+/// with which chats they came to be: a block of its own, never a tool's row.
+/// `None` for any other part, and for a call kept before its arguments were.
+fn delegating_part(part: &Json) -> Option<(zeron_proto::delegation::DelegatingKind, Vec<zeron_proto::delegation::Delegating>)> {
+    use serde::Deserialize;
+    let call = &part["call"];
+    let name = call["tool"].as_str().or(call["name"].as_str())?;
+    if part["kind"].as_str() != Some("tool") || !(name.contains("create_chat") || name.contains("send_message")) {
+        return None;
+    }
+    zeron_proto::delegation::delegating(&zeron_proto::ToolCall::deserialize(call).ok()?)
+}
+
+/// Consecutive calls handing work over the same way, as one block: whom to,
+/// each with its chat once it's known (what it's doing now is the sidebar's
+/// to say, by that id).
+fn delegated_block(parts: &mut Vec<&Json>) -> Option<Value> {
+    use zeron_proto::delegation::DelegatingKind;
+    let first = parts.first()?;
+    let (kind, _) = delegating_part(first)?;
+    let id = format!("d:{}", first["id"].as_str().unwrap_or_default());
+    let mut pending = false;
+    let mut tasks: Vec<Value> = Vec::new();
+    for part in parts.drain(..) {
+        let Some((_, started)) = delegating_part(part) else { continue };
+        let resolved = part["resolved"].as_bool() == Some(true);
+        pending |= !resolved;
+        for (i, one) in started.into_iter().enumerate() {
+            let chat = part["chats"][i].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
+            // (A message's recipient, as the call named it: an id, often.)
+            let chat = chat.or(one.chat);
+            // (Its result names each request's chat, or none of them where
+            // the harness's own shape hid it.)
+            let named = part["chats"].as_array().is_some_and(|chats| !chats.is_empty());
+            let failed = resolved
+                && (part["isError"].as_bool() == Some(true)
+                    || named && part["chats"][i].as_str().is_none_or(str::is_empty));
+            let opt = |v: Option<&str>| v.map_or(Value::Nil, Value::from);
+            tasks.push(Value::record([
+                ("title", opt(one.title.as_deref())),
+                ("chat", opt(chat.as_deref())),
+                ("agent", one.harness.as_deref().and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
+                ("pending", Value::Bool(!resolved)),
+                ("failed", Value::Bool(failed)),
+            ]));
+        }
+    }
+    Some(Value::record([
+        ("id", Value::from(id.as_str())),
+        ("kind", Value::from("delegated")),
+        (
+            "what",
+            Value::from(match kind {
+                DelegatingKind::Subagents => "subagents",
+                DelegatingKind::Chats => "chats",
+                DelegatingKind::Message => "message",
+            }),
+        ),
+        ("live", Value::Bool(pending)),
+        ("tasks", Value::List(tasks.into())),
+    ]))
+}
+
 /// The blocks of these parts of a reply (`streaming`: still being written).
 fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
     let last_ix = parts.len().saturating_sub(1);
@@ -5802,8 +5915,21 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
     // generated image), gathered into one block: a display call that worked
     // between them doesn't part them; anything else does.
     let mut pictures: Vec<&Json> = Vec::new();
+    // Calls handing work to other chats, one after another the same way.
+    let mut handed: Vec<&Json> = Vec::new();
     for (ix, &part) in parts.iter().enumerate() {
         let kind = part["kind"].as_str();
+        let handing = delegating_part(part).map(|(way, _)| way);
+        let blank = kind == Some("reasoning") && part["text"].as_str().unwrap_or_default().trim().is_empty();
+        if !blank && handing != handed.first().and_then(|first| delegating_part(first)).map(|(way, _)| way) {
+            out.extend(delegated_block(&mut handed));
+        }
+        if handing.is_some() {
+            flush(&mut out, &mut group, group_last);
+            out.extend(images_block(&mut pictures));
+            handed.push(part);
+            continue;
+        }
         if kind == Some("image") {
             flush(&mut out, &mut group, group_last);
             pictures.push(part);
@@ -5865,6 +5991,7 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
             }
         }
     }
+    out.extend(delegated_block(&mut handed));
     flush(&mut out, &mut group, group_last);
     out.extend(images_block(&mut pictures));
     Value::List(out.into())
@@ -5896,8 +6023,10 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
             start
         })
     };
-    // (A display tool is no work: its output shows in the reply.)
-    let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p);
+    // (A display tool is no work: its output shows in the reply. Nor is
+    // handing work over: whom to is a block of its own.)
+    let worked_tool =
+        |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p) && delegating_part(p).is_none();
     let is_work = |ix: usize, p: &Json| {
         worked_tool(p) || thought(p) || (said(p) && reply_start.is_none_or(|start| ix < start))
     };
@@ -5948,6 +6077,10 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
             Some("error") => format!("> {}", part["message"].as_str().unwrap_or_default()),
             Some("visual") => {
                 out.push(visual_block(part));
+                continue;
+            }
+            Some("tool") if delegating_part(part).is_some() => {
+                out.extend(delegated_block(&mut vec![part]));
                 continue;
             }
             Some("tool") => {

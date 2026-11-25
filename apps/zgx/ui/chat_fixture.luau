@@ -184,6 +184,56 @@ do
 			ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "approval" })
 		end,
 	}
+	ui.command {
+		id = "delegated_question",
+		title = "The asking child asks a question instead",
+		run = function()
+			ui.shared("chat.ask_details", {} :: { [string]: any }):set({
+				k1 = { request = "r2", kind = "question", detail = "Which branch should I audit?" },
+			})
+			ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "question" })
+		end,
+	}
+	-- s2 hands work to them: the call still out, then its chats there.
+	local function handing(live: boolean)
+		return {
+			id = "start1",
+			role = "assistant",
+			text = "",
+			streaming = live,
+			model = "Opus",
+			blocks = {
+				{ id = "t1", kind = "text", text = "I'll have the parser audited and the notes drafted while I look at the benchmark." },
+				{
+					id = "d:c1",
+					kind = "delegated",
+					what = "subagents",
+					live = live,
+					tasks = {
+						{ title = "Audit the parser", agent = "openai", chat = if live then nil else "k1", pending = live },
+						{ title = "Draft the release notes", agent = "cursor", chat = if live then nil else "k2", pending = live },
+					},
+				},
+				if live then nil else { id = "t2", kind = "text", text = "Both are running. I'll pick this up when they report back." },
+			},
+		}
+	end
+	ui.command {
+		id = "delegating",
+		title = "s2 is handing work to children",
+		run = function()
+			store.messages:push(handing(true))
+		end,
+	}
+	ui.command {
+		id = "delegating_done",
+		title = "s2 handed it over",
+		run = function()
+			local list = table.clone(store.messages:peek())
+			list[#list] = handing(false)
+			store.messages:set(list)
+		end,
+	}
 	-- s2 was woken with what they came to.
 	ui.command {
 		id = "delegated_woke",
@@ -199,6 +249,7 @@ do
 					tasks = {
 						{ chat = "k1", title = "Audit the parser", agent = "openai", status = "done" },
 						{ chat = "k2", title = "Draft the release notes", agent = "cursor", status = "failed" },
+						{ chat = "gone", title = "Time the benchmark", agent = "claude", status = "stopped" },
 					},
 				},
 			}

@@ -316,6 +316,10 @@ pub mod methods {
     /// message. An agent's always names its own chat. Local, like
     /// `AWAIT_BACKGROUND`.
     pub const REGISTER_DELEGATED_TASK: &str = "RegisterDelegatedTask";
+    /// `{chatId, index, handedChatId, title?, message?}` → `{ok}`: request
+    /// `index` of the Zeron call `chatId`'s agent is making is that chat, for
+    /// its transcript to open. An agent's always names its own chat. Local.
+    pub const NOTE_HANDED: &str = "NoteHanded";
     /// `{chatId, taskId, action, status?}` → `{ok}`: `cancel` (stops the
     /// child), `acknowledge` (a tool returned its result), `async` (a wait
     /// gave up), `discard` (its message wasn't sent). Local.
@@ -916,6 +920,7 @@ pub fn agent_allowed(method: &str) -> bool {
             // What the calling chat delegated to its children.
             | methods::REGISTER_DELEGATED_TASK
             | methods::UPDATE_DELEGATED_TASK
+            | methods::NOTE_HANDED
             | methods::LIST_DELEGATED_TASKS
             // Commands on any of the person's devices (Zeron MCP's
             // run_command & co.): full access only (the engine's agent gate).

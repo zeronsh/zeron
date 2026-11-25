@@ -587,6 +587,7 @@ mod gate_tests {
         session.last_turn_outcome = Some(crate::NativeTurnOutcome {
             status: DoneStatus::Interrupted,
             finished_at: now,
+            resumes: false,
         });
         assert_eq!(
             display_status(&chat, Some(&session), now),
@@ -595,6 +596,7 @@ mod gate_tests {
         session.last_turn_outcome = Some(crate::NativeTurnOutcome {
             status: DoneStatus::Completed,
             finished_at: now,
+            resumes: false,
         });
         assert_eq!(
             display_status(&chat, Some(&session), now),

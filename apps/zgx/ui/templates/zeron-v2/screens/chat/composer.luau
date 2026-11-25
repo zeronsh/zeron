@@ -32,7 +32,6 @@ local sessions = require("@account/sessions")
 local cloud = require("@account/cloud")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
-local Delegates = require("@app/screens/chat/delegates")
 local Held = require("@app/screens/chat/held")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
@@ -137,7 +136,7 @@ local function same_pick(a: { [string]: any }?, b: { [string]: any }?): boolean
 end
 -- The tray open behind the composer (its todos, tasks or queue), kept
 -- across a reload.
-local TRAY = ui.state("chat_tray", nil :: ("alerts" | "todos" | "agents" | "tasks" | "queue")?)
+local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
 
 local function Composer(): Node
 	-- The session shown, or nil on a new chat.
@@ -658,22 +657,6 @@ local function Composer(): Node
 		-- transcript, under it.
 		sending = function(): boolean
 			return CloudMachine.sending_last(store.messages)
-		end,
-	}
-	-- What its subagents ask the person, before that.
-	local delegates = Delegates.bind {
-		chat = function(): string?
-			return session_id:get()
-		end,
-		alerts = machine.alerts,
-		on_alert = machine.on_alert,
-		failed = function()
-			own_notice:set { tone = "danger", key = "chat.delegates.failed", dismissable = true }
-		end,
-		asked = function()
-			if TRAY:peek() == nil then
-				TRAY:set("alerts")
-			end
 		end,
 	}
 	-- This device's outbox for the chat (#1256): sends uploading or stopped,
@@ -1556,6 +1539,15 @@ local function Composer(): Node
 					lanes.open_task(id, ref)
 				end
 			end,
+			-- What a subagent asks, answered on its row.
+			on_answer_task = function(ref: string, answer: string)
+				local id = session_id:peek()
+				if id then
+					lanes.answer_task(id, ref, answer, function()
+						own_notice:set { tone = "danger", key = "chat.delegates.failed", dismissable = true }
+					end)
+				end
+			end,
 			-- Stop on a background process: its host stops it, and its row
 			-- goes as the session stops listing it (production's tray).
 			on_stop_task = function(task: string)
@@ -1591,8 +1583,8 @@ local function Composer(): Node
 			end,
 			-- (The only notice with an action: a sleeping machine's Wake.)
 			on_notice_action = machine.wake,
-			alerts = delegates.alerts,
-			on_alert_action = delegates.on_alert,
+			alerts = machine.alerts,
+			on_alert_action = machine.on_alert,
 			on_dismiss_alert = machine.dismiss,
 			disabled = function(): boolean
 				local s = store.session:get()

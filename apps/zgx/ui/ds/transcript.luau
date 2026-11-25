@@ -199,7 +199,7 @@ export type Props = {
 	open_link: ((target: string) -> ())?,
 	-- A chat as it's listed now: its title and agent's mark. Nil for one that
 	-- isn't listed, which a message from it can't open.
-	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name?, status: string?, device: string? }?)?,
 	-- What pressing `Message from Chat` does: opens that chat beside this one.
 	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
@@ -231,7 +231,7 @@ export type Draft = { id: string, text: string, part: string?, part_text: string
 -- its own blocks, opened.
 export type Block = {
 	id: string,
-	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images",
+	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "delegated",
 	text: string?,
 	-- Pictures an agent showed (`show_image`, a generated image), one after
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
@@ -247,7 +247,13 @@ export type Block = {
 	summary: string?,
 	live: boolean?,
 	blocks: { Block }?,
+	-- Work handed to other chats ("delegated"): how, and to which.
+	what: ("subagents" | "chats" | "message")?,
+	tasks: { Handed }?,
 }
+-- A chat work was handed to: what it was called, its chat once there is one,
+-- its agent, and whether the call is still out, or refused.
+export type Handed = { title: string?, chat: string?, agent: Mark.Name?, pending: boolean?, failed: boolean? }
 
 -- Rows not yet measured: about a short message.
 local ESTIMATE = 96
@@ -281,6 +287,7 @@ local ROW_ESTIMATE: any = {
 							tools = { height = 38 },
 							work = { height = 38 },
 							display_failed = { height = 36 },
+							delegated = { height = 70 },
 						},
 						default = { height = 320 },
 					},
@@ -452,64 +459,139 @@ local function seam(m: Message): Node
 	}
 end
 
+-- A chat as it's listed now (the chat page's `chat_of`).
+type Listed = { title: string, mark: Mark.Name?, status: string?, device: string? }
+type ChatOf = ((id: string) -> Listed?)?
+type OpenChat = ((chat: string, title: string) -> ())?
+
+-- A subagent's chip: how it stands, its agent, its title; a click opens its
+-- chat. `kind`: its state's glyph, followed. A chat that isn't listed yet (or
+-- any more) reads as it was called, and opens nothing.
+local function subagent_chip(t: { chat: string?, title: string?, agent: Mark.Name? }, kind: () -> string, chat_of: ChatOf, open: OpenChat, note: string?): Node
+	local function now(): Listed?
+		return if chat_of and t.chat then chat_of(t.chat) else nil
+	end
+	local function title(): string
+		local live = now()
+		return (live and live.title) or t.title or locale.s("ds.transcript.delegated.untitled")
+	end
+	local parts: { [any]: any } = {
+		h = 28,
+		px = "$space.2",
+		max_w = ui.raw(280, "a chip of a title, cut past that"),
+		min_w = 0,
+		gap = ui.raw(6, "Zeron's caption gap"),
+		items = "center",
+		rounded = "$radius.md",
+		border = 1,
+		border_color = "$border",
+		bg = "#00000000",
+		ui.switch(kind, {
+			working = status.StatusIcon { kind = "working", size = 14 },
+			connecting = status.StatusIcon { kind = "connecting", size = 14 },
+			waiting = status.StatusIcon { kind = "waiting", size = 14 },
+			input = status.StatusIcon { kind = "input", size = 14 },
+			approval = status.StatusIcon { kind = "approval", size = 14 },
+			failed = status.StatusIcon { kind = "failed", size = 14 },
+			done = status.StatusIcon { kind = "done", size = 14 },
+			-- (Stopped, or gone from the list: nothing to say of how it went.)
+			idle = ui.div { color = "$text.tertiary", Icon { name = "close-circle", size = 14 } },
+		}),
+		ui.presence(function(): string
+			local live = now()
+			return (live and live.mark) or t.agent or ""
+		end, function(mark: string): Node
+			return if mark ~= "" then Mark { name = mark :: any, size = 14, bare = true } else Icon { name = "chat-round-line", size = 14 }
+		end),
+		ui.text { title, literal = true, truncate = true, min_w = 0, text_size = "$font.size.sm", color = "$text.secondary" },
+		if note then ui.text { note, shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" } else nil,
+	}
+	if t.chat == nil or open == nil then
+		return ui.row(parts)
+	end
+	parts.label = function(): string
+		return locale.s("ds.transcript.delegated.open_chat", { title = title() })
+	end
+	parts.hover = { bg = "$hover" }
+	parts.active = { bg = "$pressed" }
+	parts.cursor = "pointer"
+	parts.on_click = function()
+		open(t.chat :: string, title())
+	end
+	return ui.button(parts)
+end
+
+local function chip_row(hook: string, class: string, said: () -> string, chips: Node): Node
+	return ui.column {
+		hook = hook,
+		class = class,
+		w_full = true,
+		gap = "$space.2",
+		ui.text { said, text_size = "$font.size.sm", color = "$text.tertiary", selectable = false },
+		chips,
+	}
+end
+
 -- What woke the chat: its subagents' results (or a question of one's), a
 -- quiet line, then each as a chip that opens its chat. Never a bubble: nobody
--- said it.
+-- said it. (How each ended, as it was told.)
 local function wake_row(m: Message, props: Props): Node
 	local wake = m.wake :: { kind: string, tasks: { WakeTask }, open: number }
 	local chips: { [any]: any } = { w_full = true, gap = "$space.2", wrap = true, items = "center" }
 	for _, t in wake.tasks do
-		local function now(): { title: string, mark: Mark.Name? }?
-			return if props.chat_of then props.chat_of(t.chat) else nil
-		end
-		local function title(): string
-			local live = now()
-			return if live then live.title else t.title
-		end
-		table.insert(chips, ui.button {
-			label = function(): string
-				return locale.s("ds.transcript.delegated.open_chat", { title = title() })
-			end,
-			h = 28,
-			px = "$space.2",
-			max_w = ui.raw(280, "a chip of a title, cut past that"),
-			min_w = 0,
-			gap = ui.raw(6, "Zeron's caption gap"),
-			items = "center",
-			rounded = "$radius.md",
-			border = 1,
-			border_color = "$border",
-			bg = "#00000000",
-			hover = { bg = "$hover" },
-			active = { bg = "$pressed" },
-			cursor = "pointer",
-			on_click = function()
-				if props.open_sender then
-					props.open_sender(t.chat, title())
-				elseif props.open_link then
-					props.open_link(`zeron-chat:{t.chat}`)
-				end
-			end,
-			status.StatusIcon { kind = if t.status == "failed" then "failed" elseif t.status == "input" then "input" elseif t.status == "stopped" then "idle" else "done", size = 14 },
-			if t.agent then Mark { name = t.agent, size = 14, bare = true } else Icon { name = "chat-round-line", size = 14 },
-			ui.text { title, literal = true, truncate = true, min_w = 0, text_size = "$font.size.sm", color = "$text.secondary" },
-			if t.status == "stopped"
-				then ui.text { locale.t("ds.transcript.delegated.stopped"), shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" }
-				else nil,
-		})
+		local kind = if t.status == "failed" then "failed" elseif t.status == "input" then "input" elseif t.status == "stopped" then "idle" else "done"
+		table.insert(chips, subagent_chip(t, function(): string
+			return kind
+		end, props.chat_of :: ChatOf, props.open_sender, if t.status == "stopped" then locale.s("ds.transcript.delegated.stopped") else nil))
 	end
-	local said = locale.s(if wake.kind == "question" then "ds.transcript.delegated.question" else "ds.transcript.delegated.results", { n = #wake.tasks })
-	if wake.open > 0 and wake.kind ~= "question" then
-		said ..= ` · {locale.s("ds.transcript.delegated.open", { n = wake.open })}`
-	end
-	return ui.column {
-		hook = "chat.message.wake",
-		class = "message message-wake",
-		w_full = true,
-		gap = "$space.2",
-		ui.text { said, text_size = "$font.size.sm", color = "$text.tertiary", selectable = false },
-		ui.row(chips),
-	}
+	return chip_row("chat.message.wake", "message message-wake", function(): string
+		local said = locale.s(if wake.kind == "question" then "ds.transcript.delegated.question" else "ds.transcript.delegated.results", { n = #wake.tasks })
+		if wake.open > 0 and wake.kind ~= "question" then
+			said ..= ` · {locale.s("ds.transcript.delegated.open", { n = wake.open })}`
+		end
+		return said
+	end, ui.row(chips))
+end
+
+-- Work handed to other chats, as the agent hands it over: whom to, each as a
+-- chip that says what its chat is doing now and opens it.
+local DELEGATED: { [string]: { string } } = {
+	subagents = { "ds.transcript.delegated.delegating", "ds.transcript.delegated.delegated" },
+	chats = { "ds.transcript.delegated.starting", "ds.transcript.delegated.started" },
+	message = { "ds.transcript.delegated.messaging", "ds.transcript.delegated.messaged" },
+}
+local function delegated_row(now: () -> Block, chat_of: ChatOf, open: OpenChat): Node
+	local tasks = ui.computed(function(): { Handed }
+		return now().tasks or {}
+	end)
+	return chip_row("chat.message.delegated", "delegated", function(): string
+		local b = now()
+		local words = DELEGATED[b.what or "subagents"] or DELEGATED.subagents
+		return locale.s(words[if b.live then 1 else 2], { n = #(b.tasks or {}) })
+	end, ui.row { w_full = true, gap = "$space.2", wrap = true, items = "center", ui.each(tasks, function(t: Handed, i: number): Node
+		local function cur(): Handed
+			return tasks:get()[i] or t
+		end
+		return subagent_chip(t, function(): string
+			local now_t = cur()
+			if now_t.failed then
+				return "failed"
+			elseif now_t.pending and now_t.chat == nil then
+				return "connecting"
+			end
+			local live = if chat_of and now_t.chat then chat_of(now_t.chat) else nil
+			if not live then
+				return if now_t.pending then "connecting" else "idle"
+			end
+			local st = live.status
+			return if st == nil or st == "done" then "done" elseif st == "limited" or st == "plan" or st == "woke" then "working" else st
+		end, chat_of, open)
+	end, {
+		-- (Made again as its chat comes: what opens it is a button's.)
+		key = function(t: Handed, i: number): string
+			return `{i}:{t.chat or ""}`
+		end,
+	}) })
 end
 
 -- A message another chat sent: `Message from [mark] Chat`, muted, on the right
@@ -756,6 +838,9 @@ type View = {
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
+	-- A chat work was handed to: as it's listed now, and what opens it.
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name?, status: string?, device: string? }?)?,
+	open_chat: ((chat: string, title: string) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 }
@@ -861,6 +946,8 @@ local function guess_block(b: Block): number
 		return math.max(24, h - 16)
 	elseif b.kind == "tools" or b.kind == "work" then
 		return if b.live then 26 * math.max(1, #(b.tools or {})) else 26
+	elseif b.kind == "delegated" then
+		return 62
 	end
 	return 240
 end
@@ -920,6 +1007,11 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					end
 					else nil,
 			}
+		end
+		if b.kind == "delegated" then
+			return delegated_row(function(): Block
+				return brow:get()
+			end, if view then view.chat_of else nil, if view then view.open_chat else nil)
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
@@ -2669,7 +2761,12 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
-					elseif m.role == "wake" then wake_row(m, props)
+					elseif m.role == "wake" then ui.column {
+						w_full = true,
+						provide = { message = m.id },
+						wake_row(m, props),
+						waiting_line(state, nil, props.turn_state),
+					}
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -2695,7 +2792,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, chat_of = props.chat_of, open_chat = props.open_sender, find = find_for }),
 			},
 		}
 	end

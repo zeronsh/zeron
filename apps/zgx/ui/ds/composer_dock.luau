@@ -90,7 +90,12 @@ export type Task = {
 	state: ("waiting" | "input" | "approval")?,
 	-- A subagent that can be stopped on its own (a chat's).
 	stops: boolean?,
+	-- What a subagent asks the person, under its row: its words or what it
+	-- would run, and its answers side by side (each an `id` that comes to
+	-- `on_answer_task`, the first the one meant).
+	ask: Ask?,
 }
+export type Ask = { words: string?, code: string?, answers: { { id: string, label: string } } }
 export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 -- Something to know about the chat (a context nearly full, a rate limit, a
 -- server that failed to start): how serious, what it is, a word more, and
@@ -127,12 +132,6 @@ export type Alert = {
 	cells: { string }?,
 	trail: string?,
 	quiet: boolean?,
-	-- What it would run, under its line, as code.
-	code: string?,
-	-- Its answers, side by side under its words (each an alert: its `action`
-	-- the label, its `id` what comes to `on_alert_action`), the first the
-	-- one meant.
-	buttons: { Alert }?,
 }
 export type Props = {
 	queue: State<{ Queued }>?,
@@ -158,6 +157,8 @@ export type Props = {
 	-- A subagent's row opens it (a tab of the panel). Its row is a plain
 	-- listing without this.
 	on_open_task: ((id: string) -> ())?,
+	-- A subagent's question or approval, answered on its row.
+	on_answer_task: ((task: string, answer: string) -> ())?,
 	-- Which tray is open; the dock keeps its own when not given.
 	open: State<Tray?>?,
 	-- Short of room: rows lose their thumbnails, actions become glyphs.
@@ -1291,7 +1292,81 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 	for _, c in parts do
 		table.insert(p, c)
 	end
-	return ui.row(p)
+	if not agent then
+		return ui.row(p)
+	end
+	-- What it asks, under its words, for as long as it asks.
+	local function asked(): Ask?
+		local r = row:get()
+		return if r.ended then nil else r.ask
+	end
+	local UNDER = ui.raw(34, "under the row's words: its inset, the glyph and the gap")
+	local function words(text: () -> string?, mono: boolean): Node
+		return ui.show(function(): boolean
+			return text() ~= nil
+		end, ui.text {
+			function(): string
+				return text() or ""
+			end,
+			literal = true,
+			wrap = true,
+			pl = UNDER,
+			pr = "$space.2",
+			font = if mono then "$font.mono" else nil,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = if mono then "$text.primary" else "$text.secondary",
+		})
+	end
+	return ui.column {
+		w_full = true,
+		ui.row(p),
+		ui.show(function(): boolean
+			return asked() ~= nil
+		end, function(): Node
+			return ui.column {
+				w_full = true,
+				pb = "$space.2",
+				gap = "$space.2",
+				words(function(): string?
+					local a = asked()
+					return a and a.words
+				end, false),
+				words(function(): string?
+					local a = asked()
+					return a and a.code
+				end, true),
+				ui.row {
+					pl = UNDER,
+					pr = "$space.2",
+					gap = "$space.2",
+					wrap = true,
+					ui.each(ui.computed(function(): { { id: string, label: string } }
+						local a = asked()
+						return if a then a.answers else {}
+					end), function(x: { id: string, label: string }, i: number): Node
+						return Button {
+							x.label,
+							size = "sm",
+							tone = if i == 1 then "primary" else "ghost",
+							h = 24,
+							px = "$space.2",
+							text_size = "$font.size.xs",
+							on_click = function()
+								if props.on_answer_task then
+									props.on_answer_task(t.id, x.id)
+								end
+							end,
+						}
+					end, {
+						key = function(x: { id: string, label: string }): string
+							return x.id
+						end,
+					}),
+				},
+			}
+		end),
+	}
 end
 
 -- An alert: its tone's glyph in its ink, what it is, a word more, its
@@ -1463,36 +1538,12 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 	local more = ui.computed(function(): { Alert }
 		return row:get().more or {}
 	end)
-	local function code(): Node
-		return ui.show(function(): boolean
-			return row:get().code ~= nil
-		end, ui.div {
-			w_full = true,
-			pl = function(): any
-				return if has_glyph() then ui.raw(34, "under the row's words: its inset, the glyph and the gap") else "$space.2"
-			end,
-			pr = "$space.2",
-			pb = "$space.1",
-			ui.text {
-				function(): string
-					return row:get().code or ""
-				end,
-				literal = true,
-				wrap = true,
-				font = "$font.mono",
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.primary",
-			},
-		})
-	end
 	return ui.column {
 		w_full = true,
 		ui.row(parts),
 		words(function(): string?
 			return row:get().body
 		end),
-		code(),
 		ui.each(more, function(x: Alert, _i: number, now: State<Alert>): Node
 			return alert_row(x, now, props, height, width, row:peek().grid or { name = 0, columns = {} })
 		end, {
@@ -1504,37 +1555,6 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 		words(function(): string?
 			return row:get().note
 		end),
-		ui.show(function(): boolean
-			return row:get().buttons ~= nil and props.on_alert_action ~= nil
-		end, ui.row {
-			pl = function(): any
-				return if has_glyph() then ui.raw(34, "under the row's words: its inset, the glyph and the gap") else "$space.2"
-			end,
-			pr = "$space.2",
-			pt = "$space.1",
-			pb = "$space.2",
-			ui.each(ui.computed(function(): { Alert }
-				return row:get().buttons or {}
-			end), function(x: Alert, i: number): Node
-				return Button {
-					x.action or "",
-					size = "sm",
-					tone = if i == 1 then "primary" else "ghost",
-					h = 24,
-					px = "$space.2",
-					text_size = "$font.size.xs",
-					on_click = function()
-						(props.on_alert_action :: (string) -> ())(x.id)
-					end,
-				}
-			end, {
-				key = function(x: Alert): string
-					return x.id
-				end,
-				row = true,
-				gap = "$space.2",
-			}),
-		}),
 	}
 end
 
@@ -2031,11 +2051,29 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			-- Subagents: the right panel's side chat's glyph; what runs, the
 			-- command line's.
 			local glyph_name: Icon.Name = if agents then "side-chat" else "terminal"
+			local function asking(): string
+				if agents then
+					for _, t in running() do
+						if t.state == "approval" or t.state == "input" then
+							return t.state
+						end
+					end
+				end
+				return "none"
+			end
+			local function mark(size: number): Node
+				return ui.switch(asking, {
+					none = Icon { name = glyph_name, size = size },
+					approval = status.StatusIcon { kind = "approval", size = size },
+					input = status.StatusIcon { kind = "input", size = size },
+				})
+			end
 			local name_key = if agents then "ds.composer_dock.subagents" else "ds.composer_dock.running"
 			table.insert(tabs, {
 				id = id,
-				glyph = Icon { name = glyph_name, size = 16 },
-				pill_glyph = Icon { name = glyph_name, size = 14 },
+				-- (One of them asking for you: that, until it's answered.)
+				glyph = mark(16),
+				pill_glyph = mark(14),
 				-- (Nothing running, the tab held open: what finished.)
 				title = function(): string
 					return if #running() > 0 or agents then name_key else "ds.composer_dock.finished"
