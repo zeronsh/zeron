@@ -31,6 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { call, whyNotTheirs } from "./ipc.mjs";
 import { pictures } from "./pictures.mjs";
 import { TEMPLATES as ALL, files } from "./templates.mjs";
+import { quiet } from "./quiet.mjs";
 import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 /** Between two writes of one account: the store takes 30 a minute. */
@@ -61,6 +62,8 @@ const edge = flag("--edge")?.replace(/\/$/, "");
 const refusedEdge = whyNotSeeded(edge, process.env.SEED_ALLOWED_EDGES);
 // (What an author's Zeron publishes goes to its own edge, whatever this is
 // told: the file says which that is.)
+const refusedFileEdge = whyNotSeeded(accounts.edge, process.env.SEED_ALLOWED_EDGES);
+if (!refusedEdge && typeof accounts.edge === "string" && refusedFileEdge) usage(`the accounts file's edge: ${refusedFileEdge}`);
 if (!refusedEdge && (typeof accounts.edge !== "string" || accounts.edge.replace(/\/$/, "") !== edge)) usage("the accounts file's edge isn't --edge");
 const refusedWorkos = whyNotItsWorkos(accounts.workos_client_id);
 if (!refusedEdge && refusedWorkos) usage(refusedWorkos);
@@ -72,7 +75,7 @@ if (authors.length === 0) usage("no authors of templates in the accounts file");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const failed = (what, said) => {
-  console.error(`FAIL ${what}\n${said}`);
+  console.error(`FAIL ${what}\n${quiet(said)}`);
   process.exit(1);
 };
 
@@ -209,4 +212,4 @@ for (const a of authors) {
     for (let i = 1; i < t.versions.length; i++) await publishVersion(a, t, i, haves.get(t.id), drawn.get(t.id));
   }
 }
-console.log(`done: ${wrote} written, ${skipped} already there`);
+console.log(`done: ${wrote} ${dryRun ? "checked" : "written"}, ${skipped} already there`);
