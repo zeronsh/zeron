@@ -788,6 +788,55 @@ async fn a_version_taken_down_has_no_mark_again() {
     }
 }
 
+/// The feed isn't past a start over until each template's mark was looked at.
+#[tokio::test]
+async fn a_feed_that_starts_over_looks_at_every_template_s_mark() {
+    // A feed that starts over while its record can't be read, or written: it
+    // isn't past it until both can.
+    for unread in [true, false] {
+        let store = FakeStore::start().await;
+        let (key, _) = SigningKey::generate().unwrap();
+        let d = with_midnight(&store, &key).await;
+        d.plugins.check_takedowns().await;
+        let folder = d._dir.path().join("templates/midnight");
+        {
+            let mut state = store.state.lock().unwrap();
+            state.template_items.get_mut("midnight").unwrap().versions[0].verified = false;
+            state.feed_floor = 10;
+            state.feed_head = Some(12);
+            state.records_without_verified = unread;
+        }
+        let writable = |on: bool| std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(if on { 0o755 } else { 0o555 })).unwrap();
+        writable(unread);
+        d.plugins.check_takedowns().await;
+        assert_eq!(template_at(&d, "midnight").await["imported"]["source"]["verified"], true, "{unread}");
+        writable(true);
+        store.state.lock().unwrap().records_without_verified = false;
+        d.plugins.check_takedowns().await;
+        assert_eq!(template_at(&d, "midnight").await["imported"]["source"]["verified"], false, "{unread}");
+        // Past it now: the full check isn't made again.
+        let asks = store.state.lock().unwrap().asks.len();
+        d.plugins.check_takedowns().await;
+        assert_eq!(store.state.lock().unwrap().asks.len(), asks, "{unread}");
+    }
+    // One whose record is gone from the store holds nothing up.
+    {
+        let store = FakeStore::start().await;
+        let (key, _) = SigningKey::generate().unwrap();
+        let d = with_midnight(&store, &key).await;
+        d.plugins.check_takedowns().await;
+        {
+            let mut state = store.state.lock().unwrap();
+            state.template_items.get_mut("midnight").unwrap().versions.clear();
+            (state.feed_floor, state.feed_head) = (10, Some(12));
+        }
+        d.plugins.check_takedowns().await;
+        let asks = store.state.lock().unwrap().asks.len();
+        d.plugins.check_takedowns().await;
+        assert_eq!(store.state.lock().unwrap().asks.len(), asks);
+    }
+}
+
 /// A template installed before it was verified has the mark once its record
 /// says so: the same contents and signer, said whole, and not one that's down.
 #[tokio::test]
