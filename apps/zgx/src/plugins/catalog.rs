@@ -240,7 +240,7 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             {
                 params["limit"] = json!((*n as u64).min(50));
             }
-            ask(&e, "StoreVersions", kind.with(params)).await
+            kind.one(e("StoreVersions", kind.with(params), None).await?)
         }
     });
     let e = engine.clone();
@@ -252,11 +252,24 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             kind.one(e("StoreVersion", kind.with(json!({ "id": id, "version": version })), None).await?)
         }
     });
-    let e = engine.clone();
-    host.async_action(kind.call("categories"), move |_| {
-        let e = e.clone();
-        async move { ask(&e, "StoreCategories", kind.with(json!({}))).await }
-    });
+    // (A template has no category, and no icon: plugins' alone.)
+    if kind.id == PLUGINS.id {
+        let e = engine.clone();
+        host.async_action(kind.call("categories"), move |_| {
+            let e = e.clone();
+            async move { ask(&e, "StoreCategories", json!({})).await }
+        });
+        let e = engine.clone();
+        host.async_action(kind.call("icon"), move |arg| {
+            let e = e.clone();
+            async move {
+                let reply = file(&e, &arg, kind).await?;
+                let path = reply["file"].as_str().filter(|p| !p.is_empty()).map(str::to_owned).ok_or("not_an_icon")?;
+                let svg = off_thread(move || read_svg(std::path::Path::new(&path))).await.flatten();
+                Ok(svg.map_or(Value::Nil, |svg| Value::record([("svg", Value::from(svg.as_str()))])))
+            }
+        });
+    }
     let e = engine.clone();
     host.async_action(kind.call("picture"), move |arg| {
         let e = e.clone();
@@ -268,16 +281,6 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
                 return Err("not_a_picture".into());
             }
             Ok(Value::record([("src", Value::from(path))]))
-        }
-    });
-    let e = engine.clone();
-    host.async_action(kind.call("icon"), move |arg| {
-        let e = e.clone();
-        async move {
-            let reply = file(&e, &arg, kind).await?;
-            let path = reply["file"].as_str().filter(|p| !p.is_empty()).map(str::to_owned).ok_or("not_an_icon")?;
-            let svg = off_thread(move || read_svg(std::path::Path::new(&path))).await.flatten();
-            Ok(svg.map_or(Value::Nil, |svg| Value::record([("svg", Value::from(svg.as_str()))])))
         }
     });
     let e = engine.clone();
@@ -325,7 +328,7 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             // (Your own account, not the catalog: every version of yours,
             // pending and rejected ones with the reviewers' reasons.)
             kind.hold("mine")?;
-            ask(&e, "StoreMyPlugins", kind.with(json!({}))).await
+            kind.one(e("StoreMyPlugins", kind.with(json!({})), None).await?)
         }
     });
     let (e, a) = (engine.clone(), asker.clone());
@@ -342,6 +345,11 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
                 return Err("invalid".into());
             }
             let params = kind.with(json!({ "id": id, "version": version, "action": action }));
+            // (A template of yours: an engine that reads no kind would do it to
+            // the plugin of that id.)
+            if kind.id == TEMPLATES.id && !mine(&e, kind).await.is_some_and(|all| all.iter().any(|(own, _)| *own == id)) {
+                return Err("not_in_store".into());
+            }
             // (Stopping installs takes nothing from anyone; taking them
             // again puts a version back in front of everyone.)
             if action == "unyank" && preview::another_s_ran() {
@@ -408,6 +416,10 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             let mut params = json!({ "id": id, "reason": reason });
             if !words.trim().is_empty() {
                 params["text"] = json!(words);
+            }
+            // (The same: first that it's a template there.)
+            if kind.id == TEMPLATES.id {
+                kind.one(e("StorePlugin", kind.with(json!({ "id": id })), None).await?)?;
             }
             answer(&e, "StoreReport", kind.with(params)).await
         }
@@ -526,7 +538,7 @@ fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl
 /// The account's own of `kind` in the store: each one's id and name, as the
 /// engine says. None if it doesn't.
 async fn mine(e: &Engine, kind: Kind) -> Option<Vec<(String, String)>> {
-    let reply = e("StoreMyPlugins", kind.with(json!({})), None).await.ok()?;
+    let reply = e("StoreMyPlugins", kind.with(json!({})), None).await.ok().filter(|reply| kind.is(reply))?;
     let all = reply[if kind.id == TEMPLATES.id { "templates" } else { "plugins" }].as_array()?;
     Some(
         all.iter()
@@ -692,7 +704,7 @@ async fn file(e: &Engine, arg: &Value, kind: Kind) -> Result<Json, String> {
     let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
     let path = arg.field("path").map(text).and_then(|p| package_path(&p)).ok_or("not_in_store")?;
     let reply = e("StoreFile", kind.with(json!({ "id": id, "version": version, "path": path })), None).await?;
-    if !reply["file"].as_str().is_some_and(|f| std::path::Path::new(f).is_absolute()) {
+    if !kind.is(&reply) || !reply["file"].as_str().is_some_and(|f| std::path::Path::new(f).is_absolute()) {
         return Err("not_in_store".into());
     }
     Ok(reply)

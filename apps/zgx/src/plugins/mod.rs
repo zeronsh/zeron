@@ -1987,10 +1987,6 @@ impl Bridge {
                 .collect();
             let blocked = blocks::blocked(&root, &t.id);
             from_store |= root.join(&t.id).join(".lineage.json").exists();
-            // (Taken down, in use or not: what was allowed of it is forgotten.)
-            if let (Some(blocks::Why::TakenDown { .. }), Some(approvals)) = (&blocked, preview::approvals_path()) {
-                preview::forget_at(&approvals, &t.id);
-            }
             let (state, error) = if blocked.is_some() {
                 ("blocked", None)
             } else if let Some(why) = &broken {

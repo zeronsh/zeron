@@ -367,12 +367,17 @@ fn acting_as_you_is_asked_in_zeron_s_window_once_another_s_template_ran() {
     // What's yours there says its name, and which of a token's are templates
     // (of those it names alone); never the page.
     let mine = json!({ "ok": true, "plugins": [{ "id": "focus-timer", "name": "Focus timer" }], "templates": [{ "id": "midnight" }, { "id": "dusk" }], "token": { "id": "t" }, "secret": "zdt_secret" });
+    let of_templates = { let mut v = mine.clone(); v["kind"] = json!("template"); v };
     let (no, items) = asker(false);
     run_asking(&unyank.replace("focus-timer\",", "focus-timer\", name = \"Anything\","), mine.clone(), no);
     assert_eq!(items.borrow()[0]["name"], "Focus timer");
     let (no, items) = asker(false);
-    run_asking(&token.replace("{ \"focus-timer\" }", "{ \"focus-timer\", \"midnight\" }"), mine, no);
+    run_asking(&token.replace("{ \"focus-timer\" }", "{ \"focus-timer\", \"midnight\" }"), of_templates, no);
     assert_eq!(items.borrow()[0]["templates"], json!(["midnight"]));
+    // (An engine that reads no kind: not known, never a plugin's list.)
+    let (no, items) = asker(false);
+    run_asking(token, made.clone(), no);
+    assert_eq!(items.borrow()[0]["templates"], Json::Null);
     // The token itself never reaches the window that asked for it.
     let (yes, _) = asker(true);
     let (out, _) = run_asking(token, made.clone(), yes);
@@ -429,10 +434,27 @@ fn a_template_s_calls_say_what_they_re_for() {
         (r#"ui.call("templates.store.report", { id = "midnight", reason = "malware" })"#, "StoreReport", json!({ "id": "midnight", "reason": "malware", "kind": "template" })),
         (r#"ui.call("templates.store.prepare", "midnight")"#, "PrepareTemplatePublish", json!({ "id": "midnight" })),
     ] {
-        let (out, asked) = run(call, json!({ "ok": true, "kind": "template" }));
+        let (out, asked) = run(call, json!({ "ok": true, "kind": "template", "templates": [{ "id": "midnight" }] }));
         assert!(out.starts_with("ok:"), "{call}: {out}");
-        assert_eq!((asked[0].0.as_str(), &asked[0].1), (method, &params), "{call}");
+        let last = asked.last().unwrap();
+        assert_eq!((last.0.as_str(), &last.1), (method, &params), "{call}");
     }
+    // An engine that reads no kind, and would act on (or answer with) the
+    // plugin of that id: nothing is done, and nothing of it shown.
+    for (call, only) in [
+        (r#"ui.call("templates.store.versions", { id = "focus" })"#, "StoreVersions"),
+        (r#"ui.call("templates.store.mine", nil)"#, "StoreMyPlugins"),
+        (r#"ui.call("templates.store.picture", { id = "focus", version = "1.0.0", path = "a.png" })"#, "StoreFile"),
+        (r#"ui.call("templates.store.version_action", { id = "focus", version = "1.0.0", action = "yank" })"#, "StoreMyPlugins"),
+        (r#"ui.call("templates.store.report", { id = "focus", reason = "malware" })"#, "StorePlugin"),
+    ] {
+        let (out, asked) = run(call, json!({ "ok": true, "id": "focus", "plugins": [{ "id": "focus" }], "versions": [], "file": "/tmp/a.png", "type": "image/png" }));
+        assert_eq!(out, "err:not_in_store", "{call}");
+        assert_eq!(asked.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), [only], "{call}");
+    }
+    // Nor one of yours that's a plugin, whatever the engine.
+    let (out, asked) = run(r#"ui.call("templates.store.version_action", { id = "focus", version = "1.0.0", action = "yank" })"#, json!({ "ok": true, "kind": "template", "templates": [{ "id": "midnight" }] }));
+    assert_eq!((out.as_str(), asked.len()), ("err:not_in_store", 1));
     for (call, kind) in [("plugins.store.detail", "template"), ("templates.store.detail", "plugin")] {
         let (out, _) = run(&format!(r#"ui.call("{call}", "midnight")"#), json!({ "id": "midnight", "kind": kind }));
         assert_eq!(out, "err:not_in_store", "{call}");
@@ -455,7 +477,7 @@ fn a_template_s_calls_say_what_they_re_for() {
     // Asked in Zeron's window, as a template's.
     preview::another_s_ran_for_test(true);
     let (no, items) = asker(false);
-    run_asking(r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "unyank" })"#, json!({}), no);
-    assert_eq!(items.borrow()[0]["kind"], "template");
+    run_asking(r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "unyank" })"#, json!({ "kind": "template", "templates": [{ "id": "midnight", "name": "Midnight" }] }), no);
+    assert_eq!((&items.borrow()[0]["kind"], &items.borrow()[0]["name"]), (&json!("template"), &json!("Midnight")));
     preview::another_s_ran_for_test(false);
 }
