@@ -97,28 +97,12 @@ Zeron's built-in themes used to be templates (`theme-<key>`, colour-only). They 
 
 ## Two examples
 
-### Restyle the sidebar's rows through tokens
+### Restyle the sidebar's rows
 
-A selected row in the sidebar is a flat surface (`ds/surface.luau`, `depth = "flat"`). Its fill is the token `zeron.selected.flat.bg`, and the gap between rows is `zeron.list.gap`. Name both in your template's `ds/tokens.luau` and every flat selection and list follows, in both themes. This is the whole file:
+The gap between rows is the token `zeron.list.gap`. Set it in your template's `ds/tokens.luau` and every list follows, in both themes. This is the whole file:
 
 ```lua
 -- ds/tokens.luau
-return {
-	setup = function()
-		ui.theme.tokens {
-			zeron = {
-				list = { gap = 4 }, -- Zeron's is 2: rows breathe
-				-- Flat (sidebar rows): an accent wash, not the neutral one.
-				selected = { flat = { bg = "alpha({accent}, 0.18)" } },
-			},
-		}
-	end,
-}
-```
-
-**Name only the tokens you change.** A template's `ds/tokens.luau` doesn't stand in for Zeron's: Zeron declares all its own first, then runs yours, token by token. One you name is yours; every other is the running Zeron's, those added after you made the template too. You can set a token, never remove one. The smallest file sets one:
-
-```lua
 return {
 	setup = function()
 		ui.theme.tokens { zeron = { list = { gap = 9 } } }
@@ -126,11 +110,22 @@ return {
 }
 ```
 
-A full copy of Zeron's file works as well, but holds every token to what it was when you copied it. If yours fails to load or throws, Zeron's tokens stand and `template_status` names your `ds/tokens.luau`.
+**Name only the tokens you change.** A template's `ds/tokens.luau` doesn't stand in for Zeron's: Zeron declares all its own first, then runs yours, token by token. One you name is yours; every other is the running Zeron's, those added after you made the template too. You can set a token, never remove one. A full copy of Zeron's file works as well, but holds every token to what it was when you copied it. If yours fails to load or throws, Zeron's tokens stand and `template_status` names your `ds/tokens.luau`.
 
 Keep the `zeron_version` that `create_template` wrote. A file like this needs a Zeron that lays tokens over its own, as the one with this guide does; on an older one it would stand in for Zeron's whole file. So never lower it.
 
-Keep only `ds/tokens.luau` in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. (A file you do copy whole, a component or a screen, is yours until you copy it again: `out_of_date` in `template_status` says when Zeron's has changed.) For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
+**What Zeron's themes set is changed there, not in `ds/tokens.luau`.** `ds/themes/zeron-dark.json` and `zeron-light.json` set the colours, and spacing and radii too, and a value there wins: naming the same token in `ds/tokens.luau` changes nothing. A selected row is one: a flat surface (`ds/surface.luau`, `depth = "flat"`), its fill the token `zeron.selected.flat.bg`. To give it an accent wash, copy both files whole from `.zeron/ds/themes/`, and in each, under `zeron`, change that one value:
+
+```json
+"selected": {
+	// (the rest as it was)
+	"flat": { "bg": "alpha({accent}, 0.18)" }
+}
+```
+
+Every flat selection follows, and what's defined by it. It shows wherever no theme is worn (see Colours and themes).
+
+Keep only the files you changed in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. (A file you copy whole, a theme's, a component or a screen, is yours until you copy it again: `out_of_date` in `template_status` says when Zeron's has changed.) For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
 
 ### Put words on the new-chat page
 
