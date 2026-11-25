@@ -95,8 +95,10 @@ fn shown(item: &Json) -> Json {
         out["name"] = out["id"].clone();
     }
     // (A version begins with a number: a word in its place is no version.)
-    // (The store's limit, 128: a plugin's sheet draws 32.)
-    let reads = |v: &str| (1..=128).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'));
+    // (The store's limit, 32, for one of the store's; a file's or a link's may
+    // carry more, drawn cut short.)
+    let most = if item["store"].is_object() { 32 } else { 128 };
+    let reads = |v: &str| (1..=most).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'));
     if item["version"].as_str().is_some_and(|v| !reads(v) || !v.starts_with(|c: char| c.is_ascii_digit())) {
         out["version"] = json!("");
     }
@@ -570,8 +572,10 @@ mod tests {
         assert_eq!(item["name"], "Midnight Verified");
         assert_eq!(item["version"], "");
         let long = format!("1.0.0-{}", "a".repeat(122));
-        assert_eq!(shown(&json!({ "version": long }))["version"], long.as_str(), "the store's 128");
+        assert_eq!(shown(&json!({ "version": long }))["version"], long.as_str(), "a file's, up to 128");
         assert_eq!(shown(&json!({ "version": format!("{long}b") }))["version"], "");
+        let store = |v: &str| shown(&json!({ "version": v, "store": { "id": "midnight" } }))["version"].clone();
+        assert_eq!((store(&"1".repeat(32)), store(&"1".repeat(33))), (json!("1".repeat(32)), json!("")), "the store's 32");
         assert_eq!(item["description"].as_str().unwrap().chars().count(), 300);
         assert_eq!(item["ignored_n"], 2, "all of them counted");
         assert_eq!(item["ignored"], json!(["a b"]));

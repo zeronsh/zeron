@@ -252,7 +252,7 @@ local function body(key: string): Node
 								else nil,
 							-- (A version of numbers alone: one with words of its own
 							-- is said in the facts, never beside the marks.)
-							if bare_version(it) then ds.Badge { it.version, tabular = true, class = "template-consent-version" } else nil,
+							if bare_version(it) then ds.Badge { it.version, tabular = true, class = "template-consent-version", max_w = 120, tooltip = it.version } else nil,
 						},
 					},
 				},
