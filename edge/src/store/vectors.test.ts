@@ -18,11 +18,12 @@ import {
   listingOf,
   listingOfTemplate
 } from "./listing";
+import { objectBody } from "./http";
 import { idProblem, readManifest } from "./manifest";
 import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, protectedPath, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
 import { fold, foldPath, plainPath, shortName, unseenName } from "./paths";
-import { parseList } from "./update-ask";
+import { parseList, parseRequest } from "./update-ask";
 import { crc32, deployTokenHash, parseDeployToken, readAllKinds, readScopeIds, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
@@ -272,13 +273,19 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
     }
   });
 
-  it("what a device asks about: every item it sends is one the store takes", () => {
-    expect(v.update_ask.items.some((c: any) => c.sent)).toBe(true);
-    for (const c of v.update_ask.items) {
-      if (!c.sent) continue;
-      for (const kind of ["plugin", "template"] as const) expect(parseList(kind, [c.item]), JSON.stringify(c.item)).toHaveLength(1);
+  it("what a device asks about: each item asked or unknown, and only a request's own shape refused", () => {
+    const ask = v.update_ask;
+    // As the store reads a request's body.
+    const read = (body: unknown) => parseRequest(objectBody(new TextEncoder().encode(JSON.stringify(body))));
+    expect(ask.items.some((c: any) => c.answer === "asked") && ask.items.some((c: any) => c.answer === "unknown")).toBe(true);
+    for (const c of ask.items) {
+      for (const kind of ["plugin", "template"] as const) expect(parseList(kind, [c.item])?.length, JSON.stringify(c.item)).toBe(c.answer === "asked" ? 1 : 0);
     }
-    for (const r of v.update_ask.requests) for (const list of r.requests) expect(parseList("template", list), r.name).toHaveLength(list.length);
+    expect(Math.min(ask.refused.length, ask.taken.length, ask.requests.length)).toBeGreaterThan(0);
+    for (const c of ask.refused) expect(read(c.body), c.name).toBeTypeOf("string");
+    for (const c of ask.taken) expect(read(c.body), c.name).toBeTypeOf("object");
+    // (What a device makes of what it has: each list one the store takes whole.)
+    for (const r of ask.requests) for (const list of r.requests) expect(parseList("template", list), r.name).toHaveLength(list.length);
   });
 
   it("paths", () => {
