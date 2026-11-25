@@ -34,7 +34,7 @@ import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { join, resolve } from "node:path";
 import { PLUGINS } from "./catalog.mjs";
 import { TEMPLATES } from "./templates.mjs";
-import { whyNotSeeded } from "./where.mjs";
+import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 
 const [command, ...rest] = process.argv.slice(2);
@@ -90,6 +90,11 @@ if (refusedEdge) {
   process.exit(2);
 }
 const clientId = need("--client-id");
+const refusedWorkos = whyNotItsWorkos(clientId);
+if (refusedWorkos) {
+  console.error(`sessions: ${refusedWorkos}`);
+  process.exit(2);
+}
 const logins = JSON.parse(readFileSync(need("--logins"), "utf8"));
 if (!Array.isArray(logins)) throw new Error("sessions: the logins file is a list of accounts");
 for (const slot of only) {
@@ -184,7 +189,6 @@ const hostedSignIn = async (browser, url, login, until) => {
     await page.waitForLoadState("domcontentloaded");
     return { page, context };
   } catch (error) {
-    await page.screenshot({ path: join(dir, `sign-in-${login.username}.png`) }).catch(() => {});
     await context.close();
     throw error;
   }
@@ -223,9 +227,9 @@ try {
       const named = await (await fetch(`${edge}/username`, { headers: { authorization: `Bearer ${bearer}` } })).json();
       if (!named.username) {
         const claimed = await fetch(`${edge}/username`, { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify({ username: login.username }) });
-        if (!claimed.ok) throw new Error(`author ${slot} couldn't claim ${login.username}: ${claimed.status} ${await claimed.text()}`);
+        if (!claimed.ok) throw new Error(`author ${slot} couldn't claim its username (${claimed.status})`);
       } else if (named.username !== login.username) {
-        throw new Error(`author ${slot} already has username ${named.username}, not ${login.username}`);
+        throw new Error(`author ${slot} already has another username than the logins file's`);
       }
       const key = await d.call("PluginSigningKey");
       // The store sees the session as the CLI does.
@@ -236,7 +240,7 @@ try {
         child.on("close", (code) => res({ code, err }));
       });
       if (status.code !== 0) throw new Error(`author ${slot}: \`zeron plugin status\` says ${status.err.trim().split("\n").pop()}`);
-      console.log(`author ${slot}: @${login.username} signed in, in a workspace, signing key ${key?.registered ? "registered" : "NOT registered"}, engine on ${ipcPort(slot)}`);
+      console.log(`author ${slot}: signed in, in a workspace, signing key ${key?.registered ? "registered" : "NOT registered"}, engine on ${ipcPort(slot)}`);
       accounts.push({ slot, home: d.env.HOME, data_dir: d.env.ZERON_DATA_DIR, ipc_port: ipcPort(slot), token_env: `SEED_TOKEN_${slot}` });
     } else {
       // tokens: one each, made once (shown only when made).

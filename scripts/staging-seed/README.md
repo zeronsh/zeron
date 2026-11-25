@@ -50,9 +50,13 @@ each author's `token_env`.
 An id published is never released, so the seeds and `sessions.mjs` write only
 to an edge the operator allows by name: `--edge` must be one of
 `SEED_ALLOWED_EDGES` (addresses, separated by commas). Production's hosts are
-refused even when they're listed. Both seeds also refuse an author's Zeron
-that's signed in to another WorkOS than the accounts file's: what it publishes
-goes to its own edge.
+refused even when they're listed.
+
+What an author's Zeron publishes goes to its own edge, whatever the seed was
+told. So the accounts file says which edge that is (the same as `--edge`), and
+both seeds ask each Zeron for its session first: it must be of the WorkOS the
+file names, and never of production's, which is read from `edge/wrangler.jsonc`
+(a seed that can't read it refuses). Nothing names an account in what's printed.
 
 ```sh
 export SEED_ALLOWED_EDGES=<edge>

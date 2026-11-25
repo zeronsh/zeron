@@ -175,6 +175,33 @@ try {
   };
   writeFileSync(join(work, "accounts.json"), JSON.stringify(accounts, null, 2));
   const seed = (env) => run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json"), "--edge", edge.url], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url, ...env }, onErr: (t) => process.stderr.write(t) });
+  // The same seed where this run's WorkOS is production's (a copy beside an
+  // edge config that says so): refused, though every other thing is right, and
+  // so is an accounts file that doesn't say its edge, or says another.
+  {
+    const copy = join(work, "as-production");
+    cpSync(here, join(copy, "scripts/staging-seed"), { recursive: true });
+    const refused = async (script, accounts, flags = []) => {
+      writeFileSync(join(work, "refused.json"), JSON.stringify(accounts));
+      const ran = await run(process.execPath, [script, "--accounts", join(work, "refused.json"), "--edge", edge.url, ...flags], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
+      return ran.code === 2 && !/published|ready/.test(ran.out) ? ran.err.trim().split("\n")[0] : `exit ${ran.code}: ${ran.out}${ran.err}`;
+    };
+    const right = JSON.parse(readFileSync(join(work, "accounts.json"), "utf8"));
+    const script = join(copy, "scripts/staging-seed/seed.mjs");
+    mkdirSync(join(copy, "edge"), { recursive: true });
+    writeFileSync(join(copy, "edge/wrangler.jsonc"), `// its config\n${JSON.stringify({ vars: { WORKOS_CLIENT_ID: edge.clientId } })}`);
+    const named = await refused(script, right);
+    check("production's WorkOS is refused, though the accounts file names it", named.includes("production's"), named);
+    const signedIn = await refused(script, { ...right, workos_client_id: "client_other" }, ["--dry-run"]);
+    check("and a Zeron signed in to it, whatever the file names", signedIn.includes("signed in to production"), signedIn);
+    rmSync(join(copy, "edge/wrangler.jsonc"));
+    const unread = await refused(script, right);
+    check("and any when production's can't be read", unread.includes("can't be read"), unread);
+    const { edge: _edge, ...edgeless } = right;
+    const none = await refused(join(here, "seed.mjs"), edgeless);
+    const other = await refused(join(here, "seed.mjs"), { ...right, edge: "https://other.example.com" });
+    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("isn't --edge"), `${none} / ${other}`);
+  }
   // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
   // before it publishes anything.
   writeFileSync(join(work, "elsewhere.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(work, "accounts.json"), "utf8")), workos_client_id: "client_elsewhere" }));
