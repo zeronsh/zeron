@@ -2,12 +2,9 @@
 // The Pixel Walker plugin's fellow in a red cap, strolling along the top bar
 // of the recreated window as he does in the app: the same 14 × 16 artwork
 // (sprite.luau), drawn at its "Normal" size (two points a pixel), at its
-// default 40 points a second, pausing 0.7 s at each end before he turns,
-// starting a fifth of the way along, heading right.
-//
-// In the app he walks the whole bar; the hero's tilted window only shows its
-// left end (at 1440 wide, little past x 180), so here he keeps to that end:
-// from x 14, over the traffic lights and arrows, to x 178 at his right edge.
+// default 40 points a second, pausing 0.7 s at each end before he turns.
+// He sets off from the session's tab (which ends at x 430), heading right,
+// and walks the bar to 48 points short of its right edge, as in the app.
 //
 // Every move is a transform or an opacity, so it all runs on the compositor
 // and nothing is repainted: the walk is a translate, the turn a scale, the
@@ -67,20 +64,21 @@ const standing = rects(POSES[1], 0, 1);
 </div>
 
 <style>
-  /* In the stage's points: his walk starts at x 14; his feet sit a point
-     above the bar's foot (y 41), and the box is a row taller for the bob. */
-  .walker { left: 14px; top: 7px; width: 28px; height: 34px; pointer-events: none; translate: 27.2px 0; }
+  /* In the stage's points: his walk starts just past the tab, at x 434; his
+     feet sit a point above the bar's foot (y 41), and the box is a row
+     taller for the bob. */
+  .walker { left: 434px; top: 7px; width: 28px; height: 34px; pointer-events: none; }
   .face, .stride, .stand { position: absolute; inset: 0; }
   .stride { overflow: hidden; opacity: 0; }
   /* The sheet is four frames wide, wider than its box: the page's own svg rule would shrink it. */
   .sheet { display: block; width: 112px; max-width: none; height: 34px; }
   .stand { display: block; width: 28px; height: 34px; }
 
-  /* One round trip: 136 points each way at 40 a second is 3.4 s, and a 0.7 s
-     pause at each end makes 8.2 s. 3.4 / 8.2 = 41.463 %, 7.5 / 8.2 = 91.463 %.
-     Starting a fifth of the way along the first leg is 0.68 s in. */
+  /* One round trip: 810 points each way (434 to 1272, less his width) at 40
+     a second is 20.25 s, and a 0.7 s pause at each end makes 41.9 s.
+     20.25 / 41.9 = 48.329 %, 40.95 / 41.9 = 97.733 %. He starts at the tab. */
   @media (prefers-reduced-motion: no-preference) {
-    .walker, .face, .stride, .stand { animation-duration: 8.2s; animation-delay: -0.68s; animation-iteration-count: infinite; }
+    .walker, .face, .stride, .stand { animation-duration: 41.9s; animation-iteration-count: infinite; }
     .walker { animation-name: walk; animation-timing-function: linear; }
     .face { animation-name: face; animation-timing-function: step-end; }
     .stride { animation-name: striding; animation-timing-function: step-end; }
@@ -90,9 +88,9 @@ const standing = rects(POSES[1], 0, 1);
   }
   @keyframes walk {
     0% { translate: 0 0; }
-    41.463% { translate: 136px 0; }
-    50% { translate: 136px 0; }
-    91.463% { translate: 0 0; }
+    48.329% { translate: 810px 0; }
+    50% { translate: 810px 0; }
+    97.733% { translate: 0 0; }
     100% { translate: 0 0; }
   }
   /* He turns when a pause ends, as the plugin does. */
@@ -102,15 +100,15 @@ const standing = rects(POSES[1], 0, 1);
   }
   @keyframes striding {
     0% { opacity: 1; }
-    41.463% { opacity: 0; }
+    48.329% { opacity: 0; }
     50% { opacity: 1; }
-    91.463% { opacity: 0; }
+    97.733% { opacity: 0; }
   }
   @keyframes standing {
     0% { opacity: 0; }
-    41.463% { opacity: 1; }
+    48.329% { opacity: 1; }
     50% { opacity: 0; }
-    91.463% { opacity: 1; }
+    97.733% { opacity: 1; }
   }
   @keyframes strides { to { translate: -112px 0; } }
 </style>
