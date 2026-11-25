@@ -262,6 +262,24 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "templates.in_another_s_name",
+	title = "Midnight is in a folder with another store template's id",
+	run = function()
+		table.insert(model, { id = "made-up-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok", imported = from_store("midnight", "1.2.0") } :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.no_store_id",
+	title = "A store template whose record names no id",
+	run = function()
+		local imported = from_store("made-up-3", "1.2.0")
+		imported.source = { kind = "store" }
+		table.insert(model, { id = "made-up-3", name = "Made up 3", version = "1.2.0", builtin = false, active = false, status = "ok", imported = imported } :: any)
+		publish()
+	end,
+}
+ui.command {
 	id = "templates.edited",
 	title = "Midnight, from the store, is changed here",
 	run = function()

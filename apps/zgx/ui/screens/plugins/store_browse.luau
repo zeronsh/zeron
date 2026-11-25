@@ -248,8 +248,12 @@ function C.make(kind: kinds.Kind)
 		for _, p in state.shown:get() do
 			local source: any = p.source
 			if type(source) == "table" and source.kind == "store" then
-				-- (By the store's id: a template's folder may be named apart.)
-				out[source.id or p.id] = p
+				-- (A template's by the store's id alone: its folder may be named
+				-- apart, and another's may have its name.)
+				local id: any = if kind.id == "template" then source.id else p.id
+				if type(id) == "string" then
+					out[id] = p
+				end
 			end
 		end
 		return out

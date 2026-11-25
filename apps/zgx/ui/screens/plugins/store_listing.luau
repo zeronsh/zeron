@@ -525,11 +525,12 @@ function C.make(kind: kinds.Kind, browse: any)
 		-- What the device shown has of it: this store plugin (installed from
 		-- the store); another plugin that has its id (from a file, a link)
 		-- is never taken for it.
-		-- (A template's folder may be named apart: by the store's id.)
+		-- (A template's by the store's id alone: its folder may be named apart,
+		-- and another's may have its name.)
 		local function item(): any
 			for _, p in state.shown:get() do
 				local source: any = p.source
-				if type(source) == "table" and source.kind == "store" and (source.id or p.id) == id and (template or p.id == id) then
+				if type(source) == "table" and source.kind == "store" and (if template then source.id else p.id) == id then
 					return p
 				end
 			end
