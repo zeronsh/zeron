@@ -24,7 +24,10 @@
 //! It comes back by itself once Zeron can check. (A template you kept runs as Zeron and can undo all
 //! of this: it guards the honest case.)
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value as Json, json};
 
@@ -82,10 +85,73 @@ fn read(path: &Path) -> Read<Json> {
     if !meta.is_file() || meta.len() > MOST {
         return Read::Bad;
     }
-    match std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
-        Some(v) => Read::Says(v),
-        None => Read::Bad,
+    // (Read once for as long as it stands: a look is every two seconds where
+    // there's nothing to watch with.)
+    let stamp = Stamp::of(&meta);
+    if let Some((of, says)) = kept().get(path)
+        && *of == stamp
+    {
+        return says.clone().map_or(Read::Bad, Read::Says);
     }
+    #[cfg(test)]
+    READS.with(|n| n.borrow_mut().push(path.to_path_buf()));
+    let says: Option<Json> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    // (Written a moment ago, it may be again within the clock's grain: read
+    // again until it has stood.)
+    if meta.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|since| since > SETTLES) {
+        let mut kept = kept();
+        if kept.len() > 1024 {
+            kept.clear();
+        }
+        kept.insert(path.to_path_buf(), (stamp, says.clone()));
+    }
+    says.map_or(Read::Bad, Read::Says)
+}
+
+/// How long a file has stood before it's taken to be as it was read.
+const SETTLES: Duration = Duration::from_secs(2);
+
+/// Which file it is, as it stands: what any write or rename moves.
+#[derive(Clone, PartialEq)]
+struct Stamp(u64, Option<SystemTime>, Option<SystemTime>, [i64; 3]);
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let which = {
+            use std::os::unix::fs::MetadataExt;
+            [meta.ino() as i64, meta.ctime(), meta.ctime_nsec()]
+        };
+        #[cfg(not(unix))]
+        let which = [0; 3];
+        Self(meta.len(), meta.modified().ok(), meta.created().ok(), which)
+    }
+}
+
+type Kept = HashMap<PathBuf, (Stamp, Option<Json>)>;
+
+/// What each file said, by what it was.
+fn kept() -> std::sync::MutexGuard<'static, Kept> {
+    static KEPT: LazyLock<Mutex<Kept>> = LazyLock::new(Mutex::default);
+    KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The files read (not merely looked at) on this thread.
+    static READS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The files read on this thread since it was last asked.
+#[cfg(test)]
+pub fn reads() -> Vec<PathBuf> {
+    READS.with(std::cell::RefCell::take)
+}
+
+/// The place of the app's own copy, for a test.
+#[cfg(test)]
+pub fn copy_at(at: Option<PathBuf>) {
+    copy_for_test(at);
 }
 
 fn words(v: &Json) -> Option<String> {
@@ -144,6 +210,7 @@ fn known(templates: &Path, copy: Option<&Path>) -> Known {
     let theirs = list(&templates.join(FILE));
     if let Read::Says((written, blocks)) = theirs {
         if let Some(copy) = copy
+            && !matches!(read(copy), Read::Says(had) if had == written)
             && let Err(error) = live::put(copy, &serde_json::to_vec_pretty(&written).unwrap_or_default())
         {
             eprintln!("zeron-zgx: templates: the taken-down list wasn't kept: {error}");
@@ -339,7 +406,7 @@ pub fn refuse(templates: &Path, id: &str) -> Result<(), String> {
 /// What you allowed of every template taken down, forgotten: not only of the
 /// one that runs, or a restore would give the others Zeron's powers back with
 /// nothing asked. (One that can't be checked keeps its: it comes back.)
-pub fn forget_taken_down(templates: &Path, approvals: &Path) {
+fn forget_taken_down(templates: &Path, approvals: &Path) {
     for id in preview::allowed_at(approvals) {
         if let Some(Why::TakenDown { .. }) = blocked(templates, &id) {
             eprintln!("zeron-zgx: templates: {id} was taken down: what was allowed of it is forgotten");
