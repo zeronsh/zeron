@@ -203,8 +203,9 @@ pub enum PluginCommand {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy tokens: what a CI job publishes with. Each is your account's,
-    /// for the plugins you name or all of yours, fixed when it's made. Made,
+    /// Deploy tokens: what a CI job publishes plugins and templates with.
+    /// Each is your account's, for those you name (an id is a plugin's or a
+    /// template's) or all of your plugins, fixed when it's made. Made,
     /// listed and revoked through the running Zeron, with your session
     /// (never with a deploy token); a plugin's first version comes from your
     /// machine.
@@ -222,20 +223,26 @@ pub enum PluginCommand {
 #[derive(Subcommand)]
 pub enum TokenCommand {
     /// Make a deploy token: it's shown this once (neither Zeron nor the
-    /// store keeps it). Name the plugins it publishes (`--plugins a,b`), or
-    /// `--all` of yours, those you first publish later included; that can't
-    /// change afterwards. Making one needs a fresh sign-in, which this asks
-    /// for.
+    /// store keeps it). Name what it publishes (`--plugins a,b`, plugins and
+    /// templates alike), or `--all` of your plugins, or `--all --templates`
+    /// for your plugins and templates, those you first publish later
+    /// included; that can't change afterwards. Making one needs a fresh
+    /// sign-in, which this asks for.
     Create {
         /// What it's for, like "GitHub Actions".
         #[arg(long)]
         name: String,
-        /// The plugins it publishes, by id (yours in the store already).
+        /// What it publishes, by id: plugins and templates (yours in the
+        /// store already).
         #[arg(long, value_delimiter = ',', value_name = "IDS", required_unless_present = "all", conflicts_with = "all")]
         plugins: Vec<String>,
         /// Every plugin of yours, those you first publish later included.
+        /// Templates too with `--templates`.
         #[arg(long)]
         all: bool,
+        /// With `--all`: every template of yours as well as every plugin.
+        #[arg(long, requires = "all")]
+        templates: bool,
         /// Stop it working after this many days.
         #[arg(long, value_name = "DAYS")]
         expires_in_days: Option<u32>,
@@ -280,6 +287,34 @@ pub enum TemplateCommand {
     Status { id: String },
     /// Delete a template (it's set aside in the templates folder's .removed).
     Delete { id: String },
+    /// Print Zeron's own files by hash, for the store's stock/<version>.json
+    /// (the release's: what a template's first reviewer reads against).
+    #[command(hide = true)]
+    Stock {
+        /// Zeron's own template folder, as the app lays it out (`.zeron`).
+        zeron: std::path::PathBuf,
+    },
+    /// Check a template against the store's rules (README, preview, listing,
+    /// version, files): every problem, before anything is sent. Needs no
+    /// Zeron running and no sign-in. Exits 1 when it doesn't meet them.
+    Check {
+        /// The template's folder, or the id of one in Zeron's templates
+        /// folder.
+        target: String,
+    },
+    /// Publish a template to the store: it's live at once, for anyone to
+    /// install, and marked verified once a reviewer has read it. With
+    /// ZERON_DEPLOY_TOKEN set to a deploy token (never pass it as an
+    /// argument): the folder is checked, packed and sent with the token, with
+    /// no Zeron running and no sign-in. Exits as `zeron plugin publish` does.
+    Publish {
+        /// The template's folder, or the id of one in Zeron's templates
+        /// folder.
+        target: String,
+        /// Check and pack it, but don't send it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// `zeron mcp …`: the MCP servers Zeron gives agents. A server is named by

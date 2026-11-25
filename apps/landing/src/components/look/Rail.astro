@@ -1,6 +1,7 @@
 ---
 // The rail beside a plugin's page (the prototype's .rail): what a person
-// weighs before installing it. What it asks for (its first few, in the
+// weighs before installing it. A template says it runs as Zeron itself;
+// a plugin, what it asks for. What it asks for (its first few, in the
 // app's words and order, the risky last and in the danger's ink; the rest
 // on its own tab), its details, its keywords, and its links: the author's
 // own (https only, as parsed) and a report. Each group under its label, a
@@ -9,6 +10,7 @@ import AppIcon from "./AppIcon.astro";
 import Icon from "./Icon.astro";
 import { catalogHref } from "../../lib/store/catalog.ts";
 import { bytes, compatibility, date } from "../../lib/store/format.ts";
+import { KIND_WORDS, kindOfItem, RUNS_AS } from "../../lib/store/kind.ts";
 import { lines } from "../../lib/store/permissions.ts";
 import type { PluginDetail } from "../../lib/store/types.ts";
 import { httpsUrl, pluginUrl } from "../../lib/store/urls.ts";
@@ -22,14 +24,23 @@ interface Props {
   onAsks?: boolean;
 }
 const { plugin, shown = 4, onAsks = false } = Astro.props;
-const asks = lines(plugin.permissions);
+const kind = kindOfItem(plugin);
+const asks = plugin.permissions ? lines(plugin.permissions) : null;
 const homepage = httpsUrl(plugin.homepage);
 const repository = httpsUrl(plugin.repository);
 ---
 
-<aside class="rail" aria-label="About this plugin">
+<aside class="rail" aria-label={`About this ${KIND_WORDS[kind].one}`}>
   {
-    !onAsks && (
+    kind === "template" && (
+      <section class="runs" aria-labelledby="rail-runs">
+        <h2 class="rail-h" id="rail-runs">{RUNS_AS.title}</h2>
+        <p>{RUNS_AS.line}</p>
+      </section>
+    )
+  }
+  {
+    asks && !onAsks && (
       <section aria-labelledby="rail-asks">
         <h2 class="rail-h" id="rail-asks">{store("plugins.store.asks")}</h2>
         {asks.length === 0 ? (
@@ -67,7 +78,7 @@ const repository = httpsUrl(plugin.repository);
       <section aria-labelledby="rail-keywords">
         <h2 class="rail-h" id="rail-keywords">Keywords</h2>
         <ul class="tags">
-          {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })} title={k}>{k}</a></li>)}
+          {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ kind, keyword: k })} title={k}>{k}</a></li>)}
         </ul>
       </section>
     )
@@ -77,7 +88,7 @@ const repository = httpsUrl(plugin.repository);
     <ul class="links">
       {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Icon name="globe" />{store("plugins.store.fact.homepage")}<span class="o"><Icon name="out" /></span></a></li>}
       {repository && <li><a href={repository} rel="nofollow noopener ugc"><Icon name="term" />{store("plugins.store.fact.repository")}<span class="o"><Icon name="out" /></span></a></li>}
-      <li><a href={`${pluginUrl(plugin.id)}/report`}><Icon name="flag" />Report this plugin</a></li>
+      <li><a href={`${pluginUrl(plugin.id, kind)}/report`}><Icon name="flag" />Report this {KIND_WORDS[kind].one}</a></li>
     </ul>
   </section>
 </aside>

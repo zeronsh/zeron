@@ -4005,7 +4005,7 @@
       "needs_person": "它已经安装。只有你本人能在 Zeron 中更新它。",
       "store_unreachable": "Zeron 暂时无法连接插件商店。请稍后再试。",
       "not_in_store": "插件商店里没有这个插件或这个版本。",
-      "store_mismatch": "收到的内容与插件商店审核过的不一致，所以没有安装。",
+      "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
       "store_error": "无法读取插件商店的回应。请稍后再试。",
       "signed_out": "需要先登录 Zeron。",
       "review": "发布需要在 Zeron 或命令行中对插件当前状态做一次检查。请重新检查。",
@@ -4039,7 +4039,7 @@
       "body_mismatch": "内容在发送途中被改动了。请重新发送。",
       "too_many_tokens": "你已有 20 个部署令牌，这是一个账户的上限。吊销一个后才能再创建。",
       "invalid_token": "商店没有接受这个部署令牌：它有误、已被吊销或已到期。",
-      "token_not_allowed": "这个部署令牌不能发布这个插件。插件的第一个版本要从你的电脑发布。",
+      "token_not_allowed": "这个部署令牌不能发布它。插件或模板的第一个版本要从你的电脑发布。",
       "session_required": "这需要你登录 Zeron，而不是使用部署令牌。",
       "key_taken": "这个密钥已被使用。",
       "invalid_name": "请给密钥一个短一点的名字。",
@@ -4048,7 +4048,10 @@
       "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
       "not_owner": "其中有些插件在商店里不属于你。",
       "invalid_scope": "请至少为它选择一个你的插件。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。",
+      "template_taken_down": "Zeron 已将此模板下架，无法使用。",
+      "template_unchecked": "Zeron 无法确认此模板是否已被下架。请稍后再试。",
+      "asked_lately": "你刚才选择了“暂不”，所以 Zeron 暂时不会再次询问。请稍后再试。"
     },
     "store": {
       "browse": "浏览",
@@ -4172,7 +4175,7 @@
       "couldnt_prereleases": "无法更改{name}的预发布设置",
       "publish_link": "发布…",
       "publish_title": "发布{name}",
-      "publish_body": "把一个版本发送到插件商店。每个版本都要经过 Zeron 审核人员审阅，之后其他人才能安装；你自己的设备可以立即使用。",
+      "publish_body": "把一个版本发送到插件商店。它会立即以你的用户名出现在商店中，所有人都可以安装；在 Zeron 审核人员审阅之前，它会显示为尚未验证。",
       "checks_title": "商店需要的内容",
       "check": {
         "readme": "README",
@@ -4264,7 +4267,7 @@
         "none_verified": "还没有已验证的版本"
       },
       "keys": "部署令牌",
-      "keys_body": "部署令牌让 CI 任务（例如 GitHub Action）无需你的会话即可发布你插件的新版本。每个令牌只发布创建时选定的插件。",
+      "keys_body": "部署令牌让 CI 任务（例如 GitHub Action）无需你的会话即可发布你的插件和模板的新版本。每个令牌只发布创建时选定的那些。",
       "keys_none": "还没有令牌。",
       "keys_failed": "无法查看你的令牌",
       "key": {
@@ -4286,7 +4289,7 @@
         "timed_out": "登录没有完成。请再试一次。",
         "made_today": "你今天已创建 10 个部署令牌。明天可以再创建。",
         "secret_title": "现在复制你的令牌",
-        "secret_body": "这是 Zeron 唯一一次显示它。请把它作为 ZERON_DEPLOY_TOKEN 放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应插件的版本。",
+        "secret_body": "这是 Zeron 唯一一次显示它。请把它作为 ZERON_DEPLOY_TOKEN 放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应的插件和模板的版本。",
         "done": "我已复制",
         "show_token": "显示令牌",
         "copied": "已复制。Zeron 会在一分钟后从剪贴板中清除它。",
@@ -4307,16 +4310,21 @@
         "scope": {
           "label": "可以发布",
           "all": "你的所有插件",
-          "chosen": "选定的插件",
+          "chosen": "选定的",
           "one": "{name}",
           "two": "{a} 和 {b}",
           "all_now": "你的所有插件：目前 {n} 个，以及以后发布的",
           "more": "{a}、{b} 等 {n} 个",
           "every": "{list} 和 {last}",
           "show_all": "全部显示",
-          "fewer": "收起"
+          "fewer": "收起",
+          "all_both": "你的所有插件和模板",
+          "all_both_hint": "模板可以做 Zeron 能做的一切。",
+          "templates": "模板",
+          "all_both_now": "你的所有插件和模板：目前 {n} 个，以及以后发布的"
         },
-        "not_used_made": "尚未使用 · 创建于 {date}"
+        "not_used_made": "尚未使用 · 创建于 {date}",
+        "one": "部署令牌"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
@@ -4325,7 +4333,7 @@
       "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
       "update_new_key": "这个版本的签名密钥与你现有版本的不同。",
       "update_asks_first": "更新前 Zeron 会先请你允许。",
-      "keys_publish_first": "请先从这台电脑发布你的一个插件。",
+      "keys_publish_first": "请先从这台电脑发布你的一个插件或模板。",
       "version_installs": "版本 {version} · {n, plural, other {# 次安装}}",
       "show_installed": "在“已安装”中查看",
       "readme_more": "显示更多",
@@ -4396,6 +4404,30 @@
         "repeated": {
           "keywords": "关键词“{word}”重复了。"
         }
+      },
+      "act": {
+        "not_now": "暂不",
+        "id": "ID",
+        "version": "版本",
+        "why_title": "为什么 Zeron 在这里询问",
+        "why_body": "自 Zeron 启动以来，运行过一个不是 Zeron 自己的模板。模板会绘制 Zeron 的主窗口，所以 Zeron 在自己的窗口中询问你。",
+        "publish": {
+          "title": "发布 {name} {version}？",
+          "body": "它会立即以你的用户名出现在商店中，所有人都可以安装。",
+          "allow": "发布"
+        },
+        "unyank": {
+          "title": "允许重新安装 {name} {version}？",
+          "body": "人们可以再次安装这个版本。",
+          "allow": "允许安装"
+        },
+        "token": {
+          "title": "创建这个部署令牌？",
+          "body": "任何拿到它的人都能以你的身份发布它所对应内容的新版本。Zeron 会先请你重新登录，并在这个窗口中显示令牌。",
+          "allow": "创建令牌"
+        },
+        "chosen": "{n, plural, other {已选 # 个}}",
+        "maybe_templates": "其中若有模板，它可以做 Zeron 能做的一切。"
       }
     }
   },
@@ -4419,7 +4451,10 @@
         "errors": "部分内容显示默认界面：{error}",
         "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
         "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
-        "no_description": "无描述。"
+        "no_description": "无描述。",
+        "taken_down": "Zeron 已将此版本下架，无法使用。",
+        "taken_down_reason": "Zeron 已将此版本下架，无法使用：{reason}",
+        "unchecked": "暂时停用：Zeron 无法确认它是否已被下架。确认后会自动恢复。"
       },
       "package_filter": "Zeron 模板",
       "export_title": "导出模板",
@@ -4495,7 +4530,108 @@
       "not_now": "暂不",
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
-      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。",
+      "update_title": "更新{name}？",
+      "new_owner": "它的发布者已变更：现在属于 @{username}。",
+      "store_record": "它与商店中的完全一致",
+      "store_record_detail": "由部署令牌发布，因此没有签名。",
+      "from_store": "来自商店",
+      "from_store_detail": "由 @{username} 发布。",
+      "from_file": "来自文件，而非商店",
+      "from_link": "来自链接，而非商店",
+      "store_changed": "商店对它的说明有变化。请再看一遍。",
+      "now_unverified": "Zeron 刚刚撤下了它的验证标记。请再看一遍。",
+      "now_verified": "Zeron 刚刚验证了它。请再看一遍。",
+      "now_publisher": "它的发布者刚刚变更。请再看一遍。",
+      "taken_down": "Zeron 已将这个版本下架，无法安装。",
+      "not_in_store": "这个版本已不在模板商店中。",
+      "own_words": "它自己的说明",
+      "version": "版本 {version}",
+      "instead": "这会用 {to} 替换 {from}，Zeron 已验证该版本。",
+      "instead_older": "这会用较旧的版本 {to} 替换 {from}，Zeron 已验证该版本。",
+      "instead_unknown": "这会用 {to} 替换你现有的版本，Zeron 已验证该版本。",
+      "instead_plain": "这会用 {to} 替换 {from}。",
+      "instead_older_plain": "这会用较旧的版本 {to} 替换 {from}。",
+      "instead_unknown_plain": "这会用 {to} 替换你现有的版本。"
+    },
+    "store": {
+      "search": "搜索模板",
+      "none_verified": "这个模板还没有经过验证的版本。",
+      "offline_title": "无法连接模板商店",
+      "offline_body": "你的模板照常工作。联网后再试。",
+      "failed_title": "模板商店没有回应",
+      "failed_body": "你的模板照常工作。稍后再试一次。",
+      "more_failed": "更多模板没有加载出来。",
+      "nothing_here": "这里没有模板",
+      "empty_title": "商店里还没有模板",
+      "empty_body": "大家发布的模板会出现在这里。",
+      "count": "{n, plural, other {# 个模板}}",
+      "list_title": "模板",
+      "runs_as_zeron_list": "模板以 Zeron 本身运行：它可以做 Zeron 能做的一切。",
+      "not_found_title": "商店里没有这个模板",
+      "not_found_body": "它可能已被下架，或者链接有误。",
+      "browse_all": "浏览模板",
+      "report": {
+        "link": "举报这个模板",
+        "title": "举报{name}",
+        "body": "Zeron 的审核人员会阅读每一份举报。"
+      },
+      "other_title": "你已经有一个使用此 ID 的模板",
+      "other_body": "它来自别处。这个会安装在它旁边。",
+      "updates_body": "接受这个模板的每个新版本，或只接受 Zeron 已验证的版本。",
+      "update_body": "新内容。含有新代码的版本会先询问你。",
+      "update_asks_first": "更新前 Zeron 会先请你允许。",
+      "blocked_body": "这个版本已从商店下架，无法使用。",
+      "blocked_body_reason": "这个版本已从商店下架，无法使用：{reason}",
+      "couldnt_updates": "无法更改 {name} 的更新设置",
+      "runs_as_zeron": "以 Zeron 本身运行",
+      "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
+      "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。",
+      "changed_here": "在这台设备上修改过",
+      "publish_body": "把一个版本发送到模板商店。它会立即以你的用户名出现在商店中，所有人都可以安装；在 Zeron 审核人员审阅之前，它会显示为尚未验证。",
+      "sent_toast": "{name} {version} 已在模板商店",
+      "check": {
+        "preview": "预览图片",
+        "zeron_version": "适用的 Zeron 版本"
+      },
+      "summary": {
+        "none": "未发布到模板商店",
+        "unknown": "把它分享到模板商店",
+        "listed_verified": "{version} 已在模板商店，已验证",
+        "listed_waiting": "{version} 已在模板商店，尚未验证",
+        "listed_declined": "{version} 已在模板商店，未通过验证"
+      },
+      "fix": {
+        "not_semver": "在 zeron-template.json 里给它一个由三个数字组成的版本号，例如 1.2.0。",
+        "id_reserved": "这个 id 已被保留：Zeron 把它留给自己、商店自己的页面或他人。请换一个名字复制这个模板。",
+        "not_newer": "在 zeron-template.json 里给它一个比你发送过的所有版本都新的版本号。",
+        "version_exists": "这个版本你已经发送过了。请在 zeron-template.json 里换一个新版本号。",
+        "protected_file": "这个文件属于 Zeron，任何模板都不能替换它。请删除它。",
+        "bad_package": "它包含 Zeron 不会为模板写入的文件。请去掉它。",
+        "none_of": "模板没有“{field}”。请从 zeron-template.json 里去掉它。",
+        "missing_listing": {
+          "preview": "在它的文件夹里添加一张图片 preview.png：这是大家最先看到的。",
+          "description": "在 zeron-template.json 里说明它的样子（\"description\"）。",
+          "name": "在 zeron-template.json 里给它起个名字（\"name\"）。",
+          "keywords": "在 zeron-template.json 里添加关键词（\"keywords\"）。",
+          "screenshots": "在 zeron-template.json 里添加图片（\"screenshots\"）。",
+          "homepage": "在 zeron-template.json 里添加网站（\"homepage\"）。",
+          "repository": "在 zeron-template.json 里写明源代码位置（\"repository\"）。",
+          "license": "在 zeron-template.json 里写明许可证（\"license\"）。",
+          "zeron_version": "在 zeron-template.json 里写明它适用的 Zeron 版本（\"zeron_version\"）。"
+        },
+        "bad_listing": {
+          "preview": "preview.png 必须是商店能显示的 PNG，且不能太大。",
+          "zeron_version": "适用的 Zeron 版本必须由三个数字组成，例如 0.3.20。"
+        },
+        "missing_readme": "在它的文件夹里写好 README.md：这是模板在商店里的页面。"
+      }
+    },
+    "failure": {
+      "not_in_store": "模板商店里没有这个模板或这个版本。",
+      "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
+      "not_verified": "Zeron 尚未验证这个版本，所以不能改为安装它。",
+      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。"
     }
   },
   "themes": {

@@ -65,7 +65,7 @@ pub fn find(id: &str) -> Option<Official> {
 
 /// Whether `rel` (from `ui/`) is one of the official templates' files.
 pub fn source_file(rel: &str) -> bool {
-    rel.strip_prefix(SOURCE).is_some_and(|r| r.starts_with('/'))
+    zeron_plugin_guard::template::official_source(rel)
 }
 
 fn source(ui: &Path, o: &Official) -> PathBuf {
@@ -122,7 +122,7 @@ fn contents(dir: &Path) -> Option<BTreeMap<String, PathBuf>> {
                 if name.starts_with('.') && name.ends_with(".tmp") {
                     continue;
                 }
-                let rel = path.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/");
+                let rel = live::rel_path(path.strip_prefix(dir).ok()?);
                 out.insert(rel, path);
             } else {
                 return None;

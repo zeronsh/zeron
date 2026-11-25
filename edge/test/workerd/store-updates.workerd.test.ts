@@ -61,7 +61,7 @@ describe("POST /store/v1/updates", () => {
     expect(fromVetted.updates).toEqual([expect.objectContaining({ version: "1.2.0", verified: false })]);
     expect(fromVetted.updates[0]).not.toHaveProperty("verified_update");
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: await hashOf(id, "1.1.0"), verified_only: true }] })).updates).toEqual([]);
-    expect((await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ ...body.plugins[0], verified_only: "yes" }] })).status).toBe(400);
+    expect(await check({ zeron: "0.4.0", plugins: [{ ...body.plugins[0], verified_only: "yes" }] })).toEqual({ updates: [], template_updates: [], blocked: [] });
   });
 
   it("names installed versions taken down with a block, for those contents only", async () => {
@@ -72,7 +72,7 @@ describe("POST /store/v1/updates", () => {
     const bad = await hashOf(id, "1.1.0");
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/take-down`, { reason: "It sends your files away." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }] });
-    expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away." }]);
+    expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away.", item_kind: "plugin" }]);
     expect(res.updates).toEqual([]);
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: "0".repeat(64) }] })).blocked).toEqual([]);
     // Suspended: no updates, blocks still said.
@@ -90,7 +90,33 @@ describe("POST /store/v1/updates", () => {
     const hash = await hashOf(id, "1.1.0");
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { reason: "A copyright claim." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash }] });
-    expect(res).toEqual({ updates: [], blocked: [] });
+    expect(res).toEqual({ updates: [], template_updates: [], blocked: [] });
+  });
+
+  it("answers an item whose id, version or hash isn't one as unknown, and the rest", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const down = uniqueId();
+    await listed(a, down, "1.0.0");
+    const taken = { id: down, version: "1.0.0", hash: await hashOf(down, "1.0.0") };
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${down}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    const one = { id, version: "1.0.0", hash: await hashOf(id, "1.0.0") };
+    await listed(a, id, "1.1.0");
+    const odd = [
+      { ...one, id: "Not An Id" }, { ...one, id: "Not An Id" }, { ...one, id: 7 }, { version: "1.0.0", hash: one.hash }, {},
+      { ...one, id: "v33", version: `1.0.0-${"a".repeat(27)}` }, { ...one, id: "v-empty", version: "" }, { ...one, id: "v-one", version: "1" }, { ...one, id: "v-null", version: null }, { id: "v-none", hash: one.hash },
+      { ...one, id: "h-short", hash: "short" }, { ...one, id: "h-upper", hash: "A".repeat(64) }, { ...one, id: "h-seven", hash: 7 }, { ...one, id: "p-text", prerelease: "yes" }
+    ];
+    const res = await check({ zeron: "0.4.0", plugins: [...odd, one, taken] });
+    expect(res.updates).toEqual([expect.objectContaining({ id, version: "1.1.0" })]);
+    expect(res.blocked).toEqual([{ id: down, version: "1.0.0", reason: "Harmful.", item_kind: "plugin" }]);
+    // The same for the item itself: never offered, never blocked.
+    expect(await check({ zeron: "0.4.0", plugins: [{ ...one, version: `1.0.0-${"a".repeat(27)}` }, { ...taken, hash: taken.hash.toUpperCase() }] })).toEqual({ updates: [], template_updates: [], blocked: [] });
+    // They count towards the most one request holds.
+    const many = Array.from({ length: 200 }, () => ({}));
+    expect((await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: many })).status).toBe(200);
+    expect((await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [...many, {}] })).status).toBe(400);
   });
 
   it("refuses a malformed request", async () => {
@@ -99,12 +125,15 @@ describe("POST /store/v1/updates", () => {
       {},
       { zeron: "0.4", plugins: [] },
       { zeron: "0.4.0", plugins: "x" },
-      { zeron: "0.4.0", plugins: [{ id: "a", version: "1.0.0", hash: "0".repeat(64) }] },
-      { zeron: "0.4.0", plugins: [{ id: "ab", version: "1.0.0", hash: "short" }] },
+      { zeron: "0.4.0", plugins: [null] },
+      { zeron: "0.4.0", plugins: ["ab"] },
+      { zeron: "0.4.0", plugins: [["ab"]] },
       { zeron: "0.4.0", plugins: [{ id: "ab", version: "1.0.0", hash: "0".repeat(64) }, { id: "ab", version: "1.0.0", hash: "0".repeat(64) }] },
+      // (A repeat, whatever the versions and hashes are.)
+      { zeron: "0.4.0", plugins: [{ id: "ab", version: "1.0.0", hash: "0".repeat(64) }, { id: "ab", version: "not one" }] },
       { zeron: "0.4.0", plugins: Array.from({ length: 201 }, (_, i) => ({ id: `p${i}x`, version: "1.0.0", hash: "0".repeat(64) })) }
     ];
     for (const body of bad) expect((await call(undefined, "POST", "/store/v1/updates", body)).status, JSON.stringify(body)?.slice(0, 80)).toBe(400);
-    expect(await check({ zeron: "0.4.0", plugins: [] })).toEqual({ updates: [], blocked: [] });
+    expect(await check({ zeron: "0.4.0", plugins: [] })).toEqual({ updates: [], template_updates: [], blocked: [] });
   });
 });

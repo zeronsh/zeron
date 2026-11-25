@@ -14,6 +14,7 @@ import Tile from "../../../../components/look/Tile.astro";
 import Store from "../../../../layouts/Store.astro";
 import "../../../../styles/look/plugin.css";
 import { bytes, compatibility, date, day } from "../../../../lib/store/format.ts";
+import { KIND_PATH, KIND_WORDS, kindOf, RUNS_AS } from "../../../../lib/store/kind.ts";
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
 import { isPluginId, isPrerelease, isVersion, versionParam } from "../../../../lib/store/names.ts";
@@ -27,10 +28,11 @@ import { lsb } from "../../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const id = Astro.params.id ?? "";
 const version = versionParam(Astro.params.version) ?? "";
 const edge = Astro.locals.edge;
-const [plugin, found, latestZeron] = isPluginId(id) ? await Promise.all([edge.plugin(id), isVersion(version) ? edge.version(id, version) : null, edge.latestRelease()]) : [null, null, null];
+const [plugin, found, latestZeron] = isPluginId(id) ? await Promise.all([edge.plugin(id, kind), isVersion(version) ? edge.version(id, version, kind) : null, edge.latestRelease()]) : [null, null, null];
 const pluginMissing = !plugin || (!plugin.ok && plugin.error === "not_found") || (plugin.ok && !plugin.data.version);
 // (A record that names another version is a version not in the store: the page says only what the record names.)
 const versionMissing = !pluginMissing && (!found || (!found.ok && found.error === "not_found") || (found.ok && found.data.version !== version));
@@ -42,7 +44,7 @@ let notes = "";
 if (p && v) {
   // (Drawn once and kept by its text, as the plugin page draws it: rendered.ts.)
   const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
-  const out = v.notes ? await drawn(Astro.url.origin, id, v.version, "notes", v.notes, { file: (path) => fileUrl(id, v.version, path), demote: true }, { keep: true, waitUntil: cf ? (x) => cf.waitUntil(x) : undefined }) : null;
+  const out = v.notes ? await drawn(Astro.url.origin, id, v.version, "notes", v.notes, { file: (path) => fileUrl(id, v.version, path, kind), demote: true }, { keep: true, waitUntil: cf ? (x) => cf.waitUntil(x) : undefined }) : null;
   notes = out?.html ?? "";
   if (!out || keepable([out])) publicPage(Astro, [pluginTag(id)]);
   else Astro.response.headers.set("cache-control", "no-store");
@@ -52,21 +54,21 @@ const now = Date.now();
 const newest = p && v ? p.version === v.version : false;
 const engines = v?.engines ?? p?.engines ?? null;
 const off = v && latestZeron && satisfies(latestZeron, engines?.zeron) === false ? { needs: engines?.zeron, latest: latestZeron } : null;
-const base = pluginUrl(id);
+const base = pluginUrl(id, kind);
 /** The versions either side of it, in the store's order: the stepper at the notes' foot. */
-const near = p && v ? await neighbours(edge, p, v.version) : null;
+const near = p && v ? await neighbours(edge, kind, p, v.version) : null;
 const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
 ---
 
 {
   p && v ? (
-    <Store title={`${p.name} ${v.version} · Plugins · Zeron`} description={`${p.name} ${v.version}, a plugin for Zeron${v.verified ? ", verified by Zeron" : ""}.`} canonical={`${base}/versions/${encodeURIComponent(v.version)}`} current="browse" class={hueClass(id)}>
+    <Store title={`${p.name} ${v.version} · ${KIND_WORDS[kind].Many} · Zeron`} description={`${p.name} ${v.version}, ${KIND_WORDS[kind].a} for Zeron${v.verified ? ", verified by Zeron" : ""}.`} canonical={`${base}/versions/${encodeURIComponent(v.version)}`} current={kind} class={hueClass(id)}>
       <div class="wrap">
         <nav class="crumbs" aria-label="Where this is">
-          <a href="/plugins">Plugins</a><Icon name="chev" /><a href={base}>{p.name}</a><Icon name="chev" /><a href={`${base}/versions`}>Versions</a>
+          <a href={KIND_PATH[kind]}>{KIND_WORDS[kind].Many}</a><Icon name="chev" /><a href={base}>{p.name}</a><Icon name="chev" /><a href={`${base}/versions`}>Versions</a>
         </nav>
-        <header class="head vhead">
-          <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xl" />
+        <header class:list={["head vhead", { bare: kind === "template" }]}>
+          {kind === "plugin" && <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xl" />}
           <div class="txt">
             <h1 class={lsb(p.name)}>
               <span class="name">{p.name}</span> <b class="vnum mono">{v.version}</b>{" "}
@@ -82,10 +84,11 @@ const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
             <div class="get">
               <div class="get-btn"><span class="btn pri" aria-disabled="true">Can't be installed</span></div>
               <p class="ver"><b class="mono">{v.version}</b><i aria-hidden="true"></i><span class="said">{statusWords("yanked")}</span></p>
+              {kind === "template" && <p class="runs-as">{RUNS_AS.title}</p>}
               <p class="note quiet">{stoppedWhy(v)}</p>
             </div>
           ) : (
-            <Get id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
+            <Get kind={kind} id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
           )}
         </header>
         <div class="cols2 after-head">
@@ -100,6 +103,12 @@ const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
             </nav>
           </div>
           <aside class="rail" aria-label="About this version">
+            {kind === "template" && (
+              <section class="runs" aria-labelledby="rail-runs">
+                <h2 class="rail-h" id="rail-runs">{RUNS_AS.title}</h2>
+                <p>{RUNS_AS.line}</p>
+              </section>
+            )}
             <section aria-labelledby="rail-version">
               <h2 class="rail-h" id="rail-version">This version</h2>
               <dl class="facts">
@@ -114,7 +123,7 @@ const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
               <h2 class="rail-h" id="rail-links">Links</h2>
               <ul class="links">
                 <li><a href={base}><Icon name="arrow" /><span>{p.name}'s page</span></a></li>
-                <li><a href={`${base}/report`}><Icon name="flag" />Report this plugin</a></li>
+                <li><a href={`${base}/report`}><Icon name="flag" />Report this {KIND_WORDS[kind].one}</a></li>
               </ul>
             </section>
           </aside>
@@ -122,6 +131,6 @@ const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
       </div>
     </Store>
   ) : (
-    <NotHere state={down ? "down" : "missing"} what={versionMissing ? "version" : "plugin"} retry={Astro.url.pathname} back={versionMissing && p ? { href: base, name: p.name } : undefined} />
+    <NotHere state={down ? "down" : "missing"} kind={kind} what={versionMissing ? "version" : "plugin"} retry={Astro.url.pathname} back={versionMissing && p ? { href: base, name: p.name } : undefined} />
   )
 }

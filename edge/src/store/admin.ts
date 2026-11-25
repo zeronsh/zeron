@@ -3,8 +3,8 @@
  * 2026-11-19-store-shapes-44-45). Every route needs a staff web session
  * (principal.ts `requireAdmin`).
  *
- *   GET  /store/v1/admin/queue?state=undecided|verified|declined|all&cursor&limit
- *   GET  /store/v1/admin/versions/:id/:version                (with its review base)
+ *   GET  /store/v1/admin/queue?state=undecided|verified|declined|all&kind=plugin|template&cursor&limit
+ *   GET  /store/v1/admin/versions/:id/:version                (with its review base; either kind)
  *   POST /store/v1/admin/versions/:id/:version/verify
  *   POST /store/v1/admin/versions/:id/:version/decline { reason, message }
  *   GET  /store/v1/admin/plugins/:id
@@ -12,6 +12,8 @@
  *   POST /store/v1/admin/plugins/:id/versions/:version/take-down { reason }
  *   POST /store/v1/admin/plugins/:id/versions/:version/remove { reason }
  *   POST /store/v1/admin/plugins/:id/versions/:version/restore { reason }
+ *   … the `/admin/plugins/:id/…` routes also as `/admin/templates/:id/…`, each
+ *   of its own kind only (an id of the other kind is 404, for staff too)
  *   GET  /store/v1/admin/reports?status&cursor   POST /store/v1/admin/reports/:id/resolve { resolution, note? }
  *   GET  /store/v1/admin/audit?cursor
  *   GET  /store/v1/admin/reservations   POST /store/v1/admin/reservations { id, to_username?, note? }
@@ -35,13 +37,15 @@ import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, publisherIds, reviewOf, versionInfo } from "./cards";
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
-import { LISTED, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
+import { VERSION_ORDER, type VersionRow, auditIfChanged, listedOf, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
+import { KINDS, type Kind, kindOfSegment } from "./kind";
 import { dropFromDeployTokens, readBody, requireAdmin } from "./principal";
 import { purgeCatalog, purgeTakedowns } from "./purge";
 import { isUnused, releaseId } from "./release";
 import { SITE_IDS } from "./listing";
 import { decodeSegment } from "./serve";
+import { stockOf } from "./stock";
 import { foldUsername } from "../username";
 
 const MAX_BODY = 8 * 1024;
@@ -165,6 +169,12 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
   const limit = limitOf(url);
   if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
+  // Both kinds, unless it names one.
+  const kindRaw = url.searchParams.get("kind");
+  const kind = kindRaw === null ? undefined : KINDS.find((k) => k === kindRaw);
+  if (kindRaw !== null && kind === undefined) return fail(400, "bad_request", "kind is plugin or template.");
+  const kindWhere = kind === undefined ? "" : "AND (SELECT k.kind FROM plugins k WHERE k.id = v.plugin_id) = ?";
+  const kindBinds = kind === undefined ? [] : [kind];
   // The undecided read oldest first, versions with open reports before the
   // rest (their key is the publish time, or that plus 10^14 when nothing is
   // reported); every other state, newest first. The undecided hold at most
@@ -179,7 +189,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       : "v.published_at";
   const ks = keysetSql("sort_key", "rid", undecided, after);
   const { rows, total } = await withTotal<{
-    rid: number; sort_key: number; plugin_id: string; version: string; status: string; published_at: number; publisher_id: string; checks: string;
+    rid: number; sort_key: number; plugin_id: string; kind: Kind; version: string; status: string; published_at: number; publisher_id: string; checks: string;
     permissions: string; name: string; icon: string | null; is_release: number; parts: string | null; reports: number; earlier: number; installs: number;
     verification: "unverified" | "verified"; verified_at: number | null; declined_at: number | null; decline_reason: string | null; decline_message: string | null;
     base_version: string | null; base_permissions: string | null; base_parts: string | null;
@@ -191,26 +201,30 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
            SELECT v.rowid AS rid, ${sortKey} AS sort_key, v.plugin_id, v.version, v.status, v.published_at, v.publisher_id, v.checks, v.permissions,
                   v.name, v.icon, v.is_release, ${partsSql("v")} AS parts, ${reportsSql("v")} AS reports, ${earlierSql("v")} AS earlier,
                   (SELECT p.installs FROM plugins p WHERE p.id = v.plugin_id) AS installs,
+                  (SELECT p.kind FROM plugins p WHERE p.id = v.plugin_id) AS kind,
                   v.verification, v.verified_at, v.declined_at, v.decline_reason, v.decline_message,
                   b.version AS base_version, b.permissions AS base_permissions, ${partsSql("b")} AS base_parts
            FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
-           WHERE ${QUEUE_WHERE[state]}
+           WHERE ${QUEUE_WHERE[state]} ${kindWhere}
          ) WHERE 1 = 1 ${ks.where}
          ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(...ks.binds, limit + 1),
-    db.prepare(`SELECT COUNT(*) AS n FROM versions v WHERE ${QUEUE_WHERE[state]}`)
+      .bind(...kindBinds, ...ks.binds, limit + 1),
+    db.prepare(`SELECT COUNT(*) AS n FROM versions v WHERE ${QUEUE_WHERE[state]} ${kindWhere}`).bind(...kindBinds)
   );
   const { page, links } = pageOf(rows, limit, after, (r) => [r.sort_key, r.rid]);
   const names = await people(env, page.map((r) => r.publisher_id));
   return answer({
     items: page.map((r) => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
-      const asks = parseStoredJson<ConsentItem | null>(r.permissions, null);
+      const kind = r.kind;
+      // (A template asks for nothing: nothing to diff.)
+      const asks = kind === "template" ? null : parseStoredJson<ConsentItem | null>(r.permissions, null);
       const baseAsks = parseStoredJson<ConsentItem | null>(r.base_permissions, null);
       const diff = asks ? consentDiff(baseAsks, asks, { before: baseAsks ? askParts(r.base_parts) : null, after: askParts(r.parts) }) : null;
       const count = (level: string) => checks.filter((c) => c.level === level).length;
       return {
+        kind,
         plugin: { id: r.plugin_id, name: r.name },
         version: r.version,
         status: r.status,
@@ -219,8 +233,8 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         published_at: r.published_at,
         publisher: names[r.publisher_id] ?? null,
         // The version's icon, a path in its package (as a card's), fetched
-        // through the files route with this version.
-        icon: r.icon,
+        // through the files route with this version; none, a template's.
+        icon: kind === "template" ? null : r.icon,
         // Against the newest version a reviewer verified (none: a first look).
         ...(r.base_version !== null ? { base: r.base_version } : {}),
         new_asks: diff?.added ?? [],
@@ -249,7 +263,7 @@ const partsSql = (alias: string): string => `json_extract(${alias}.manifest, ${A
 const baseSql = (alias: string): string =>
   `SELECT rowid FROM versions WHERE plugin_id = ${alias}.plugin_id AND version != ${alias}.version AND verification = 'verified' ORDER BY ${VERSION_ORDER} LIMIT 1`;
 
-const versionView = async (env: Env, db: D1Database, id: string, versionText: string): Promise<Response> => {
+const versionView = async (env: Env, db: D1Database, bucket: R2Bucket, id: string, versionText: string): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
   if (!plugin || !v) return notFound();
   const base = await db
@@ -262,7 +276,11 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .bind(id, q.version)
       .all<{ path: string; bytes: number; sha256: string; kind: string }>()
       .then((r) => r.results.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256, kind: f.kind, binary: f.kind === "binary" })));
-  const [ownFiles, baseFiles, decisions, recent, authors, standing] = await Promise.all([
+  // The Zeron a template was made from (its listing's engines, `>=` it).
+  const madeFrom = plugin.kind === "template" ? (v.engines_zeron ?? "").replace(/^>=/, "") : null;
+  const counts = (kind: Kind, verified: boolean): string =>
+    `(SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${listedOf(kind)}${verified ? " AND p.verified_version IS NOT NULL" : ""})`;
+  const [ownFiles, baseFiles, decisions, recent, authors, standing, stock] = await Promise.all([
     files(v),
     base ? files(base) : Promise.resolve([]),
     db
@@ -278,27 +296,30 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .all<{ plugin_id: string; version: string; status: string; verification: string; published_at: number }>(),
     authorsOf(env, [v.publisher_id, plugin.owner_id]),
     // When the account first listed a version (publishing lists it), and
-    // its listed plugins, how many with a verified version.
+    // its listed plugins and templates, how many with a verified version.
     db
       .prepare(
         `SELECT (SELECT MIN(published_at) FROM versions WHERE publisher_id = ?1) AS first_published_at,
-                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${LISTED}) AS total,
-                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${LISTED} AND p.verified_version IS NOT NULL) AS verified`
+                ${counts("plugin", false)} AS plugins, ${counts("plugin", true)} AS plugins_verified,
+                ${counts("template", false)} AS templates, ${counts("template", true)} AS templates_verified`
       )
       .bind(v.publisher_id)
-      .first<{ first_published_at: number | null; total: number; verified: number }>()
+      .first<{ first_published_at: number | null; plugins: number; plugins_verified: number; templates: number; templates_verified: number }>(),
+    madeFrom === null ? undefined : stockOf(bucket, madeFrom)
   ]);
   const publisher = authors[v.publisher_id]!;
   const owner = authors[plugin.owner_id]!;
   const permissions = parseStoredJson<ConsentItem | null>(v.permissions, null);
   const basePermissions = base ? parseStoredJson<ConsentItem | null>(base.permissions, null) : null;
+  const template = plugin.kind === "template";
   return answer({
+    kind: plugin.kind,
     // (A PluginCard, amendment 35; nothing listed: this version's.)
     plugin: ownerCard(plugin, v, authorCard(owner)),
     version: {
-      ...versionInfo(v, true),
+      ...versionInfo(v, plugin.kind, true),
       superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null,
-      name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license,
+      name: v.name, summary: v.summary, icon: template ? null : v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license,
       categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, [])
     },
     superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null,
@@ -309,15 +330,20 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       decisions: { verified: decisions?.verified ?? 0, declined: decisions?.declined ?? 0 },
       recent: recent.results.map((r) => ({ ...r, verified: r.verification === "verified" })),
       first_published_at: standing?.first_published_at ?? null,
-      plugins: { total: standing?.total ?? 0, verified: standing?.verified ?? 0 }
+      plugins: { total: standing?.plugins ?? 0, verified: standing?.plugins_verified ?? 0 },
+      templates: { total: standing?.templates ?? 0, verified: standing?.templates_verified ?? 0 }
     },
     manifest: parseStoredJson(v.manifest, null),
     ...(base ? { base: { version: base.version, manifest: parseStoredJson(base.manifest, null) } } : {}),
-    files: ownFiles,
+    // Each against Zeron's own at the version a template says it was made
+    // from, with a base too (null for a plugin's, or where that isn't known).
+    files: ownFiles.map((f) => ({ ...f, zeron: stock?.(f.path, f.sha256) ?? null })),
+    zeron_base: madeFrom === null ? null : { version: madeFrom, known: stock !== undefined },
     base_files: baseFiles,
     checks: parseStoredJson(v.checks, []),
-    permissions,
-    permissions_diff: permissions
+    // (A template asks for nothing.)
+    permissions: template ? null : permissions,
+    permissions_diff: permissions && !template
       ? consentDiff(basePermissions, permissions, { before: base ? askPartsOf(base.manifest) : null, after: askPartsOf(v.manifest) })
       : null
   });
@@ -344,7 +370,8 @@ const ownerUsername = async (env: Env, ownerId: string): Promise<string | null> 
 
 const changed = async (db: D1Database, id: string, version: string): Promise<Response> => {
   await purgeCatalog(db, id, [version]);
-  return answer({ version: versionInfo((await versionRow(db, id, version))!, true) });
+  const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, version)]);
+  return answer({ version: versionInfo(v!, plugin!.kind, true) });
 };
 
 const reasonOf = (body: Record<string, unknown> | undefined, what: string): string | Response =>
@@ -409,7 +436,13 @@ const decline = async (db: D1Database, adminId: string, id: string, v: VersionRo
  * write (after its audit row, so only when the change landed). */
 const takedownEvent = (db: D1Database, kind: "take_down" | "restore", id: string, version: string, reason: string, at: number): D1PreparedStatement =>
   db
-    .prepare("INSERT INTO takedown_events (kind, plugin_id, version, reason, at) SELECT ?, ?, ?, ?, ? WHERE changes() > 0")
+    // (The item's kind and the version's content hash with it: a device
+    // reads which of its lists it's about, and refuses a file or link import
+    // of the same package.)
+    .prepare(
+      `INSERT INTO takedown_events (kind, item_kind, plugin_id, version, hash, reason, at)
+       SELECT ?1, (SELECT kind FROM plugins WHERE id = ?2), ?2, ?3, (SELECT content_hash FROM versions WHERE plugin_id = ?2 AND version = ?3), ?4, ?5 WHERE changes() > 0`
+    )
     .bind(kind, id, version, reason, at);
 
 const afterEvent = async (db: D1Database, id: string, version: string): Promise<Response> => {
@@ -517,9 +550,11 @@ const restore = async (db: D1Database, adminId: string, id: string, v: VersionRo
   return afterEvent(db, id, v.version);
 };
 
-const versionAction = async (db: D1Database, adminId: string, id: string, versionText: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
+/** (`kind`: the prefix it came by, or undefined for the routes that take
+ * only an id, which take either.) */
+const versionAction = async (db: D1Database, adminId: string, kind: Kind | undefined, id: string, versionText: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
-  if (!plugin || !v) return notFound();
+  if (!plugin || (kind !== undefined && plugin.kind !== kind) || !v) return notFound();
   switch (action) {
     case "verify":
       return verify(db, adminId, id, v);
@@ -536,9 +571,9 @@ const versionAction = async (db: D1Database, adminId: string, id: string, versio
   }
 };
 
-const pluginAction = async (env: Env, db: D1Database, adminId: string, id: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
+const pluginAction = async (env: Env, db: D1Database, adminId: string, kind: Kind, id: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
   const plugin = await pluginRow(db, id);
-  if (!plugin) return notFound();
+  if (!plugin || plugin.kind !== kind) return notFound();
   const now = Date.now();
   let conflict: Response | undefined;
   switch (action) {
@@ -568,9 +603,9 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       break;
     case "feature": {
       if (typeof body?.featured !== "boolean") return fail(400, "bad_request", "featured is true or false.");
-      // Featured is the vetted shelf: only a plugin whose newest version is verified.
+      // Featured is the vetted shelf: only an item whose newest version is verified.
       if (body.featured && !(plugin.listed_version && plugin.verified === 1)) {
-        return fail(409, "not_verified", "Only a plugin whose newest version is verified can be featured.");
+        return fail(409, "not_verified", `Only a ${kind} whose newest version is verified can be featured.`);
       }
       conflict = await change(
         db,
@@ -613,14 +648,14 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
   }
   if (conflict) return conflict;
   await purgeCatalog(db, id);
-  return adminPlugin(env, db, id);
+  return adminPlugin(env, db, kind, id);
 };
 
 // ── a plugin, reports, audit, reservations ──────────────────────────────────
 
-const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Response> => {
+const adminPlugin = async (env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
   const plugin = await pluginRow(db, id);
-  if (!plugin) return notFound();
+  if (!plugin || plugin.kind !== kind) return notFound();
   const [versions, reportRows, authors] = await Promise.all([
     db.prepare(`SELECT * FROM versions WHERE plugin_id = ? ORDER BY ${VERSION_ORDER}`).bind(id).all<VersionRow>(),
     db.prepare(`SELECT ${REPORT_COLUMNS} FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id WHERE r.plugin_id = ? ORDER BY r.id DESC LIMIT 100`).bind(id).all<ReportRow>(),
@@ -637,7 +672,7 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
     },
     owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
     versions: versions.results.map((v) => ({
-      ...versionInfo(v, true),
+      ...versionInfo(v, plugin.kind, true),
       publisher_id: publishers.get(v.publisher_id)!,
       superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
     })),
@@ -649,11 +684,12 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
   });
 };
 
-const REPORT_COLUMNS = "r.id, r.plugin_id, p.name AS plugin_name, r.version, r.reporter_id, r.reason, r.text, r.created_at, r.status, r.resolved_by, r.resolved_at, r.note";
+const REPORT_COLUMNS = "r.id, r.plugin_id, p.name AS plugin_name, p.kind AS plugin_kind, r.version, r.reporter_id, r.reason, r.text, r.created_at, r.status, r.resolved_by, r.resolved_at, r.note";
 interface ReportRow {
   readonly id: number;
   readonly plugin_id: string;
   readonly plugin_name: string | null;
+  readonly plugin_kind: Kind | null;
   readonly version: string | null;
   readonly reporter_id: string;
   readonly reason: string;
@@ -670,7 +706,8 @@ const reportItems = async (env: Env, rows: readonly ReportRow[]) => {
   const names = await people(env, [...rows.map((r) => r.reporter_id), ...rows.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
   return rows.map((r) => ({
     id: r.id,
-    plugin: { id: r.plugin_id, name: r.plugin_name },
+    // (Its kind says which prefix its staff page is under.)
+    plugin: { id: r.plugin_id, name: r.plugin_name, kind: r.plugin_kind },
     version: r.version,
     reporter: names[r.reporter_id] ?? null,
     reason: r.reason,
@@ -730,14 +767,14 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
   const ks = keysetSql("seq", "seq", false, after);
   const pluginFilter = url.searchParams.get("plugin");
-  if (pluginFilter !== null && !ID_RE.test(pluginFilter)) return fail(400, "bad_request", "plugin is a plugin id.");
+  if (pluginFilter !== null && !ID_RE.test(pluginFilter)) return fail(400, "bad_request", "plugin is a plugin's or a template's id.");
   // One plugin's log by its index (audit_plugin), or the whole log.
   const byPlugin = pluginFilter === null ? [] : [pluginFilter];
   const conditions = [...(pluginFilter === null ? [] : ["plugin_id = ?"]), ...(ks.where ? [ks.where.replace(/^AND /, "")] : [])];
-  const { rows, total } = await withTotal<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null }>(
+  const { rows, total } = await withTotal<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null; item_kind: Kind | null }>(
     db,
     db
-      .prepare(`SELECT * FROM audit ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY ${ks.order} LIMIT ?`)
+      .prepare(`SELECT audit.*, (SELECT p.kind FROM plugins p WHERE p.id = audit.plugin_id) AS item_kind FROM audit ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY ${ks.order} LIMIT ?`)
       .bind(...byPlugin, ...ks.binds, limit + 1),
     db.prepare(`SELECT COUNT(*) AS n FROM audit ${pluginFilter === null ? "" : "WHERE plugin_id = ?"}`).bind(...byPlugin)
   );
@@ -750,6 +787,8 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       actor: { id: names[r.actor_id]?.id ?? null, username: names[r.actor_id]?.username ?? null, user_id: r.actor_id },
       action: r.action,
       plugin_id: r.plugin_id,
+      // The item's kind, for the prefix of its staff page (null: released).
+      item_kind: r.item_kind,
       version: r.version,
       detail: parseStoredJson(r.detail, null)
     })),
@@ -829,15 +868,16 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, bu
   if (section === "versions" && a && b) {
     const versionText = decodeSegment(b);
     if (!versionText || !ID_RE.test(a)) return notFound();
-    if (parts.length === 4 && get) return versionView(env, db, a, versionText);
-    if (parts.length === 5 && post && (c === "verify" || c === "decline")) return versionAction(db, admin.userId, a, versionText, c, body);
+    if (parts.length === 4 && get) return versionView(env, db, bucket, a, versionText);
+    if (parts.length === 5 && post && (c === "verify" || c === "decline")) return versionAction(db, admin.userId, undefined, a, versionText, c, body);
   }
-  if (section === "plugins" && a && ID_RE.test(a)) {
-    if (parts.length === 3 && get) return adminPlugin(env, db, a);
-    if (parts.length === 4 && post && b) return pluginAction(env, db, admin.userId, a, b, body);
+  const kind = kindOfSegment(section);
+  if (kind !== undefined && a && ID_RE.test(a)) {
+    if (parts.length === 3 && get) return adminPlugin(env, db, kind, a);
+    if (parts.length === 4 && post && b) return pluginAction(env, db, admin.userId, kind, a, b, body);
     if (parts.length === 6 && post && b === "versions" && c && (d === "take-down" || d === "remove" || d === "restore")) {
       const versionText = decodeSegment(c);
-      return versionText ? versionAction(db, admin.userId, a, versionText, d, body) : notFound();
+      return versionText ? versionAction(db, admin.userId, kind, a, versionText, d, body) : notFound();
     }
   }
   if (section === "reports") {

@@ -22,6 +22,8 @@
  */
 import { constantTimeEqual } from "../../cloud/crypto";
 import { STORE_DATA } from "../data";
+import type { Kind } from "../kind";
+import { PLUGIN_ID_RE } from "./signing";
 
 const FORMAT = STORE_DATA.deploy_token;
 export const TOKEN_PREFIX: string = FORMAT.prefix;
@@ -95,3 +97,27 @@ export const newDeployTokenId = (): string => {
   return `tok_${base62(bytes.reduce((acc, b) => (acc << 8n) | BigInt(b), 0n), 16)}`;
 };
 export const DEPLOY_TOKEN_ID_RE = /^tok_[0-9A-Za-z]{16}$/;
+
+/** A scope's list of ids (plugins' and templates' alike: one namespace),
+ * read as the device reads one: each trimmed, 1 to `max_scope_plugins` of
+ * them, each an id, each once, sorted; or which of that it isn't, with the
+ * ids at fault. */
+export const readScopeIds = (ids: readonly unknown[]): { readonly plugins: string[] } | { readonly error: "count" } | { readonly error: "id" | "repeated"; readonly ids: readonly unknown[] } => {
+  if (ids.length < 1 || ids.length > FORMAT.max_scope_plugins) return { error: "count" };
+  const trimmed = ids.map((id) => (typeof id === "string" ? id.trim() : id));
+  const bad = trimmed.filter((id) => typeof id !== "string" || !PLUGIN_ID_RE.test(id));
+  if (bad.length) return { error: "id", ids: bad };
+  const repeated = trimmed.filter((id, i) => trimmed.indexOf(id) !== i);
+  if (repeated.length) return { error: "repeated", ids: [...new Set(repeated)] };
+  return { plugins: (trimmed as string[]).slice().sort() };
+};
+
+/** An `all` token's kinds, read as the device reads them: absent, a
+ * plugin's; or exactly one of the lists the data file names
+ * (`deploy_token.all_kinds`), in its order. */
+export const readAllKinds = (raw: unknown): readonly Kind[] | undefined => {
+  if (raw === undefined) return ["plugin"];
+  if (!Array.isArray(raw)) return undefined;
+  const named = (FORMAT.all_kinds as readonly (readonly Kind[])[]).find((kinds) => kinds.length === raw.length && kinds.every((k, i) => k === raw[i]));
+  return named && [...named];
+};

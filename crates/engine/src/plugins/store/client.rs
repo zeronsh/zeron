@@ -52,11 +52,33 @@ pub enum Caller {
     DeployToken(Arc<DeployToken>),
 }
 
-/// The edge's store routes.
+/// What a store item is (contract "Templates in the store"): fixed when its
+/// id is claimed, ids being one namespace over both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Plugin,
+    Template,
+}
+
+impl Kind {
+    /// Its routes' segment: `/store/v1/<segment>/…`, `/me/<segment>`, and
+    /// its pages' on the store's website.
+    pub fn segment(self) -> &'static str {
+        match self {
+            Kind::Plugin => "plugins",
+            Kind::Template => "templates",
+        }
+    }
+}
+
+/// The edge's store routes, for items of one kind ([`StoreClient::of`]).
 #[derive(Clone)]
 pub struct StoreClient {
     base: String,
     http: reqwest::Client,
+    kind: Kind,
 }
 
 /// `text` as one URL path segment.
@@ -252,6 +274,10 @@ pub struct Installed {
 pub struct UpdatesAsk {
     pub zeron: String,
     pub plugins: Vec<Installed>,
+    /// Templates installed from the store (with the plugins, at most
+    /// `MAX_UPDATE_ITEMS` a request).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<Installed>,
 }
 
 /// A newer version the store offers.
@@ -312,15 +338,26 @@ pub struct TakedownEvent {
     pub seq: u64,
     /// `take_down` or `restore`.
     pub kind: String,
+    /// What was taken down (absent: a plugin; none: a kind this Zeron
+    /// doesn't know, which is none of its business and hides nothing else).
+    #[serde(default = "plugin_kind", deserialize_with = "known_kind")]
+    pub item_kind: Option<Kind>,
     pub id: String,
     pub version: String,
     #[serde(default, deserialize_with = "nullable")]
     pub reason: String,
+    /// Its content hash, when the store knows it.
+    #[serde(default, deserialize_with = "nullable")]
+    pub hash: Option<String>,
 }
 
 /// A version taken down and blocked: devices turn it off.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Block {
+    /// What was taken down (absent: a plugin; none: a kind this Zeron
+    /// doesn't know, which is none of its business and hides nothing else).
+    #[serde(default = "plugin_kind", deserialize_with = "known_kind")]
+    pub item_kind: Option<Kind>,
     pub id: String,
     pub version: String,
     #[serde(default, deserialize_with = "nullable")]
@@ -333,9 +370,12 @@ pub struct Block {
 #[derive(Debug, Clone, Default)]
 pub struct Updates {
     pub updates: Vec<Offer>,
+    /// The templates' offers.
+    pub template_updates: Vec<Offer>,
+    /// Blocks of either kind ([`Block::item_kind`]).
     pub blocked: Vec<Block>,
     /// Offers or blocks that couldn't be read, each as the store sent it
-    /// (its `id`, when it had one).
+    /// (its `id`, when it had one): of either kind, ids being one namespace.
     pub unreadable: Vec<Option<String>>,
 }
 
@@ -350,10 +390,12 @@ impl Updates {
     fn read(value: &Value) -> Self {
         let mut out = Updates::default();
         let items = |key: &str| value.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
-        for item in items("updates") {
-            match serde_json::from_value::<Offer>(item.clone()) {
-                Ok(offer) => out.updates.push(offer),
-                Err(_) => out.unreadable.push(item["id"].as_str().map(str::to_owned)),
+        for (key, offers) in [("updates", &mut out.updates), ("template_updates", &mut out.template_updates)] {
+            for item in items(key) {
+                match serde_json::from_value::<Offer>(item.clone()) {
+                    Ok(offer) => offers.push(offer),
+                    Err(_) => out.unreadable.push(item["id"].as_str().map(str::to_owned)),
+                }
             }
         }
         for item in items("blocked") {
@@ -364,6 +406,18 @@ impl Updates {
         }
         out
     }
+}
+
+fn plugin_kind() -> Option<Kind> {
+    Some(Kind::Plugin)
+}
+
+/// An item's kind, none when it's one this Zeron doesn't know.
+fn known_kind<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Kind>, D::Error> {
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        None => plugin_kind(),
+        Some(word) => serde_json::from_value(word).ok(),
+    })
 }
 
 /// A field the store may send as `null` for "none": read as its default.
@@ -388,6 +442,27 @@ impl StoreClient {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            kind: Kind::Plugin,
+        }
+    }
+
+    /// The same store, its routes those of items of `kind` (a new client's
+    /// are plugins').
+    pub fn of(&self, kind: Kind) -> Self {
+        Self { kind, ..self.clone() }
+    }
+
+    /// `/store/v1/<kind>/<id>`.
+    fn item(&self, id: &str) -> String {
+        format!("/store/v1/{}/{}", self.kind.segment(), segment(id))
+    }
+
+    /// A store-wide route's path, asking about this client's kind (the
+    /// store's default is plugins, so they're asked about as before).
+    fn store_wide(&self, path: &str) -> String {
+        match self.kind {
+            Kind::Plugin => format!("/store/v1/{path}"),
+            Kind::Template => format!("/store/v1/{path}?kind=template"),
         }
     }
 
@@ -395,8 +470,9 @@ impl StoreClient {
         &self.base
     }
 
-    /// Plugin `id`'s page on the store's website: the site beside this edge
-    /// (`edge.zeron.sh` → `zeron.sh`), at `/plugins/<id>`.
+    /// `id`'s page on the store's website: the site beside this edge
+    /// (`edge.zeron.sh` → `zeron.sh`), at `/plugins/<id>` (a template's,
+    /// `/templates/<id>`).
     pub fn page_url(&self, id: &str) -> String {
         let site = url::Url::parse(&self.base)
             .ok()
@@ -407,7 +483,7 @@ impl StoreClient {
                 url.as_str().trim_end_matches('/').to_owned()
             })
             .unwrap_or_else(|| self.base.clone());
-        format!("{site}/plugins/{}", segment(id))
+        format!("{site}/{}/{}", self.kind.segment(), segment(id))
     }
 
     /// `method path` (path from `/store/v1`, query included) with `body`,
@@ -480,16 +556,16 @@ impl StoreClient {
     // ── Public ──────────────────────────────────────────────────────────
 
     pub async fn search(&self, search: &Search, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, &format!("/store/v1/plugins{}", search.query()), None, caller).await
+        self.json(reqwest::Method::GET, &format!("/store/v1/{}{}", self.kind.segment(), search.query()), None, caller).await
     }
 
     pub async fn categories(&self) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, "/store/v1/categories", None, &Caller::Anonymous).await
+        self.json(reqwest::Method::GET, &self.store_wide("categories"), None, &Caller::Anonymous).await
     }
 
     /// The plugin's detail, as the store wrote it, and what the device acts on.
     pub async fn plugin(&self, id: &str, caller: &Caller) -> Result<(Value, Detail), String> {
-        let value = self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}", segment(id)), None, caller).await?;
+        let value = self.json(reqwest::Method::GET, &self.item(id), None, caller).await?;
         let detail = Self::typed(value.clone())?;
         Ok((value, detail))
     }
@@ -505,7 +581,7 @@ impl StoreClient {
             query.push(format!("limit={}", limit.clamp(1, 50)));
         }
         let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
-        self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/versions{query}", segment(id)), None, caller).await
+        self.json(reqwest::Method::GET, &format!("{}/versions{query}", self.item(id)), None, caller).await
     }
 
     /// Version `version` of `id`, as the store records it (listed or
@@ -513,7 +589,7 @@ impl StoreClient {
     /// A record that can't be read (one without `verified`, say: readers
     /// require it) is `store_mismatch`: nothing is installed by it.
     pub async fn version(&self, id: &str, version: &str, caller: &Caller) -> Result<(Value, VersionRecord), String> {
-        let path = format!("/store/v1/plugins/{}/versions/{}", segment(id), segment(version));
+        let path = format!("{}/versions/{}", self.item(id), segment(version));
         let value = self.json(reqwest::Method::GET, &path, None, caller).await?;
         let record = serde_json::from_value(value.clone())
             .map_err(|_| failure(reason::STORE_MISMATCH, format!("The store's record of {id} {version} can't be read (it doesn't say all a record says), so it wasn't installed")))?;
@@ -529,7 +605,7 @@ impl StoreClient {
 
     /// The store's totals, `{plugins, verified}`.
     pub async fn stats(&self) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, "/store/v1/stats", None, &Caller::Anonymous).await
+        self.json(reqwest::Method::GET, &self.store_wide("stats"), None, &Caller::Anonymous).await
     }
 
     /// Version `version`'s package file, up to the largest a package may be.
@@ -539,7 +615,7 @@ impl StoreClient {
         if bytes == 0 || bytes > MAX_PACKAGE_BYTES {
             return Err(failure(reason::STORE_MISMATCH, "The store's record doesn't give a size a package can be, so nothing was fetched"));
         }
-        let path = format!("/store/v1/plugins/{}/versions/{}/package", segment(id), segment(version));
+        let path = format!("{}/versions/{}/package", self.item(id), segment(version));
         self.send(reqwest::Method::GET, &path, None, caller, bytes).await.map_err(|error| {
             if install::reason_of(&error) == Some(install::reason::TOO_BIG) {
                 failure(reason::STORE_MISMATCH, "What the store sent is bigger than its record says, so it wasn't installed")
@@ -551,7 +627,7 @@ impl StoreClient {
 
     /// One file of version `version`'s package, at most `limit` bytes.
     pub async fn file(&self, id: &str, version: &str, file: &str, caller: &Caller, limit: u64) -> Result<Vec<u8>, String> {
-        let path = format!("/store/v1/plugins/{}/files/{}/{}", segment(id), segment(version), segments(file));
+        let path = format!("{}/files/{}/{}", self.item(id), segment(version), segments(file));
         self.send(reqwest::Method::GET, &path, None, caller, limit).await
     }
 
@@ -563,25 +639,27 @@ impl StoreClient {
 
     // ── Publisher ───────────────────────────────────────────────────────
 
-    /// Submit `package` (a `.zeron-plugin`) as a new version of `id`. A
+    /// Submit `package` (a `.zeron-plugin`, or a `.zeron-template` for
+    /// templates) as a new version of `id`. A
     /// refusal comes with its listing fields ([`refused_fields`]).
     pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, (String, Value)> {
-        let path = format!("/store/v1/plugins/{}/versions", segment(id));
+        let path = format!("{}/versions", self.item(id));
         let bytes = self.exchange(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
         object(&bytes).map_err(|failure| (failure, Value::Null))
     }
 
     pub async fn my_plugins(&self, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, "/store/v1/me/plugins", None, caller).await
+        self.json(reqwest::Method::GET, &format!("/store/v1/me/{}", self.kind.segment()), None, caller).await
     }
 
     /// `yank` or `unyank` version `version` of `id`.
     pub async fn version_action(&self, id: &str, version: &str, action: &str, caller: &Caller) -> Result<Value, String> {
-        let path = format!("/store/v1/plugins/{}/versions/{}/{}", segment(id), segment(version), segment(action));
+        let path = format!("{}/versions/{}/{}", self.item(id), segment(version), segment(action));
         self.json(reqwest::Method::POST, &path, None, caller).await
     }
 
-    /// The account's deploy tokens (never their secrets).
+    /// The account's deploy tokens (never their secrets). (A token is over
+    /// items of either kind.)
     pub async fn tokens(&self, caller: &Caller) -> Result<Value, String> {
         self.json(reqwest::Method::GET, "/store/v1/me/tokens", None, caller).await
     }
@@ -615,12 +693,12 @@ impl StoreClient {
         if let Some(text) = text {
             body["text"] = serde_json::json!(text);
         }
-        self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/reports", segment(id)), Some(body), caller).await
+        self.json(reqwest::Method::POST, &format!("{}/reports", self.item(id)), Some(body), caller).await
     }
 
     /// Counted as installed (once per account, by the edge).
     pub async fn installed(&self, id: &str, caller: &Caller) -> Result<(), String> {
-        self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/installed", segment(id)), None, caller).await.map(drop)
+        self.json(reqwest::Method::POST, &format!("{}/installed", self.item(id)), None, caller).await.map(drop)
     }
 }
 
@@ -676,6 +754,45 @@ fn refusal(status: u16, body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client asks about one kind: a template's routes mirror a plugin's
+    /// under their own prefix, and a store-wide route says which (plugins
+    /// are asked about as they always were).
+    #[test]
+    fn a_client_is_for_one_kind() {
+        let plugins = StoreClient::new("https://edge.example.test/");
+        let templates = plugins.of(Kind::Template);
+        assert_eq!((plugins.item("focus"), templates.item("midnight")), ("/store/v1/plugins/focus".into(), "/store/v1/templates/midnight".into()));
+        assert_eq!((plugins.store_wide("stats"), templates.store_wide("stats")), ("/store/v1/stats".into(), "/store/v1/stats?kind=template".into()));
+        assert_eq!(plugins.page_url("focus"), "https://example.test/plugins/focus");
+        assert_eq!(templates.page_url("midnight"), "https://example.test/templates/midnight");
+        assert_eq!(templates.of(Kind::Plugin).item("focus"), plugins.item("focus"));
+    }
+
+    /// The update check's answer names each kind's offers apart; an event or
+    /// a block without `item_kind` is a plugin's.
+    #[test]
+    fn updates_and_take_downs_say_which_kind() {
+        let offer = |id: &str| serde_json::json!({ "id": id, "version": "1.1.0", "hash": "h", "verified": true });
+        let read = Updates::read(&serde_json::json!({
+            "updates": [offer("focus")],
+            "template_updates": [offer("midnight"), { "id": "odd" }],
+            "blocked": [{ "id": "focus", "version": "1.0.0" }, { "id": "midnight", "version": "1.0.0", "item_kind": "template" }, { "id": "x", "version": "1", "item_kind": "theme" }],
+        }));
+        assert_eq!((read.updates[0].id.as_str(), read.template_updates[0].id.as_str(), read.updates.len(), read.template_updates.len()), ("focus", "midnight", 1, 1));
+        assert_eq!(read.blocked.iter().map(|b| b.item_kind).collect::<Vec<_>>(), [Some(Kind::Plugin), Some(Kind::Template), None], "a kind this Zeron doesn't know isn't read as another");
+        assert_eq!(read.unreadable, [Some("odd".to_owned())]);
+        let event: TakedownEvent = serde_json::from_value(serde_json::json!({ "seq": 1, "kind": "take_down", "id": "focus", "version": "1.0.0" })).unwrap();
+        assert_eq!(event.item_kind, Some(Kind::Plugin));
+        // One of an unknown kind doesn't make the feed unreadable.
+        let feed: Takedowns = serde_json::from_value(serde_json::json!({ "head": 2, "events": [
+            { "seq": 1, "kind": "take_down", "item_kind": "theme", "id": "x", "version": "1.0.0" },
+            { "seq": 2, "kind": "take_down", "item_kind": "plugin", "id": "focus", "version": "1.0.0" },
+        ] })).unwrap();
+        assert_eq!(feed.events.iter().map(|e| e.item_kind).collect::<Vec<_>>(), [None, Some(Kind::Plugin)]);
+        let ask = UpdatesAsk { zeron: "0.4.0".into(), plugins: Vec::new(), templates: Vec::new() };
+        assert_eq!(serde_json::to_value(&ask).unwrap(), serde_json::json!({ "zeron": "0.4.0", "plugins": [] }), "no templates: the ask as it was");
+    }
 
     #[test]
     fn paths_and_queries_are_escaped() {

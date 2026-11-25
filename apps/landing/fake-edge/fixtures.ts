@@ -99,6 +99,8 @@ export interface FakeVersion {
 }
 
 export interface FakePlugin {
+  /** What it is; left out, a plugin. */
+  kind?: "template";
   id: string;
   owner: string;
   status: "listed" | "unlisted" | "suspended" | "removed";
@@ -812,6 +814,7 @@ export function reports(): FakeReport[] {
     { id: 1, plugin_id: "shell-runner", version: "1.0.0", reason: "misleading", text: "It says it runs saved commands, but it asks to run bash, which can run anything.", reporter: "user_ada", created_at: NOW - 2 * DAY, status: "open", note: null },
     { id: 2, plugin_id: "xss-probe", version: "1.0.0", reason: "malware", text: `Its name is <script>alert("report")</script>, which can't be good.`, reporter: "user_kai", created_at: NOW - 1 * DAY, status: "open", note: null },
     { id: 3, plugin_id: "focus-timer", version: "1.1.0", reason: "broken", text: "Doesn't stop when the chat closes.", reporter: "user_mo", created_at: NOW - 30 * DAY, status: "actioned", note: "Fixed in 1.2.0." },
+    { id: 4, plugin_id: "night-board", version: "1.0.0", reason: "other", text: "Its board hides the composer on a small window.", reporter: "user_mo", created_at: NOW - 3 * DAY, status: "open", note: null },
   ];
 }
 
@@ -828,6 +831,7 @@ export interface FakeAudit {
 
 export function audit(): FakeAudit[] {
   return [
+    { seq: 4, at: NOW - 3 * DAY, actor: "user_grace", action: "version.verify", plugin_id: "control-room", version: "1.2.0", detail: null },
     { seq: 3, at: NOW - 4 * DAY, actor: "user_grace", action: "version.decline", plugin_id: "session-badges", version: "1.2.0", detail: { reason: "asks_too_much" } },
     { seq: 2, at: NOW - 9 * DAY, actor: "user_grace", action: "version.verify", plugin_id: "focus-timer", version: "1.2.0", detail: null },
     { seq: 1, at: NOW - 20 * DAY, actor: "user_grace", action: "plugin.suspend", plugin_id: "crypto-ticker", version: null, detail: { reason: "Sends what you type to a third party." } },
@@ -846,7 +850,7 @@ export interface FakeToken {
   short: string;
   /** The SHA-256 of the secret, in hex (one the fake made; a fixture's secret was never kept). */
   hash: string | null;
-  scope: { all: true } | { plugins: string[] };
+  scope: { all: true; all_kinds?: ("plugin" | "template")[] } | { plugins: string[] };
   last_used_plugin: string | null;
   name: string;
   created_at: number;
@@ -904,6 +908,9 @@ export function tokens(): FakeToken[] {
       expires_at: ends === null ? null : NOW + (ends as number) * DAY,
       revoked_at: revoked === null ? null : NOW - (revoked as number) * DAY,
     })),
+    // (Last: a token's id is its place. Templates too: all of both, and some of each, its last use a template's.)
+    { owner: "user_ada", scope: { all: true, all_kinds: ["plugin", "template"] }, last_used_plugin: "control-room", name: "Monorepo, everything", created_at: NOW - 4 * DAY, last_used_at: NOW - 1 * DAY, expires_at: NOW + 60 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: ["control-room", "dockside", "focus-timer"] }, last_used_plugin: null, name: "Themes and timers", created_at: NOW - 2 * DAY, last_used_at: null, expires_at: NOW + 90 * DAY, revoked_at: null },
   ];
   return rows.map((row, n) => ({ ...row, ...fixtureToken(n), hash: null }));
 }

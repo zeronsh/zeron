@@ -30,7 +30,9 @@
 //!   plugins.store.mine                StoreMyPlugins
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
-//!   plugins.store.publish { id, hash, ticket }  PublishPlugin
+//!   plugins.store.publish { id, hash, ticket }  PublishPlugin (`ticket`: the
+//!                                     prepare's, which is a handle: the
+//!                                     engine's own stays in the host)
 //!   plugins.store.tokens()            ListDeployTokens: the account's
 //!                                     deploy tokens (never a token itself)
 //!   plugins.store.create_token { name, scope, expires? }  CreateDeployToken
@@ -46,13 +48,19 @@
 //!   plugins.store.revoke_token { id }  RevokeDeployToken
 //!   plugins.store.report { id, reason, text }  StoreReport
 //!
+//! A template's are the same, `templates.store.*` (but its categories and icon, which
+//! it has none of): the engine's calls with `kind`, and its own
+//! `PrepareTemplatePublish`, `PublishTemplate`, `SetTemplateUpdates` and
+//! `SetTemplatePrereleases`. Neither kind's is
+//! ever answered with the other's.
+//!
 //! Each rejects with the engine's words ("offline", "not_in_store", a store
 //! word, "<reason>: <words>"), which the page says in its words where it
 //! knows them (screens/plugins/words `failure`). Installing is
 //! `plugins.install { store, version?, device? }` (mod.rs), and turning a
 //! version the store took down back on is `plugins.set_off`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -61,7 +69,8 @@ use std::time::Duration;
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, Value};
 
-use super::json_value;
+use super::act_consent::{self, Act};
+use super::{json_value, preview};
 use crate::auth::text;
 
 /// An icon, at most (an installed plugin's too, mod.rs `icon_svg`).
@@ -81,6 +90,7 @@ thread_local! {
 pub(super) type Engine = Rc<dyn Fn(&'static str, Json, Option<String>) -> Pin<Box<dyn Future<Output = Result<Json, String>>>>>;
 
 pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
+    let asking = me.clone();
     let engine: Engine = Rc::new(move |method, params, device| {
         let me = me.clone();
         Box::pin(async move {
@@ -90,13 +100,90 @@ pub(super) fn install(host: &ScriptHost, me: std::rc::Weak<super::Bridge>) {
             }
         })
     });
-    install_with(host, engine);
+    let asker: Asker = {
+        let me = asking;
+        Rc::new(move |act| Box::pin(super::act_consent::ask(me.clone(), act)))
+    };
+    install_with(host, engine, asker);
 }
 
-/// The store's actions on `engine`.
-pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
+/// What you do as yourself, asked in a window of its own (act_consent.rs);
+/// a test's stands in for it.
+pub(super) type Asker = Rc<dyn Fn(Act) -> Pin<Box<dyn Future<Output = Result<Json, String>>>>>;
+
+/// The store's actions on `engine`. Once a template that isn't Zeron's has
+/// run, publishing, taking new installs again and a new token go by `asker`.
+pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
+    for kind in [PLUGINS, TEMPLATES] {
+        install_kind(host, &engine, &asker, kind);
+    }
+    install_account(host, engine, asker);
+}
+
+/// A kind of thing the store holds, as its calls are named here and asked of
+/// the engine: a plugin's are the engine's as they were (it says no kind), a
+/// template's say theirs.
+#[derive(Clone, Copy)]
+struct Kind {
+    id: &'static str,
+    calls: &'static str,
+    prepare: &'static str,
+    publish: &'static str,
+    updates: &'static str,
+    prereleases: &'static str,
+}
+
+const PLUGINS: Kind = Kind { id: "plugin", calls: "plugins.store", prepare: "PreparePluginPublish", publish: "PublishPlugin", updates: "SetPluginUpdates", prereleases: "SetPluginPrereleases" };
+const TEMPLATES: Kind = Kind { id: "template", calls: "templates.store", prepare: "PrepareTemplatePublish", publish: "PublishTemplate", updates: "SetTemplateUpdates", prereleases: "SetTemplatePrereleases" };
+
+impl Kind {
+    fn call(self, name: &str) -> String {
+        format!("{}.{name}", self.calls)
+    }
+
+    /// Refused while a template is only previewed (preview.rs `BLOCKED` names
+    /// each of both kinds').
+    fn hold(self, name: &str) -> Result<(), String> {
+        preview::refuse(&self.call(name))
+    }
+
+    fn with(self, mut params: Json) -> Json {
+        if self.id != PLUGINS.id {
+            params["kind"] = json!(self.id);
+        }
+        params
+    }
+
+    /// Whether `v` is one of this kind's: as it says, and a plugin's that
+    /// doesn't say (a store from before there were templates).
+    fn is(self, v: &Json) -> bool {
+        match v["kind"].as_str() {
+            Some(kind) => kind == self.id,
+            None => self.id == PLUGINS.id,
+        }
+    }
+
+    /// One of them, never one of the other kind's in its place.
+    fn one(self, reply: Json) -> Result<Value, String> {
+        match self.is(&reply) {
+            true => Ok(json_value(&reply)),
+            false => Err("not_in_store".into()),
+        }
+    }
+
+    /// A list of them, any of the other kind's left out.
+    fn all(self, mut reply: Json) -> Result<Value, String> {
+        if let Some(items) = reply["items"].as_array_mut() {
+            items.retain(|item| self.is(item));
+        }
+        Ok(json_value(&reply))
+    }
+}
+
+/// `kind`'s actions: reading the store, and publishing one of yours.
+fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
     let e = engine.clone();
-    host.async_action("plugins.store.search", move |arg| {
+    host.async_action(kind.call("search"), move |arg| {
         let e = e.clone();
         async move {
             let mut params = json!({});
@@ -118,11 +205,11 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             if matches!(arg.field("verified"), Some(Value::Bool(true))) {
                 params["verified"] = json!(true);
             }
-            ask(&e, "StoreSearch", params).await
+            kind.all(e("StoreSearch", kind.with(params), None).await?)
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.detail", move |arg| {
+    host.async_action(kind.call("detail"), move |arg| {
         let e = e.clone();
         async move {
             // `id`, or `{ id, for_zeron }`: judged for another device's Zeron.
@@ -135,11 +222,11 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             if let Some(zeron) = arg.field("for_zeron").map(text).filter(|v| version_ok(v)) {
                 params["for_zeron"] = json!(zeron);
             }
-            ask(&e, "StorePlugin", params).await
+            kind.one(e("StorePlugin", kind.with(params), None).await?)
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.versions", move |arg| {
+    host.async_action(kind.call("versions"), move |arg| {
         let e = e.clone();
         async move {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
@@ -153,28 +240,41 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             {
                 params["limit"] = json!((*n as u64).min(50));
             }
-            ask(&e, "StoreVersions", params).await
+            kind.one(e("StoreVersions", kind.with(params), None).await?)
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.version", move |arg| {
+    host.async_action(kind.call("version"), move |arg| {
         let e = e.clone();
         async move {
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
-            ask(&e, "StoreVersion", json!({ "id": id, "version": version })).await
+            kind.one(e("StoreVersion", kind.with(json!({ "id": id, "version": version })), None).await?)
         }
     });
+    // (A template has no category, and no icon: plugins' alone.)
+    if kind.id == PLUGINS.id {
+        let e = engine.clone();
+        host.async_action(kind.call("categories"), move |_| {
+            let e = e.clone();
+            async move { ask(&e, "StoreCategories", json!({})).await }
+        });
+        let e = engine.clone();
+        host.async_action(kind.call("icon"), move |arg| {
+            let e = e.clone();
+            async move {
+                let reply = file(&e, &arg, kind).await?;
+                let path = reply["file"].as_str().filter(|p| !p.is_empty()).map(str::to_owned).ok_or("not_an_icon")?;
+                let svg = off_thread(move || read_svg(std::path::Path::new(&path))).await.flatten();
+                Ok(svg.map_or(Value::Nil, |svg| Value::record([("svg", Value::from(svg.as_str()))])))
+            }
+        });
+    }
     let e = engine.clone();
-    host.async_action("plugins.store.categories", move |_| {
-        let e = e.clone();
-        async move { ask(&e, "StoreCategories", json!({})).await }
-    });
-    let e = engine.clone();
-    host.async_action("plugins.store.picture", move |arg| {
+    host.async_action(kind.call("picture"), move |arg| {
         let e = e.clone();
         async move {
-            let reply = file(&e, &arg).await?;
+            let reply = file(&e, &arg, kind).await?;
             let path = reply["file"].as_str().filter(|p| !p.is_empty()).ok_or("not_a_picture")?;
             let kind = reply["type"].as_str().unwrap_or_default();
             if !kind.starts_with("image/") || kind == "image/svg+xml" {
@@ -184,32 +284,22 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.icon", move |arg| {
+    host.async_action(kind.call("prereleases"), move |arg| {
         let e = e.clone();
         async move {
-            let reply = file(&e, &arg).await?;
-            let path = reply["file"].as_str().filter(|p| !p.is_empty()).map(str::to_owned).ok_or("not_an_icon")?;
-            let svg = off_thread(move || read_svg(std::path::Path::new(&path))).await.flatten();
-            Ok(svg.map_or(Value::Nil, |svg| Value::record([("svg", Value::from(svg.as_str()))])))
-        }
-    });
-    let e = engine.clone();
-    host.async_action("plugins.store.prereleases", move |arg| {
-        let e = e.clone();
-        async move {
-            crate::plugins::preview::refuse("plugins.store.prereleases")?;
+            kind.hold("prereleases")?;
             let (id, device) = super::remote::id_and_device(&arg);
             let id = store_id(&id).ok_or("not_in_store")?;
             let on = matches!(arg.field("on"), Some(Value::Bool(true)));
-            let reply = e("SetPluginPrereleases", json!({ "id": id, "on": on }), device).await?;
+            let reply = e(kind.prereleases, json!({ "id": id, "on": on }), device).await?;
             Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.updates", move |arg| {
+    host.async_action(kind.call("updates"), move |arg| {
         let e = e.clone();
         async move {
-            crate::plugins::preview::refuse("plugins.store.updates")?;
+            kind.hold("updates")?;
             // (A plugin's own choice, or with no id the device's; `prefer`
             // nil: as the device does, or for the device the default.)
             let id = arg.field("id").map(text).unwrap_or_default();
@@ -217,6 +307,9 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let mut params = json!({});
             if !id.is_empty() {
                 params["id"] = json!(store_id(&id).ok_or("not_in_store")?);
+            } else if kind.id == TEMPLATES.id {
+                // (The device's choice is one, over both kinds: the plugins'.)
+                return Err("not_in_store".into());
             }
             params["prefer"] = match arg.field("prefer").map(text).as_deref() {
                 Some("newest") => json!("newest"),
@@ -224,25 +317,25 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
                 None | Some("") => Json::Null,
                 Some(_) => return Err("invalid".into()),
             };
-            let reply = e("SetPluginUpdates", params, device).await?;
+            let reply = e(kind.updates, params, device).await?;
             Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.mine", move |_| {
+    host.async_action(kind.call("mine"), move |_| {
         let e = e.clone();
         async move {
             // (Your own account, not the catalog: every version of yours,
             // pending and rejected ones with the reviewers' reasons.)
-            crate::plugins::preview::refuse("plugins.store.mine")?;
-            ask(&e, "StoreMyPlugins", json!({})).await
+            kind.hold("mine")?;
+            kind.one(e("StoreMyPlugins", kind.with(json!({})), None).await?)
         }
     });
-    let e = engine.clone();
-    host.async_action("plugins.store.version_action", move |arg| {
-        let e = e.clone();
+    let (e, a) = (engine.clone(), asker.clone());
+    host.async_action(kind.call("version_action"), move |arg| {
+        let (e, a) = (e.clone(), a.clone());
         async move {
-            crate::plugins::preview::refuse("plugins.store.version_action")?;
+            kind.hold("version_action")?;
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
             let action = arg.field("action").map(text).unwrap_or_default();
@@ -251,27 +344,55 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             if !["yank", "unyank"].contains(&action.as_str()) {
                 return Err("invalid".into());
             }
-            answer(&e, "StoreVersionAction", json!({ "id": id, "version": version, "action": action })).await
+            let params = kind.with(json!({ "id": id, "version": version, "action": action }));
+            // (A template of yours: an engine that reads no kind would do it to
+            // the plugin of that id.)
+            if kind.id == TEMPLATES.id && !mine(&e, kind).await.is_some_and(|all| all.iter().any(|(own, _)| *own == id)) {
+                return Err("not_in_store".into());
+            }
+            // (Stopping installs takes nothing from anyone; taking them
+            // again puts a version back in front of everyone.)
+            if action == "unyank" && preview::another_s_ran() {
+                let name = mine(&e, kind).await.and_then(|all| all.into_iter().find(|(own, _)| *own == id)).map_or_else(|| id.clone(), |(_, name)| name);
+                let item = act_consent::unyanking(kind.id, &id, &name, &version);
+                let reply = a(act(item, move || async move { e("StoreVersionAction", params, None).await })).await?;
+                answered(&reply)?;
+                return Ok(json_value(&reply));
+            }
+            answer(&e, "StoreVersionAction", params).await
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.prepare", move |id| {
+    host.async_action(kind.call("prepare"), move |id| {
         let e = e.clone();
         async move {
-            crate::plugins::preview::refuse("plugins.store.prepare")?;
+            kind.hold("prepare")?;
             let id = store_id(&text(&id)).ok_or("not_in_store")?;
-            ask(&e, "PreparePluginPublish", json!({ "id": id })).await
+            let reply = e(kind.prepare, json!({ "id": id }), None).await?;
+            Ok(json_value(&keep_prepared(reply, kind.id)))
         }
     });
-    let e = engine.clone();
-    host.async_action("plugins.store.publish", move |arg| {
-        let e = e.clone();
+    let (e, a) = (engine.clone(), asker.clone());
+    host.async_action(kind.call("publish"), move |arg| {
+        let (e, a) = (e.clone(), a.clone());
         async move {
-            crate::plugins::preview::refuse("plugins.store.publish")?;
+            kind.hold("publish")?;
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let hash = arg.field("hash").map(text).unwrap_or_default();
-            let ticket = arg.field("ticket").map(text).unwrap_or_default();
-            let reply = e("PublishPlugin", json!({ "id": id, "hash": hash, "ticket": ticket }), None).await?;
+            // (What's sent, and what's asked, is what the engine said it
+            // checked, kept here: never what the page says of it.)
+            let was = arg.field("ticket").map(text).and_then(|handle| prepared(kind.id, &id, &hash, &handle)).ok_or("changed")?;
+            let params = json!({ "id": id, "hash": hash, "ticket": was.ticket });
+            let send = move || async move {
+                // (Good once, whatever comes of it.)
+                forget_prepared(&was.handle);
+                e(kind.publish, params, None).await
+            };
+            let reply = if preview::another_s_ran() {
+                a(act(act_consent::publishing(kind.id, &id, &was.name, &was.version), send)).await?
+            } else {
+                send().await?
+            };
             // (A listing refused for a cause it names: the page says which,
             // in its own words, so the refusal comes as the answer.)
             if let Some(refused) = listing_refusal(&reply) {
@@ -282,6 +403,32 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         }
     });
     let e = engine.clone();
+    host.async_action(kind.call("report"), move |arg| {
+        let e = e.clone();
+        async move {
+            kind.hold("report")?;
+            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
+            let reason = arg.field("reason").map(text).unwrap_or_default();
+            if !REPORT_REASONS.contains(&reason.as_str()) {
+                return Err("invalid".into());
+            }
+            let words: String = arg.field("text").map(text).unwrap_or_default().chars().take(2000).collect();
+            let mut params = json!({ "id": id, "reason": reason });
+            if !words.trim().is_empty() {
+                params["text"] = json!(words);
+            }
+            // (The same: first that it's a template there.)
+            if kind.id == TEMPLATES.id {
+                kind.one(e("StorePlugin", kind.with(json!({ "id": id })), None).await?)?;
+            }
+            answer(&e, "StoreReport", kind.with(params)).await
+        }
+    });
+}
+
+/// The account's: its deploy tokens, for either kind.
+fn install_account(host: &ScriptHost, engine: Engine, asker: Asker) {
+    let e = engine.clone();
     host.async_action("plugins.store.tokens", move |_| {
         let e = e.clone();
         async move {
@@ -291,12 +438,13 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             ask(&e, "ListDeployTokens", json!({})).await
         }
     });
-    let e = engine.clone();
+    let (e, a) = (engine.clone(), asker.clone());
     host.async_action("plugins.store.create_token", move |arg| {
-        let e = e.clone();
+        let (e, a) = (e.clone(), a.clone());
         async move {
             crate::plugins::preview::refuse("plugins.store.create_token")?;
-            let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
+            // (As it's shown before it's made: one line of what prints.)
+            let name = super::consent::plain(&arg.field("name").map(text).unwrap_or_default(), 64);
             if name.is_empty() {
                 return Err("invalid_name".into());
             }
@@ -308,7 +456,53 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             {
                 params["expires"] = json!(*at as i64);
             }
-            create_token(&e, params).await
+            if preview::another_s_ran() {
+                // (Which of them are templates: read of the account, never said
+                // by the page.)
+                let templates = match params["scope"]["plugins"].as_array() {
+                    Some(ids) => mine(&e, TEMPLATES).await.map(|all| ids.iter().filter_map(Json::as_str).filter(|id| all.iter().any(|(own, _)| own == id)).map(str::to_owned).collect()),
+                    None => None,
+                };
+                let item = act_consent::token(&params, templates);
+                let stop = {
+                    let e = e.clone();
+                    move || {
+                        STEP_UP.with(|n| n.set(n.get() + 1));
+                        let e = e.clone();
+                        crate::engine::get().spawn(async move {
+                            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
+                        });
+                    }
+                };
+                let undo = {
+                    let e = e.clone();
+                    move |made: Json| -> act_consent::Answer {
+                        let e = e.clone();
+                        Box::pin(async move { revoke_made(&e, &made).await })
+                    }
+                };
+                let run = Box::new(move || -> act_consent::Answer { Box::pin(async move { create_token(&e, params, &|| true).await }) });
+                let mut reply = a(Act { item, run, stop: Box::new(stop), undo: Some(Box::new(undo)) }).await?;
+                // (The window that made it shows it; this one never has it.)
+                if let Some(record) = reply.as_object_mut() {
+                    record.remove("secret");
+                }
+                return Ok(json_value(&reply));
+            }
+            // (The app's own flow. Should another's template start while it
+            // waits on the sign-in, it stops there: this window no longer
+            // shows a token.)
+            let ours = || !preview::another_s_ran();
+            let mut reply = create_token(&e, params, &ours).await?;
+            if !ours() {
+                if let Some(record) = reply.as_object_mut() {
+                    record.remove("secret");
+                }
+                if revoke_made(&e, &reply).await.is_ok() {
+                    return Err("cancelled".into());
+                }
+            }
+            Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
@@ -320,6 +514,7 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             // An engine without CancelStepUp yet answers no; nothing else
             // to do then.)
             STEP_UP.with(|n| n.set(n.get() + 1));
+            act_consent::give_up();
             let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
             Ok(Value::Nil)
         }
@@ -333,24 +528,89 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             answer(&e, "RevokeDeployToken", json!({ "id": id })).await
         }
     });
-    let e = engine;
-    host.async_action("plugins.store.report", move |arg| {
-        let e = e.clone();
-        async move {
-            crate::plugins::preview::refuse("plugins.store.report")?;
-            let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
-            let reason = arg.field("reason").map(text).unwrap_or_default();
-            if !REPORT_REASONS.contains(&reason.as_str()) {
-                return Err("invalid".into());
-            }
-            let words: String = arg.field("text").map(text).unwrap_or_default().chars().take(2000).collect();
-            let mut params = json!({ "id": id, "reason": reason });
-            if !words.trim().is_empty() {
-                params["text"] = json!(words);
-            }
-            answer(&e, "StoreReport", params).await
-        }
+}
+
+/// `run` as an act asked in its window, with nothing to stop half-way.
+fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl FnOnce() -> F + 'static) -> Act {
+    Act { item, run: Box::new(move || Box::pin(run())), stop: Box::new(|| {}), undo: None }
+}
+
+/// The account's own of `kind` in the store: each one's id and name, as the
+/// engine says. None if it doesn't.
+async fn mine(e: &Engine, kind: Kind) -> Option<Vec<(String, String)>> {
+    let reply = e("StoreMyPlugins", kind.with(json!({})), None).await.ok().filter(|reply| kind.is(reply))?;
+    let all = reply[if kind.id == TEMPLATES.id { "templates" } else { "plugins" }].as_array()?;
+    Some(
+        all.iter()
+            .filter_map(|p| {
+                let id = p["id"].as_str().and_then(store_id)?;
+                let name = p["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or(&id).to_owned();
+                Some((id, name))
+            })
+            .collect(),
+    )
+}
+
+/// The token `made` records, revoked: nobody saw it, or will.
+async fn revoke_made(e: &Engine, made: &Json) -> Result<Json, String> {
+    let id = made["token"]["id"].as_str().filter(|id| !id.is_empty()).ok_or("failed")?;
+    let reply = e("RevokeDeployToken", json!({ "id": id }), None).await?;
+    answered(&reply)?;
+    Ok(reply)
+}
+
+/// What the engine checked and gave a ticket for: what publishing with it
+/// sends. The ticket stays here: the page has `handle` in its place, which
+/// means nothing to the engine.
+#[derive(Clone)]
+struct Prepared {
+    handle: String,
+    kind: &'static str,
+    id: String,
+    hash: String,
+    ticket: String,
+    name: String,
+    version: String,
+}
+
+thread_local! {
+    /// The last few, newest last.
+    static PREPARED: RefCell<Vec<Prepared>> = const { RefCell::new(Vec::new()) };
+    static NEXT_PREPARED: Cell<u64> = const { Cell::new(0) };
+}
+
+const PREPARED_MOST: usize = 16;
+
+/// `reply` as the page has it: its ticket kept here, a handle in its place
+/// (none if what it's for isn't all said).
+fn keep_prepared(mut reply: Json, kind: &'static str) -> Json {
+    let Some(ticket) = reply.as_object_mut().and_then(|o| o.remove("ticket")) else { return reply };
+    let field = |k: &str| reply[k].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    let (Some(ticket), Some(id), Some(hash), Some(version)) = (ticket.as_str().filter(|t| !t.is_empty()), field("id"), field("hash"), field("version")) else {
+        return reply;
+    };
+    let name = reply["name"].as_str().filter(|s| !s.trim().is_empty()).map_or_else(|| id.clone(), |s| s.chars().take(64).collect());
+    let n = NEXT_PREPARED.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
     });
+    let handle = format!("prepared-{n}");
+    reply["ticket"] = json!(handle);
+    PREPARED.with(|p| {
+        let mut p = p.borrow_mut();
+        p.push(Prepared { handle, kind, id, hash, ticket: ticket.to_owned(), name, version });
+        let over = p.len().saturating_sub(PREPARED_MOST);
+        p.drain(..over);
+    });
+    reply
+}
+
+fn prepared(kind: &str, id: &str, hash: &str, handle: &str) -> Option<Prepared> {
+    PREPARED.with(|p| p.borrow().iter().find(|p| p.handle == handle && p.kind == kind && p.id == id && p.hash == hash).cloned())
+}
+
+fn forget_prepared(handle: &str) {
+    PREPARED.with(|p| p.borrow_mut().retain(|p| p.handle != handle));
 }
 
 /// What a report may say is wrong (the plan's amendment 13).
@@ -439,19 +699,19 @@ fn package_path(path: &str) -> Option<String> {
 
 /// One file of a store version, as the engine keeps it: its answer, its
 /// `file` a path here (absolute, or it's no file).
-async fn file(e: &Engine, arg: &Value) -> Result<Json, String> {
+async fn file(e: &Engine, arg: &Value, kind: Kind) -> Result<Json, String> {
     let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
     let version = arg.field("version").map(text).filter(|v| version_ok(v)).ok_or("not_in_store")?;
     let path = arg.field("path").map(text).and_then(|p| package_path(&p)).ok_or("not_in_store")?;
-    let reply = e("StoreFile", json!({ "id": id, "version": version, "path": path }), None).await?;
-    if !reply["file"].as_str().is_some_and(|f| std::path::Path::new(f).is_absolute()) {
+    let reply = e("StoreFile", kind.with(json!({ "id": id, "version": version, "path": path })), None).await?;
+    if !kind.is(&reply) || !reply["file"].as_str().is_some_and(|f| std::path::Path::new(f).is_absolute()) {
         return Err("not_in_store".into());
     }
     Ok(reply)
 }
 
 /// A version as the store names them: SemVer's characters, at most 128.
-fn version_ok(v: &str) -> bool {
+pub(crate) fn version_ok(v: &str) -> bool {
     !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
 }
 
@@ -476,14 +736,24 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-/// A deploy token's scope as the store takes it: `{ all: true }` (every
-/// plugin of the account's, those it publishes later too), or
+/// A deploy token's scope as the store takes it: `{ all: true, all_kinds? }`
+/// (every plugin of the account's, those it publishes later too, and its
+/// templates when `all_kinds` names them), or
 /// `{ plugins: [ids] }`, one to fifty store ids, each once (a duplicate
 /// refused, never dropped). Anything else is no scope.
 fn token_scope(scope: Option<&Value>) -> Option<Json> {
     let scope = scope?;
     if matches!(scope.field("all"), Some(Value::Bool(true))) {
-        return Some(json!({ "all": true }));
+        // (Which kinds: plugins alone unless it says both, said in that
+        // order; nothing else is a scope.)
+        return match scope.field("all_kinds") {
+            None | Some(Value::Nil) => Some(json!({ "all": true })),
+            Some(Value::List(kinds)) => {
+                let kinds: Vec<String> = kinds.iter().map(text).collect();
+                (kinds == ["plugin"] || kinds == ["plugin", "template"]).then(|| json!({ "all": true, "all_kinds": kinds }))
+            }
+            Some(_) => None,
+        };
     }
     let Some(Value::List(items)) = scope.field("plugins") else { return None };
     let mut ids: Vec<String> = Vec::new();
@@ -501,12 +771,13 @@ fn token_scope(scope: Option<&Value>) -> Option<Json> {
 /// (StepUp `for: "deploy_token"`; every token asks, and each sign-in makes
 /// one token), asked again each second until it lands, is cancelled, or ten
 /// minutes pass. Asked once first, so what makes no token at all (not
-/// published yet, not yours) is said before the browser opens.
-async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
+/// published yet, not yours) is said before the browser opens. `go_on` is
+/// looked at before each ask after the first: `false` gives it up.
+async fn create_token(e: &Engine, params: Json, go_on: &dyn Fn() -> bool) -> Result<Json, String> {
     let reply = e("CreateDeployToken", params.clone(), None).await?;
     if reply["ok"].as_bool() != Some(false) || reply["error"].as_str() != Some("step_up_required") {
         answered(&reply)?;
-        return Ok(json_value(&reply));
+        return Ok(reply);
     }
     let live = STEP_UP.with(|n| {
         n.set(n.get() + 1);
@@ -524,6 +795,11 @@ async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
         if STEP_UP.with(Cell::get) != live {
             return Err("cancelled".into());
         }
+        if !go_on() {
+            STEP_UP.with(|n| n.set(n.get() + 1));
+            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
+            return Err("cancelled".into());
+        }
         let reply = e("CreateDeployToken", params.clone(), None).await?;
         match reply["error"].as_str() {
             Some("step_up_required") if reply["ok"].as_bool() == Some(false) => {
@@ -533,7 +809,7 @@ async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
             }
             _ => {
                 answered(&reply)?;
-                return Ok(json_value(&reply));
+                return Ok(reply);
             }
         }
     }
@@ -553,18 +829,25 @@ mod tests {
     #[test]
     fn a_preview_can_t_act_as_you_in_the_store() {
         let source = include_str!("catalog.rs");
-        let mut guarded = 0;
+        let (mut guarded, mut of_kinds) = (0, 0);
         for line in source.lines() {
-            if let Some(rest) = line.split("preview::refuse(\"").nth(1) {
-                let name = rest.split('"').next().unwrap_or_default();
-                if name.is_empty() {
-                    continue;
-                }
-                assert!(crate::plugins::preview::BLOCKED.contains(&name), "{name} isn't blocked in a preview");
+            let after = |what: &str| line.split(what).nth(1).and_then(|rest| rest.split('"').next()).filter(|name| !name.is_empty()).map(str::to_owned);
+            if let Some(name) = after("preview::refuse(\"") {
+                assert!(crate::plugins::preview::blocked(&name), "{name} isn't blocked in a preview");
                 guarded += 1;
             }
+            if let Some(name) = after("kind.hold(\"") {
+                for kind in [PLUGINS, TEMPLATES] {
+                    let name = kind.call(&name);
+                    assert!(crate::plugins::preview::BLOCKED.contains(&name.as_str()), "{name} isn't blocked in a preview");
+                }
+                of_kinds += 1;
+            }
         }
-        assert!(guarded >= 9, "{guarded}");
+        assert!(guarded >= 3 && of_kinds >= 7, "{guarded} {of_kinds}");
+        for read in ["search", "detail", "versions", "version", "picture"] {
+            assert!(!crate::plugins::preview::blocked(&TEMPLATES.call(read)), "{read} only reads the catalog");
+        }
         for read in ["plugins.store.search", "plugins.store.detail", "plugins.store.versions", "plugins.store.version", "plugins.store.categories", "plugins.store.picture", "plugins.store.icon"] {
             assert!(!crate::plugins::preview::BLOCKED.contains(&read), "{read} only reads the catalog");
         }

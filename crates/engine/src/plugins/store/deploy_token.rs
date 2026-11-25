@@ -19,6 +19,8 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+use super::client::Kind;
+
 pub const PREFIX: &str = "zdt_";
 /// The environment variable `zeron plugin publish` reads the token from.
 pub const ENV: &str = "ZERON_DEPLOY_TOKEN";
@@ -142,11 +144,14 @@ pub fn checksum(before: &str) -> String {
 }
 
 /// What a token may publish, fixed when it's made (as a key's was): every
-/// plugin of its account's, those it publishes later included, or the
-/// plugins named.
+/// plugin of its account's (and template, if it says so), those it publishes
+/// later included, or the ids named, a plugin's or a template's alike.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    All,
+    /// Every plugin of the account's, and every template too when
+    /// `templates` (`all_kinds`: chosen when it's made; a token made before
+    /// templates could be published is plugins').
+    All { templates: bool },
     /// Sorted and unique.
     Plugins(Vec<String>),
 }
@@ -171,18 +176,31 @@ impl Scope {
         Ok(Self::Plugins(ids))
     }
 
-    /// As the store takes and answers it: `{all: true}` or `{plugins: [...]}`.
+    /// The scope `{all: true, all_kinds?}` says: `["plugin"]` or (in this
+    /// order) `["plugin", "template"]`, none is `["plugin"]`, anything else
+    /// `Err`.
+    pub fn all(kinds: Option<&[String]>) -> Result<Self, String> {
+        let kinds: Option<Vec<&str>> = kinds.map(|k| k.iter().map(String::as_str).collect());
+        match kinds.as_deref() {
+            None | Some(["plugin"]) => Ok(Self::All { templates: false }),
+            Some(["plugin", "template"]) => Ok(Self::All { templates: true }),
+            Some(_) => Err("A token for all of yours is for your plugins, or your plugins and templates (all_kinds: [\"plugin\"] or [\"plugin\", \"template\"])".into()),
+        }
+    }
+
+    /// As the store takes and answers it: `{all: true, all_kinds: [...]}` or
+    /// `{plugins: [...]}`.
     pub fn to_value(&self) -> serde_json::Value {
         match self {
-            Scope::All => serde_json::json!({ "all": true }),
+            Scope::All { templates } => serde_json::json!({ "all": true, "all_kinds": if *templates { &["plugin", "template"][..] } else { &["plugin"] } }),
             Scope::Plugins(ids) => serde_json::json!({ "plugins": ids }),
         }
     }
 
-    /// Whether it covers plugin `id`.
-    pub fn covers(&self, id: &str) -> bool {
+    /// Whether it covers `id`, an item of `kind`.
+    pub fn covers(&self, id: &str, kind: Kind) -> bool {
         match self {
-            Scope::All => true,
+            Scope::All { templates } => kind == Kind::Plugin || *templates,
             Scope::Plugins(ids) => ids.iter().any(|p| p == id),
         }
     }
@@ -229,7 +247,18 @@ mod tests {
     fn a_scope_is_all_or_one_to_fifty_ids_each_once() {
         let two = Scope::plugins(&["git".into(), " focus".into()]).unwrap();
         assert_eq!(two.to_value(), serde_json::json!({ "plugins": ["focus", "git"] }));
-        assert!(two.covers("git") && !two.covers("notes") && Scope::All.covers("notes"));
+        assert!(two.covers("git", Kind::Plugin) && two.covers("git", Kind::Template) && !two.covers("notes", Kind::Plugin));
+        // All of yours: plugins alone, unless it says templates too.
+        let kinds = |words: &[&str]| Scope::all(Some(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>()));
+        let plugins = Scope::all(None).unwrap();
+        assert_eq!((Ok(plugins.clone()), plugins.to_value()), (kinds(&["plugin"]), serde_json::json!({ "all": true, "all_kinds": ["plugin"] })));
+        assert!(plugins.covers("notes", Kind::Plugin) && !plugins.covers("notes", Kind::Template));
+        let both = kinds(&["plugin", "template"]).unwrap();
+        assert_eq!(both.to_value(), serde_json::json!({ "all": true, "all_kinds": ["plugin", "template"] }));
+        assert!(both.covers("notes", Kind::Plugin) && both.covers("notes", Kind::Template));
+        for bad in [&[][..], &["template"], &["template", "plugin"], &["plugin", "plugin"], &["plugin", "theme"]] {
+            assert!(kinds(bad).is_err(), "{bad:?}");
+        }
         assert!(Scope::plugins(&[]).is_err() && Scope::plugins(&["Not An Id".into()]).is_err());
         assert_eq!(Scope::plugins(&["git".into(), "focus".into(), " git".into()]), Err("\"git\" is named twice".to_owned()));
         assert!(Scope::plugins(&(0..51).map(|n| format!("p{n:02}")).collect::<Vec<_>>()).is_err());

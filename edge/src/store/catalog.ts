@@ -7,10 +7,16 @@
  *   GET /store/v1/plugins/:id                    → PluginDetail
  *   GET /store/v1/plugins/:id/versions?cursor&limit → { versions, total, next_cursor?, prev_cursor? }
  *   GET /store/v1/plugins/:id/versions/:version  → VersionInfo
- *   GET /store/v1/categories?top                 → { categories: [{ id, name, count, top? }] }
- *   GET /store/v1/keywords?category&limit        → { keywords: [{ keyword, count }] }
- *   GET /store/v1/stats                          → { plugins, verified, new_7d }
+ *   … the same under /store/v1/templates, of templates
+ *   GET /store/v1/categories?top&kind            → { categories: [{ id, name, count, top? }] }
+ *   GET /store/v1/keywords?category&limit&kind   → { keywords: [{ keyword, count }] }
+ *   GET /store/v1/stats?kind                     → { plugins, verified, new_7d }
  *   GET /store/v1/takedowns?after=<seq>          → { events, head, reset? }
+ *
+ * The catalog of plugins and that of templates never mix: each route reads
+ * its own kind (kind.ts; `listedOf`), and so does its cache key: the routes
+ * look alike, so the key carries the kind (a template's page must never be
+ * served the plugin's cached one, whose id may be asked for under either).
  *
  * Every listed plugin is in the catalog the moment it is published; a
  * review only marks it. Sorts are honest: each is exactly its own key,
@@ -31,8 +37,9 @@ import { foldUsername } from "../username";
 import { LIST_TTL, cacheKey, cachedValue, throughCache } from "./cache";
 import { hasCredentials } from "./principal";
 import { authorCard, authorsOf, packageUrl, permissionsOf, pluginCard, versionInfo } from "./cards";
-import { LISTED, PUBLIC_STATUSES, type PluginRow, type VersionRow, parseList, pluginRow, publicVersion } from "./db";
+import { PUBLIC_STATUSES, type PluginRow, type VersionRow, listedOf, parseList, pluginRow, publicVersion } from "./db";
 import { answer, fail, notFound } from "./http";
+import { type Kind, kindOfSegment, kindParam, segmentOf } from "./kind";
 import { CATEGORIES, isCategory } from "./listing";
 import { type VersionPlace, decodeCursor, decodeVersionCursor, encodeCursor, encodeVersionCursor, ftsQuery, searchTerms } from "./search";
 import { decodeSegment } from "./serve";
@@ -124,16 +131,16 @@ export const listParams = (lq: ListKey) => ({
   cursor: lq.cursor
 });
 
-/** The keys of the first pages a change to a plugin in `categories` moves:
- * each sort, featured or not, verified or not. */
-export const firstPageKeys = (categories: readonly string[]): string[] => {
+/** The keys of the first pages a change to an item of `kind` in
+ * `categories` moves: each sort, featured or not, verified or not. */
+export const firstPageKeys = (kind: Kind, categories: readonly string[]): string[] => {
   const keys: string[] = [];
   for (const sort of ["popular", "updated", "new", "verified"] as const) {
     for (const featured of [false, true]) {
       for (const verified of [false, true]) {
         for (const category of [undefined, ...categories]) {
           keys.push(
-            cacheKey(["plugins"], listParams({ terms: [], category, keyword: undefined, author: undefined, featured, verified, sort, limit: DEFAULT_LIMIT, cursor: undefined }))
+            cacheKey([segmentOf(kind)], listParams({ terms: [], category, keyword: undefined, author: undefined, featured, verified, sort, limit: DEFAULT_LIMIT, cursor: undefined }))
           );
         }
       }
@@ -142,19 +149,25 @@ export const firstPageKeys = (categories: readonly string[]): string[] => {
   return keys;
 };
 
-/** The cache keys of a plugin's versions' first page and one version. */
-export const STATS_KEY = cacheKey(["stats"]);
+/** A key's kind, where it isn't a plugin's (a plugin's keys are as they
+ * always were). */
+const kindParams = (kind: Kind): { kind?: Kind } => (kind === "plugin" ? {} : { kind });
+export const statsKey = (kind: Kind): string => cacheKey(["stats"], kindParams(kind));
 /** The categories with their counts and each one's most installed plugins
  * (as many as `top` may ask for): one cached value every `?top` reads. */
 export const CATEGORIES_KEY = cacheKey(["categories"]);
-/** The most used keywords, of all listed plugins or of one category's (as
- * many as `limit` may ask for): one cached value each. */
-export const keywordsKey = (category: string | undefined): string => cacheKey(["keywords"], { category });
+/** The most used keywords, of all listed items of `kind` or of one
+ * category's (as many as `limit` may ask for): one cached value each. */
+export const keywordsKey = (kind: Kind, category: string | undefined): string => cacheKey(["keywords"], { category, ...kindParams(kind) });
 /** The take-down feed's answer for a device at `after` (none: one that
  * starts afresh). */
 export const takedownsKey = (after: number | undefined): string => cacheKey(["takedowns"], { after: after === undefined ? undefined : String(after) });
-export const versionsPageKey = (id: string): string => cacheKey(["plugins", id, "versions"]);
-export const versionKey = (id: string, version: string): string => cacheKey(["plugins", id, "versions", version]);
+/** An item's detail, its versions' first page, and one of its versions. The
+ * kind is in each: `/templates/<a plugin's id>` is asked for under a path
+ * like a template's, and must never read the plugin's. */
+export const itemKey = (kind: Kind, id: string): string => cacheKey([segmentOf(kind), id]);
+export const versionsPageKey = (kind: Kind, id: string): string => cacheKey([segmentOf(kind), id, "versions"]);
+export const versionKey = (kind: Kind, id: string, version: string): string => cacheKey([segmentOf(kind), id, "versions", version]);
 
 const SORT_KEY: Record<Sort, { readonly expr: string; readonly asc: boolean }> = {
   // (The mark breaks a tie between equal ranks, and nothing more.)
@@ -167,8 +180,8 @@ const SORT_KEY: Record<Sort, { readonly expr: string; readonly asc: boolean }> =
   verified: { expr: "p.verified_at", asc: false }
 };
 
-const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Response> => {
-  const filter = JSON.stringify(listParams({ ...lq, cursor: undefined, limit: DEFAULT_LIMIT }));
+const listPlugins = async (env: Env, db: D1Database, kind: Kind, lq: ListQuery): Promise<Response> => {
+  const filter = JSON.stringify({ ...listParams({ ...lq, cursor: undefined, limit: DEFAULT_LIMIT }), ...kindParams(kind) });
   let after: { key: number; seq: number; dir: "next" | "prev" } | undefined;
   if (lq.cursor !== undefined) {
     after = decodeCursor(lq.cursor, filter);
@@ -184,7 +197,7 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   }
   // Each clause with its own binds, assembled in SQL order.
   const joins: { sql: string; binds: unknown[] }[] = [];
-  const where: { sql: string; binds: unknown[] }[] = [{ sql: LISTED, binds: [] }];
+  const where: { sql: string; binds: unknown[] }[] = [{ sql: listedOf(kind), binds: [] }];
   if (lq.terms.length) {
     joins.push({ sql: "JOIN plugin_search ON plugin_search.rowid = p.seq", binds: [] });
     where.push({ sql: "plugin_search MATCH ?", binds: [ftsQuery(lq.terms)] });
@@ -242,17 +255,18 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   );
 };
 
-/** A listed plugin, or undefined (unknown, suspended, or nothing installable). */
-const listedPlugin = async (db: D1Database, id: string): Promise<PluginRow | undefined> => {
+/** A listed item of `kind`, or undefined (unknown, of the other kind,
+ * suspended, or nothing installable). */
+const listedPlugin = async (db: D1Database, kind: Kind, id: string): Promise<PluginRow | undefined> => {
   const p = await pluginRow(db, id);
-  return p && p.status === "active" && p.listed_version ? p : undefined;
+  return p && p.kind === kind && p.status === "active" && p.listed_version ? p : undefined;
 };
 
-/** An active plugin (listed or not): its listed and yanked versions stay
- * readable, a yanked one for the devices that have it. */
-const activePlugin = async (db: D1Database, id: string): Promise<PluginRow | undefined> => {
+/** An active item of `kind` (listed or not): its listed and yanked versions
+ * stay readable, a yanked one for the devices that have it. */
+const activePlugin = async (db: D1Database, kind: Kind, id: string): Promise<PluginRow | undefined> => {
   const p = await pluginRow(db, id);
-  return p && p.status === "active" ? p : undefined;
+  return p && p.kind === kind && p.status === "active" ? p : undefined;
 };
 
 const placeOf = (v: VersionRow): VersionPlace => [v.major, v.minor, v.patch, v.is_release, v.pre_key];
@@ -289,8 +303,8 @@ const versionsPage = async (db: D1Database, id: string, limit: number, after: { 
   };
 };
 
-const pluginDetail = async (env: Env, db: D1Database, id: string): Promise<Response> => {
-  const p = await listedPlugin(db, id);
+const pluginDetail = async (env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
+  const p = await listedPlugin(db, kind, id);
   if (!p) return notFound();
   const [listed, versions, authors] = await Promise.all([
     db.prepare("SELECT * FROM versions WHERE plugin_id = ? AND version = ?").bind(id, p.listed_version).first<VersionRow>(),
@@ -303,15 +317,17 @@ const pluginDetail = async (env: Env, db: D1Database, id: string): Promise<Respo
       ...pluginCard(p, authorCard(authors[p.owner_id]!)),
       readme: listed.readme,
       screenshots: parseList(listed.screenshots),
-      permissions: permissionsOf(listed),
+      // (A template asks for nothing: it runs as Zeron itself, so it carries
+      // no permission list.)
+      ...(kind === "plugin" ? { permissions: permissionsOf(listed) } : {}),
       engines: listed.engines_zeron === null ? null : { zeron: listed.engines_zeron },
       homepage: listed.homepage,
       repository: listed.repository,
       license: listed.license,
-      versions: versions.versions.map((v) => versionInfo(v)),
+      versions: versions.versions.map((v) => versionInfo(v, kind)),
       ...(versions.next ? { versions_next_cursor: versions.next } : {}),
       package: {
-        url: packageUrl(id, listed.version),
+        url: packageUrl(kind, id, listed.version),
         bytes: listed.package_bytes,
         sha256: listed.package_sha256,
         hash: listed.content_hash,
@@ -323,8 +339,8 @@ const pluginDetail = async (env: Env, db: D1Database, id: string): Promise<Respo
   );
 };
 
-const pluginVersions = async (db: D1Database, id: string, url: URL): Promise<Response> => {
-  if (!(await activePlugin(db, id))) return notFound();
+const pluginVersions = async (db: D1Database, kind: Kind, id: string, url: URL): Promise<Response> => {
+  if (!(await activePlugin(db, kind, id))) return notFound();
   const limit = limitOf(url.searchParams, 20);
   if (limit === undefined) return fail(400, "bad_request", `limit is 1 to ${MAX_LIMIT}.`);
   const cursor = url.searchParams.get("cursor");
@@ -333,7 +349,7 @@ const pluginVersions = async (db: D1Database, id: string, url: URL): Promise<Res
   const page = await versionsPage(db, id, limit, after);
   return answer(
     {
-      versions: page.versions.map((v) => versionInfo(v)),
+      versions: page.versions.map((v) => versionInfo(v, kind)),
       total: page.total,
       ...(page.next ? { next_cursor: page.next } : {}),
       ...(page.prev ? { prev_cursor: page.prev } : {})
@@ -343,11 +359,11 @@ const pluginVersions = async (db: D1Database, id: string, url: URL): Promise<Res
   );
 };
 
-/** One public version of an active plugin, by its name. */
-const oneVersion = async (db: D1Database, id: string, version: string): Promise<Response> => {
-  if (!(await activePlugin(db, id))) return notFound();
+/** One public version of an active item, by its name. */
+const oneVersion = async (db: D1Database, kind: Kind, id: string, version: string): Promise<Response> => {
+  if (!(await activePlugin(db, kind, id))) return notFound();
   const v = await db.prepare(`SELECT * FROM versions WHERE plugin_id = ? AND version = ? AND ${publicVersion()}`).bind(id, version).first<VersionRow>();
-  return v ? answer(versionInfo(v), 200, publicCache(LIST_TTL)) : notFound();
+  return v ? answer(versionInfo(v, kind), 200, publicCache(LIST_TTL)) : notFound();
 };
 
 /** Each category with the number of listed plugins in it: exactly the set
@@ -383,13 +399,13 @@ interface CategoryEntry {
  * installed, in the order and set `?category=<id>&sort=popular` lists. */
 const categoryEntries = async (env: Env, db: D1Database): Promise<CategoryEntry[]> => {
   const [counted, ranked] = await db.batch<unknown>([
-    db.prepare(`SELECT c.category, COUNT(*) AS n FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${LISTED} GROUP BY c.category`),
+    db.prepare(`SELECT c.category, COUNT(*) AS n FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${listedOf("plugin")} GROUP BY c.category`),
     db
       .prepare(
         `SELECT * FROM (
            SELECT c.category AS top_category, p.*,
              ROW_NUMBER() OVER (PARTITION BY c.category ORDER BY COALESCE(${SORT_KEY.popular.expr}, 0) DESC, p.seq DESC) AS top_rank
-           FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${LISTED}
+           FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${listedOf("plugin")}
          ) WHERE top_rank <= ? ORDER BY top_category, top_rank`
       )
       .bind(MAX_TOP)
@@ -404,11 +420,15 @@ const categoryEntries = async (env: Env, db: D1Database): Promise<CategoryEntry[
   }));
 };
 
-/** `GET /store/v1/categories[?top=1..4]`: each category with its count,
- * and with `top`, its most installed plugins as cards. */
+/** `GET /store/v1/categories[?top=1..4][&kind]`: each category with its
+ * count, and with `top`, its most installed plugins as cards. A template is
+ * in no category (contract "Templates in the store"): none. */
 const categories = async (request: Request, env: Env, db: D1Database, url: URL): Promise<Response> => {
+  const kind = kindParam(url.searchParams);
+  if (kind === undefined) return fail(400, "bad_request", "kind is plugin or template.");
   const top = countParam(url.searchParams, "top", 1, MAX_TOP, undefined);
   if (top === null) return fail(400, "bad_request", `top is 1 to ${MAX_TOP}.`);
+  if (kind === "template") return fromValue(request, { categories: [] });
   const entries = (await cachedValue(request, CATEGORIES_KEY, LIST_TTL, () => categoryEntries(env, db)))!;
   return fromValue(request, { categories: entries.map(({ top: cards, ...c }) => (top === undefined ? c : { ...c, top: cards.slice(0, top) })) });
 };
@@ -417,17 +437,19 @@ const categories = async (request: Request, env: Env, db: D1Database, url: URL):
  * plugins use most (of one category's, with `category`), most used first,
  * ties by keyword. */
 const keywords = async (request: Request, db: D1Database, url: URL): Promise<Response> => {
+  const kind = kindParam(url.searchParams);
+  if (kind === undefined) return fail(400, "bad_request", "kind is plugin or template.");
   const category = url.searchParams.get("category") ?? undefined;
   if (category !== undefined && !isCategory(category)) return fail(400, "bad_request", "That isn't a category.");
   const limit = countParam(url.searchParams, "limit", 1, MAX_KEYWORDS_SHOWN, MAX_KEYWORDS_SHOWN);
   if (limit === null || limit === undefined) return fail(400, "bad_request", `limit is 1 to ${MAX_KEYWORDS_SHOWN}.`);
-  const all = (await cachedValue(request, keywordsKey(category), LIST_TTL, async () =>
+  const all = (await cachedValue(request, keywordsKey(kind, category), LIST_TTL, async () =>
     (
       await db
         .prepare(
           `SELECT k.keyword, COUNT(*) AS count FROM plugin_keywords k JOIN plugins p ON p.id = k.plugin_id
              ${category ? "JOIN plugin_categories c ON c.plugin_id = p.id AND c.category = ?" : ""}
-           WHERE ${LISTED} GROUP BY k.keyword ORDER BY count DESC, k.keyword ASC LIMIT ?`
+           WHERE ${listedOf(kind)} GROUP BY k.keyword ORDER BY count DESC, k.keyword ASC LIMIT ?`
         )
         .bind(...(category ? [category] : []), MAX_KEYWORDS_SHOWN)
         .all<{ keyword: string; count: number }>()
@@ -439,9 +461,9 @@ const keywords = async (request: Request, db: D1Database, url: URL): Promise<Res
 /** The store's totals: listed plugins, those whose newest version is
  * verified (what `?verified=1` lists), and those first listed in the last
  * seven days. */
-const stats = async (db: D1Database): Promise<Response> => {
+const stats = async (db: D1Database, kind: Kind): Promise<Response> => {
   const row = await db
-    .prepare(`SELECT COUNT(*) AS plugins, COALESCE(SUM(p.verified), 0) AS verified, COALESCE(SUM(p.listed_at >= ?), 0) AS new_7d FROM plugins p WHERE ${LISTED}`)
+    .prepare(`SELECT COUNT(*) AS plugins, COALESCE(SUM(p.verified), 0) AS verified, COALESCE(SUM(p.listed_at >= ?), 0) AS new_7d FROM plugins p WHERE ${listedOf(kind)}`)
     .bind(Date.now() - 7 * DAY_MS)
     .first<{ plugins: number; verified: number; new_7d: number }>();
   return answer({ plugins: row?.plugins ?? 0, verified: row?.verified ?? 0, new_7d: row?.new_7d ?? 0 }, 200, publicCache(LIST_TTL));
@@ -468,13 +490,13 @@ const takedowns = async (db: D1Database, after: number | undefined): Promise<Res
   if (after === undefined || after > head || oldest > after + 1) return answer({ events: [], head, reset: true }, 200, publicCache(LIST_TTL));
   const rows = (
     await db
-      .prepare("SELECT seq, kind, plugin_id, version, reason FROM takedown_events WHERE seq > ? ORDER BY seq LIMIT ?")
+      .prepare("SELECT seq, kind, item_kind, plugin_id, version, hash, reason FROM takedown_events WHERE seq > ? ORDER BY seq LIMIT ?")
       .bind(after, TAKEDOWN_PAGE)
-      .all<{ seq: number; kind: string; plugin_id: string; version: string; reason: string | null }>()
+      .all<{ seq: number; kind: string; item_kind: Kind; plugin_id: string; version: string; hash: string | null; reason: string | null }>()
   ).results;
   return answer(
     {
-      events: rows.map((r) => ({ seq: r.seq, kind: r.kind, id: r.plugin_id, version: r.version, ...(r.reason ? { reason: r.reason } : {}) })),
+      events: rows.map((r) => ({ seq: r.seq, kind: r.kind, item_kind: r.item_kind, id: r.plugin_id, version: r.version, ...(r.hash ? { hash: r.hash } : {}), ...(r.reason ? { reason: r.reason } : {}) })),
       head
     },
     200,
@@ -486,7 +508,11 @@ export const handleCatalog = async (request: Request, env: Env, db: D1Database, 
   if (request.method !== "GET" && request.method !== "HEAD") return undefined;
   if (parts.length === 3 && parts[2] === "categories") return categories(request, env, db, url);
   if (parts.length === 3 && parts[2] === "keywords") return keywords(request, db, url);
-  if (parts.length === 3 && parts[2] === "stats") return throughCache(request, STATS_KEY, LIST_TTL, () => stats(db));
+  if (parts.length === 3 && parts[2] === "stats") {
+    const kind = kindParam(url.searchParams);
+    if (kind === undefined) return fail(400, "bad_request", "kind is plugin or template.");
+    return throughCache(request, statsKey(kind), LIST_TTL, () => stats(db, kind));
+  }
   if (parts.length === 3 && parts[2] === "takedowns") {
     // Read once: the key and the answer are the same `after`. Anything but
     // digits is refused, never cached (so no spelling of a seq can fill the
@@ -498,24 +524,25 @@ export const handleCatalog = async (request: Request, env: Env, db: D1Database, 
     // every other at the same place share one answer.)
     return throughCache(request, takedownsKey(after), LIST_TTL, () => takedowns(db, after));
   }
-  if (parts[2] !== "plugins") return undefined;
+  const kind = kindOfSegment(parts[2]);
+  if (kind === undefined) return undefined;
   if (parts.length === 3) {
     const lq = parseListQuery(url);
     if (lq instanceof Response) return lq;
-    return throughCache(request, cacheKey(["plugins"], listParams(lq)), LIST_TTL, () => listPlugins(env, db, lq));
+    return throughCache(request, cacheKey([segmentOf(kind)], listParams(lq)), LIST_TTL, () => listPlugins(env, db, kind, lq));
   }
   const id = parts[3]!;
   if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id)) return notFound();
-  if (parts.length === 4) return throughCache(request, cacheKey(["plugins", id]), LIST_TTL, () => pluginDetail(env, db, id));
+  if (parts.length === 4) return throughCache(request, itemKey(kind, id), LIST_TTL, () => pluginDetail(env, db, kind, id));
   if (parts.length === 5 && parts[4] === "versions") {
     // The first page only is cached (and purged); later pages are as fresh as a list's.
     const plain = url.search === "";
-    return plain ? throughCache(request, versionsPageKey(id), LIST_TTL, () => pluginVersions(db, id, url)) : pluginVersions(db, id, url);
+    return plain ? throughCache(request, versionsPageKey(kind, id), LIST_TTL, () => pluginVersions(db, kind, id, url)) : pluginVersions(db, kind, id, url);
   }
   if (parts.length === 6 && parts[4] === "versions") {
     const version = decodeSegment(parts[5]!);
     if (!version || !parseVersion(version)) return notFound();
-    return throughCache(request, versionKey(id, version), LIST_TTL, () => oneVersion(db, id, version));
+    return throughCache(request, versionKey(kind, id, version), LIST_TTL, () => oneVersion(db, kind, id, version));
   }
   return undefined;
 };

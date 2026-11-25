@@ -13,6 +13,8 @@
 .hero { display: flex; flex-direction: column; align-items: center; text-align: center; }
 .hero h1 { font-size: 56px; line-height: 64px; font-weight: 600; letter-spacing: -0.04em; overflow-wrap: anywhere; max-width: 100%; }
 .hero .lead { margin-top: var(--head); max-width: 640px; font-size: 18px; line-height: 28px; text-wrap: balance; }
+/* (What a template runs as: once, over its list.) */
+.hero .fact { margin-top: var(--s8); font-size: 14px; line-height: 20px; color: var(--text-3); text-wrap: balance; }
 .hfind { position: relative; display: flex; align-items: center; width: 100%; max-width: 560px; height: 48px; margin-top: var(--groups); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); text-align: left; transition: box-shadow 0.12s var(--ease); }
 .hfind:hover { box-shadow: 0 0 0 1px var(--line-2); }
 .hfind:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
@@ -87,7 +89,19 @@
 .rhead { display: flex; align-items: center; justify-content: space-between; gap: var(--s16); min-height: 32px; }
 /* (Nothing in the list: no count and no order; the phone's filters stay.) */
 .rhead.bare { display: none; }
-.rhead p { color: var(--text-2); font-size: 14px; }
+/* Templates have no categories: how to narrow them is a row over the grid, beside its count and order: all or the
+   verified, then the keywords on one line, fading where it goes on (it scrolls). The grid takes the width. */
+.browse.full { grid-template-columns: minmax(0, 1fr); }
+.tnarrow { display: flex; flex: 1; align-items: center; gap: var(--s16); min-width: 0; }
+.tpick { display: flex; flex: none; gap: var(--s4); }
+.tkeys { display: flex; flex: 1; gap: var(--s8); min-width: 0; padding: 0 var(--s48) 0 0; overflow-x: auto; scrollbar-width: none; list-style: none; mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent); }
+.tkeys::-webkit-scrollbar { display: none; }
+.tkeys li { flex: none; }
+.tkeys .chip { max-width: 240px; display: block; line-height: 32px; overflow: hidden; text-overflow: ellipsis; }
+.browse.full .rhead.bare { display: flex; }
+/* (Nothing counted: the row begins with a chip, which hangs by its padding.) */
+.browse.full .rhead.bare .tpick { margin-left: calc(-1 * var(--s12)); }
+.rhead p { color: var(--text-2); font-size: 14px; white-space: nowrap; }
 .rhead p b { color: var(--text); font-weight: 600; }
 
 /* The list: three a row on a wide screen, two, then one; each the one card, which hangs by its padding. */
@@ -106,6 +120,11 @@
 .pc-meta { display: flex; align-items: center; gap: var(--s8); min-width: 0; margin-top: var(--s8); color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
 .pc-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pc-meta .state { flex: none; height: 20px; }
+
+/* The templates' list: each its picture (the store's tile), three a row on a wide screen, two, then one. */
+.tresults { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s32) var(--s24); margin-top: var(--groups); padding: 0; list-style: none; }
+.tresults li { display: flex; min-width: 0; }
+.ft-meta .state { flex: none; height: 20px; }
 
 /* The pages: the numbers centred, the count under them. */
 .pager.numbered { flex-direction: column; justify-content: flex-start; gap: var(--s8); margin-top: var(--groups); padding-top: 0; box-shadow: none; }
@@ -149,7 +168,7 @@ span.pg.step { color: var(--text-3); opacity: 0.5; }
 .sort summary .t3 { font-weight: 450; }
 
 @media (max-width: 1279px) {
-  .results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .results, .tresults { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 1024px) {
   .browse { grid-template-columns: 188px minmax(0, 1fr); gap: var(--s48); }
@@ -159,7 +178,7 @@ span.pg.step { color: var(--text-3); opacity: 0.5; }
 @media (max-width: 860px) {
   .browse { grid-template-columns: minmax(0, 1fr); gap: var(--s32); }
   .facets { position: static; gap: 0; }
-  .facets .wide-facet, .facets .facet-h { display: none; }
+  .facets .wide-facet, .facets .facet-h, .tnarrow { display: none; }
   .catlist { flex-direction: row; gap: var(--s8); overflow-x: auto; margin: 0 calc(-1 * var(--gutter)); padding: var(--s4) var(--gutter) var(--s4) calc(var(--gutter) - var(--pad)); scrollbar-width: none; }
   .catlist a { flex: none; gap: var(--s8); height: 32px; border-radius: 16px; font-size: 13px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
   .catlist a[aria-current] { background: var(--text); color: var(--bg); box-shadow: none; font-weight: 500; }
@@ -173,8 +192,9 @@ span.pg.step { color: var(--text-3); opacity: 0.5; }
   .hero .lead { font-size: 16px; line-height: 24px; }
   .hfind { margin-top: var(--s24); }
   .hero + *, .featured + .browse { margin-top: var(--s48); }
+  .sort summary .t3 { display: none; }
   /* (One a row; the picks a sideways row, the next one's edge in view.) */
-  .results { grid-template-columns: minmax(0, 1fr); }
+  .results, .tresults { grid-template-columns: minmax(0, 1fr); }
   .feat-row { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: 84%; gap: var(--s16); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
   .feat-row li { scroll-snap-align: start; }
   .feat-row li:nth-child(3) { display: flex; }

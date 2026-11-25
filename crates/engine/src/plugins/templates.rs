@@ -170,16 +170,19 @@ pub(super) fn template_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     is_real_dir(&path).then_some(path)
 }
 
-/// Every installed template id, unsorted.
-fn installed(dir: &Path) -> Vec<String> {
+/// Every installed template id, sorted.
+pub(super) fn installed(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries
+    let mut ids: Vec<String> = entries
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|id| template_dir(dir, id).is_some())
-        .collect()
+        .collect();
+    // (Not as the disk happens to list them.)
+    ids.sort();
+    ids
 }
 
 /// The app files under `root`, as relative paths (`/`-separated), sorted:
@@ -227,9 +230,95 @@ fn zeron_files(zeron: &Path) -> Vec<String> {
     app_files(zeron, &[MANIFEST, HASHES, CATALOG])
 }
 
-/// A template's own app files.
+/// The most `stock/<version>.json` may be (the edge reads no more).
+const MAX_STOCK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Zeron's own files as the app lays them out (its `.zeron` folder), for the
+/// store's `stock/<version>.json`: what a template's first reviewer reads
+/// each of its files against. `{version, files: {rel: sha256}}`, the files a
+/// template copies (never `.zeron`'s bookkeeping).
+pub fn stock(zeron: &Path) -> Result<Value, String> {
+    let manifest: Manifest = read_regular(&zeron.join(MANIFEST))
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or("That isn't Zeron's own template folder (.zeron): it has no manifest that can be read")?;
+    let version = manifest.zeron_version.unwrap_or_default();
+    super::version::Version::parse(&version).map_err(|e| format!("Its Zeron version ({version:?}) isn't one a release has: {e}"))?;
+    let mut files = serde_json::Map::new();
+    for rel in zeron_files(zeron) {
+        let bytes = inside(zeron, &rel).and_then(|path| read_regular(&path)).ok_or_else(|| format!("Couldn't read {rel}"))?;
+        files.insert(rel, json!(super::signing::sha256_hex(&bytes)));
+    }
+    if !files.contains_key("app.luau") {
+        return Err("That isn't Zeron's own template folder (.zeron): it has no app.luau".into());
+    }
+    let stock = json!({ "version": version, "files": files });
+    if serde_json::to_vec(&stock).map_or(0, |b| b.len()) > MAX_STOCK_BYTES {
+        return Err("Zeron's own files are more than the store reads (4 MB)".into());
+    }
+    Ok(stock)
+}
+
+/// A template's own app files: none of its listing files
+/// (`listing::TEMPLATE_LISTING_FILES`), which are never part of its app.
 pub(super) fn own_files(template: &Path) -> Vec<String> {
-    app_files(template, &[MANIFEST, BASE, PREVIEW, super::guides::README])
+    let mut files = app_files(template, &[MANIFEST, BASE]);
+    files.retain(|rel| !super::listing::template_listing_file(rel));
+    files
+}
+
+/// A template's listing files that are there.
+pub(super) fn listing_files(template: &Path) -> Vec<String> {
+    let mut files = app_files(template, &[MANIFEST, BASE]);
+    files.retain(|rel| super::listing::template_listing_file(rel));
+    files
+}
+
+/// The folder of `id`, one of your own templates: not Zeron's, nor one
+/// installed from a package.
+pub(super) fn own_dir(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let folder = template_dir(dir, id).filter(|_| id != ZERON).ok_or_else(|| format!("There's no template {id} of yours. list_templates names them."))?;
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    if official(id, &folder, &manifest) || super::template_packages::has_record(&folder) {
+        return Err("Only a template you're making on this device can be published from here (a folder anywhere publishes with `zeron template publish <folder>` and a deploy token)".into());
+    }
+    Ok(folder)
+}
+
+/// What in `template` (its own dot files aside) isn't one of its files as
+/// [`app_files`] lists them: a name Zeron doesn't write, or what isn't a file.
+/// (The app may make a file of one all the same.) At most `most`, as text.
+pub(super) fn others(template: &Path, most: usize) -> Vec<String> {
+    fn walk(root: &Path, at: &Path, prefix: &str, most: usize, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            out.push(prefix.to_owned());
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= most {
+                return;
+            }
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            let rel = if prefix.is_empty() { text.to_string() } else { format!("{prefix}/{text}") };
+            if name.to_str().is_some_and(|name| name.starts_with('.')) && rel != LUAURC {
+                continue;
+            }
+            match entry.file_type() {
+                _ if name.to_str().is_none() || inside(root, &rel).is_none() => out.push(rel),
+                Ok(kind) if kind.is_dir() => walk(root, &entry.path(), &rel, most, out),
+                Ok(kind) if kind.is_file() => {}
+                _ => out.push(rel),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(template, template, "", most, &mut out);
+    out
+}
+
+/// Whether there are any of [`others`].
+pub(super) fn has_others(template: &Path) -> bool {
+    !others(template, 1).is_empty()
 }
 
 /// The active template's id, as `.active` says: `zeron` when it's absent,
@@ -310,7 +399,19 @@ fn official(id: &str, folder: &Path, manifest: &Manifest) -> bool {
             .strip_prefix(mark)
             .and_then(|rest| rest.strip_prefix('-'))
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    at_its_id && super::template_packages::imported(folder).is_none()
+    at_its_id && !super::template_packages::has_record(folder)
+}
+
+/// A template's name as it's shown: its manifest's, else its id.
+fn shown_name(name: Option<&str>, id: &str) -> String {
+    let name = super::listing::shown(name.unwrap_or_default(), super::listing::MAX_NAME_LEN);
+    if name.is_empty() { id.to_owned() } else { name }
+}
+
+/// [`shown_name`] of the template in `folder`.
+pub(super) fn name(folder: &Path, id: &str) -> String {
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    shown_name(manifest.name.as_deref(), id)
 }
 
 /// One template, as `ListTemplates` lists it.
@@ -339,13 +440,15 @@ fn entry(
     } else {
         ("ok", None)
     };
+    let said = |text: Option<String>, max| super::listing::shown(&text.unwrap_or_default(), max);
     let mut out = json!({
         "id": id,
-        "name": manifest.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| id.to_owned()),
-        "description": manifest.description.unwrap_or_default(),
-        "author": manifest.author.unwrap_or_default(),
-        "version": manifest.version.unwrap_or_default(),
-        "zeron_version": made_for,
+        "name": shown_name(manifest.name.as_deref(), id),
+        "description": said(manifest.description, super::listing::MAX_DESCRIPTION_LEN),
+        // (A package's manifest doesn't say whose it is: its record does.)
+        "author": said(manifest.author.filter(|_| !super::template_packages::has_record(folder)), super::listing::MAX_NAME_LEN),
+        "version": said(manifest.version, super::version::MAX_LEN),
+        "zeron_version": said(Some(made_for), super::version::MAX_LEN),
         "builtin": builtin,
         "active": id == active,
         "status": status,
@@ -354,15 +457,37 @@ fn entry(
     if let Some(error) = error {
         out["error"] = json!(error);
     }
+    // Taken down from the store, or a copy of one that was.
+    if !builtin && let Some(block) = super::template_blocks::blocked(dir, folder) {
+        out["status"] = json!("blocked");
+        out["blocked"] = match block.id.is_empty() {
+            // (It can't be told: there's nothing to name.)
+            true => json!({ "unchecked": true, "reason": block.reason }),
+            false => json!({ "id": block.id, "version": block.version, "reason": block.reason, "at": block.at }),
+        };
+        // (A copy of it says whose it is, and that it's a copy.)
+        if super::template_blocks::by_lineage(folder, &block) {
+            out["blocked"]["via"] = json!("lineage");
+        }
+    }
     let preview = folder.join(PREVIEW);
     if is_regular_file(&preview) {
         out["preview"] = json!(preview.display().to_string());
     }
     // Someone's, installed from a package: by whom, as it was signed.
-    if !builtin && let Some(imported) = super::template_packages::imported(folder) {
+    if !builtin && let Some((imported, edited)) = super::template_packages::shown_record(folder) {
         out["imported"] = imported;
+        if edited {
+            out["edited"] = json!(true);
+        }
     }
     out
+}
+
+/// The row of template `id`, as the store's pages say it.
+pub(super) fn installed_row(dir: &Path, id: &str) -> Value {
+    let zeron: Manifest = zeron_dir(dir).map(|zeron| read_json(&zeron.join(MANIFEST))).unwrap_or_default();
+    entry(dir, id, &dir.join(id), &active(dir), &zeron.zeron_version.unwrap_or_default())
 }
 
 /// `ListTemplates`: `{dir, active, templates: [..]}`, Zeron's first, then by
@@ -476,6 +601,16 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
         )
     };
 
+    // What it's a copy of goes with it: a take-down of that is one of this
+    // too. (One whose own can't be read isn't copied.)
+    let lineage = match &from_dir {
+        Some(from) => {
+            super::template_blocks::refuse(dir, from, "copied")?;
+            super::template_blocks::identities(from).map_err(|_| "Zeron can't read where that template came from, so it can't be copied.")?
+        }
+        None => Vec::new(),
+    };
+
     let tmp = dir.join(format!(
         ".tmp-{id}-{}-{}",
         std::process::id(),
@@ -484,7 +619,7 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)
         .map_err(|e| format!("Couldn't make the template's folder: {e}"))?;
-    let made = fill(&tmp, &zeron, from_dir.as_deref(), id, name, guide).and_then(|()| {
+    let made = fill(&tmp, &zeron, from_dir.as_deref(), id, name, guide).and_then(|()| super::template_blocks::keep_lineage(&tmp, &lineage)).and_then(|()| {
         std::fs::rename(&tmp, &target)
             .map_err(|e| format!("Couldn't put the template in place: {e}"))
     });
@@ -516,6 +651,9 @@ pub fn use_template(dir: &Path, id: &str, by: Option<&Value>) -> Result<Value, S
         return Err(format!(
             "There's no template {id}. list_templates names them."
         ));
+    }
+    if id != ZERON {
+        super::template_blocks::refuse(dir, &dir.join(id), "used")?;
     }
     match by {
         Some(by) => write_atomic(
@@ -667,6 +805,33 @@ mod tests {
             .iter()
             .map(|t| t["id"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    /// Zeron's own files as a release has them: each by its sha256, its
+    /// bookkeeping left out; anything else isn't Zeron's, or isn't a release.
+    #[test]
+    fn plugins_templates_stock_is_zeron_s_files_by_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let z = dir.path();
+        let put = |rel: &str, text: &str| {
+            std::fs::create_dir_all(z.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(z.join(rel), text).unwrap();
+        };
+        assert!(stock(z).is_err(), "no manifest");
+        put(MANIFEST, r#"{"id":"zeron","zeron_version":"0.3.18"}"#);
+        assert!(stock(z).is_err(), "no app");
+        for (rel, text) in [("app.luau", "app"), ("ds/tokens.luau", "tokens"), (".luaurc", "{}"), (HASHES, "{}"), (CATALOG, "{}"), (".hidden/x", "x")] {
+            put(rel, text);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(z.join("app.luau"), z.join("linked.luau")).unwrap();
+        let made = stock(z).unwrap();
+        let hash = |text: &str| json!(super::super::signing::sha256_hex(text.as_bytes()));
+        assert_eq!(made, json!({ "version": "0.3.18", "files": { ".luaurc": hash("{}"), "app.luau": hash("app"), "ds/tokens.luau": hash("tokens") } }));
+        for version in ["", "0.3", "dev"] {
+            put(MANIFEST, &json!({ "id": "zeron", "zeron_version": version }).to_string());
+            assert!(stock(z).is_err(), "{version:?} isn't a release");
+        }
     }
 
     #[test]

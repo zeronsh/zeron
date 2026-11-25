@@ -89,7 +89,11 @@ describe("the site's own pages", () => {
 
   test("robots and the sitemaps", async () => {
     expect((await html("/robots.txt")).body).toContain("Sitemap: https://zeron.sh/sitemap.xml");
-    expect((await html("/sitemap.xml")).body).toContain("<loc>https://zeron.sh/plugins/sitemap.xml</loc>");
+    const index = (await html("/sitemap.xml")).body;
+    for (const kind of ["plugins", "templates"]) expect(index).toContain(`<loc>https://zeron.sh/${kind}/sitemap.xml</loc>`);
+    const templates = (await html("/templates/sitemap.xml")).body;
+    expect(templates).toContain("<loc>https://zeron.sh/templates/control-room</loc>");
+    expect(templates).not.toContain("/plugins");
     const plugins = await html("/plugins/sitemap.xml");
     expect(plugins.response.headers.get("content-type")).toContain("application/xml");
     expect(plugins.body).toContain("<loc>https://zeron.sh/plugins/focus-timer</loc>");
@@ -297,7 +301,7 @@ describe("a plugin's page", () => {
     expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);
     expect(body).toContain('<a href="/plugins/focus-timer/report">');
     // Every version verified: the seal by the name, Verified under Install, no amber note.
-    expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span><svg class="seal l"/);
+    expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span>(&nbsp;|\u00a0)<svg class="seal l"/);
     expect(body).toMatch(/<span class="said ok"><svg class="seal"[^>]*>[\s\S]*?<\/svg>Verified<\/span>/);
     expect(body).not.toContain('<p class="note">');
   });
@@ -529,7 +533,7 @@ describe("signed-in pages", () => {
       expect(response.status, path).toBe(200);
       expect(response.headers.get("cache-control"), path).toBe("private, no-store");
       expect(body, path).toContain(`<a class="btn pri" href="/auth/web/login?return_to=${encodeURIComponent(path)}">Sign in</a>`);
-      expect(body, path).toMatch(/<h2>Sign in to see (the plugins you publish|your deploy tokens)<\/h2>/);
+      expect(body, path).toMatch(/<h2>Sign in to see (what you&#39;ve published|your deploy tokens)<\/h2>/);
     }
   });
 
@@ -853,7 +857,7 @@ describe("forms", () => {
     expect(body).toContain(steps);
     expect(body.match(/<ol class="steps">/g)).toHaveLength(1);
     expect(body).not.toContain('class="how"');
-    expect(body).toContain('<a href="/account" aria-current="page">Your plugins</a>');
+    expect(body).toContain('<a href="/account" aria-current="page">Published</a>');
   });
 
   test("Deploy tokens with none: the guide's steps from CI; with no plugin, one line and no New token", async () => {
@@ -911,12 +915,12 @@ describe("forms", () => {
   test("the account's deploy tokens: a row each, its name and short id, what it can publish, last used, when it ends, Revoke; the revoked and ended apart", async () => {
     const { body } = await html("/account/tokens", await site.signIn("user_ada"));
     // Twelve live, each with Revoke (a quiet button in the danger's ink); five revoked or ended, in their group.
-    expect(body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(12);
+    expect(body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(14);
     expect(body).toMatch(/<details class="gone"><summary>Revoked and ended tokens · 5/);
     expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
     // Each by its name (one line, whole in its title) and short id beside it, the store's: never more of a token, which this page never has.
     const ids = [...body.matchAll(/<span class="nm" title="[^"]*">[^<]*<\/span><span class="id">([^<]*)<\/span>/g)].map((m) => m[1]);
-    expect(ids).toHaveLength(17);
+    expect(ids).toHaveLength(19);
     for (const id of ids) expect(id).toMatch(/^[0-9A-Za-z]{8}$/);
     expect(body).toContain('<span class="nm" title="GitHub Actions">GitHub Actions</span><span class="id">xJVb81Wo</span>');
     expect(body).not.toMatch(/zdt_[0-9A-Za-z]/);
@@ -924,7 +928,7 @@ describe("forms", () => {
     expect(body).toMatch(/<span class="c-scope" title="\d+ today, and any you publish later"><span class="sw">All your plugins<\/span><\/span>/);
     expect(body).toMatch(/<span class="c-scope"><span class="tiles" aria-hidden="true"><span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span><\/span><span class="sw">Focus timer<\/span><\/span>/);
     const many = body.slice(body.indexOf(">GitHub Actions, the monorepo<"), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
-    expect(many).toMatch(/<details class="every"><summary class="c-scope"><span class="sw">14 plugins<\/span><span class="tiles" aria-hidden="true">(<span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span>){3}<span class="more num">\+11<\/span><\/span><span class="show">Show all<span class="sr-only"> plugins GitHub Actions, the monorepo can publish<\/span><\/span>/);
+    expect(many).toMatch(/<details class="every"><summary class="c-scope"><span class="sw">14 plugins<\/span><span class="tiles" aria-hidden="true">(<span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span>){3}<span class="more num">\+11<\/span><\/span><span class="show">Show all<span class="sr-only"> that GitHub Actions, the monorepo can publish<\/span><\/span>/);
     // (The list, every one by name, opens as a row of its own under the token.)
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
@@ -1009,7 +1013,12 @@ describe("forms", () => {
         expect(form.body).toContain('<input id="page-token-name" class="input" type="text" name="name" value placeholder="GitHub Actions" maxlength="64" required autocomplete="off" spellcheck="false">');
         expect([...form.body.matchAll(/<option value="([^"]+)"( selected)?>([^<]+)<\/option>/g)].map((m) => `${m[1]}${m[2] ?? ""} ${m[3]}`)).toEqual(["30 In 30 days", "90 selected In 90 days", "365 In a year", "never Never"]);
         expect(form.body).toContain('<input type="radio" name="scope" value="all" checked>');
-        expect(form.body.match(/<input type="checkbox" name="plugins" value="[a-z0-9-]+">/g)).toHaveLength(20);
+        expect(form.body.match(/<input type="checkbox" name="plugins" value="[a-z0-9-]+" data-kind="[a-z]+">/g)).toHaveLength(24);
+        // (Three ways: all your plugins, those and your templates, or the ones chosen; a template of yours is marked one.)
+        expect([...form.body.matchAll(/<span class="rc-words"><b>([^<]+)<\/b><small[^>]*>([^<]+)<\/small>/g)].map((m) => `${m[1]}: ${m[2]}`)).toEqual(["All your plugins: 20 today, and any you publish later", "All your plugins and templates: A template can do anything Zeron can.", "Chosen: Only these, up to 50"]);
+        const groups = form.body.slice(form.body.indexOf('<div class="picks"'));
+        expect([...groups.matchAll(/<h3 class="picks-h" id="[^"]+">([^<]+)<\/h3>/g)].map((m) => m[1])).toEqual(["Plugins", "Templates"]);
+        expect(groups.slice(groups.indexOf(">Templates</h3>")).match(/<input type="checkbox"/g)).toHaveLength(4);
         expect(form.body).not.toContain("Zeron will ask you to sign in again first.");
 
         const made = await make(ada, [["name", "Release CI"], ["ends", "30"], ["scope", "chosen"], ["plugins", "focus-timer"], ["plugins", "theme-sync"]]);
@@ -1043,7 +1052,7 @@ describe("forms", () => {
         expect(list.body).toContain(`<span class="id">${short}</span>`);
         expect(list.body).toContain(">Release CI<");
         expect(tokensIn(list.body)).toEqual([]);
-        expect(list.body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect(list.body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(15);
 
         // The sign-in's ticket is spent: another token signs in again first, and comes back to the form as it was, with no token anywhere in the address.
         const again = await make(ada, [["name", "Second"], ["ends", "never"], ["scope", "all"]]);
@@ -1051,7 +1060,7 @@ describe("forms", () => {
         const location = again.response.headers.get("location")!;
         expect(location).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/account/tokens/new?again=1&name=Second&ends=never&scope=all" })}`);
         expect(tokensIn(decodeURIComponent(location))).toEqual([]);
-        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(15);
       } finally {
         await site.fake("tokens");
       }
@@ -1069,16 +1078,20 @@ describe("forms", () => {
         const back = "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather";
         expect(sent.response.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: back })}`);
         // (Nothing was made.)
-        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(14);
         // Signed in again, the form as it was, and a word that it's ready.
         const fresh = await signedIn("user_ada");
         const filled = await html(back, fresh);
         expect(filled.body).toContain('name="name" value="Nightly"');
         expect(filled.body).toContain('<option value="365" selected>');
         expect(filled.body).toContain('<input type="radio" name="scope" value="chosen" checked>');
-        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="focus-timer" checked>');
-        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="weather" checked>');
-        expect(filled.body.match(/name="plugins" value="[a-z0-9-]+" checked/g)).toHaveLength(2);
+        // (Its card says what's ticked, drawn by the server on a form that comes back.)
+        expect(filled.body).toMatch(/<b>Chosen<\/b><small [^>]*>2 plugins, up to 50<\/small>/);
+        const both = await html("/account/tokens/new?again=1&name=CI&ends=90&scope=chosen&plugins=focus-timer,weather,control-room", stale);
+        expect(both.body).toMatch(/<b>Chosen<\/b><small [^>]*>2 plugins and 1 template, up to 50<\/small>/);
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="focus-timer" data-kind="plugin" checked>');
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="weather" data-kind="plugin" checked>');
+        expect(filled.body.match(/name="plugins" value="[a-z0-9-]+" data-kind="[a-z]+" checked/g)).toHaveLength(2);
         expect(filled.body).toContain('<p class="note ok">You signed in again. Create the token to finish.</p>');
       } finally {
         await site.fake("tokens");
@@ -1094,14 +1107,14 @@ describe("forms", () => {
         expect(noName.body).toContain('<p class="said" id="page-token-said">Name the token in 1 to 64 characters.</p>');
         const noneChosen = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"]]);
         expect(noneChosen.response.status).toBe(400);
-        expect(noneChosen.body).toContain("Choose at least one plugin it can publish.");
+        expect(noneChosen.body).toContain("Choose at least one it can publish.");
         // (Someone else's plugin: not_owner, by name.)
         const theirs = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"], ["plugins", "pr-radar"]]);
         expect(theirs.response.status).toBe(403);
         expect(theirs.body).toContain("You don&#39;t own pr-radar any more. Choose again.");
         expect(theirs.body).toContain('name="name" value="CI"');
         // Twenty live, the most: the next is refused, and says what to do.
-        for (let i = 0; i < 8; i++) expect((await make(await signedIn("user_ada"), [["name", `CI ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
+        for (let i = 0; i < 6; i++) expect((await make(await signedIn("user_ada"), [["name", `CI ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
         const full = await make(await signedIn("user_ada"), [["name", "One more"], ["ends", "30"], ["scope", "all"]]);
         expect(full.response.status).toBe(409);
         expect(full.body).toContain('<p class="said" role="alert">You have 20 deploy tokens, the most an account can have. Revoke one to make another.</p>');
@@ -1124,7 +1137,7 @@ describe("forms", () => {
       const noCsrf = await post("/account/tokens/new", ada, fields);
       expect(noCsrf.status).toBe(303);
       expect(flashOf(noCsrf)).toBe("__Host-zeron_flash=expired");
-      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(14);
     });
   });
 
@@ -1345,7 +1358,280 @@ describe("forms", () => {
     // (As the edge does: always the front page, absolute.)
     expect(response.headers.get("location")).toBe("https://zeron.sh/");
     // (Signed out now: the page offers sign-in again.)
-    expect((await html("/account", lin)).body).toContain("<h2>Sign in to see the plugins you publish</h2>");
+    expect((await html("/account", lin)).body).toContain("<h2>Sign in to see what you&#39;ve published</h2>");
+  });
+});
+
+describe("templates: a plugin's pages, given the kind", () => {
+  test("the list: image first, each its preview, not verified yet in words; what they run as once, above; how to narrow it a row, no sidebar; Featured only over a longer list, never twice", async () => {
+    const { response, body } = await html("/templates");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=30");
+    expect(hasInlineScript(body)).toBe(false);
+    inert(body);
+    expect(body).toContain("<p class=\"lead\">Whole interfaces for Zeron, made by people who use it. A check marks what Zeron has verified.</p>");
+    const list = body.slice(body.indexOf('<ul class="tresults"'), body.indexOf("</ul>", body.indexOf('<ul class="tresults"')));
+    const cards = list.split('<a class="ftile').slice(1);
+    expect(cards.length).toBe(11);
+    for (const c of cards) {
+      expect(c).toMatch(/ href="\/templates\/[a-z0-9-]+"><span class="ft-cover"><img src="\/templates\/[a-z0-9-]+\/files\/[^/]+\/preview\.png" alt=""/);
+      expect(c).not.toContain('class="tile');
+      expect(c).not.toContain("Runs as Zeron");
+    }
+    expect(cards.find((c) => c.includes("/templates/dockside"))).toMatch(/<span class="state no">Not verified yet<\/span>/);
+    expect(cards.find((c) => c.includes("/templates/control-room"))).toMatch(/<svg class="seal s"[\s\S]*<span class="num">4,210 installs<\/span>/);
+    expect(body.match(/Runs as Zeron|runs as Zeron/g)).toHaveLength(1);
+    expect(body).toContain('<p class="fact">A template runs as Zeron itself: it can do anything Zeron can.</p>');
+    expect(body).not.toContain('class="facets"');
+    expect(body).not.toContain('id="featured"');
+    expect(body).toMatch(/<a class="chip" href="\/templates\?keyword=calm"/);
+    // (A category means nothing here, whatever the address says.)
+    expect((await html("/templates?category=git")).response.headers.get("location")).toBe("/templates");
+    expect((await html("/templates?q=zzzz")).body).toContain("<p>No template matches “zzzz”.</p>");
+    // (A list longer than a page: Featured over it, its three left out of the first page's grid, all of them once in all.)
+    try {
+      await site.fake("templates", { on: "1" });
+      const { body: long } = await html("/templates", await site.signIn("user_mo"));
+      const at = (part: string) => [...part.matchAll(/<a class="ftile h\d+" href="\/templates\/([^"]+)"/g)].map((m) => m[1]!);
+      const cut = long.indexOf('<ul class="tresults"');
+      expect(at(long.slice(0, cut))).toEqual(["control-room", "paper-desk", "phosphor"]);
+      expect(at(long.slice(cut))).toHaveLength(21);
+      expect(new Set(at(long)).size).toBe(24);
+    } finally {
+      await site.fake("templates");
+    }
+  });
+
+  test("a template never shows where a plugin is asked for, nor the reverse: lists, search, one page, its versions, its files", async () => {
+    const plugins = (await html("/plugins?q=control+room")).body;
+    expect(plugins).not.toContain("control-room");
+    expect((await html("/templates?q=timer")).body).not.toContain("focus-timer");
+    for (const path of ["/plugins/control-room", "/plugins/control-room/versions", "/plugins/control-room/versions/1.2.0", "/plugins/control-room/files/1.2.0/preview.png", "/templates/focus-timer", "/templates/focus-timer/versions", "/templates/focus-timer/versions/1.2.0", "/templates/focus-timer/files/1.2.0/icon.svg", "/templates/control-room/asks"])
+      expect((await site.fetch(path)).status, path).toBe(404);
+    expect((await html("/templates/focus-timer")).body).toContain("No template is listed here");
+  });
+
+  test("its page: no tile, its preview large and first, then its pictures; what it runs as; Overview and Versions; Install opens it in Zeron", async () => {
+    const { response, body } = await html("/templates/control-room");
+    expect(response.status).toBe(200);
+    inert(body);
+    expect(body).toContain("<title>Control room, a template for Zeron</title>");
+    const head = body.slice(body.indexOf('<header class="head bare"'), body.indexOf("</header>", body.indexOf('<header class="head bare"')));
+    expect(head).not.toContain('class="tile');
+    expect(head).toContain('href="zeron://open/template/control-room" data-install');
+    // (Beside Install: after the version's line, before "Opens Zeron".)
+    expect(head).toMatch(/<p class="ver">[\s\S]*?<\/p>\s*<p class="runs-as">Runs as Zeron itself<\/p>[\s\S]*Opens Zeron\./);
+    const shots = [...body.matchAll(/<a class="shot([^"]*)" href="([^"]+)"[^>]*data-shot="(\d)"/g)].map((m) => `${m[3]}${m[1]} ${m[2]}`);
+    expect(shots).toEqual(["0 lead-shot /templates/control-room/files/1.2.0/preview.png", ...[1, 2, 3].map((i) => `${i} /templates/control-room/files/1.2.0/screenshots/${i}.png`)]);
+    expect(body).toMatch(/<h2 class="rail-h" id="rail-runs">Runs as Zeron itself<\/h2><p>It can do anything Zeron can\.<\/p>/);
+    expect(body).toMatch(/<nav class="tabs"[^>]*><a href="\/templates\/control-room" aria-current="page">Overview<\/a><a href="\/templates\/control-room\/versions">Versions<span class="num">3<\/span><\/a><\/nav>/);
+    expect(body).not.toContain("What it asks for");
+    expect(body).toContain('<a href="/templates/control-room/report">');
+    const preview = await site.fetch("/templates/control-room/files/1.2.0/preview.png");
+    expect([preview.status, preview.headers.get("content-type")]).toEqual([200, "image/png"]);
+    expect([...new Uint8Array(await preview.arrayBuffer()).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    // One not verified: in words at its head, beside its preview, with the verified one to install instead.
+    const dock = (await html("/templates/dockside")).body;
+    expect(dock).toContain('<span class="said no">Not verified yet</span>');
+    expect(dock).toContain('href="zeron://open/template/dockside?version=0.9.0"');
+    expect((await html("/templates/early-hours")).body).toContain("<b>No version of this template is verified yet.</b>");
+  });
+
+  test("its versions, one version and its report are the same pages, under its own prefix", async () => {
+    const versions = (await html("/templates/control-room/versions")).body;
+    expect(versions).toContain('<a href="/templates/control-room/versions/1.1.0">1.1.0</a>');
+    expect(versions).toContain('href="zeron://open/template/control-room?version=1.1.0"');
+    const one = (await html("/templates/control-room/versions/1.1.0")).body;
+    expect(one).toContain("Runs as Zeron itself");
+    expect(one).toContain('<a href="/templates">Templates</a>');
+    const kai = await site.signIn("user_kai");
+    const report = await html("/templates/control-room/report", kai);
+    expect(report.body).toContain('action="/templates/control-room/report"');
+    const sent = await post("/templates/control-room/report", kai, { csrf: tokenOf(report.body), reason: "other", text: "A test." });
+    expect([sent.status, sent.headers.get("location")]).toEqual([303, "/templates/control-room/report"]);
+    expect((await site.fetch("/templates/focus-timer/report", { headers: { cookie: kai } })).status).toBe(404);
+  });
+
+  test("the bar's search searches the kind you're on; on a page of neither, plugins", async () => {
+    for (const [path, at] of [["/templates/control-room", "/templates"], ["/plugins/focus-timer", "/plugins"], ["/plugins/publishing", "/plugins"], ["/account", "/plugins"], ["/account/tokens", "/plugins"]] as const) {
+      const { body } = await html(path);
+      expect(body, path).toContain(`<form class="find" role="search" action="${at}"`);
+      expect(body, path).toContain(`placeholder="Search ${at.slice(1)}"`);
+    }
+    expect((await html("/templates")).body).toMatch(/<a href="\/templates" aria-current="page">Templates<\/a>/);
+  });
+});
+
+describe("templates of yours, and your deploy tokens' scopes", () => {
+  test("Your plugins: a Templates table under the plugins' one, only when you have any; each row to its own page", async () => {
+    const { body } = await html("/account", await site.signIn("user_ada"));
+    expect(body).toMatch(/<h2 id="your-plugins">Plugins<span class="num">20<\/span><\/h2>/);
+    expect(body).toMatch(/<h2 id="your-templates">Templates<span class="num">4<\/span><\/h2>/);
+    const table = body.slice(body.indexOf('<ul aria-label="Your templates"'));
+    expect(table).toMatch(/href="\/account\/templates\/control-room"[\s\S]*?<span class="thumb s" aria-hidden="true"><img src="\/templates\/control-room\/files\/1\.2\.0\/preview\.png"/);
+    expect(body.indexOf('id="your-plugins"')).toBeLessThan(body.indexOf('id="your-templates"'));
+    expect(body).toMatch(/aria-current="page">Published<span class="num">24<\/span>/);
+  });
+
+  test("one of yours: its versions, stop and allow installs under its own prefix; the other kind's id, and another's, the 404", async () => {
+    const ada = await site.signIn("user_ada");
+    const { body } = await html("/account/templates/dockside", ada);
+    expect(body).toContain('href="/templates/dockside"');
+    expect(body).toContain('placeholder="Search plugins"');
+    expect(body).toContain('<span class="thumb xl"');
+    expect(verifiedOf(body, "1.0.0")).toBe("Not verified yet");
+    expect(body).toContain('href="/account/templates/dockside/versions/1.0.0/yank"');
+    expect((await html("/account/templates/dockside/versions/1.0.0/yank", ada)).body).toContain("Stop new installs of Dockside 1.0.0?");
+    for (const path of ["/account/plugins/dockside", "/account/templates/focus-timer", "/account/templates/night-board"]) expect((await site.fetch(path, { headers: { cookie: ada } })).status, path).toBe(404);
+    const token = tokenOf(body);
+    const stopped = await post("/account/templates/dockside/versions/1.0.0/yank", ada, { csrf: token });
+    expect([stopped.status, stopped.headers.get("location")]).toEqual([303, "/account/templates/dockside"]);
+    expect(stateOf((await html("/account/templates/dockside", ada)).body, "1.0.0")).toBe("No new installs");
+    const back = await post("/account/templates/dockside/versions/1.0.0/unyank", ada, { csrf: token });
+    expect(back.headers.get("location")).toBe("/account/templates/dockside");
+    expect(stateOf((await html("/account/templates/dockside", ada)).body, "1.0.0")).toBe("Listed");
+  });
+
+  test("Deploy tokens: a scope in words, of either kind; what it last sent, a template by its name", async () => {
+    const { body } = await html("/account/tokens", await site.signIn("user_ada"));
+    const row = (name: string) => body.slice(body.indexOf(`>${name}<`), body.indexOf("</li>", body.indexOf(`>${name}<`)));
+    expect(row("Monorepo, everything")).toContain('<span class="sw">All your plugins and templates</span>');
+    expect(row("Monorepo, everything")).toContain("Control room");
+    expect(row("Themes and timers")).toContain('<span class="sw">3 chosen</span>');
+    expect(row("Themes and timers")).toContain('<span class="thumb xs mixed"');
+  });
+
+  test("the page is Published: its title, tab, crumbs and menu; its foot's first step names the template's command for who has one", async () => {
+    const ada = (await html("/account", await site.signIn("user_ada"))).body;
+    expect(ada).toContain("<title>Published · Zeron</title>");
+    expect(ada).toMatch(/<h1 class="lsb-[^"]*">Published<\/h1>/);
+    expect(ada).toContain("Everything you&#39;ve published, and where each version stands.");
+    expect(ada).toMatch(/<\/svg>Publish<\/a>/);
+    expect(ada).toContain('<a href="/account">Published</a>');
+    expect(ada).toContain("<code>zeron template publish</code>");
+    const grace = (await html("/account", await site.signIn("user_kai"))).body;
+    expect(grace).toContain("<code>zeron template publish</code>");
+    for (const path of ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/templates/dockside", "/account/plugins/focus-timer/versions/1.2.0/yank", "/plugins/publishing"]) expect((await html(path, await site.signIn("user_ada"))).body, path).not.toMatch(/>Your plugins</);
+  });
+
+  test("making one for both kinds asks the edge for both, and says so", async () => {
+    const ada = await site.signIn("user_ada");
+    const { body } = await html("/account/tokens/new?scope=both&name=Everything&ends=90", ada);
+    expect(body).toContain('<input type="radio" name="scope" value="both" checked>');
+    try {
+      const made = await post("/account/tokens/new", ada, { csrf: tokenOf(body), name: "Everything", ends: "90", scope: "both" });
+      expect(made.status).toBe(200);
+      expect(await made.text()).toContain("All your plugins and templates");
+    } finally {
+      await site.fake("tokens");
+    }
+  });
+
+  test("the guide: a template's part, after sending, with what it needs and its two commands", async () => {
+    const { body } = await html("/plugins/publishing");
+    expect(body).toContain("Put your plugin or template in Zeron's store.");
+    expect(body).toContain("<code>--all --templates</code>");
+    expect([...body.matchAll(/<h2 id="([a-z-]+)">/g)].map((m) => m[1])).toEqual(["quick-start", "needs", "send", "templates", "review", "versions", "ci"]);
+    const part = body.slice(body.indexOf('<h2 id="templates">'), body.indexOf('<h2 id="review">'));
+    for (const word of ["preview.png", "README.md", "id", "name", "description", "version", "zeron_version"]) expect(part, word).toContain(`<th scope="row"><code>${word}</code></th>`);
+    expect(part).toContain("zeron template check &lt;folder&gt;\nzeron template publish &lt;id&gt;");
+    expect(part).toContain("it runs as Zeron itself and can do anything Zeron can");
+  });
+});
+
+describe("templates, as staff read and decide them", () => {
+  test("Review's list holds both; a template's row is marked, says what it runs as, and goes to its own prefix", async () => {
+    const { body } = await html("/admin/plugins", await site.signIn("user_grace"));
+    const rows = body.slice(body.indexOf('<div class="tbl q">')).split("<li>");
+    const early = rows.find((r) => r.includes("/admin/templates/early-hours/0.1.0"))!;
+    expect(early).toContain('<span class="kind-mark">Template</span>');
+    expect(early).toContain("Nothing verified yet");
+    expect(early).toContain("Runs as Zeron itself");
+    expect(early).toContain('<span class="thumb s mixed"');
+    expect(rows.find((r) => r.includes("/admin/templates/dockside/1.0.0"))).toContain("Against 0.9.0");
+    expect(rows.find((r) => r.includes("/admin/plugins/first-light/0.1.0"))).not.toContain("Template");
+  });
+
+  test("a first version: runs as Zeron itself where the asks are; its files grouped against the Zeron its author named, changed and new first, the same ones folded with a count", async () => {
+    const grace = await site.signIn("user_grace");
+    const { response, body } = await html("/admin/templates/early-hours/0.1.0", grace);
+    expect(response.status).toBe(200);
+    inert(body);
+    expect(body).toMatch(/<h2 id="asks-h">Runs as Zeron itself<\/h2><p class="sub2">It can do anything Zeron can\./);
+    expect(body).not.toContain("What it asks for");
+    // (Made from an older Zeron than the latest: both said.)
+    expect(body).toContain("Compared with Zeron 0.3.0, the version its author made it from. The current Zeron is 0.3.4.");
+    const groups = [...body.matchAll(/<h3>([^<]+)<span class="num">(\d+)<\/span><\/h3>|<summary>(Same as Zeron[^<]+)<span class="num">(\d+)<\/span>/g)].map((m) => `${m[1] ?? m[3]?.replace("&#39;", "'")} ${m[2] ?? m[4]}`);
+    expect(groups).toEqual(["Changed 3", "New 4", "Same as Zeron 0.3.0's 9"]);
+    expect(body).toContain('<span class="fn">zeron-template.json</span>');
+    expect(body).toContain('src="/templates/early-hours/files/0.1.0/preview.png"');
+    expect(body).toContain("Reports on this template");
+    expect(body).toMatch(/<dt>Templates<\/dt>/);
+    // One whose Zeron isn't known: said, and every file shown, in no group.
+    const unknown = (await html("/admin/templates/wide-columns/1.0.0", grace)).body;
+    expect(unknown).toContain("Its author made it from Zeron 0.9.0. That version&#39;s own files aren&#39;t known here, so every file is shown.");
+    expect(unknown).not.toContain("Same as Zeron");
+    expect(unknown).not.toContain("every file is new");
+    expect(unknown.match(/<span class="fn">/g)!.length).toBeGreaterThan(12);
+  });
+
+  test("an update: the diff leads, against its newest verified version; a quiet word on each file; a picture before and after, side by side", async () => {
+    const grace = await site.signIn("user_grace");
+    const { body } = await html("/admin/templates/dockside/1.0.0", grace);
+    expect(body).not.toContain("<h3>Changed<");
+    expect(body).toMatch(/<span class="fn">init\.luau<\/span><span class="word">Changed from Zeron&#39;s<\/span>/);
+    expect(body).toMatch(/<span class="fn">preview\.png<\/span><span class="word">Not Zeron&#39;s<\/span><span class="state no">Not text<\/span>/);
+    expect(body).toMatch(/<span class="fn">ui\/list\.luau<\/span><span class="word">Same as Zeron&#39;s<\/span>/);
+    const changes = (await html("/admin/templates/dockside/1.0.0?view=changes", grace)).body;
+    expect(changes).toMatch(/<div class="pair"><figure><figcaption>Before<\/figcaption><img src="\/templates\/dockside\/files\/0\.9\.0\/preview\.png"[^>]*><\/figure><figure><figcaption>After<\/figcaption><img src="\/templates\/dockside\/files\/1\.0\.0\/preview\.png"/);
+    const file = (await html("/admin/templates/dockside/1.0.0?view=files&path=init.luau", grace)).body;
+    expect(file).toContain('aria-current="page"');
+    expect(file).toContain("<code>init.luau</code>");
+  });
+
+  test("the other kind's id isn't under a prefix, for staff too: its page, a version, a question; anyone else gets the 404 for all of it", async () => {
+    const grace = await site.signIn("user_grace");
+    const kai = await site.signIn("user_kai");
+    for (const path of ["/admin/plugins/dockside", "/admin/plugins/dockside/1.0.0", "/admin/plugins/dockside/1.0.0/verify", "/admin/plugins/dockside/actions/suspend", "/admin/templates/focus-timer", "/admin/templates/focus-timer/1.2.0", "/admin/templates/focus-timer/1.2.0/decline", "/admin/templates"]) expect((await site.fetch(path, { headers: { cookie: grace } })).status, path).toBe(404);
+    for (const path of ["/admin/templates/dockside", "/admin/templates/dockside/1.0.0", "/admin/templates/dockside/1.0.0/verify"]) {
+      expect((await site.fetch(path)).status, path).toBe(404);
+      expect((await site.fetch(path, { headers: { cookie: kai } })).status, path).toBe(404);
+    }
+  });
+
+  test("a decision posted under the other kind's prefix decides nothing", async () => {
+    const grace = await site.signIn("user_grace");
+    const csrf = tokenOf((await html("/admin/templates/early-hours/0.1.0", grace)).body);
+    for (const [path, fields] of [["/admin/plugins/early-hours/0.1.0/verify", {}], ["/admin/plugins/early-hours/0.1.0/decline", { reason: "broken", message: "A test." }], ["/admin/plugins/early-hours/0.1.0/take_down", { reason: "A test." }]] as const) {
+      const r = await post(path, grace, { csrf, ...fields });
+      if (path.endsWith("take_down")) expect(flashOf(r)).not.toContain("taken_down");
+      else expect(r.status, path).toBe(404);
+    }
+    expect((await html("/admin/templates/early-hours/0.1.0", grace)).body).toContain("Live, not read yet");
+  });
+
+  test("verify, take down, restore; feature; its staff page, its report and its log entry link its own prefix", async () => {
+    const grace = await site.signIn("user_grace");
+    const page = (await html("/admin/templates/dockside", grace)).body;
+    expect(page).toContain('<span class="kind-mark">Template</span>');
+    expect(page).toContain('href="/templates/dockside"');
+    expect(page).toContain('href="/admin/templates/dockside/1.0.0"');
+    const csrf = tokenOf(page);
+    const verified = await post("/admin/templates/dockside/1.0.0/verify", grace, { csrf });
+    expect([verified.status, verified.headers.get("location")]).toEqual([303, "/admin/templates/dockside/1.0.0"]);
+    expect((await html("/templates/dockside", await site.signIn("user_mo"))).body).toContain('<span class="said ok">');
+    const down = await post("/admin/templates/dockside/1.0.0/take_down", grace, { csrf, reason: "A test." });
+    expect(down.headers.get("location")).toBe("/admin/templates/dockside");
+    const restored = await post("/admin/templates/dockside/1.0.0/restore", grace, { csrf, reason: "A test." });
+    expect(restored.headers.get("location")).toBe("/admin/templates/dockside");
+    const featured = await post("/admin/templates/night-board/actions/feature", grace, { csrf });
+    expect(featured.headers.get("location")).toBe("/admin/templates/night-board");
+    await post("/admin/templates/night-board/actions/unfeature", grace, { csrf });
+    expect((await html("/admin/templates/dockside/1.0.0/decline", grace)).body).toContain("Dockside");
+    const log = (await html("/admin/audit", grace)).body;
+    expect(log).toContain('href="/admin/templates/dockside/1.0.0"');
+    expect(log).toContain('href="/admin/plugins/focus-timer/1.2.0"');
+    expect((await html("/admin/reports", grace)).body).toContain('href="/admin/templates/night-board"');
   });
 });
 
@@ -1376,11 +1662,11 @@ describe("one store page (Discover and Browse were two)", () => {
     expect(body).toMatch(/<div class="make-acts"><a class="btn pri" href="\/plugins\/publishing">Publishing guide<\/a><span class="cmd">/);
   });
 
-  test("the bar: Browse · Publish · Review (Discover gone); the store's search is its hero's, the bar's elsewhere; each narrows the store in place", async () => {
+  test("the bar: Plugins · Templates · Publish · Review (Discover and Browse gone); the store's search is its hero's, the bar's elsewhere; each narrows the store in place", async () => {
     const { body } = await html("/plugins?category=git&verified=1");
     const nav = body.slice(body.indexOf('<nav class="nav"'), body.indexOf("</nav>", body.indexOf('<nav class="nav"')));
     // (On a public page Review is there for staff alone, hidden until the script knows who's looking.)
-    expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Browse /plugins", "Publish /account", "Review /admin/plugins"]);
+    expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Plugins /plugins", "Templates /templates", "Publish /account", "Review /admin/plugins"]);
     expect(nav).toMatch(/<a href="\/admin\/plugins" hidden data-staff>Review<\/a>/);
     expect(body).not.toContain(">Discover<");
     // (The hero's form, the bar's and the phone's: to the store, keeping what narrows it.)
@@ -1450,9 +1736,9 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(first).toMatch(/aria-label="What it asks for"><span role="listitem" class="ask1">[^<]+<\/span>/);
     expect(first).not.toContain('class="add');
     // Each says how many have the plugin, beside who sent it.
-    for (const r of rows) expect(r).toMatch(/<span class="c-sub">(@[^< ]+|an account with no username) · [\d,]+ installs?/);
+    for (const r of rows) expect(r).toMatch(/<span class="c-sub">(?:<span class="kind-mark">Template<\/span>)?(@[^< ]+|an account with no username) · [\d,]+ installs?/);
     // Every row is the link to its version, which it names: its name, then the version.
-    for (const r of rows) expect(r).toMatch(/^"\/admin\/plugins\/[a-z0-9-]+\/[^"]+">[\s\S]*?<span class="nm" title="[^"]*">[^<]*<\/span><b class="vno mono">[^<]+<\/b>/);
+    for (const r of rows) expect(r).toMatch(/^"\/admin\/(?:plugins|templates)\/[a-z0-9-]+\/[^"]+">[\s\S]*?<span class="nm" title="[^"]*">[^<]*<\/span><b class="vno mono">[^<]+<\/b>/);
     // (A name's controls that turn text around are dropped: "Probe \u202Eevil" reads as written, never around its version.)
     expect(body).not.toContain("\u202E");
     // The staff pages sit beside the lists as tabs: Reports with how many are open.

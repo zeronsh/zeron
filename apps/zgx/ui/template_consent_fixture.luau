@@ -37,6 +37,65 @@ local PACKAGES: { [string]: any } = {
 		hash = "mystery-hash-1",
 		author = { kind = "unknown", reason = "Checking who made it…" },
 	},
+	-- From the store: verified and signed; unverified, by a deploy token (no
+	-- key), an update over what was changed here; and one from a link.
+	store = {
+		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+	},
+	token = {
+		pending = "midnight-2", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-2",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false, verified_alternative = { version = "1.2.0" } },
+		update_of = "midnight", replaces_edits = true, new_owner = true, also_installed = { { id = "midnight", from = "file" } },
+	},
+	changed = {
+		pending = "midnight-3", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-3",
+		from = { kind = "store" }, author = { kind = "verified", username = "grace" }, store = { id = "midnight", publisher = "grace", verified = false, verified_alternative = { version = "1.2.0" } },
+		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = { unverified = true, publisher = true }, also_installed = { { id = "midnight", from = "file" } },
+	},
+	worded = {
+		pending = "midnight-5", id = "midnight", name = "Midnight", version = "1.0.0-verified", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-5",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false },
+	},
+	instead = {
+		pending = "midnight-6", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-6",
+		from = { kind = "store", replaced = { version = "1.3.0", older = true } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+		update_of = "midnight", instead = true,
+	},
+	instead_withdrawn = {
+		pending = "midnight-6", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-6",
+		from = { kind = "store", replaced = { version = "1.3.0", older = true } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false },
+		update_of = "midnight", instead = true, store_changed = { unverified = true },
+	},
+	instead_unknown = {
+		pending = "midnight-7", id = "midnight", name = "Midnight", version = "1.4.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-7",
+		from = { kind = "store", replaced = { version = "", older = false } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+		update_of = "midnight", instead = true,
+	},
+	-- (The longest name the host lets through.)
+	long = {
+		pending = "long-1", id = "midnight", name = string.rep("W", 64), version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "long-1",
+		from = { kind = "store" }, author = { kind = "verified", username = string.rep("w", 39) }, store = { id = "midnight", publisher = string.rep("w", 39), verified = false, verified_alternative = { version = "1.2.0" } },
+		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = { unverified = true, publisher = true },
+	},
+	plain_update = {
+		pending = "midnight-4", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-4",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false },
+		update_of = "midnight",
+	},
+	-- (`store`, as the store came to say of it: the same package.)
+	store_said = {
+		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
+		from = { kind = "store" }, author = { kind = "verified", username = "grace" }, store = { id = "midnight", publisher = "grace", verified = false }, store_changed = { unverified = true, publisher = true },
+	},
+	store_verified = {
+		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true }, store_changed = { verified = true },
+	},
+	link = {
+		pending = "linked-1", id = "linked", name = "Linked", version = "1.0.0", key = "AbCdEfGhIjKlMnOpQrStUv", files = 3, ignored = {}, hash = "link-hash",
+		from = { kind = "link", url = "https://example.com/x" }, author = { kind = "verified", username = "grace" },
+	},
 	-- A template in preview, to keep (an agent made it on this device).
 	sleek = {
 		keep = "sleek",
@@ -62,6 +121,9 @@ local function show(id: string?)
 end
 
 ui.actions {
+	["templates.install_verified"] = function()
+		note("install_verified")
+	end,
 	["templates.decide"] = function(arg: any)
 		if arg.keep then
 			note(`keep:{arg.keep}:{tostring(arg.allow)}:{arg.hash}`)
@@ -74,6 +136,25 @@ ui.actions {
 
 ui.command { id = "ledger", title = "Show Ledger", run = function() show("ledger") end }
 ui.command { id = "mystery", title = "Show Mystery", run = function() show("mystery") end }
+for _, id in { "store", "token", "link", "instead", "instead_withdrawn", "instead_unknown", "worded", "long", "changed", "plain_update", "store_said", "store_verified" } do
+	ui.command { id = id, title = id, run = function() show(id) end }
+end
+for _, name in { "en", "zh-Hans" } do
+	ui.command { id = `locale_{name}`, title = name, run = function() ui.locale:set(name) end }
+end
+-- (Allow refused, the store's word as the engine gives it.)
+for id, word in { refused_taken_down = "taken_down: It reads your keys", refused_gone = "not_in_store", refused_offline = "Zeron couldn't check this with the store. Try again." } do
+	ui.command { id = id, title = id, run = function()
+		shown:set({ busy = false, item = table.clone(PACKAGES.store), error = word } :: any)
+	end }
+end
+-- (Pictures: each scheme.)
+local actions = require("@screens/onboarding/actions")
+for _, scheme in { "light", "dark" } do
+	ui.command { id = scheme, title = scheme, run = function()
+		actions.apply_scheme(scheme :: any)
+	end }
+end
 ui.command { id = "sleek", title = "Keep Sleek", run = function() show("sleek") end }
 ui.command {
 	id = "found",

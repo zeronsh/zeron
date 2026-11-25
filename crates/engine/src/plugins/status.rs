@@ -38,6 +38,13 @@ pub struct State {
     /// The same for one plugin, over the device's.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub store_updates_for: BTreeMap<String, UpdatePreference>,
+    /// Store templates' own choice of update, over the device's, by the
+    /// store's id (one installed twice shares it).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub template_updates_for: BTreeMap<String, UpdatePreference>,
+    /// Store templates this device takes pre-releases of, by the store's id.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub template_prerelease: BTreeSet<String>,
     /// The last take-down feed event applied here (its `seq`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takedowns_after: Option<u64>,
@@ -45,6 +52,9 @@ pub struct State {
     /// (`store::notices`): none until it first looks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishes: Option<super::store::notices::Seen>,
+    /// The same of its templates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_publishes: Option<super::store::notices::Seen>,
     /// Publishes not made on this device that the app hasn't shown yet,
     /// oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,6 +97,29 @@ impl State {
     /// The update preference for plugin `id` here.
     pub fn updates_for(&self, id: &str) -> UpdatePreference {
         self.store_updates_for.get(id).copied().or(self.store_updates).unwrap_or(DEFAULT_UPDATES)
+    }
+}
+
+impl State {
+    /// The device's update preference, over both kinds.
+    pub fn device_updates(&self) -> UpdatePreference {
+        self.store_updates.unwrap_or(DEFAULT_UPDATES)
+    }
+
+    /// The update preference for store template `id` here.
+    pub fn template_updates(&self, id: &str) -> UpdatePreference {
+        self.template_updates_for.get(id).copied().unwrap_or(self.device_updates())
+    }
+
+    /// What updates of store plugin `id` this device takes: which, and
+    /// whether pre-releases.
+    pub fn choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.updates_for(id), self.prerelease.contains(id))
+    }
+
+    /// [`Self::choice`], of store template `id`.
+    pub fn template_choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.template_updates(id), self.template_prerelease.contains(id))
     }
 }
 

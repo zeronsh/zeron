@@ -6,9 +6,11 @@
 //! - [`commands`]: the programs a plugin runs (`zeron.run`), and the one
 //!   runner both sides use;
 //! - [`net`]: where a plugin's requests may go (`zeron.fetch`);
-//! - [`consent`]: what it asks for, rated as its consent sheet says it.
+//! - [`consent`]: what it asks for, rated as its consent sheet says it;
+//! - [`template`]: which of a template's files are what, and what it's kept by.
 
 pub mod commands;
 pub mod consent;
 pub mod net;
 pub mod path;
+pub mod template;

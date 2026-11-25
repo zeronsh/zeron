@@ -301,3 +301,68 @@ test("a newer version found says so and updates in place; a refused one says why
 	expect(app:has('#template-ledger >> ~"wasn\'t installed"')).to_be(true)
 	expect(app:has('#template-ledger >> role:button "Update"')).to_be(false)
 end)
+
+-- One Zeron took down, or can't check for now, says which on its line and
+-- can't be used; restored, its row is as it was, the same node throughout.
+test("one taken down says why and can't be used, and is as it was once it's restored", function()
+	local app = open()
+	local node = row(app, "night")
+	local before = app:tree("#template-night")
+	expect(before).never.to_contain("disabled")
+	for how, says in {
+		taken_down = "Zeron took this version down, so it can't be used",
+		taken_down_plain = "Zeron took this version down. It can't be used.",
+		unchecked = "Off for now: Zeron couldn't check whether it was taken",
+	} do
+		app:command(`templates.{how}`)
+		app:frames(20)
+		local tree = app:tree("#template-night")
+		expect(tree).to_contain(says)
+		expect(tree).to_contain("disabled")
+		expect(row(app, "night")).to_be(node)
+	end
+	app:command("templates.restored")
+	app:frames(20)
+	expect(app:tree("#template-night")).to_be(before)
+end)
+
+test("a store template's row says what it is and its mark, and that it was changed here; another's is as it was", function()
+	local app = open()
+	local before = app:tree("#template-hot-pink")
+	app:command("templates.from_store")
+	app:frames(20)
+	local tree = app:tree("#template-midnight-2")
+	expect(tree).to_contain("@ada")
+	expect(tree).to_contain("Runs as Zeron itself")
+	expect(app:tree("#template-midnight-2 >> .template-mark")).to_contain("Verified")
+	local node = row(app, "midnight-2")
+	app:command("templates.edited")
+	app:frames(20)
+	expect(app:tree("#template-midnight-2 >> .template-mark")).to_contain("Changed on this device")
+	expect(app:tree("#template-midnight-2")).never.to_contain("Verified")
+	expect(row(app, "midnight-2")).to_be(node)
+	expect(app:has("#template-hot-pink >> .template-mark")).to_be(false)
+	expect(app:tree("#template-hot-pink")).never.to_contain("Runs as Zeron")
+	expect((app:tree("#template-hot-pink"):gsub("@%d+", ""))).to_be((before:gsub("@%d+", "")))
+end)
+
+test("a store template running a version the store hasn't verified says so on its row, as a plugin does", function()
+	local app = mount("templates_fixture.luau")
+	app:resize(1000, 900)
+	app:command("templates.from_store")
+	app:command("templates.from_store_unverified")
+	app:frames(20)
+	expect(app:tree("#template-ledger-store")).to_contain("Zeron hasn't verified 1.2.0 yet.")
+	expect(app:tree("#template-midnight-2")).never.to_contain("hasn't verified")
+	expect(app:tree("#template-hot-pink")).never.to_contain("hasn't verified")
+end)
+
+test("the store's refusal of a template says it in a template's words", function()
+	local app = open()
+	app:command("failure_not_in_store")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("This template, or this version of it, isn't in the template store.")
+	app:command("failure_other")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Something else")
+end)

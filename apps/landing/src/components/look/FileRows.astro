@@ -1,0 +1,26 @@
+---
+// A package's files as rows, each a link to it: what changed marked before
+// its path (an update's), a quiet word on it after (a template's, against
+// Zeron's own), not text said loudly, and how big it is.
+import { bytes } from "../../lib/store/format.ts";
+import type { Change } from "../../lib/store/review.ts";
+
+interface Props {
+  rows: { path: string; href: string; bytes: number; binary: boolean; change?: Change | null; word?: string | null }[];
+}
+const CHANGE = { added: { mark: "A", label: "New", tone: "add" }, modified: { mark: "M", label: "Changed", tone: "mod" }, removed: { mark: "D", label: "Removed", tone: "del" } } as const;
+---
+
+<ul class="flist">
+  {Astro.props.rows.map((f) => (
+    <li>
+      <a href={f.href} class:list={{ removed: f.change === "removed" }}>
+        {f.change && <span class:list={["m", CHANGE[f.change].tone]} title={CHANGE[f.change].label}>{CHANGE[f.change].mark}<span class="sr-only"> ({CHANGE[f.change].label})</span></span>}
+        <span class="fn">{f.path}</span>
+        {f.word && <span class="word">{f.word}</span>}
+        {f.binary && <span class="state no">Not text</span>}
+        <span class="d num">{bytes(f.bytes)}</span>
+      </a>
+    </li>
+  ))}
+</ul>

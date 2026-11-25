@@ -132,9 +132,7 @@ impl Notice {
     /// someone chose: plain, one line, short. One by a deploy token has a
     /// button to the tokens, to revoke it there.
     pub fn published(name: &str, version: &str, via: &str, token_name: Option<&str>, words: &str) -> Self {
-        let plain = |text: &str, most: usize| -> String {
-            text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
-        };
+        let plain = one_line;
         let (name, version) = (plain(name, 64), plain(version, 32));
         let token = token_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
         let chinese = CHINESE.with(std::cell::Cell::get);
@@ -149,6 +147,37 @@ impl Notice {
         };
         let action = by_token.then_some(if chinese { DEPLOY_TOKENS_ZH } else { DEPLOY_TOKENS });
         Notice { title, body, tone: Tone::Neutral, action, stays: true }
+    }
+
+    /// A menu's Paste refused while the clipboard holds a token Zeron copied
+    /// (`preview::guard`): the keys still paste.
+    pub fn paste_with_keys() -> Self {
+        let keys = if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" };
+        let title = match CHINESE.with(std::cell::Cell::get) {
+            true => format!("请用 {keys} 粘贴。Zeron 不让模板读取你复制的令牌。"),
+            false => format!("Use {keys} to paste. Zeron keeps a token you copied away from templates."),
+        };
+        Notice { title, body: String::new(), tone: Tone::Neutral, action: None, stays: false }
+    }
+
+    /// Template `name`, in use, can't be: Zeron took it down, or can't tell
+    /// for now whether it did. The default interface shows instead.
+    pub fn stopped(name: &str, why: &super::blocks::Why) -> Self {
+        use super::blocks::Why;
+        let chinese = CHINESE.with(std::cell::Cell::get);
+        let (name, reason) = (one_line(name, 64), match why {
+            Why::TakenDown { reason } => reason.as_deref().map(|r| one_line(r, 300)).filter(|r| !r.is_empty()),
+            Why::Unchecked => None,
+        });
+        let (title, body) = match (why, reason, chinese) {
+            (Why::TakenDown { .. }, Some(reason), false) => (format!("{name} was taken down"), format!("{reason} Zeron switched back to its own interface.")),
+            (Why::TakenDown { .. }, None, false) => (format!("{name} was taken down"), "Zeron switched back to its own interface.".to_owned()),
+            (Why::TakenDown { .. }, Some(reason), true) => (format!("{name} 已被下架"), format!("{reason} Zeron 已切换回自己的界面。")),
+            (Why::TakenDown { .. }, None, true) => (format!("{name} 已被下架"), "Zeron 已切换回自己的界面。".to_owned()),
+            (Why::Unchecked, _, false) => (format!("{name} is off for now"), "Zeron couldn't check whether it was taken down. It comes back once Zeron has checked.".to_owned()),
+            (Why::Unchecked, _, true) => (format!("{name} 暂时停用"), "Zeron 无法确认它是否已被下架。确认后会自动恢复。".to_owned()),
+        };
+        Notice { title, body, tone: Tone::Warning, action: None, stays: true }
     }
 
     /// Zeron opened with the default interface (safe mode): ⌥ (Alt) held, or
@@ -172,6 +201,11 @@ impl Notice {
         };
         Notice { title: "Opened with the default interface".into(), body: body.into(), tone, action: None, stays }
     }
+}
+
+/// Words someone chose, as a notice has them: plain, one line, short.
+fn one_line(text: &str, most: usize) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
 }
 
 thread_local! {
@@ -496,6 +530,9 @@ fn toasts(runtime: &zgx::reactive::Runtime, locale: zgx::reactive::Signal<zgx_sc
     NOTICES.with(|n| *n.borrow_mut() = Some(notices.clone()));
     if let Some(reason) = preview::take_safe_at_launch() {
         notice(Notice::safe_at_launch(reason));
+    }
+    if let Some((name, why)) = super::take_stopped_at_launch() {
+        notice(Notice::stopped(&name, &why));
     }
     let themes = zgx::theme::Themes::of(runtime);
     let shown = runtime.signal(true);

@@ -2,9 +2,12 @@
  * What an author and a signed-in person do:
  *
  *   GET  /store/v1/me/plugins                         → { publisher_id, plugins: [PluginCard & { listing, versions }] }
+ *   GET  /store/v1/me/templates                       → the same of templates: { publisher_id, templates }
  *   POST /store/v1/plugins/:id/versions/:version/{yank|unyank}
  *   POST /store/v1/plugins/:id/installed              → { counted }
  *   POST /store/v1/plugins/:id/reports { reason, text, version? } → { id }
+ *   … and the same under /store/v1/templates: an id of the other kind there
+ *   doesn't exist.
  *
  * A deploy token reads only the plugins in its scope its account owns, and
  * changes nothing here: yank and unyank need a signed-in session.
@@ -16,7 +19,7 @@
  * Each is one guarded UPDATE, logged in the audit log with the author as
  * actor, and moves the listing in the same batch.
  *
- * `/me/plugins` is the owner's view: every version in every state, each
+ * `/me/plugins` (and `/me/templates`) is the owner's view: every version in every state, each
  * with its review (a declined one's reason and words are its author's to
  * read), how it was published (`via`, the signing `key`, and the deploy
  * token by its name and short id then), so a device can raise a notice for
@@ -26,24 +29,27 @@
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
 import { authorCard, authorsOf, listingState, ownerCard, publisherId, publisherIds, versionInfo } from "./cards";
-import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
+import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, listedOf, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
+import { type Kind, segmentOf } from "./kind";
 import { authenticatePublisher, readBody, sessionRequired } from "./principal";
 import { allowWrite } from "./publish";
 import { purgeCatalog } from "./purge";
+import { MAX_VERSION_LENGTH } from "./semver";
 import { decodeSegment } from "./serve";
 
 export const REPORT_REASONS: readonly string[] = STORE_DATA.report_reasons;
 export const MAX_REPORT_TEXT = 2000;
 export const REPORTS_PER_DAY = 10;
 
-export const handleMyPlugins = async (request: Request, env: Env, db: D1Database): Promise<Response> => {
+/** The owner's view of their items of `kind`: `/me/plugins` or `/me/templates`. */
+export const handleMine = async (request: Request, env: Env, db: D1Database, kind: Kind): Promise<Response> => {
   // A signed-in person only: the owner's view holds decline notes, unlisted
   // plugins and token names, so a deploy token reads none of it (401
   // `session_required`, contract "A token publishes and reads nothing").
   const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
-  const plugins = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId).all<PluginRow>()).results;
+  const plugins = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? AND kind = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId, kind).all<PluginRow>()).results;
   const versions = plugins.length
     ? (
         await db
@@ -56,14 +62,14 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
   const author = authorCard(authors[publisher.userId]!);
   return answer({
     publisher_id: await publisherId(publisher.userId),
-    plugins: plugins.map((p) => {
+    [segmentOf(kind)]: plugins.map((p) => {
       const own = versions.filter((v) => v.plugin_id === p.id);
       return {
         // Nothing listed: the card shows its highest version.
         ...ownerCard(p, own[0], author),
         listing: listingState(p),
         versions: own.map((v) => ({
-          ...versionInfo(v, true),
+          ...versionInfo(v, p.kind, true),
           // The account that published it, fixed at publish: a plugin
           // transferred in raises no notice for its former owner's versions.
           publisher_id: publishers.get(v.publisher_id)!,
@@ -79,7 +85,7 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
 
 type AuthorAction = "yank" | "unyank";
 
-export const handleAuthorAction = async (request: Request, env: Env, db: D1Database, id: string, versionSegment: string, action: AuthorAction): Promise<Response> => {
+export const handleAuthorAction = async (request: Request, env: Env, db: D1Database, kind: Kind, id: string, versionSegment: string, action: AuthorAction): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
   if (publisher.via !== "session") return fail(403, "key_not_allowed", "Yanking and unyanking need a signed-in session.");
@@ -87,7 +93,7 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
   const versionText = decodeSegment(versionSegment);
   const plugin = await pluginRow(db, id);
   const version = versionText && plugin ? await versionRow(db, id, versionText) : null;
-  if (!plugin || !version || plugin.owner_id !== publisher.userId) return notFound();
+  if (!plugin || plugin.kind !== kind || !version || plugin.owner_id !== publisher.userId) return notFound();
   if (action === "yank" && version.status !== "listed") {
     return fail(409, "invalid_state", `Version ${version.version} is ${version.status}: only a listed version can be yanked.`);
   }
@@ -121,7 +127,7 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
   if ((results[0]?.meta.changes ?? 0) === 0) return fail(409, "invalid_state", "The version changed meanwhile: look again.");
   await purgeCatalog(db, id, [version.version, ...(action === "unyank" ? await supersededAt(db, id, version.version, now) : [])]);
   const updated = await versionRow(db, id, version.version);
-  return answer({ version: versionInfo(updated!, true) });
+  return answer({ version: versionInfo(updated!, kind, true) });
 };
 
 /**
@@ -135,7 +141,7 @@ const writer = async (request: Request, env: Env): Promise<{ userId: string } | 
   return caller.via === "session" ? caller : sessionRequired();
 };
 
-export const handleInstalled = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {
+export const handleInstalled = async (request: Request, env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
   const caller = await writer(request, env);
   if (caller instanceof Response) return caller;
   if (!(await allowWrite(env, caller.userId))) return rateLimited();
@@ -143,20 +149,20 @@ export const handleInstalled = async (request: Request, env: Env, db: D1Database
     db
       .prepare(
         `INSERT INTO installs (plugin_id, user_id, at)
-         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM plugins p WHERE p.id = ? AND p.status = 'active' AND p.listed_version IS NOT NULL)
+         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM plugins p WHERE p.id = ? AND ${listedOf(kind)})
          ON CONFLICT DO NOTHING`
       )
       .bind(id, caller.userId, Date.now(), id),
     db.prepare("UPDATE plugins SET installs = installs + 1 WHERE id = ? AND changes() = 1").bind(id)
   ]);
   const counted = (results[0]?.meta.changes ?? 0) === 1;
-  if (!counted && !(await db.prepare("SELECT 1 FROM plugins p WHERE p.id = ? AND p.status = 'active' AND p.listed_version IS NOT NULL").bind(id).first())) {
+  if (!counted && !(await db.prepare(`SELECT 1 FROM plugins p WHERE p.id = ? AND ${listedOf(kind)}`).bind(id).first())) {
     return notFound();
   }
   return answer({ counted });
 };
 
-export const handleReport = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {
+export const handleReport = async (request: Request, env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
   const caller = await writer(request, env);
   if (caller instanceof Response) return caller;
   if (!(await allowWrite(env, caller.userId))) return rateLimited();
@@ -170,9 +176,9 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, i
     return fail(400, "bad_request", `reason is one of ${REPORT_REASONS.join(", ")}.`);
   }
   if (typeof text !== "string" || text.length > MAX_REPORT_TEXT) return fail(400, "bad_request", `text is at most ${MAX_REPORT_TEXT} characters.`);
-  if (version !== null && (typeof version !== "string" || version.length > 128)) return fail(400, "bad_request", "version is a version of this plugin.");
+  if (version !== null && (typeof version !== "string" || version.length > MAX_VERSION_LENGTH)) return fail(400, "bad_request", `version is a version of this ${kind}.`);
   const plugin = await pluginRow(db, id);
-  if (!plugin || plugin.status !== "active" || !plugin.listed_version) return notFound();
+  if (!plugin || plugin.kind !== kind || plugin.status !== "active" || !plugin.listed_version) return notFound();
   const open = await db
     .prepare("SELECT id FROM reports WHERE plugin_id = ? AND reporter_id = ? AND status = 'open'")
     .bind(id, caller.userId)

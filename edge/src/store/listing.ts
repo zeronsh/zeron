@@ -13,10 +13,11 @@
 import { cleanImage } from "../image-check";
 import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./json";
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
-import { MAX_BYTES, MAX_FILES } from "./package";
+import { MAX_BYTES, MAX_FILES, TEMPLATE_MANIFEST_FILE, TEMPLATE_SCREENSHOTS, insideTemplate, protectedPath, strayScreenshot, validTemplateId } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
 import { asWritten, firstUnseen, keywordClaim, markClaim, problemWord } from "./mark";
-import { foldPath, plainPath } from "./paths";
+import type { Kind } from "./kind";
+import { foldPath, plainPath, shortName, unseenName } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
 /** The fixed list (contract amendment 4), with the words shown for each. */
@@ -48,6 +49,23 @@ export const MAX_README_BYTES = LIMITS.max_readme_bytes;
 export const MAX_CHANGELOG_BYTES = LIMITS.max_changelog_bytes;
 export const MAX_MANIFEST_BYTES = LIMITS.max_manifest_bytes;
 export const MAX_NOTES_BYTES = LIMITS.max_notes_bytes;
+/** A template's preview, its card's cover: at most this many bytes. */
+export const MAX_PREVIEW_BYTES = LIMITS.max_preview_bytes;
+export const PREVIEW_FILE = "preview.png";
+/** What a device writes beside a template's files (no file may fold to it). */
+const TEMPLATE_IMPORTED_FILE = ".imported.json";
+/** Members a template's manifest may not have in the store. */
+const TEMPLATE_REFUSED_MEMBERS: readonly string[] = STORE_DATA.template_refused_members;
+/** Every member it may have, or is refused for by name: any other but its
+ * signature is refused too. */
+const TEMPLATE_KNOWN_MEMBERS: ReadonlySet<string> = new Set([
+  "signature",
+  ...STORE_DATA.template_manifest_fields.required,
+  ...STORE_DATA.template_manifest_fields.allowed,
+  ...TEMPLATE_REFUSED_MEMBERS
+]);
+/** A README holding this sentence is the one Zeron wrote, unchanged. */
+const TEMPLATE_README_STUB: string = STORE_DATA.template_readme_stub;
 
 export type ListingRule =
   | "bad_package"
@@ -57,6 +75,7 @@ export type ListingRule =
   | "missing_listing"
   | "bad_listing"
   | "too_large"
+  | "protected_file"
   | "binary_file"
   | "no_notes";
 
@@ -70,7 +89,8 @@ export interface Problem {
   readonly path: string | null;
   readonly words: string;
   /** A bad name, description or keywords: why, and (where there is one)
-   * the word at fault, cleaned (`problemWord`). */
+   * the word at fault, cleaned (`problemWord`); the member a template's
+   * manifest may not have. */
   readonly cause?: ListingCause;
   readonly word?: string;
 }
@@ -82,8 +102,8 @@ const because = (p: Problem, cause: ListingCause, word?: string): Problem => {
 };
 /** A mark claim's problem: its cause by whether the claim is a glyph, its
  * word where the text says it, as written (the claim when nowhere). */
-const markProblem = (field: string, text: string, claim: string, words: string): Problem =>
-  because(problem("bad_listing", field, words), [...claim].length === 1 && MARK_GLYPHS.includes(claim) ? "mark_glyph" : "mark_word", asWritten(text, claim) ?? claim);
+const markProblem = (field: string, text: string, claim: string, words: string, item: Kind): Problem =>
+  because(problem("bad_listing", field, words), [...claim].length === 1 && MARK_GLYPHS.includes(claim) ? "mark_glyph" : "mark_word", asWritten(text, claim, item) ?? claim);
 /** The first character unseen refuses, as U+ and four or more hex digits. */
 const unseenProblem = (field: string, text: string, words: string): Problem => {
   const c = firstUnseen(text);
@@ -248,84 +268,69 @@ export const zeronRange = (raw: ReadonlyMap<string, Json>): { range: string | nu
   return typeof zeron === "string" ? { range: zeron } : { error: 'Its "engines.zeron" must be a range of versions, as text' };
 };
 
-/** listing.rs `check`: what stands in the way of publishing, and what's
- * worth knowing, each once, in the engine's order. */
-export const checkListing = (
-  manifest: Manifest,
-  files: ReadonlyMap<string, Uint8Array>,
-  isText: (bytes: Uint8Array) => boolean
-): { problems: Problem[]; warnings: Problem[] } => {
-  const problems: Problem[] = [];
-  const warnings: Problem[] = [];
-  const raw = manifest.raw;
-  if (manifest.problem) problems.push(problem("bad_package", "manifest", manifest.problem));
-  const idError = idProblem(manifest.id);
-  if (idError && idError !== RESERVED_ID_ERROR) problems.push(problem("bad_package", "id", idError));
-  else if (BUILTIN_IDS.includes(manifest.id) || SITE_IDS.includes(manifest.id) || manifest.id.startsWith("zeron") || idError === RESERVED_ID_ERROR) {
-    problems.push(problem("id_reserved", "id", `"${manifest.id}" is kept for Zeron`));
+/** `id_reserved` when the store keeps `id` (one namespace: a plugin's or a
+ * template's alike). */
+const reservedId = (id: string, problems: Problem[]): void => {
+  if (SITE_IDS.includes(id)) problems.push(problem("id_reserved", "id", `"${id}" is kept for the store's own pages: pick another id`));
+  else if (BUILTIN_IDS.includes(id) || id.startsWith("zeron") || idProblem(id) === RESERVED_ID_ERROR) {
+    problems.push(problem("id_reserved", "id", `"${id}" is kept for Zeron`));
   }
-  if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));
-  if (chars(manifest.name) > MAX_NAME_LEN) problems.push(because(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`), "too_long"));
-  else if (firstUnseen(manifest.name) !== undefined) problems.push(unseenProblem("name", manifest.name, "Its name has a control or invisible formatting character"));
+};
+
+/** Its name: at most `MAX_NAME_LEN`, nothing drawn as nothing, no mark. */
+const checkName = (name: string, item: Kind, problems: Problem[]): void => {
+  if (chars(name) > MAX_NAME_LEN) problems.push(because(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`), "too_long"));
+  else if (firstUnseen(name) !== undefined) problems.push(unseenProblem("name", name, "Its name has a control or invisible formatting character"));
   else {
-    const claim = markClaim(manifest.name, true);
+    const claim = markClaim(name, true, item);
     if (claim !== undefined) {
-      problems.push(markProblem("name", manifest.name, claim, `Its name says "${claim}": only the store marks a plugin verified or official. Name it for what it does, without that word`));
+      problems.push(markProblem("name", name, claim, `Its name says "${claim}": only the store marks a ${item} verified or official. Name it for what it does, without that word`, item));
     }
   }
-  if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
+};
 
+/** Its page: a README.md of text, at most `MAX_README_BYTES`; never one
+ * holding `stub` (the one Zeron wrote, unchanged). */
+const checkReadme = (files: ReadonlyMap<string, Uint8Array>, stub: string | undefined, problems: Problem[]): void => {
   const readme = files.get(README_FILE);
   if (!readme) problems.push(problem("missing_readme", null, "It needs a README.md: its page in the store"));
   else if (readme.length > MAX_README_BYTES) problems.push(problem("too_large", null, `Its README.md is at most ${MAX_README_BYTES / 1024} KB`, README_FILE));
   else {
     const text = decodeText(readme);
-    if (text === undefined || rustTrim(text) === "") problems.push(problem("missing_readme", null, "Its README.md is empty or isn't text", README_FILE));
+    if (text !== undefined && stub !== undefined && text.includes(stub)) {
+      problems.push(problem("missing_readme", null, "Its README.md is still the one Zeron wrote: say what it is and how it looks, for its page in the store", README_FILE));
+    } else if (text === undefined || rustTrim(text) === "") problems.push(problem("missing_readme", null, "Its README.md is empty or isn't text", README_FILE));
   }
+};
 
-  const description = rustTrim(manifest.description);
+/** What the store shows on its card: one line, at most
+ * `MAX_DESCRIPTION_LEN`, nothing drawn as nothing, no mark said of it. */
+const checkDescription = (written: string, item: Kind, problems: Problem[]): void => {
+  const description = rustTrim(written);
   if (description === "") problems.push(problem("missing_listing", "description", 'It needs a "description": one line saying what it does'));
   else if (chars(description) > MAX_DESCRIPTION_LEN || description.includes("\n")) {
     const why: ListingCause = chars(description) > MAX_DESCRIPTION_LEN ? "too_long" : "not_one_line";
     problems.push(because(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`), why));
   } else if (firstUnseen(description) !== undefined) problems.push(unseenProblem("description", description, "Its description has a control or invisible formatting character"));
   else {
-    const claim = markClaim(description, false);
+    const claim = markClaim(description, false, item);
     if (claim !== undefined) {
       problems.push(
         markProblem(
           "description",
           description,
           claim,
-          `Its description says "${claim}" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is ("works with the official Slack app")`
+          `Its description says "${claim}" of the ${item} itself: only the store marks a ${item} verified or official. Say what it does instead, or say whose thing it is ("works with the official Slack app")`,
+          item
         )
       );
     }
   }
-  const icon = raw.get("icon");
-  if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));
-  else if (typeof icon === "string") {
-    const bytes = files.get(icon);
-    const text = bytes && bytes.length <= MAX_ICON_BYTES ? decodeText(bytes) : undefined;
-    if (!(icon.endsWith(".svg") && text !== undefined && rustTrimStart(text).startsWith("<svg"))) {
-      problems.push(problem("bad_listing", "icon", `Its icon must be an SVG file in it, at most ${MAX_ICON_BYTES / 1024} KB`, icon));
-    }
-  } else problems.push(problem("bad_listing", "icon", 'Its "icon" must be the path of an SVG file in it'));
+};
 
-  const categories = raw.get("categories");
-  if (categories === undefined || categories === null) problems.push(problem("missing_listing", "categories", 'It needs a category ("categories": ["productivity"])'));
-  else if (isArray(categories)) {
-    const names = strings(categories);
-    if (categories.length === 0) problems.push(problem("missing_listing", "categories", "It needs a category"));
-    else if (categories.length > MAX_CATEGORIES || duplicates(names)) problems.push(problem("bad_listing", "categories", `It's in 1 or ${MAX_CATEGORIES} categories, each once`));
-    else {
-      const bad = names.find((n) => n === undefined || !isCategory(n));
-      if (names.some((n) => n === undefined || !isCategory(n))) {
-        problems.push(problem("bad_listing", "categories", `"${bad ?? "?"}" isn't one of the store's categories (${CATEGORIES.map((c) => c.id).join(", ")})`));
-      }
-    }
-  } else problems.push(problem("bad_listing", "categories", 'Its "categories" must be a list'));
-
+/** Its keywords: at most `MAX_KEYWORDS`, each once, each a keyword, none
+ * saying the mark. */
+const checkKeywords = (raw: ReadonlyMap<string, Json>, item: Kind, problems: Problem[]): void => {
   const keywords = raw.get("keywords");
   if (isArray(keywords)) {
     const words = strings(keywords);
@@ -345,13 +350,16 @@ export const checkListing = (
         const claim = keywordClaim(w);
         if (claim === undefined) continue;
         problems.push(
-          because(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": only the store marks a plugin verified or official. Drop it, or use a word for what the plugin does`), "mark_word", w)
+          because(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": only the store marks a ${item} verified or official. Drop it, or use a word for what the ${item} does`), "mark_word", w)
         );
         break;
       }
     }
   } else if (keywords !== undefined && keywords !== null) problems.push(problem("bad_listing", "keywords", 'Its "keywords" must be a list'));
+};
 
+/** Its `homepage` and `repository` (https links) and `license` (a short name). */
+const checkLinks = (raw: ReadonlyMap<string, Json>, problems: Problem[]): void => {
   for (const field of ["homepage", "repository"]) {
     const url = raw.get(field);
     if (url === undefined || url === null || (typeof url === "string" && httpsUrl(url) && parsedUrl(url) !== undefined)) continue;
@@ -361,6 +369,11 @@ export const checkListing = (
   if (!(license === undefined || license === null || (typeof license === "string" && rustTrim(license) !== "" && byteLength(license) <= MAX_LICENSE_LEN && ![...license].some(isControl)))) {
     problems.push(problem("bad_listing", "license", `Its "license" is a short name, like MIT (at most ${MAX_LICENSE_LEN} characters)`));
   }
+};
+
+/** Its screenshots: at most `MAX_SCREENSHOTS`, each once, each a PNG or
+ * JPEG in it (under `folder`, when its pictures must be there). */
+const checkScreenshots = (raw: ReadonlyMap<string, Json>, files: ReadonlyMap<string, Uint8Array>, folder: string | undefined, problems: Problem[]): void => {
   const screenshots = raw.get("screenshots");
   if (isArray(screenshots)) {
     const paths = strings(screenshots);
@@ -372,43 +385,59 @@ export const checkListing = (
       }
       const dot = path.lastIndexOf(".");
       const typed = dot >= 0 && SCREENSHOT_TYPES.includes(path.slice(dot + 1).replace(/[A-Z]/g, (c) => c.toLowerCase()));
-      const bytes = plainPath(path) ? files.get(path) : undefined;
-      if (!typed || !bytes || !isScreenshot(bytes)) problems.push(problem("bad_listing", "screenshots", "A screenshot must be a PNG or JPEG picture in it", path));
+      const there = plainPath(path) && (folder === undefined || path.startsWith(`${folder}/`));
+      const bytes = there ? files.get(path) : undefined;
+      if (!typed || !bytes || !isScreenshot(bytes)) {
+        problems.push(
+          problem("bad_listing", "screenshots", folder === undefined ? "A screenshot must be a PNG or JPEG picture in it" : `A screenshot must be a PNG or JPEG picture in its ${folder}/ folder`, path)
+        );
+      }
     }
   } else if (screenshots !== undefined && screenshots !== null) problems.push(problem("bad_listing", "screenshots", 'Its "screenshots" must be a list'));
+};
 
-  const range = zeronRange(raw);
-  if ("error" in range) problems.push(problem("bad_listing", "engines", range.error));
-  else if (range.range !== null && !parseRange(range.range)) problems.push(problem("bad_listing", "engines", `"${range.range}" isn't a range of versions`));
-
+/** How big: at most `MAX_FILES` files and `MAX_BYTES`. */
+const checkSize = (files: ReadonlyMap<string, Uint8Array>, item: Kind, problems: Problem[]): void => {
   let total = 0;
   for (const bytes of files.values()) total += bytes.length;
-  if (files.size > MAX_FILES || total > MAX_BYTES) problems.push(problem("too_large", null, "It's too big for a plugin (2,000 files, 50 MB)"));
+  if (files.size > MAX_FILES || total > MAX_BYTES) problems.push(problem("too_large", null, `It's too big for a ${item} (2,000 files, 50 MB)`));
+};
 
+const checkChangelogSize = (files: ReadonlyMap<string, Uint8Array>, problems: Problem[]): void => {
+  const changelog = files.get(CHANGELOG_FILE);
+  if (changelog && changelog.length > MAX_CHANGELOG_BYTES) problems.push(problem("too_large", null, "CHANGELOG.md is over 512 KB", CHANGELOG_FILE));
+};
+
+/** The manifest as written, without the signature, which the store keeps
+ * apart: at most `MAX_MANIFEST_BYTES`. */
+const checkManifestSize = (raw: JsonObject, problems: Problem[]): void => {
+  const unsigned: JsonObject = new Map(raw);
+  unsigned.delete("signature");
+  if (byteLength(canonicalJson(unsigned)) > MAX_MANIFEST_BYTES) problems.push(problem("too_large", "manifest", "Its manifest is over 256 KB"));
+};
+
+/** Worth knowing: files that aren't text or a picture (warnings), and
+ * `version`'s notes in CHANGELOG.md (too long is a problem; none, a warning). */
+const worthKnowing = (files: ReadonlyMap<string, Uint8Array>, version: string, isText: (bytes: Uint8Array) => boolean, problems: Problem[], warnings: Problem[]): void => {
   for (const [rel, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     if (!readable(rel, bytes, isText)) warnings.push(problem("binary_file", null, "It isn't text or a picture: reviewers look closely at files like this", rel));
   }
   const changelog = files.get(CHANGELOG_FILE);
-  const notes = changelog && changelog.length <= MAX_CHANGELOG_BYTES ? changelogNotes(lossy.decode(changelog), manifest.version) : undefined;
+  const notes = changelog && changelog.length <= MAX_CHANGELOG_BYTES ? changelogNotes(lossy.decode(changelog), version) : undefined;
   if (notes !== undefined && byteLength(notes) > MAX_NOTES_BYTES) {
     problems.push(problem("too_large", null, `This version's notes in CHANGELOG.md are at most ${MAX_NOTES_BYTES / 1024} KB`, CHANGELOG_FILE));
   }
   if (changelog && changelog.length <= MAX_CHANGELOG_BYTES && notes === undefined) {
-    warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${manifest.version}: this version shows without notes`, CHANGELOG_FILE));
+    warnings.push(problem("no_notes", null, `CHANGELOG.md has no section for ${version}: this version shows without notes`, CHANGELOG_FILE));
   }
+};
 
-  // Amendment 31's rules, after the engine's own.
-  const changelogBytes = files.get(CHANGELOG_FILE);
-  if (changelogBytes && changelogBytes.length > MAX_CHANGELOG_BYTES) problems.push(problem("too_large", null, "CHANGELOG.md is over 512 KB", CHANGELOG_FILE));
-  // (As written: without the signature, which the store keeps apart.)
-  const unsigned: JsonObject = new Map(raw);
-  unsigned.delete("signature");
-  if (byteLength(canonicalJson(unsigned)) > MAX_MANIFEST_BYTES) problems.push(problem("too_large", "manifest", "Its manifest is over 256 KB"));
-  // Two paths that are one file on a Mac or a Windows machine (the
-  // manifest's own name among them), or a file where another path needs
-  // a folder of that name there (amendment 42): each at the later path, in
-  // code point order; a path with a problem is never recorded.
-  const folded = new Map<string, string>([[foldPath(MANIFEST_FILE), MANIFEST_FILE]]);
+/** Two paths that are one file on a Mac or a Windows machine (`taken`,
+ * what's written beside them, among them), or a file where another path
+ * needs a folder of that name there (amendment 42): each at the later path,
+ * in code point order; a path with a problem is never recorded. */
+const checkClashes = (files: ReadonlyMap<string, Uint8Array>, taken: readonly string[], problems: Problem[]): void => {
+  const folded = new Map<string, string>(taken.map((rel) => [foldPath(rel), rel]));
   const folders = new Map<string, string>();
   for (const rel of [...files.keys()].sort(byCodePoint)) {
     const key = foldPath(rel);
@@ -433,8 +462,162 @@ export const checkListing = (
     for (const folder of parents) if (!folders.has(folder)) folders.set(folder, rel);
     folded.set(key, rel);
   }
+};
 
+/** listing.rs `check`: what stands in the way of publishing, and what's
+ * worth knowing, each once, in the engine's order. */
+export const checkListing = (
+  manifest: Manifest,
+  files: ReadonlyMap<string, Uint8Array>,
+  isText: (bytes: Uint8Array) => boolean
+): { problems: Problem[]; warnings: Problem[] } => {
+  const problems: Problem[] = [];
+  const warnings: Problem[] = [];
+  const raw = manifest.raw;
+  if (manifest.problem) problems.push(problem("bad_package", "manifest", manifest.problem));
+  const idError = idProblem(manifest.id);
+  if (idError && idError !== RESERVED_ID_ERROR) problems.push(problem("bad_package", "id", idError));
+  else reservedId(manifest.id, problems);
+  if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));
+  checkName(manifest.name, "plugin", problems);
+  if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
+  checkReadme(files, undefined, problems);
+  checkDescription(manifest.description, "plugin", problems);
+  const icon = raw.get("icon");
+  if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));
+  else if (typeof icon === "string") {
+    const bytes = files.get(icon);
+    const text = bytes && bytes.length <= MAX_ICON_BYTES ? decodeText(bytes) : undefined;
+    if (!(icon.endsWith(".svg") && text !== undefined && rustTrimStart(text).startsWith("<svg"))) {
+      problems.push(problem("bad_listing", "icon", `Its icon must be an SVG file in it, at most ${MAX_ICON_BYTES / 1024} KB`, icon));
+    }
+  } else problems.push(problem("bad_listing", "icon", 'Its "icon" must be the path of an SVG file in it'));
+
+  const categories = raw.get("categories");
+  if (categories === undefined || categories === null) problems.push(problem("missing_listing", "categories", 'It needs a category ("categories": ["productivity"])'));
+  else if (isArray(categories)) {
+    const names = strings(categories);
+    if (categories.length === 0) problems.push(problem("missing_listing", "categories", "It needs a category"));
+    else if (categories.length > MAX_CATEGORIES || duplicates(names)) problems.push(problem("bad_listing", "categories", `It's in 1 or ${MAX_CATEGORIES} categories, each once`));
+    else {
+      const bad = names.find((n) => n === undefined || !isCategory(n));
+      if (names.some((n) => n === undefined || !isCategory(n))) {
+        problems.push(problem("bad_listing", "categories", `"${bad ?? "?"}" isn't one of the store's categories (${CATEGORIES.map((c) => c.id).join(", ")})`));
+      }
+    }
+  } else problems.push(problem("bad_listing", "categories", 'Its "categories" must be a list'));
+
+  checkKeywords(raw, "plugin", problems);
+  checkLinks(raw, problems);
+  checkScreenshots(raw, files, undefined, problems);
+
+  const range = zeronRange(raw);
+  if ("error" in range) problems.push(problem("bad_listing", "engines", range.error));
+  else if (range.range !== null && !parseRange(range.range)) problems.push(problem("bad_listing", "engines", `"${range.range}" isn't a range of versions`));
+
+  checkSize(files, "plugin", problems);
+  worthKnowing(files, manifest.version, isText, problems, warnings);
+  // Amendment 31's rules, after the engine's own.
+  checkChangelogSize(files, problems);
+  checkManifestSize(raw, problems);
+  // A name that could be another of its files' (a device refuses the package
+  // as it reads it).
+  for (const rel of [...files.keys()].sort(byCodePoint)) {
+    if (shortName(rel)) problems.push(problem("bad_package", "files", `"${rel}" could be a Windows short name of another file (a ~ with a digit after it): rename it`, rel));
+    else if (unseenName(rel)) problems.push(problem("bad_package", "files", `"${rel}" has a control or invisible character in its name: rename it`, rel));
+  }
+  checkClashes(files, [MANIFEST_FILE], problems);
   return { problems, warnings };
+};
+
+/** A PNG's first bytes. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** Whether a PNG has an animation control chunk (`acTL`), read chunk by chunk
+ * while a whole chunk header remains (listing.rs `animated_png`): a cover is
+ * a still. */
+const isAnimatedPng = (bytes: Uint8Array): boolean => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = PNG_SIGNATURE.length; at + 8 <= bytes.length; at += 12 + view.getUint32(at)) {
+    if (view.getUint32(at + 4) === 0x6163544c) return true;
+  }
+  return false;
+};
+
+/** listing.rs `check_template`: what stands in the way of publishing a
+ * template with `manifest` (its own, as the package carries it, which the
+ * signature isn't part of here) and `files` (every file the package
+ * carries), and what's worth knowing, each once, in the engine's order. A
+ * template asks for nothing (it runs as Zeron), so its rules are the
+ * listing's, its files' and its preview's. */
+export const checkTemplate = (
+  raw: JsonObject,
+  files: ReadonlyMap<string, Uint8Array>,
+  isText: (bytes: Uint8Array) => boolean
+): { problems: Problem[]; warnings: Problem[] } => {
+  const problems: Problem[] = [];
+  const warnings: Problem[] = [];
+  for (const member of TEMPLATE_REFUSED_MEMBERS) {
+    if (raw.has(member)) problems.push(problem("bad_listing", member, `A template has no "${member}": it asks for nothing, and runs as Zeron itself`));
+  }
+  for (const member of [...raw.keys()].filter((key) => !TEMPLATE_KNOWN_MEMBERS.has(key)).sort(byCodePoint)) {
+    const word = problemWord(member);
+    problems.push({ ...problem("bad_listing", "manifest", `"${word ?? ""}" isn't something a template's manifest says in the store: leave it out`), ...(word === undefined ? {} : { word }) });
+  }
+  const text = (key: string): string | undefined => {
+    const value = raw.get(key);
+    return typeof value === "string" ? rustTrim(value) : undefined;
+  };
+  const id = text("id") ?? "";
+  if (!validTemplateId(id)) {
+    problems.push(problem("bad_package", "id", `"${id}" can't be a template's id: use 2 to 40 lowercase letters, digits and dashes, starting with a letter or digit`));
+  } else reservedId(id, problems);
+  const version = text("version") ?? "";
+  if (!parseVersion(version)) problems.push(problem("not_semver", "version", `"${version}" isn't a version (MAJOR.MINOR.PATCH)`));
+  const madeFrom = text("zeron_version");
+  if (madeFrom === undefined || madeFrom === "") problems.push(problem("missing_listing", "zeron_version", 'It needs a "zeron_version": the Zeron it was made from'));
+  else if (!parseVersion(madeFrom)) problems.push(problem("not_semver", "zeron_version", `"${madeFrom}" isn't a version (MAJOR.MINOR.PATCH)`));
+  const name = text("name");
+  if (name === undefined || name === "") problems.push(problem("missing_listing", "name", 'It needs a "name"'));
+  else checkName(name, "template", problems);
+  checkReadme(files, TEMPLATE_README_STUB, problems);
+  checkDescription(text("description") ?? "", "template", problems);
+  const preview = files.get(PREVIEW_FILE);
+  if (!preview) problems.push(problem("missing_listing", "preview", "It needs a preview.png: its card's cover in the store"));
+  else if (preview.length > MAX_PREVIEW_BYTES || !PNG_SIGNATURE.every((b, i) => preview[i] === b) || isAnimatedPng(preview)) {
+    problems.push(problem("bad_listing", "preview", `Its preview.png must be a still PNG picture, at most ${MAX_PREVIEW_BYTES / (1024 * 1024)} MB`, PREVIEW_FILE));
+  }
+  checkKeywords(raw, "template", problems);
+  checkLinks(raw, problems);
+  checkScreenshots(raw, files, TEMPLATE_SCREENSHOTS, problems);
+  checkChangelogSize(files, problems);
+  checkManifestSize(raw, problems);
+  // Its files: each one Zeron writes, none of those no template replaces.
+  for (const rel of [...files.keys()].sort(byCodePoint)) {
+    if (!insideTemplate(rel) || unseenName(rel)) problems.push(problem("bad_package", "files", `It has a file Zeron won't write: "${rel}"`, rel));
+    else if (protectedPath(rel)) {
+      problems.push(problem("protected_file", "files", `"${rel}" is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out`, rel));
+    } else if (shortName(rel)) {
+      problems.push(problem("protected_file", "files", `"${rel}" could be a Windows short name of one of Zeron's own files (a ~ with a digit after it): rename it`, rel));
+    } else if (strayScreenshot(rel)) {
+      problems.push(problem("bad_listing", "files", `"${rel}" isn't a PNG or JPEG: ${TEMPLATE_SCREENSHOTS}/ holds its pictures alone`, rel));
+    } else if (rel.startsWith(`${TEMPLATE_SCREENSHOTS}/`) && !isScreenshot(files.get(rel)!)) {
+      problems.push(problem("bad_listing", "files", `"${rel}" isn't a PNG or JPEG picture, whatever its name says`, rel));
+    }
+  }
+  checkClashes(files, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE], problems);
+  checkSize(files, "template", problems);
+  worthKnowing(files, version, isText, problems, warnings);
+  return { problems, warnings };
+};
+
+/** A template's preview, past the device's check: a picture the store will
+ * serve (image-check's), so its card's cover is never a 404. Undefined when
+ * it is. */
+export const previewProblem = (files: ReadonlyMap<string, Uint8Array>): Problem | undefined => {
+  const preview = files.get(PREVIEW_FILE);
+  if (preview && pictureType(preview) === "image/png") return undefined;
+  return problem("bad_listing", "preview", "Its preview.png isn't a PNG picture the store can show", PREVIEW_FILE);
 };
 
 /** What the store keeps of a listing that passed `checkListing`. */
@@ -487,6 +670,41 @@ export const listingOf = (manifest: Manifest, files: ReadonlyMap<string, Uint8Ar
     readme: decodeText(readmeBytes)!.replace(/^\uFEFF/, ""),
     notes,
     version: parseVersion(manifest.version)!
+  };
+};
+
+/** The listing of a template `checkTemplate` found no problem in: its icon
+ * and categories empty (a template has neither), and the Zerons it's for
+ * `>=` the one it was made from. */
+export const listingOfTemplate = (raw: JsonObject, files: ReadonlyMap<string, Uint8Array>): Listing => {
+  const text = (key: string): string | undefined => {
+    const value = raw.get(key);
+    return typeof value === "string" ? value : undefined;
+  };
+  const trimmed = (key: string): string => rustTrim(text(key) ?? "");
+  const list = (key: string): string[] => {
+    const value = raw.get(key);
+    return isArray(value) ? (value as string[]) : [];
+  };
+  const version = trimmed("version");
+  const changelog = files.get(CHANGELOG_FILE);
+  const engines = `>=${trimmed("zeron_version")}`;
+  const link = (key: string): string | null => (text(key) === undefined ? null : (parsedUrl(text(key)!) ?? null));
+  return {
+    name: trimmed("name"),
+    summary: trimmed("description"),
+    icon: "",
+    categories: [],
+    keywords: list("keywords"),
+    homepage: link("homepage"),
+    repository: link("repository"),
+    license: text("license") ?? null,
+    screenshots: list("screenshots"),
+    engines,
+    enginesRange: parseRange(engines) ?? null,
+    readme: decodeText(files.get(README_FILE)!)!.replace(/^\uFEFF/, ""),
+    notes: changelog ? (changelogNotes(lossy.decode(changelog), version) ?? null) : null,
+    version: parseVersion(version)!
   };
 };
 

@@ -1,6 +1,7 @@
 ---
-// A plugin's head, the same on its Overview, Versions and asks: one block,
-// as Raycast's extension page sets it. Its tile; beside it the name (the
+// A plugin's head, the same on its Overview, Versions and asks (and a
+// template's, which has no tile: its preview is what it looks like): one
+// block, as Raycast's extension page sets it. Its tile; beside it the name (the
 // seal when its newest is verified), the summary under it, then one line of
 // who made it (their initial before their name), its category and how many
 // have it. At the right, getting it (Get.astro), the button level with the
@@ -15,6 +16,7 @@ import { satisfies } from "../../lib/store/semver.ts";
 import type { PluginDetail, VersionInfo } from "../../lib/store/types.ts";
 import { memberUrl } from "../../lib/store/urls.ts";
 import { initial } from "../../lib/store/tile.ts";
+import { KIND_PATH, KIND_WORDS, kindOfItem } from "../../lib/store/kind.ts";
 import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
@@ -27,6 +29,7 @@ interface Props {
   latestZeron: string | null;
 }
 const { plugin, category, versions, latestZeron } = Astro.props;
+const kind = kindOfItem(plugin);
 const newest = versions.find((v) => v.version === plugin.version);
 const verifiedOne = plugin.verified_version ? versions.find((v) => v.version === plugin.verified_version) : undefined;
 const off = latestZeron && satisfies(latestZeron, plugin.engines?.zeron) === false ? { needs: plugin.engines?.zeron, latest: latestZeron } : null;
@@ -34,13 +37,13 @@ const first = plugin.categories[0] ?? null;
 ---
 
 <nav class="crumbs" aria-label="Where this is">
-  <a href="/plugins">Plugins</a>
+  <a href={KIND_PATH[kind]}>{KIND_WORDS[kind].Many}</a>
   {first && category && <><Icon name="chev" /><a href={catalogHref({ category: first })}>{category}</a></>}
 </nav>
-<header class="head">
-  <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="xl" />
+<header class:list={["head", { bare: kind === "template" }]}>
+  {kind === "plugin" && <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="xl" />}
   <div class="txt">
-    <h1 class={lsb(plugin.name)}><span class="name">{plugin.name}</span>{plugin.verified && <Seal size="l" />}</h1>
+    <h1 class={lsb(plugin.name)}><span class="name">{plugin.name}</span>{plugin.verified && <>&nbsp;<Seal size="l" /></>}</h1>
     <p class="sum">{plugin.summary}</p>
     <p class="by">
       {
@@ -55,6 +58,7 @@ const first = plugin.categories[0] ?? null;
     </p>
   </div>
   <Get
+    kind={kind}
     id={plugin.id}
     name={plugin.name}
     version={plugin.version}

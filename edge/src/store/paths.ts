@@ -5,7 +5,7 @@
  * folder on every system. The store builds R2 keys only from paths that
  * pass `plainPath`.
  */
-import { LIMITS } from "./data";
+import { LIMITS, STORE_DATA } from "./data";
 import { compareUtf8 } from "./json";
 
 /** The longest package path, in UTF-8 bytes. */
@@ -49,17 +49,39 @@ export const pathProblem = (rel: string): string | undefined => {
 export const plainPath = (rel: string): boolean =>
   pathProblem(rel) === undefined && rel.split("/").every((part) => !part.startsWith("."));
 
-/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
- * Windows compare two paths (listing.rs `fold_path`). Two that fold the
- * same are one file there. */
-export const foldPath = (rel: string): string =>
-  [...rel.normalize("NFC").replaceAll("\\", "/")]
+/** Whether any part of `rel` could be a Windows short name (`ZERON-~1.JSO`):
+ * a `~` directly followed by an ASCII digit (template.rs `short_name`). */
+export const shortName = (rel: string): boolean => /~[0-9]/.test(rel);
+
+/** A code point as a regular expression's class takes it. */
+const codePoint = (c: number): string => `\\u{${c.toString(16)}}`;
+const UNSEEN = new RegExp(`[${STORE_DATA.file_names.unseen.map(([first, last]) => `${codePoint(first!)}-${codePoint(last!)}`).join("")}]`, "u");
+/** Whether `rel` holds a character drawn as nothing, or a control
+ * (template.rs `unseen`; data file `file_names.unseen`): some disks leave
+ * them out of a name they look up. An emoji's selectors aren't among them. */
+export const unseenName = (rel: string): boolean => UNSEEN.test(rel);
+
+const SELECTORS = new RegExp(`[${STORE_DATA.file_names.selectors.map((ch) => codePoint(ch.codePointAt(0)!)).join("")}]`, "gu");
+/** `rel` without emoji's selectors: no name is told apart by one. */
+const withoutSelectors = (rel: string): string => rel.replace(SELECTORS, "");
+
+/** plugin-guard `fold` (path.rs): how the files no template replaces are
+ * compared: without emoji's selectors, `\` as `/`, each character's
+ * uppercase then its lowercase, empty and `.` parts dropped, each part
+ * without its trailing dots and spaces. */
+export const fold = (rel: string): string =>
+  [...withoutSelectors(rel).replaceAll("\\", "/")]
     .map((c) => c.toUpperCase().toLowerCase())
     .join("")
     .split("/")
     .filter((part) => part !== "" && part !== ".")
     .map((part) => part.replace(/[. ]+$/, ""))
     .join("/");
+
+/** plugin-guard `fold`, after emoji's selectors are dropped and Unicode
+ * normalization (NFC): how macOS and Windows compare two paths (listing.rs
+ * `fold_path`). Two that fold the same are one file there. */
+export const foldPath = (rel: string): string => fold(withoutSelectors(rel).normalize("NFC"));
 
 /** What a device writes beside a plugin's files, which no file may fold to
  * (install.rs `SOURCE_FILE`). */

@@ -84,15 +84,25 @@ pub fn reserved_on_windows(part: &str) -> bool {
         && (rest[0].is_ascii_digit() || matches!(rest[0], '¹' | '²' | '³'))
 }
 
+/// Whether `c` is a variation selector of ordinary emoji (text's U+FE0E, the
+/// picture's U+FE0F): drawn as nothing, and allowed in a name, which is safe
+/// only because names are compared without it ([`fold`]).
+pub fn selector(c: char) -> bool {
+    matches!(c, '\u{fe0e}' | '\u{fe0f}')
+}
+
 /// `rel` as a case-insensitive, normalising filesystem compares it: `\`
 /// as `/`, each character's uppercase then its lowercase (`ſ` → `s`,
-/// `K` (Kelvin) → `k`, `ı` → `i`), and each part without the dots and
-/// spaces Windows drops from its end. Two paths that fold the same can
+/// `K` (Kelvin) → `k`, `ı` → `i`), each part without the dots and spaces
+/// Windows drops from its end, and none of the [`selector`]s a name may have
+/// (some disks look names up without them, as a Linux folder that ignores
+/// case does: nothing is told apart by one). Two paths that fold the same can
 /// name the same file on macOS or Windows; compare folds for "is this the
 /// protected file".
 pub fn fold(rel: &str) -> String {
     let unified: String = rel
         .chars()
+        .filter(|c| !selector(*c))
         .map(|c| if c == '\\' { '/' } else { c })
         .flat_map(char::to_uppercase)
         .flat_map(char::to_lowercase)
@@ -177,6 +187,11 @@ mod tests {
         ] {
             assert_eq!(fold(same), protected, "{same:?}");
         }
+        for same in ["screens/plu\u{fe0f}gins/page.luau", "\u{fe0e}Screens/plugins.\u{fe0f}/page.luau", "screens/\u{fe0f}/plugins/page.luau", "screens/plugins/page.luau\u{fe0f}"] {
+            assert_eq!(fold(same), protected, "{same:?}");
+        }
+        assert_eq!(fold("\u{2764}\u{fe0f}.png"), "\u{2764}.png");
+        assert_ne!(fold("screens/plu\u{fe0d}gins/page.luau"), protected);
         assert_eq!(fold("\u{212a}"), "k");
         assert_ne!(fold("screens/plugin/page.luau"), protected);
     }

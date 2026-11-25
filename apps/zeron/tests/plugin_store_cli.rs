@@ -55,9 +55,13 @@ impl Run {
     }
 
     async fn zeron(&self, store: &FakeStore, secret: Option<&str>, args: &[&str]) -> Output {
+        self.run(store, secret, "plugin", args).await
+    }
+
+    async fn run(&self, store: &FakeStore, secret: Option<&str>, noun: &str, args: &[&str]) -> Output {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_zeron"));
         command
-            .args(["plugin"])
+            .args([noun])
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
@@ -180,6 +184,80 @@ async fn ci_checks_and_publishes_with_a_deploy_token() {
     assert_eq!(refused.status.code(), Some(1), "{said}");
     assert!(said.contains("\"official\"") && said.contains("Say what it does instead"), "{said}");
     assert_eq!(store.state.lock().unwrap().submitted.len(), requests, "nothing was sent");
+}
+
+/// `zeron template check` and `publish` as a CI job runs them: no Zeron, no
+/// sign-in; unsigned, under the templates' prefix, the same words and codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
+    let store = FakeStore::start().await;
+    let run = Run::new();
+    let folder = run.home.join("midnight");
+    let write = |rel: &str, bytes: &[u8]| {
+        let path = folder.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    let version = |version: &str| {
+        let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "A dark interface.", "author": "you", "version": version, "zeron_version": "0.3.16" });
+        write("zeron-template.json", &serde_json::to_vec(&manifest).unwrap());
+        write("CHANGELOG.md", format!("## {version}\n- Darker.\n").as_bytes());
+    };
+    version("1.0.0");
+    write("app.luau", b"return {}");
+    write("preview.png", b"\x89PNG\r\n\x1a\n");
+    let arg = folder.display().to_string();
+    let secret = store.add_deploy_token("ada", "CI", Scope::plugins(&["midnight".into(), "focus-board".into()]).unwrap());
+
+    // What it lacks, all said, nothing sent (1).
+    let checked = run.run(&store, None, "template", &["check", &arg]).await;
+    assert_eq!(checked.status.code(), Some(1), "{}", text(&checked));
+    assert!(text(&checked).contains("error: missing_readme"), "{}", text(&checked));
+    let refused = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    write("README.md", b"# Midnight");
+    write("screenshots/x.luau", b"return {}");
+    let stray = run.run(&store, None, "template", &["check", &arg]).await;
+    assert_eq!(stray.status.code(), Some(1), "{}", text(&stray));
+    assert!(text(&stray).contains("error: bad_listing (screenshots/x.luau)"), "{}", text(&stray));
+    std::fs::remove_dir_all(folder.join("screenshots")).unwrap();
+    assert!(store.state.lock().unwrap().requests.is_empty(), "nothing was sent");
+
+    let checked = run.run(&store, None, "template", &["check", &arg]).await;
+    assert_eq!(checked.status.code(), Some(0), "{}", text(&checked));
+    assert!(text(&checked).contains("midnight 1.0.0 meets the store's rules"));
+    let dry = run.run(&store, Some(&secret), "template", &["publish", &arg, "--dry-run"]).await;
+    assert_eq!(dry.status.code(), Some(0), "{}", text(&dry));
+    assert!(text(&dry).contains("Not sent") && store.state.lock().unwrap().submitted_templates.is_empty(), "{}", text(&dry));
+
+    // Its first version is never a token's (3), said of a template.
+    let first = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
+    assert_eq!(first.status.code(), Some(3), "{}", text(&first));
+    assert!(text(&first).contains("may not publish this template (a template's first version is published from your computer)"), "{}", text(&first));
+    store.state.lock().unwrap().templates.insert("midnight".into(), ("ada".into(), vec!["0.9.0".into()]));
+
+    let published = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
+    assert_eq!(published.status.code(), Some(0), "{}", text(&published));
+    assert!(text(&published).contains("Published midnight 1.0.0: live now, not yet verified.") && text(&published).contains("/templates/midnight"), "{}", text(&published));
+    let (id, raw) = store.state.lock().unwrap().submitted_templates[0].clone();
+    let package = zeron_engine::plugins::template_packages::parse_from_store(raw, false).unwrap();
+    assert_eq!((id.as_str(), package.key.as_deref()), ("midnight", None), "unsigned");
+    assert!(package.files.contains_key("README.md") && package.manifest.get("author").is_none());
+    assert!(store.state.lock().unwrap().submitted.is_empty(), "never as a plugin");
+    for output in [&dry, &first, &published] {
+        assert!(!text(output).contains(&secret[12..]), "the token is never said back");
+    }
+    // An older version: refused before it's sent, by its public versions.
+    version("0.9.5");
+    let older = run.run(&store, Some(&secret), "template", &["publish", &arg]).await;
+    assert_eq!(older.status.code(), Some(1), "{}", text(&older));
+    assert!(text(&older).contains("error: not_newer (version)"), "{}", text(&older));
+    assert_eq!(store.state.lock().unwrap().submitted_templates.len(), 1);
+    // No token, no such folder, a folder that's no template (2).
+    for (token, args) in [(None, vec!["publish", &arg]), (Some(secret.as_str()), vec!["publish", "/no/such/folder"]), (None, vec!["check", run.home.to_str().unwrap()])] {
+        let out = run.run(&store, token, "template", &args).await;
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

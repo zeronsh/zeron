@@ -11,10 +11,12 @@
 import { compatibility, day, publishedWhen } from "../../lib/store/format.ts";
 import { appUrl, linkable } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
+import { KIND_WORDS, RUNS_AS, type Kind } from "../../lib/store/kind.ts";
 import Seal from "./Seal.astro";
 import ZeronMark from "./ZeronMark.astro";
 
 interface Props {
+  kind: Kind;
   id: string;
   name: string;
   /** The version the button installs. */
@@ -29,11 +31,11 @@ interface Props {
   /** No Zeron released can install it: the button stays, off, and says why. */
   off?: { needs: string | undefined; latest: string } | null;
 }
-const { id, name, version, newest, verified, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
+const { kind, id, name, version, newest, verified, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
 // (A version the link can't name isn't named on the button either: Zeron's page chooses.)
 const named = !newest && linkable(version) ? version : undefined;
 const label = newest ? "Install in Zeron" : named ? store("plugins.store.install_version", { version: named }) : "Open in Zeron";
-const href = appUrl(id, named);
+const href = appUrl(id, named, kind);
 const now = Date.now();
 ---
 
@@ -55,6 +57,8 @@ const now = Date.now();
     {verified ? <span class="said ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
     <time datetime={new Date(publishedAt).toISOString()}><span class="sr-only">Published </span>{publishedWhen(publishedAt, now)}</time>
   </p>
+  {/* (What a template runs as, under its version, where the rail that says it is far below: styles/look/plugin.css.) */}
+  {kind === "template" && <p class="runs-as">{RUNS_AS.title}</p>}
   {
     off ? (
       <p class="note warn">
@@ -68,14 +72,14 @@ const now = Date.now();
               <b>{store("plugins.store.not_verified_line", { version, verified: verifiedVersion })}</b>{" "}
               {linkable(verifiedVersion) && (
                 <>
-                  <a href={appUrl(id, verifiedVersion)}>{store("plugins.store.install_instead", { version: verifiedVersion })}</a>
+                  <a href={appUrl(id, verifiedVersion, kind)}>{store("plugins.store.install_instead", { version: verifiedVersion })}</a>
                   {verifiedVersionAt ? `, verified ${day(verifiedVersionAt, now)}.` : "."}
                 </>
               )}
             </>
           ) : (
             <>
-              <b>{store("plugins.store.none_verified")}</b> Zeron asks before it installs it.
+              <b>{kind === "plugin" ? store("plugins.store.none_verified") : `No version of this ${KIND_WORDS[kind].one} is verified yet.`}</b> Zeron asks before it installs it.
             </>
           )}
         </p>
@@ -93,7 +97,7 @@ const now = Date.now();
     <p><b>{label} opens Zeron at {name}, ready to install.</b> If nothing opened:</p>
     <ol>
       <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press {label} again.</li>
-      <li>Or, in Zeron, open Settings, then Plugins, then Browse, and search for {name}.</li>
+      <li>Or, in Zeron, open Settings, then {KIND_WORDS[kind].Many}, then Browse, and search for {name}.</li>
     </ol>
   </div>
 </div>

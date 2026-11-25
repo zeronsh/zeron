@@ -2,11 +2,14 @@
 // One of the store's picks (Featured), image first: its first picture at
 // 16:10 across the tile's top (the card's cover); with none, its own tile on
 // its hue as a soft gradient. Under it, its tile, name and check, what it
-// does on one line, and who made it and how many have it.
+// does on one line, and who made it and how many have it. A template is
+// this tile in its list too (its preview is what it looks like): no icon,
+// and not verified yet always in words.
 import Seal from "./Seal.astro";
 import Tile from "./Tile.astro";
 import { count } from "../../lib/store/format.ts";
 import { hueClass } from "../../lib/store/hue.ts";
+import { kindOfItem } from "../../lib/store/kind.ts";
 import type { PluginCard } from "../../lib/store/types.ts";
 import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 
@@ -16,19 +19,20 @@ interface Props {
   eager?: boolean;
 }
 const { plugin: p, eager = false } = Astro.props;
-const cover = pictureUrl(p.id, p.version, p.cover);
+const kind = kindOfItem(p);
+const cover = pictureUrl(p.id, p.version, p.cover, kind);
 ---
 
-<a class:list={["ftile", hueClass(p.id)]} href={pluginUrl(p.id)}>
+<a class:list={["ftile", hueClass(p.id)]} href={pluginUrl(p.id, kind)}>
   <span class:list={["ft-cover", { bare: !cover }]}>
     {cover ? <img src={cover} alt="" loading={eager ? "eager" : "lazy"} decoding="async" /> : <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="l" />}
   </span>
   <span class="ft-body">
-    <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="s" />
+    {kind === "plugin" && <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="s" />}
     <span class="ft-txt">
       <span class="ft-name"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</span>
       <span class="ft-sum">{p.summary}</span>
-      <span class="ft-meta">{p.author.username ? `@${p.author.username}` : "a former account"}<i aria-hidden="true"></i><span class="num">{count(p.installs)} {p.installs === 1 ? "install" : "installs"}</span></span>
+      <span class="ft-meta">{p.author.username ? `@${p.author.username}` : "a former account"}<i aria-hidden="true"></i>{kind === "template" && !p.verified ? <span class="state no">Not verified yet</span> : <span class="num">{count(p.installs)} {p.installs === 1 ? "install" : "installs"}</span>}</span>
     </span>
   </span>
 </a>

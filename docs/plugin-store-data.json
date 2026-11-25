@@ -1,5 +1,5 @@
 {
-  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id>: a device runs a plugin with one, but the store never lists it (the listing rule id_reserved, which no reservation lifts). known_permissions are every permission a manifest may ask for: one not among them is the manifest's problem ('It asks for \"x\", which isn't a permission Zeron knows'), read on a device and at the store alike. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id> and /templates/<id>, and those two names: a device runs a plugin with one (but 'templates', which is a reserved id too) and uses a template with one, but the store never lists it, of either kind (the listing rule id_reserved, which no reservation lifts). known_permissions are every permission a manifest may ask for: one not among them is the manifest's problem ('It asks for \"x\", which isn't a permission Zeron knows'), read on a device and at the store alike. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
   "builtin_ids": [
     "git",
     "github",
@@ -138,6 +138,15 @@
     ]
   },
   "deploy_token": {
+    "all_kinds": [
+      [
+        "plugin"
+      ],
+      [
+        "plugin",
+        "template"
+      ]
+    ],
     "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
     "body_len": 43,
     "check_len": 6,
@@ -147,9 +156,98 @@
     "prefix": "zdt_",
     "short_len": 8
   },
+  "file_names": {
+    "about": "Of a plugin's files and a template's alike. A short name is a '~' directly followed by an ASCII digit, anywhere in a path (Windows opens ZERON-~1.JSO as zeron-plugin.json). unseen: the characters, as [first, last] code points, no path may hold (HFS+ leaves some out of a name it looks up). selectors are allowed (ordinary emoji names have them), and a path is compared without them: fold drops them before anything else it does, and the collision rule drops them before NFC too. At publish: a plugin's short name, and either kind's unseen character, is bad_package (field files, its path); a template's short name is protected_file (field files, its path). One problem a path: of a plugin, its short name before its unseen character; of a template, its unseen character, then that it's protected, then its short name, then what screenshots/ may hold. A device refuses a plugin's package with either, and a template's with an unseen character, as bad_file; a template's short name is left out and named. What's installed already loads as it did. The file_names cases hold both sides to it.",
+    "selectors": [
+      "︎",
+      "️"
+    ],
+    "unseen": [
+      [
+        0,
+        31
+      ],
+      [
+        127,
+        159
+      ],
+      [
+        173,
+        173
+      ],
+      [
+        847,
+        847
+      ],
+      [
+        1564,
+        1564
+      ],
+      [
+        4447,
+        4448
+      ],
+      [
+        6068,
+        6069
+      ],
+      [
+        6155,
+        6159
+      ],
+      [
+        8203,
+        8207
+      ],
+      [
+        8234,
+        8238
+      ],
+      [
+        8288,
+        8303
+      ],
+      [
+        12644,
+        12644
+      ],
+      [
+        65024,
+        65037
+      ],
+      [
+        65279,
+        65279
+      ],
+      [
+        65440,
+        65440
+      ],
+      [
+        65520,
+        65528
+      ],
+      [
+        113824,
+        113827
+      ],
+      [
+        119155,
+        119162
+      ],
+      [
+        917504,
+        921599
+      ]
+    ]
+  },
   "format": "zeron-plugin-store-data:v1",
   "key_proof_prefix": "zeron-plugin-key:v1:",
   "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); No badge lifts it ('zeron' in a keyword is anyone's). The listing cases named 'keywords:' hold both sides to it.",
+  "kinds": [
+    "plugin",
+    "template"
+  ],
   "known_permissions": [
     "ui.add",
     "ui.change",
@@ -206,11 +304,12 @@
     "max_number": 9007199254740991,
     "max_package_bytes": 70953642,
     "max_path": 1024,
+    "max_preview_bytes": 4194304,
     "max_publish_body_bytes": 20971520,
     "max_range_len": 256,
     "max_readme_bytes": 524288,
     "max_screenshots": 8,
-    "max_update_plugins": 200,
+    "max_update_items": 200,
     "max_url_len": 2048,
     "max_version_len": 32,
     "screenshot_types": [
@@ -805,7 +904,103 @@
         "現在",
         "完全",
         "正式"
-      ]
+      ],
+      "template_about": "A template's name and description are read with template_words as plugin_words too (beside them, wherever the rules above say plugin_words); a plugin's with plugin_words alone.",
+      "template_words": {
+        "de": {
+          "substring": false,
+          "words": [
+            "vorlage",
+            "vorlagen",
+            "oberfläche",
+            "layout"
+          ]
+        },
+        "en": {
+          "substring": false,
+          "words": [
+            "template",
+            "templates",
+            "layout",
+            "layouts",
+            "interface",
+            "interfaces",
+            "skin",
+            "skins"
+          ]
+        },
+        "es": {
+          "substring": false,
+          "words": [
+            "plantilla",
+            "plantillas",
+            "interfaz"
+          ]
+        },
+        "fr": {
+          "substring": false,
+          "words": [
+            "gabarit",
+            "gabarits",
+            "interface",
+            "habillage",
+            "habillages"
+          ]
+        },
+        "it": {
+          "substring": false,
+          "words": [
+            "interfaccia",
+            "interfacce"
+          ]
+        },
+        "ja": {
+          "substring": true,
+          "words": [
+            "テンプレート",
+            "レイアウト",
+            "インターフェース",
+            "インターフェイス"
+          ]
+        },
+        "ko": {
+          "substring": true,
+          "words": [
+            "템플릿",
+            "레이아웃",
+            "스킨",
+            "인터페이스"
+          ]
+        },
+        "pt": {
+          "substring": false,
+          "words": [
+            "interface",
+            "layout"
+          ]
+        },
+        "ru": {
+          "substring": false,
+          "words": [
+            "шаблон*",
+            "интерфейс*",
+            "макет*"
+          ]
+        },
+        "zh": {
+          "substring": true,
+          "words": [
+            "模板",
+            "界面",
+            "布局",
+            "皮肤",
+            "佈局",
+            "介面",
+            "範本",
+            "皮膚"
+          ]
+        }
+      }
     },
     "glyphs": [
       "✓",
@@ -2111,8 +2306,52 @@
     "sitemap",
     "feed",
     "static",
-    "assets"
+    "assets",
+    "plugins",
+    "templates"
   ],
+  "template_format": "zeron-template:v1",
+  "template_listing_files": [
+    "README.md",
+    "CHANGELOG.md",
+    "preview.png",
+    "screenshots/"
+  ],
+  "template_manifest_fields": {
+    "allowed": [
+      "keywords",
+      "screenshots",
+      "homepage",
+      "repository",
+      "license"
+    ],
+    "required": [
+      "id",
+      "name",
+      "description",
+      "version",
+      "zeron_version"
+    ]
+  },
   "template_payload_prefix": "zeron-template:v1\n",
+  "template_protected": [
+    "screens/plugins/",
+    "screens/templates/",
+    "account/",
+    ".luaurc"
+  ],
+  "template_readme_stub": "This README isn't part of the interface.",
+  "template_refused_members": [
+    "builtin_theme",
+    "builtin_template",
+    "permissions",
+    "commands",
+    "services",
+    "tools",
+    "engines",
+    "icon",
+    "categories"
+  ],
+  "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces, none of file_names.selectors in it), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface; of screenshots/, the files whose extension (ASCII case aside) is one of limits.screenshot_types, and any other file under it (its path folded as for template_protected) is refused (bad_listing, field files, its path), left out by a device and never composed; and one of them, listed in the manifest or not, whose first bytes aren't a PNG's or a JPEG's is refused too (bad_listing, field files, its path). template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field, in that list's order); nor may any other but signature (bad_listing, field manifest, word the member, in code point order). template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a still PNG (no acTL chunk, read chunk by chunk from the signature while a whole chunk header remains) of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
   "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it."
 }

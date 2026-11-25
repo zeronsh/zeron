@@ -46,6 +46,9 @@ pub enum Kind {
     /// `PreparePluginPublish` checked it, sent to the store. Minted for this
     /// device's app or CLI alone.
     Publish,
+    /// `PublishTemplate {id, hash}`: as [`Kind::Publish`], of one of your
+    /// templates.
+    PublishTemplate,
 }
 
 /// Who a review was minted for, and so the only one who may use it.
@@ -75,6 +78,9 @@ struct Review {
     origin: Origin,
     subject: String,
     hash: String,
+    /// What else was shown that the decision holds to (a store template's
+    /// record, `store::device`).
+    shown: Option<String>,
     at: Instant,
 }
 
@@ -94,6 +100,11 @@ pub fn needed(what: &str) -> RpcError {
 impl Reviews {
     /// A fresh review for `subject` as shown (`hash`), good only to `origin`.
     pub fn mint(&mut self, kind: Kind, origin: Origin, subject: &str, hash: &str) -> Result<String, RpcError> {
+        self.mint_shown(kind, origin, subject, hash, None)
+    }
+
+    /// [`Self::mint`], with what else was shown (`redeem` gives it back).
+    pub fn mint_shown(&mut self, kind: Kind, origin: Origin, subject: &str, hash: &str, shown: Option<String>) -> Result<String, RpcError> {
         self.prune();
         while self.open.len() >= MAX {
             let Some(oldest) = self
@@ -115,6 +126,7 @@ impl Reviews {
                 origin,
                 subject: subject.to_owned(),
                 hash: hash.to_owned(),
+                shown,
                 at: Instant::now(),
             },
         );
@@ -125,6 +137,7 @@ impl Reviews {
     /// for what it was minted for, only to whom it was minted for
     /// (`origin`), only within [`TTL`]. A token presented for something
     /// else, or by someone else, is used up too (it was leaked or misused).
+    /// What else was shown when it was minted.
     pub fn redeem(
         &mut self,
         kind: Kind,
@@ -132,12 +145,13 @@ impl Reviews {
         subject: &str,
         hash: &str,
         token: Option<&str>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<String>, RpcError> {
         self.prune();
         let what = match kind {
             Kind::Plugin => "Allowing a plugin",
             Kind::Template => "Allowing a template",
             Kind::Publish => "Publishing a plugin",
+            Kind::PublishTemplate => "Publishing a template",
         };
         let Some(token) = token.filter(|t| !t.is_empty()) else {
             return Err(needed(what));
@@ -148,7 +162,7 @@ impl Reviews {
         if review.kind != kind || review.origin != *origin || review.subject != subject || review.hash != hash {
             return Err(needed(what));
         }
-        Ok(())
+        Ok(review.shown)
     }
 
     fn prune(&mut self) {

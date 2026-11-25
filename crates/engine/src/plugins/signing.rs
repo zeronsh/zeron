@@ -82,7 +82,13 @@ fn files_value(files: &FileHashes) -> serde_json::Value {
 
 /// hex sha256 of `canonical(manifest without signature) + "\n" + canonical(F)`.
 pub fn content_hash(manifest: &Manifest, files: &FileHashes) -> String {
-    let mut bytes = canonical_json(&manifest.unsigned_value());
+    content_hash_of(&manifest.unsigned_value(), files)
+}
+
+/// [`content_hash`] of a manifest as a value, without its signature
+/// (`unsigned`): a template package's, whose manifest is no plugin's.
+pub fn content_hash_of(unsigned: &serde_json::Value, files: &FileHashes) -> String {
+    let mut bytes = canonical_json(unsigned);
     bytes.push(b'\n');
     bytes.extend(canonical_json(&files_value(files)));
     sha256_hex(&bytes)

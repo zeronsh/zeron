@@ -15,18 +15,20 @@ import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import StaffHead from "../../../components/look/StaffHead.astro";
-import Tile from "../../../components/look/Tile.astro";
+import Thumb from "../../../components/look/Thumb.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import "../../../styles/look/staff.css";
 import type { IconName } from "../../../components/look/icons.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { count, dateTime, day, unbidi, waitedFor } from "../../../lib/store/format.ts";
+import { kindOfItem, RUNS_AS } from "../../../lib/store/kind.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
 import { permission } from "../../../lib/store/permissions.ts";
 import { RISKY_ASKS } from "../../../lib/store/review.ts";
 import { adminSession } from "../../../lib/store/session.ts";
+import { staffUrl } from "../../../lib/store/urls.ts";
 import { queueHref, staffTabs } from "../../../lib/store/staff.ts";
 import type { QueueItem, QueueState } from "../../../lib/store/types.ts";
 
@@ -73,12 +75,14 @@ const now = Date.now();
 const ask = (name: string) => permission({ asks: [name] }, name).title;
 /** What a row says about what it asks for, against its newest verified version (its base). */
 function change(item: QueueItem) {
+  // (A template asks for nothing: it runs as Zeron itself, and its files are what there is to read.)
+  if (kindOfItem(item) === "template") return { line: item.base ? `Against ${item.base}` : "Nothing verified yet", asks: [], marked: false, runs: true };
   if (!item.base) return { line: "Nothing verified yet", asks: item.new_asks, marked: false };
   if (item.new_asks.length > 0) return { line: `Asks for more than ${item.base}`, asks: item.new_asks, marked: true };
   if (item.asks_changed) return { line: `What it asks for changed inside since ${item.base}`, asks: [], marked: false };
   return { line: `Asks for the same as ${item.base}`, asks: [], marked: false };
 }
-const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
+const submissionHref = (item: QueueItem) => staffUrl(item.plugin.id, kindOfItem(item), item.version);
 ---
 
 <Store title={`${LISTS[status].label} · Review · Zeron`} description="The plugin review queue." noindex current="review" session={session}>
@@ -105,14 +109,14 @@ const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent
                     <li>
                       <a class="trow" href={submissionHref(item)}>
                         <span class="c-name">
-                          <Tile id={item.plugin.id} name={item.plugin.name} icon={item.icon} version={item.version} size="s" />
+                          <Thumb item={{ id: item.plugin.id, name: item.plugin.name, kind: item.kind, icon: item.icon, cover: null, version: item.version }} size="s" mixed />
                           <span class="c-two">
                             <span class="c-line">
                               <span class="nm" title={name}>{name}</span>
                               <b class="vno mono">{item.version}</b>
                               {item.reports > 0 && <span class="state bad">{item.reports === 1 ? "1 report" : `${count(item.reports)} reports`}</span>}
                             </span>
-                            <span class="c-sub">{[who, item.installs !== undefined && (item.installs === 1 ? "1 install" : `${count(item.installs)} installs`), item.prerelease && "pre-release"].filter(Boolean).join(" · ")}</span>
+                            <span class="c-sub">{kindOfItem(item) === "template" && <><span class="kind-mark">Template</span></>}{[who, item.installs !== undefined && (item.installs === 1 ? "1 install" : `${count(item.installs)} installs`), item.prerelease && "pre-release"].filter(Boolean).join(" · ")}</span>
                           </span>
                         </span>
                         <span class="c-chg">
@@ -120,6 +124,7 @@ const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent
                             {item.checks.fail > 0 && <span class="state bad">{item.checks.fail === 1 ? "A check failed" : `${count(item.checks.fail)} checks failed`}</span>}
                             <span class="said">{c.line}</span>
                           </span>
+                          {"runs" in c && <span class="c-sub">{RUNS_AS.title}</span>}
                           {c.asks.length > 0 && (
                             <span class="c-sub asks" role="list" aria-label={c.marked ? `New since ${item.base}` : "What it asks for"}>
                               {asks.map((a) => (

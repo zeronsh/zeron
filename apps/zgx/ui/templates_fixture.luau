@@ -9,6 +9,7 @@ local ds = require("@ds")
 ds.setup()
 local state = require("@app/screens/templates/state")
 local page = require("@app/screens/templates/page")
+require("./template_store_stub")
 -- The command palette too, whose Templates rows use them (shell/palette).
 -- (No window chrome to restyle in a test host, as shell_fixture says.)
 local actions = require("@app/screens/onboarding/actions");
@@ -119,7 +120,11 @@ local function settle(ok: boolean, value: any)
 	end
 end
 stub.import = function(from: any)
-	note(`import:{if type(from) == "table" then (from.url or from.path or "") else tostring(from)}`)
+	if type(from) == "table" and from.store then
+		note(`import:store:{from.store}:{from.version or ""}`)
+	else
+		note(`import:{if type(from) == "table" then (from.url or from.path or "") else tostring(from)}`)
+	end
 	return later()
 end
 stub.check_updates = function()
@@ -148,6 +153,12 @@ ui.command {
 		settle(true, { pending = "ledger-1700000001", name = "Ledger", needs_consent = true })
 	end,
 }
+local said_failure = ui.state("templates_said_failure", "")
+for name, message in { not_in_store = "not_in_store: midnight 9.9.9 isn't in the store", offline = "offline", other = "Something else" } do
+	ui.command { id = `failure_{name}`, title = name, run = function()
+		said_failure:set(page._failure(message))
+	end }
+end
 ui.command {
 	id = "install_failed",
 	title = "The install fails",
@@ -200,6 +211,117 @@ ui.command {
 		local t = find("airy")
 		t.status = "out_of_date"
 		t.zeron_version = "0.2.120"
+		publish()
+	end,
+}
+for _, how in { "taken_down", "taken_down_plain", "unchecked" } do
+	ui.command {
+		id = `templates.{how}`,
+		title = `Night: {how}`,
+		run = function()
+			local t = find("night")
+			t.status = "blocked"
+			t.blocked = if how == "unchecked" then { unchecked = true } elseif how == "taken_down" then { reason = "It reads {keys}." } else {}
+			publish()
+		end,
+	}
+end
+-- A store template's record as the page has it: what the engine keeps of it
+-- (`.imported.json`) with its row's word on it (src/plugins/store_rows.rs).
+local function from_store(id: string, version: string): any
+	return {
+		key = "AbCdEfGhIjKlMnOpQrStUv",
+		at = 1795132800,
+		hash = `{id}-{version}`,
+		version = version,
+		ignored = {},
+		author = { kind = "verified", username = "ada" },
+		source = { kind = "store", id = id, publisher = "ada", verified = true, verified_at = 1795032800000 },
+	}
+end
+ui.command {
+	id = "templates.store_update",
+	title = "A newer Midnight, not verified yet, is found in the store",
+	run = function()
+		(find("midnight-2") :: any).update = { version = "1.3.0", added = {}, removed = {}, verified = false, installed_verified = true, verified_alternative = nil, notes = "Warmer light." }
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.store_choices",
+	title = "The engine says which updates the store's templates take",
+	run = function()
+		(find("midnight-2") :: any).prerelease = true
+		ui.shared("templates.store_updates", nil :: any):set({ device = "newest", plugins = { midnight = "verified" } })
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.from_store",
+	title = "Midnight arrives from the store, in a folder of another name",
+	run = function()
+		table.insert(model, {
+			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok",
+			imported = from_store("midnight", "1.2.0"),
+		} :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.in_another_s_name",
+	title = "Midnight is in a folder with another store template's id",
+	run = function()
+		table.insert(model, { id = "made-up-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok", imported = from_store("midnight", "1.2.0") } :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.no_store_id",
+	title = "A store template whose record names no id",
+	run = function()
+		local imported = from_store("made-up-3", "1.2.0")
+		imported.source = { kind = "store" }
+		table.insert(model, { id = "made-up-3", name = "Made up 3", version = "1.2.0", builtin = false, active = false, status = "ok", imported = imported } :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.from_store_unverified",
+	title = "Ledger arrives from the store, not verified",
+	run = function()
+		local imported = from_store("ledger", "1.2.0")
+		imported.source.verified = false
+		imported.source.verified_at = nil
+		table.insert(model, { id = "ledger-store", name = "Ledger", version = "1.2.0", builtin = false, active = false, status = "ok", imported = imported } :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.edited",
+	title = "Midnight, from the store, is changed here",
+	run = function()
+		(find("midnight-2") :: any).edited = true
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.store_blocked",
+	title = "Midnight, from the store, is taken down",
+	run = function()
+		table.insert(model, {
+			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "blocked", blocked = { id = "midnight", version = "1.2.0", reason = "It reads your keys." },
+			imported = from_store("midnight", "1.2.0"),
+		} :: any)
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.restored",
+	title = "Night: restored",
+	run = function()
+		local t = find("night")
+		t.status = "ok"
+		t.blocked = nil
 		publish()
 	end,
 }
@@ -294,6 +416,10 @@ ui.command {
 local theme_names = ui.state("theme_names", "")
 ui.command { id = "theme_names", title = "List the themes", run = function() theme_names:set(table.concat(ui.theme.names(), ",")) end }
 
+for _, name in { "en", "zh-Hans" } do
+	ui.command { id = `locale_{name}`, title = name, run = function() ui.locale:set(name) end }
+end
+
 -- Light, for pictures of it (src/audit_shots.rs: `!theme_light`).
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 
@@ -301,6 +427,7 @@ return ui.div {
 	w_full = true,
 	h_full = true,
 	ui.scroll {
+		id = "fixture-scroll",
 		w_full = true,
 		h_full = true,
 		ui.column {

@@ -18,6 +18,8 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
+--   store_stub.not_now     the next publish or unyank is answered Not now
+--   store_stub.asked_lately the next publish or unyank is refused: Not now was said lately
 --   store_stub.token_ended  a token that ended yesterday, still listed
 --   store_stub.tokens_full  a new token is refused: the account has 20 live
 --   store_stub.tokens_today a new token is refused: 10 made today
@@ -46,6 +48,16 @@ local claims = false
 -- The store refuses the next publish for its description's mark glyph
 -- (`store_stub.refuse_listing`), as the edge says it.
 local refuse_listing = false
+-- The next publish, or the next unyank, is answered Not now in Zeron's own
+-- window (`store_stub.not_now`).
+local not_now: string? = nil
+local function asked_first()
+	local word = not_now
+	if word then
+		not_now = nil
+		error({ message = word }, 0)
+	end
+end
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -715,6 +727,7 @@ stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
 		refused_as_you()
+		asked_first()
 		if refuse_listing then
 			refuse_listing = false
 			return { ok = false, error = "bad_listing", field = "description", cause = "mark_glyph", word = "✅" }
@@ -742,6 +755,7 @@ end
 stub.version_action = function(id: string, version: string, action: string): any
 	note(`version:{id}:{version}:{action}`)
 	return answer(function(): any
+		asked_first()
 		for _, v in mine[id].versions do
 			if v.version == version then
 				-- (Its author's own yank and unyank: never a superseded one's.)
@@ -767,7 +781,7 @@ end
 -- A new token needs a fresh sign-in: the first ask waits until
 -- `store_stub.signed_in_again`, as the host's StepUp does.
 stub.create_token = function(args: any): any
-	local scope = if args.scope and args.scope.all then "all" else table.concat((args.scope and args.scope.plugins) or {}, ",")
+	local scope = if args.scope and args.scope.all then (if args.scope.all_kinds then `all:{table.concat(args.scope.all_kinds, "+")}` else "all") else table.concat((args.scope and args.scope.plugins) or {}, ",")
 	note(`create_token:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
 	local p: any = { settled = false, waiters = {} }
 	local function settle()
@@ -970,6 +984,20 @@ ui.command {
 	title = "Store: the next publish is refused for its description's mark",
 	run = function()
 		refuse_listing = true
+	end,
+}
+ui.command {
+	id = "store_stub.not_now",
+	title = "Store: the next publish or unyank is answered Not now",
+	run = function()
+		not_now = "cancelled"
+	end,
+}
+ui.command {
+	id = "store_stub.asked_lately",
+	title = "Store: the next publish or unyank is refused: Not now was said lately",
+	run = function()
+		not_now = "asked_lately"
 	end,
 }
 ui.command {

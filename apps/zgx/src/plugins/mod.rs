@@ -53,6 +53,9 @@ pub mod official;
 pub mod tokens;
 pub mod looks;
 pub mod template_consent;
+pub mod act_consent;
+pub mod blocks;
+pub mod store_rows;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
@@ -263,6 +266,15 @@ pub struct Bridge {
     fallbacks: RefCell<HashMap<String, usize>>,
     /// The templates page's data (screens/templates).
     templates_page: Shared,
+    /// What the engine last said of the templates (`ListTemplates`), and
+    /// whether it's being asked.
+    templates_said: RefCell<Json>,
+    template_asks: RefCell<store_rows::Asks>,
+    /// The templates taken down whose approval was forgotten, each with the
+    /// approvals' record as it stood after (one written since is looked at).
+    forgotten: RefCell<HashMap<String, String>>,
+    /// The templates here as last published, for it.
+    templates_here: RefCell<Json>,
     /// Plugins that failed, kept out until they change.
     failed_plugins: RefCell<recovery::Failures>,
     ui: zgx::widgets::WeakUi,
@@ -295,6 +307,9 @@ pub struct Bridge {
     /// Which updates the store's plugins take on this device (the
     /// engine's `store_updates`: `{ device, plugins = { id = … } }`).
     store_updates: Shared,
+    /// The same, of the store's templates (`ListTemplates`: store_rows.rs
+    /// `choices`).
+    template_updates: Shared,
     settings_own: RefCell<HashMap<String, Shared>>,
     /// The main window's dialogs (a folder setting's).
     dialogs: zgx_desktop::FileDialogs,
@@ -629,6 +644,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         failed_files: RefCell::default(),
         broken: RefCell::default(),
         fallbacks: RefCell::default(),
+        templates_said: RefCell::default(),
+        template_asks: RefCell::default(),
+        forgotten: RefCell::default(),
+        templates_here: RefCell::default(),
         templates_page: host.shared("templates", Value::record([("state", Value::from("loading"))])),
         failed_plugins: RefCell::default(),
         ui: cx.ui.downgrade(),
@@ -644,6 +663,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         settings: RefCell::new(settings::Book::new(settings::storage_dir())),
         settings_list: host.shared("plugins.settings", vlist(Vec::new())),
         store_updates: host.shared("plugins.store_updates", Value::Nil),
+        template_updates: host.shared("templates.store_updates", Value::Nil),
         settings_own: RefCell::default(),
         dialogs: cx.dialogs.clone(),
         costs: RefCell::default(),
@@ -779,7 +799,20 @@ fn live_overlay() -> live::Overlay {
     LIVE_OVERLAY.with(|o| o.borrow().clone())
 }
 
+fn held_back(id: &str, why: &blocks::Why) {
+    HELD_BACK.with(|h| *h.borrow_mut() = (*why == blocks::Why::Unchecked).then(|| id.to_string()));
+}
+
+/// The template a launch refused, and why, told once.
+pub fn take_stopped_at_launch() -> Option<(String, blocks::Why)> {
+    STOPPED_AT_LAUNCH.with(|s| s.borrow_mut().take())
+}
+
 thread_local! {
+    static STOPPED_AT_LAUNCH: RefCell<Option<(String, blocks::Why)>> = const { RefCell::new(None) };
+    /// The template in use that can't be checked for now (its id): back by
+    /// itself once it can, which no notice calls a switch.
+    static HELD_BACK: RefCell<Option<String>> = const { RefCell::new(None) };
     /// What `prepare_live` laid down, for the bridge to start from.
     static LIVE_OVERLAY: RefCell<live::Overlay> = RefCell::default();
     /// And what it laid it down from, so the window's first look composes
@@ -813,6 +846,12 @@ pub fn prepare_live() -> PathBuf {
     if ZERON_TEMPLATE.swap(false, std::sync::atomic::Ordering::Relaxed) {
         preview::enter_safe();
     }
+    // One Zeron took down never starts (blocks.rs), told once there's a window.
+    if let Some((id, why)) = blocks::stop(&root, preview::approvals_path().as_deref(), None) {
+        let name = template_name(&root, &id);
+        held_back(&id, &why);
+        STOPPED_AT_LAUNCH.with(|s| *s.borrow_mut() = Some((name, why)));
+    }
     {
         let id = live::active(&root);
         preview::launch_started(id != live::BUILTIN);
@@ -825,24 +864,33 @@ pub fn prepare_live() -> PathBuf {
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
-    let ui = crate::ui_dir();
-    let id = live::active(&root);
+    lay_at_launch(&crate::ui_dir(), &root).unwrap_or(fallback)
+}
+
+/// `prepare_live`'s laying down: the active template in `root` over `ui`'s own
+/// (as the last launch left it, or composed now), and its app file. None:
+/// Zeron's own runs from `ui/`.
+fn lay_at_launch(ui: &Path, root: &Path) -> Option<PathBuf> {
+    let id = live::active(root);
     // `.live` as the last launch left it, from the same Zeron and template:
     // it runs as it is (live::LaunchStamp), nothing read or written.
-    let stamp = live::LaunchStamp::now(&ui, &root, &id);
-    if stamp.still_laid(&ui, &root) {
-        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+    let stamp = live::LaunchStamp::now(ui, root, &id);
+    if stamp.still_laid(ui, root) {
+        preview::note_running(root, &id);
+        let (_, overlay) = live::plan(root, &id, &Default::default(), false);
         LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
         let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
         LIVE_LAID.with(|l| *l.borrow_mut() = laid);
-        return root.join(live::LIVE).join("app.luau");
+        return Some(root.join(live::LIVE).join("app.luau"));
     }
-    if let Err(error) = live::sync_zeron(&ui, &root) {
+    if let Err(error) = live::sync_zeron(ui, root) {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
+        return None;
     }
     zgx::profile::mark("Zeron's own interface copied");
-    match live::compose(&root, &id, &Default::default(), false) {
+    // (Zeron's official templates are this build's by now.)
+    preview::note_running(root, &id);
+    match live::compose(root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
             // (Pictures of templates taken from the window, before their
@@ -850,17 +898,17 @@ pub fn prepare_live() -> PathBuf {
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
             // What the next launch can run as it is: `.live` as this left it.
-            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
-            if let Err(error) = laid_now.write(&root) {
+            let laid_now = live::LaunchStamp::now(ui, root, &id);
+            if let Err(error) = laid_now.write(root) {
                 eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
             }
             let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
             LIVE_LAID.with(|l| *l.borrow_mut() = laid);
-            root.join(live::LIVE).join("app.luau")
+            Some(root.join(live::LIVE).join("app.luau"))
         }
         Err(error) => {
             eprintln!("zeron-zgx: the template wasn't laid down ({error}); running Zeron's own from ui/");
-            fallback
+            None
         }
     }
 }
@@ -1794,6 +1842,21 @@ impl Bridge {
             return;
         }
         let id = survey.id.clone();
+        // What runs was taken down, or can't be checked: Zeron's own from this
+        // look on (the survey already says so), told by the host.
+        let running = self.laid.borrow().id.clone();
+        if running != live::BUILTIN && id == live::BUILTIN {
+            let (at, of) = (root.to_path_buf(), running.clone());
+            let stopped = off_thread(move || blocks::stop(&at, preview::approvals_path().as_deref(), Some(&of))).await.flatten();
+            if let Some((_, why)) = stopped {
+                self.chose.set(true);
+                held_back(&running, &why);
+                host_bar::notice(host_bar::Notice::stopped(&template_name(root, &running), &why));
+            }
+        }
+        if id != live::BUILTIN && HELD_BACK.with(|h| h.borrow_mut().take()).is_some_and(|held| held == id) {
+            self.chose.set(true);
+        }
         let whole_failed = id != live::BUILTIN && self.broken.borrow_mut().holds(&id, &survey.template_stamp);
         let failed: BTreeSet<String> = {
             let mut failures = self.failed_files.borrow_mut();
@@ -1818,8 +1881,18 @@ impl Bridge {
         let trusted = match cached {
             Some(t) => t,
             None => {
-                let (root, id) = (root.to_path_buf(), id.clone());
-                let t = off_thread(move || preview::trusted(&root, &id)).await.unwrap_or(false);
+                let (at, id) = (root.to_path_buf(), id.clone());
+                let t = off_thread(move || {
+                    preview::note_running(&at, &id);
+                    preview::trusted(&at, &id)
+                })
+                .await;
+                // (It couldn't be told there: told here, by its files alone,
+                // so Zeron's own is never taken for someone else's.)
+                let t = t.unwrap_or_else(|| {
+                    preview::note_running(root, &want.id);
+                    false
+                });
                 *self.trust.borrow_mut() = Some((trust_key, t));
                 t
             }
@@ -1895,6 +1968,9 @@ impl Bridge {
         let Some(root) = self.templates_dir() else { return };
         let active = self.overlay.borrow().template.clone();
         let mut list = Vec::new();
+        let mut from_store = false;
+        // What the engine's answer is of: moved, it's asked again.
+        let mut here = vec![json!([active, self.laid.borrow().template_stamp])];
         let mut status = serde_json::Map::new();
         let installed = live::installed(&root);
         // Each template's own theme (its theme.luau, as data), for the Themes
@@ -1912,7 +1988,32 @@ impl Bridge {
                 .keys()
                 .filter_map(|rel| self.failed_files.borrow().why(&format!("{}:{rel}", t.id)).map(|why| (rel.clone(), why.to_string())))
                 .collect();
-            let (state, error) = if let Some(why) = &broken {
+            let blocked = blocks::blocked(&root, &t.id);
+            from_store |= root.join(&t.id).join(".lineage.json").exists();
+            // (Taken down, in use or not: what was allowed of it is forgotten:
+            // again whenever the record moves, as an Allow under way may write
+            // to it after; a stat a look otherwise.)
+            let down = matches!(blocked, Some(blocks::Why::TakenDown { .. }));
+            if !down {
+                self.forgotten.borrow_mut().remove(&t.id);
+            } else if let Some(approvals) = preview::approvals_path() {
+                let stood = live::file_stamp(&approvals);
+                if self.forgotten.borrow().get(&t.id) != Some(&stood) {
+                    preview::forget_at(&approvals, &t.id);
+                    // (Kept only if it took, and as it stood before the read
+                    // that shows it: one written since moves it.)
+                    let after = live::file_stamp(&approvals);
+                    if !preview::allowed_at(&approvals).contains(&t.id) {
+                        self.forgotten.borrow_mut().insert(t.id.clone(), after);
+                    } else {
+                        self.forgotten.borrow_mut().remove(&t.id);
+                    }
+                }
+            }
+            here.push(row_here(&t, blocked.as_ref()));
+            let (state, error) = if blocked.is_some() {
+                ("blocked", None)
+            } else if let Some(why) = &broken {
                 ("broken", Some(why.clone()))
             } else if let Some((rel, why)) = errors.iter().next() {
                 ("errors", Some(format!("{rel}: {why}")))
@@ -1942,6 +2043,9 @@ impl Bridge {
             if let Some(error) = error {
                 fields.push(("error", Value::from(error.as_str())));
             }
+            if let Some(why) = &blocked {
+                fields.push(("blocked", json_value(&blocks::row(why))));
+            }
             // The colours its preview is drawn in (looks.rs): none for one
             // that changes none of Zeron's.
             let look = self.looks.look(&root, &t.id);
@@ -1951,12 +2055,24 @@ impl Bridge {
             // Someone's, from a package: who signed it, where it came from
             // (never a local path), and a newer version found there.
             if let Some(imported) = &t.imported {
+                let said = self.templates_said.borrow();
+                let row = store_rows::row(&said, &t.id, imported);
                 let mut imported = imported.clone();
-                if let Some(source) = imported.get_mut("source").and_then(Json::as_object_mut) {
-                    source.retain(|k, _| matches!(k.as_str(), "kind" | "url" | "ref"));
-                }
-                if let Some(found) = template_update(&root, &t.id, imported["hash"].as_str().unwrap_or("")) {
+                let of_store = imported["source"]["kind"] == "store";
+                from_store |= of_store;
+                imported["source"] = store_rows::source(&imported["source"], row);
+                // (A store template checks only the store: the engine's word.)
+                let found = match of_store {
+                    true => row.map(|row| row["update"].clone()).filter(Json::is_object),
+                    false => template_update(&root, &t.id, imported["hash"].as_str().unwrap_or("")),
+                };
+                if let Some(found) = found {
                     fields.push(("update", json_value(&found)));
+                }
+                for mark in ["edited", "prerelease"] {
+                    if of_store && row.is_some_and(|row| row[mark] == true) {
+                        fields.push((mark, Value::Bool(true)));
+                    }
                 }
                 fields.push(("imported", json_value(&imported)));
             }
@@ -1966,9 +2082,12 @@ impl Bridge {
         // or one brought in here). `here`: its window opened as it came, so
         // the app gives it no notice as well (screens/plugins/waiting).
         let mut pending = live::pending(&root);
+        here.push(json!(pending));
         for p in &mut pending {
             let name = p["pending"].as_str().unwrap_or("").to_string();
             p["here"] = json!(self.told.borrow().contains(&format!("template:{name}")));
+            store_rows::waiting(&self.templates_said.borrow(), p);
+            from_store |= p["from"]["kind"] == "store";
         }
         templates::write_if_changed(&root.join(live::STATUS), &Json::Object(status));
         self.templates_page.set(Value::record([
@@ -1978,6 +2097,43 @@ impl Bridge {
             ("list", vlist(list)),
             ("pending", vlist(pending.iter().map(json_value).collect())),
         ]));
+        *self.templates_here.borrow_mut() = Json::Array(here);
+        if from_store {
+            self.ask_templates();
+        }
+    }
+
+    /// What the engine says of the templates from the store, asked again if
+    /// what's here moved since it answered (`store_rows::Asks`); the page
+    /// brought up to date if it's anything new.
+    fn ask_templates(&self) {
+        if cfg!(test) || !self.template_asks.borrow_mut().due(&self.templates_here.borrow(), Instant::now()) {
+            return;
+        }
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            let said = template_call("ListTemplates", json!({})).await;
+            let Some(b) = me.upgrade() else { return };
+            // (Not answered: what it last said stays, and it's asked again at a
+            // look in a while.)
+            let answered = said.is_ok();
+            if let Ok(said) = said {
+                // (One the engine says is taken down, at once: blocks.rs.)
+                if let Some(root) = b.templates_dir()
+                    && blocks::take_rows(&root, &said)
+                {
+                    b.look();
+                }
+                if *b.templates_said.borrow() != said {
+                    b.template_updates.set(json_value(&store_rows::choices(&said)));
+                    *b.templates_said.borrow_mut() = said;
+                    b.publish_templates();
+                }
+            }
+            if b.template_asks.borrow_mut().done(answered, Instant::now()) {
+                b.ask_templates();
+            }
+        });
     }
 
     /// Settings → Plugins brought up to date, once what asked has settled:
@@ -3715,6 +3871,9 @@ impl Bridge {
                 async move {
                     // (A preview can't switch templates: preview.rs.)
                     preview::refuse("templates.use")?;
+                    if let Some(root) = templates_root() {
+                        blocks::refuse(&root, &text(&id))?;
+                    }
                     template_call("UseTemplate", json!({ "id": text(&id) })).await?;
                     // Chosen here, on Zeron's own Templates page (never a
                     // template's: screens/templates is never templated):
@@ -3756,6 +3915,7 @@ impl Bridge {
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let from = text(&id);
+                    blocks::refuse(&root, &from)?;
                     let (new_id, name) = live::copy_name(&root, &from);
                     template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
                     b.look();
@@ -3790,6 +3950,9 @@ impl Bridge {
         host.async_action("templates.export", |arg| async move {
             preview::refuse("templates.export")?;
             let id = arg.field("id").map(text).unwrap_or_default();
+            if let Some(root) = templates_root() {
+                blocks::refuse(&root, &id)?;
+            }
             let mut path = arg.field("path").map(text).unwrap_or_default();
             // (A save dialog's name, its extension taken off.)
             if !path.is_empty() && !path.ends_with(".zeron-template") {
@@ -3799,15 +3962,26 @@ impl Bridge {
         });
         host.async_action("templates.import", {
             let me = me.clone();
-            // A file (`path`, or `{ path }`) or a link (`{ url }`).
+            // A file (`path`, or `{ path }`), a link (`{ url }`) or the store's
+            // (`{ store, version? }`).
             move |arg| {
                 let me = me.clone();
                 async move {
                     preview::refuse("templates.import")?;
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                    let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url")) {
-                        (Some(path), None) => json!({ "path": path }),
-                        (None, Some(url)) => json!({ "url": url }),
+                    // (From the store, one of its versions: it always waits.)
+                    let store = given("store").map(|id| catalog::store_id(&id).ok_or("not_in_store")).transpose()?;
+                    let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url"), store) {
+                        (Some(path), None, None) => json!({ "path": path }),
+                        (None, Some(url), None) => json!({ "url": url }),
+                        (None, None, Some(store)) => {
+                            let mut params = json!({ "store": store });
+                            // (One that isn't a version: none of it, never another.)
+                            if let Some(version) = given("version") {
+                                params["version"] = json!(Some(version).filter(|v| catalog::version_ok(v)).ok_or("not_found")?);
+                            }
+                            params
+                        }
                         _ => return Err("Choose a template file or paste a link".into()),
                     };
                     let reply = template_call("ImportTemplate", params).await?;
@@ -3826,6 +4000,18 @@ impl Bridge {
         // Each template from a link (or a file) checked where it came from
         // for a newer version; and the one found for a template, installed
         // in its place.
+        // The page opens: what the engine says of the store's, as it is now
+        // (a mark is of when it's shown: one not in use isn't watched).
+        host.action("templates.refresh", {
+            let me = me.clone();
+            move |_| {
+                if let Some(b) = me.upgrade() {
+                    b.template_asks.borrow_mut().want();
+                    // (Asked only with something of the store's here.)
+                    b.publish_templates();
+                }
+            }
+        });
         host.async_action("templates.check_updates", {
             let me = me.clone();
             move |_| {
@@ -3833,6 +4019,7 @@ impl Bridge {
                 async move {
                     let reply = template_call("CheckTemplateUpdates", json!({})).await?;
                     if let Some(b) = me.upgrade() {
+                        b.template_asks.borrow_mut().want();
                         b.look();
                     }
                     Ok(json_value(&reply))
@@ -3957,6 +4144,11 @@ pub fn slug(name: &str) -> String {
 /// A template call: asked again once the account's setup is finished if
 /// the engine answered `setup_incomplete` (no organization chosen yet), so
 /// the templates page works as soon as setup does.
+/// What of a template here the engine's answer is of (`store_rows::Asks`).
+fn row_here(t: &live::Installed, blocked: Option<&blocks::Why>) -> Json {
+    json!([t.id, t.imported, blocked.map(blocks::row)])
+}
+
 async fn template_call(method: &str, params: Json) -> Result<Json, String> {
     crate::auth::after_setup(|| call(method, params.clone())).await
 }
@@ -4044,6 +4236,238 @@ mod tests {
 
     fn item(json: Json) -> Item {
         Item { json }
+    }
+
+    /// Someone who has only ever run Zeron's own (no `.active`, `zeron`, one
+    /// that's gone, or an official template) is never taken to have run
+    /// another's, whichever launch: the first, a warm one, or the one after an
+    /// update, whose official template still holds the last Zeron's files as
+    /// it starts. Another's is told at each.
+    #[test]
+    fn only_another_s_template_is_told_at_a_launch() {
+        let ui = crate::ui_dir();
+        let root = std::env::temp_dir().join(format!("zgx-ran-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Whether another's ran at a launch of `id` (none: no `.active`).
+        let launch = |id: Option<&str>, warm: bool| {
+            match id {
+                Some(id) => drop(live::set_active(&root, id).unwrap()),
+                None => drop(std::fs::remove_file(root.join(live::ACTIVE))),
+            }
+            let active = live::active(&root);
+            assert_eq!(live::LaunchStamp::now(&ui, &root, &active).still_laid(&ui, &root), warm, "{id:?}");
+            preview::another_s_ran_for_test(false);
+            assert!(lay_at_launch(&ui, &root).is_some(), "{id:?}");
+            preview::another_s_ran()
+        };
+        assert!(!launch(None, false), "the first launch");
+        assert!(!launch(None, true), "a warm one");
+        assert!(!launch(Some("zeron"), true));
+        assert!(!launch(Some("gone"), true), "one that isn't there runs Zeron's");
+        let official = "zeron-v2";
+        assert!(!launch(Some(official), false));
+        assert!(!launch(Some(official), true));
+        // After an update: the last Zeron's files, as it wrote them.
+        let dir = root.join(official);
+        std::fs::write(dir.join("screens/shell/last.luau"), "-- the last Zeron's").unwrap();
+        let base = dir.join(".base.json");
+        let mut record: Json = serde_json::from_slice(&std::fs::read(&base).unwrap()).unwrap();
+        record["screens/shell/last.luau"] = json!("0");
+        std::fs::write(&base, record.to_string()).unwrap();
+        assert!(preview::another_s(&root, official), "not this build's yet");
+        assert!(!launch(Some(official), false), "the launch after an update");
+        assert!(!dir.join("screens/shell/last.luau").exists());
+        assert!(!launch(Some(official), true));
+        // Another's, at both; and one that calls itself official.
+        std::fs::create_dir_all(root.join("mine/screens")).unwrap();
+        std::fs::write(root.join("mine/zeron-template.json"), r#"{"id":"mine","name":"Mine","builtin_template":"zeron-v2"}"#).unwrap();
+        std::fs::write(root.join("mine/screens/x.luau"), "-- x").unwrap();
+        assert!(launch(Some("mine"), false));
+        assert!(launch(Some("mine"), true));
+        // And never cleared by what runs after it.
+        lay_at_launch(&ui, &root);
+        live::set_active(&root, "zeron").unwrap();
+        lay_at_launch(&ui, &root);
+        assert!(preview::another_s_ran());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One taken down is never laid down at a launch, the first or a warm one
+    /// (whose `.live` still holds it), nor found by a look while it runs: with
+    /// no engine, from its list alone. The store's own, in a folder of another
+    /// name, and a copy of it, known by what it was copied from.
+    #[test]
+    fn a_look_with_nothing_changed_asks_nothing_and_reads_no_file_of_a_template() {
+        let root = std::env::temp_dir().join(format!("zgx-ticks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let templates = root.join("templates");
+        let write = |rel: &str, text: &str| {
+            let path = templates.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        // (As a file that has stood a while.)
+        let settle = |rel: &str| {
+            let path = if rel.starts_with("trust/") { root.join(rel) } else { templates.join(rel) };
+            std::fs::File::options().append(true).open(path).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(60)).unwrap();
+            // (Its change's time is now, whatever it says: stood a moment.)
+            std::thread::sleep(blocks::SETTLES + Duration::from_millis(50));
+        };
+        let hash = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
+        let record = |version: &str| json!({ "key": null, "hash": "h", "version": version, "source": { "kind": "store", "store": { "id": "midnight", "hash": hash } } }).to_string();
+        write("midnight/zeron-template.json", r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#);
+        write("midnight/screens/a.luau", "-- a");
+        write("midnight/.imported.json", &record("1.0.0"));
+        write("mine/zeron-template.json", r#"{"id":"mine","name":"Mine"}"#);
+        write(".blocked.json", r#"{"format":"zeron-template-blocks:v1","blocks":[{"id":"dusk","version":"1.0.0","reason":"x","at":1}]}"#);
+        blocks::copy_at(Some(root.join("trust/blocked.json")));
+        preview::enter_safe_for_test(false);
+        live::set_active(&templates, "midnight").unwrap();
+        // What a look does of them (`survey`, then `publish_templates`): how
+        // many times it asks the engine.
+        let asks = RefCell::new(store_rows::Asks::default());
+        let look = || {
+            let active = live::active(&templates);
+            let mut here = vec![json!([active, live::template_stamp(&templates.join(&active))])];
+            for t in live::installed(&templates) {
+                let blocked = blocks::blocked(&templates, &t.id);
+                here.push(row_here(&t, blocked.as_ref()));
+            }
+            here.push(json!(live::pending(&templates)));
+            let due = asks.borrow_mut().due(&Json::Array(here), Instant::now());
+            if due {
+                assert!(!asks.borrow_mut().done(true, Instant::now()));
+            }
+            usize::from(due)
+        };
+        assert_eq!(look(), 1, "as it starts");
+        for rel in ["midnight/.imported.json", ".blocked.json", "trust/blocked.json"] {
+            settle(rel);
+        }
+        look();
+        blocks::reads();
+        assert_eq!((0..200).map(|_| look()).sum::<usize>(), 0, "nothing changed");
+        assert_eq!(blocks::reads(), Vec::<PathBuf>::new(), "and nothing read");
+        // A file of the one in use: asked once. Its record: once, and read.
+        write("midnight/screens/a.luau", "-- another");
+        assert_eq!((0..50).map(|_| look()).sum::<usize>(), 1);
+        assert_eq!(blocks::reads(), Vec::<PathBuf>::new());
+        write("midnight/.imported.json", &record("1.0.1"));
+        settle("midnight/.imported.json");
+        assert_eq!((0..50).map(|_| look()).sum::<usize>(), 1);
+        assert_eq!(blocks::reads(), [templates.join("midnight/.imported.json")]);
+        // The list: read once, as it moves, and what it says holds.
+        write(".blocked.json", r#"{"format":"zeron-template-blocks:v1","blocks":[{"id":"midnight","version":"1.0.1","reason":"x","at":1}]}"#);
+        settle(".blocked.json");
+        assert_eq!(live::active(&templates), live::BUILTIN);
+        settle("trust/blocked.json");
+        look();
+        blocks::reads();
+        assert_eq!((0..50).map(|_| look()).sum::<usize>(), 0);
+        assert_eq!(blocks::reads(), Vec::<PathBuf>::new());
+        blocks::copy_at(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What a look costs with a store template here, and with none (release:
+    /// `cargo test --release … look_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "run on purpose: it measures"]
+    fn look_cost() {
+        let root = std::env::temp_dir().join(format!("zgx-look-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ui = crate::ui_dir();
+        preview::enter_safe_for_test(false);
+        live::sync_zeron(&ui, &root).unwrap();
+        blocks::copy_at(Some(root.join("trust/blocked.json")));
+        let cpu = || {
+            let mut used: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut used) };
+            let of = |t: libc::timeval| t.tv_sec as f64 * 1e3 + t.tv_usec as f64 / 1e3;
+            of(used.ru_utime) + of(used.ru_stime)
+        };
+        let measure = |what: &str| {
+            let stamp = live::ui_stamp(&ui);
+            // (Each part of it apart: what was there before the store's
+            // templates, and what they add.)
+            let time = |part: &dyn Fn()| {
+                (0..10).for_each(|_| part());
+                let before = cpu();
+                (0..200).for_each(|_| part());
+                (cpu() - before) / 200.
+            };
+            let survey = time(&|| drop(live::survey(&ui, &root, Some(&stamp))));
+            let listed = time(&|| drop((live::installed(&root), live::pending(&root))));
+            let checked = time(&|| {
+                for t in live::installed(&root) {
+                    let _ = row_here(&t, blocks::blocked(&root, &t.id).as_ref());
+                }
+            }) - time(&|| drop(live::installed(&root)));
+            println!("{what}: survey {survey:.2} ms, list {listed:.2} ms, blocks {checked:.2} ms a look; {:.3}% of a core at one in 2 s", (survey + listed + checked) / 20.);
+        };
+        measure("none installed");
+        let hash = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
+        for (rel, path) in live::files(&ui, zeron_plugin_guard::template::of_the_app) {
+            let to = root.join("midnight").join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(path, to).unwrap();
+        }
+        std::fs::write(root.join("midnight/zeron-template.json"), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#).unwrap();
+        std::fs::write(root.join("midnight/.imported.json"), json!({ "key": null, "hash": "h", "version": "1.0.0", "source": { "kind": "store", "store": { "id": "midnight", "hash": hash } } }).to_string()).unwrap();
+        std::fs::write(root.join(".blocked.json"), r#"{"format":"zeron-template-blocks:v1","blocks":[]}"#).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        measure("a store template (all of Zeron's files) installed, not in use");
+        live::set_active(&root, "midnight").unwrap();
+        assert_eq!(live::active(&root), "midnight");
+        measure("the same, in use");
+        blocks::copy_at(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_taken_down_is_never_laid_down() {
+        let ui = crate::ui_dir();
+        for (folder, file, says) in [
+            ("midnight-2", ".imported.json", r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"}}}"#),
+            ("my-copy", ".lineage.json", r#"[{"id":"first","version":"0.1.0","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"},{"id":"midnight","version":"1.2.0","hash":"4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e"}]"#),
+        ] {
+            let root = std::env::temp_dir().join(format!("zgx-down-{folder}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let dir = root.join(folder);
+            std::fs::create_dir_all(dir.join("screens")).unwrap();
+            std::fs::write(dir.join("zeron-template.json"), json!({ "id": folder, "name": "Midnight" }).to_string()).unwrap();
+            std::fs::write(dir.join("screens/midnight.luau"), "-- theirs").unwrap();
+            std::fs::write(dir.join(file), says).unwrap();
+            live::set_active(&root, folder).unwrap();
+            let laid = || root.join(live::LIVE).join("screens/midnight.luau").exists();
+            let list = |blocks: Json| std::fs::write(root.join(blocks::FILE), json!({ "format": "zeron-template-blocks:v1", "blocks": blocks }).to_string()).unwrap();
+            let down = json!([{ "id": "midnight", "version": "1.2.0", "reason": "x", "at": 1 }]);
+            preview::another_s_ran_for_test(false);
+            // (No list at all: the store's are off until there is one.)
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}");
+            list(json!([]));
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(laid(), "{folder}");
+            assert!(live::LaunchStamp::now(&ui, &root, folder).still_laid(&ui, &root), "{folder}: the next launch is a warm one");
+            assert_eq!(live::survey(&ui, &root, None).id, folder);
+            // Taken down as it runs: the next look is Zeron's own.
+            list(down.clone());
+            assert_eq!(live::survey(&ui, &root, None).id, live::BUILTIN, "{folder}");
+            // And while Zeron was closed: the warm launch lays nothing of it.
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}: nothing of it is left in .live");
+            // Restored, it's as it was; then taken down before a first launch.
+            list(json!([]));
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(laid(), "{folder}");
+            list(down);
+            std::fs::remove_file(root.join(live::LAUNCH_STAMP)).unwrap();
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// R26: a plugin removed, or back under its id from somewhere else,

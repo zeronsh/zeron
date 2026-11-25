@@ -655,14 +655,24 @@ pub mod methods {
     /// `{installed, name, author, ignored}`; anyone else's: kept for you to
     /// allow in Zeron, `{pending, id, name, …, key, author, hash, ignored,
     /// needs_consent: true}`. Unsigned or tampered packages are refused.
+    /// `{store, version?}`: from the store, by its id there; it waits,
+    /// whatever its record says (an agent's is a verified version, else
+    /// `needs_person`), over an earlier version of it that's here as an
+    /// update of that one: the item as `ListTemplates` lists it.
     pub const IMPORT_TEMPLATE: &str = "ImportTemplate";
-    /// `{pending, allow, hash}` → `{installed, name, author}` or
-    /// `{declined}`: the consent window's answer for a waiting package
-    /// (checked again; `hash` is the package as shown). Only Zeron's consent
-    /// window calls it.
+    /// `{pending, allow, hash, review}` → `{installed, name, author, digest}`
+    /// or `{declined}`: the consent window's answer for a waiting package
+    /// (checked again; `hash` is the package as shown). One from the store
+    /// has its record read again: `{changed}` ([`REVIEW_TEMPLATE`]) when it
+    /// isn't what it was allowed under. Only Zeron's consent window calls it.
     pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
-    /// `{pending, hash}` → `{review}`: as [`REVIEW_PLUGIN`], for
-    /// `DecideTemplate {allow: true}` on that waiting package.
+    /// `{pending, hash, shown?}` → `{review}`: as [`REVIEW_PLUGIN`], for
+    /// `DecideTemplate {allow: true}` on that waiting package. One from the
+    /// store says what its window draws, `shown: {verified, publisher,
+    /// publisher_id, version}` (required), and has its record read now: when
+    /// that isn't what's drawn, `{changed: {verified, verified_at?,
+    /// publisher, publisher_id}}` and no review. Refused when the store can't
+    /// be asked, or it's `taken_down` or `not_in_store`.
     pub const REVIEW_TEMPLATE: &str = "ReviewTemplate";
     /// Each template installed from a link checked there for a newer
     /// version (`{id?}`): `{updates, errors}`.
@@ -792,8 +802,17 @@ pub mod methods {
     /// verified, the newest verified beside it; `verified`: the newest
     /// verified. Taking an unverified version always asks.
     pub const SET_PLUGIN_UPDATES: &str = "SetPluginUpdates";
+    /// `{id, prefer: "newest" | "verified" | null}` → `{prefer, device}`: as
+    /// [`SET_PLUGIN_UPDATES`], for store template `id`. `id` is the store's:
+    /// one installed twice (`midnight` and `midnight-2`) shares it. (The
+    /// device's own choice, over plugins and templates, is
+    /// [`SET_PLUGIN_UPDATES`] without an id.)
+    pub const SET_TEMPLATE_UPDATES: &str = "SetTemplateUpdates";
+    /// `{id, on}` → `{id, on}`: whether this device takes store template
+    /// `id`'s pre-releases; by the store's id, as [`SET_TEMPLATE_UPDATES`].
+    pub const SET_TEMPLATE_PRERELEASES: &str = "SetTemplatePrereleases";
     /// `{ids}` → `{}`: the app has shown these of the plugin list's
-    /// `store_notices` (each `{id, plugin, version, name?, via: "device" |
+    /// `store_notices` (each `{id, kind, plugin, version, name?, via: "device" |
     /// "deploy_token", token_name?, at, words}`: a publish of one of the
     /// account's plugins this device didn't make), so the engine lets them
     /// go. Each is raised once per version, and kept until it's shown.
@@ -812,6 +831,20 @@ pub mod methods {
     /// checked, signed with this device's key and sent to the store with
     /// your session. The person's act alone: never an agent's.
     pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
+    /// `{id}` → as [`PREPARE_PLUGIN_PUBLISH`], of one of your own templates,
+    /// with `kind: "template"`. What its folder has and isn't sent is each a
+    /// warning (`left_out`).
+    pub const PREPARE_TEMPLATE_PUBLISH: &str = "PrepareTemplatePublish";
+    /// `{id, hash, ticket}` → as
+    /// [`PUBLISH_PLUGIN`], of a template as [`PREPARE_TEMPLATE_PUBLISH`]
+    /// checked it. The person's act alone: never an agent's.
+    pub const PUBLISH_TEMPLATE: &str = "PublishTemplate";
+    /// `{pending, hash}` → as
+    /// `ImportTemplate`'s reply: the verified version of a waiting store
+    /// template, instead of the unverified one; the version is the engine's
+    /// own waiting item's, refused `not_verified` unless its record, read
+    /// then, says verified. The person's act alone: never an agent's.
+    pub const INSTALL_VERIFIED_TEMPLATE: &str = "InstallVerifiedTemplate";
     /// `{}` → the store's `/me/plugins`: your plugins there, every version
     /// `verified` or not, with its `review` (a decline's reason and words are
     /// yours alone).
@@ -823,12 +856,14 @@ pub mod methods {
     /// last_used_at, expires_at, revoked_at}]}`: the account's deploy
     /// tokens, as the store lists them (never a secret).
     pub const LIST_DEPLOY_TOKENS: &str = "ListDeployTokens";
-    /// `{name, scope: {all: true} | {plugins: [id…]}, expires?}` →
+    /// `{name, scope: {all: true, all_kinds?} | {plugins: [id…]}, expires?}`
+    /// (`all_kinds`: `["plugin"]`, the default, or `["plugin", "template"]`;
+    /// the ids named are of either kind) →
     /// `{ok: true, token: {id, short, name, scope, expires_at,
     /// created_at}, secret}` (the secret, `zdt_…`, shown this once and kept
     /// nowhere), or `{ok: false, error, message}`: `step_up_required` (run
     /// [`STEP_UP`] `{for: "deploy_token"}`, then again: each token takes a
-    /// step-up of its own), `not_owner` with `ids` (plugins not yours in the
+    /// step-up of its own), `not_owner` with `ids` (those not yours in the
     /// store), `not_published`, `invalid_scope`, or the store's word. The
     /// scope is fixed: another scope is another token.
     pub const CREATE_DEPLOY_TOKEN: &str = "CreateDeployToken";
@@ -909,6 +944,11 @@ pub fn local_only(method: &str) -> bool {
             | methods::DECIDE_TEMPLATE
             | methods::CHECK_TEMPLATE_UPDATES
             | methods::UPDATE_TEMPLATE
+            | methods::PREPARE_TEMPLATE_PUBLISH
+            | methods::PUBLISH_TEMPLATE
+            | methods::INSTALL_VERIFIED_TEMPLATE
+            | methods::SET_TEMPLATE_UPDATES
+            | methods::SET_TEMPLATE_PRERELEASES
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             // Themes: this device's library and choice, never another's.
@@ -1376,6 +1416,11 @@ mod tests {
             methods::DECIDE_TEMPLATE,
             methods::CHECK_TEMPLATE_UPDATES,
             methods::UPDATE_TEMPLATE,
+            methods::PREPARE_TEMPLATE_PUBLISH,
+            methods::PUBLISH_TEMPLATE,
+            methods::INSTALL_VERIFIED_TEMPLATE,
+            methods::SET_TEMPLATE_UPDATES,
+            methods::SET_TEMPLATE_PRERELEASES,
             methods::DESCRIBE_APP,
             methods::LIST_THEMES,
             methods::GET_THEME,
@@ -1773,6 +1818,10 @@ mod tests {
             methods::REVIEW_TEMPLATE,
             methods::UPDATE_PLUGIN,
             methods::UPDATE_TEMPLATE,
+            methods::PUBLISH_TEMPLATE,
+            methods::INSTALL_VERIFIED_TEMPLATE,
+            methods::SET_TEMPLATE_UPDATES,
+            methods::SET_TEMPLATE_PRERELEASES,
             methods::APPLY_UPDATE,
             methods::ACCESS_TOKEN,
             methods::STEP_UP,

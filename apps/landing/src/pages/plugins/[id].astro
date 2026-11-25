@@ -1,5 +1,6 @@
 ---
-// A plugin's page, its Overview (the prototype's plugin page): its head
+// A plugin's page, or a template's (the same file under both prefixes:
+// astro.config.mjs), its Overview (the prototype's plugin page): its head
 // (who made it, what it does, getting it), its pictures on its own colour,
 // its README set to be read, and the rail of what a person weighs before
 // installing. The same for everyone, so kept by the Worker cache for at
@@ -11,6 +12,7 @@ import PluginTabs from "../../components/look/PluginTabs.astro";
 import Rail from "../../components/look/Rail.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/plugin.css";
+import { KIND_WORDS, kindOf } from "../../lib/store/kind.ts";
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { hueClass } from "../../lib/store/hue.ts";
 import { loadPlugin } from "../../lib/store/plugin-page.ts";
@@ -19,18 +21,19 @@ import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const asked = Astro.params.id ?? "";
 // One address per plugin: a query can't make the page (or its README) be made again, or split its cache.
-if (Astro.url.search) return Astro.redirect(pluginUrl(asked), 301);
+if (Astro.url.search) return Astro.redirect(pluginUrl(asked, kind), 301);
 
-const page = await loadPlugin(Astro.locals.edge, asked);
+const page = await loadPlugin(Astro.locals.edge, kind, asked);
 let readme = "";
 if (page.state === "ok") {
   const { plugin } = page;
   // Drawn once and kept by its text (rendered.ts), the try finished whether or not the visitor stays.
   // (A first heading that only says its name again isn't drawn: the page says it.)
   const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
-  const out = await drawn(Astro.url.origin, plugin.id, plugin.version, "readme", plugin.readme, { file: (p) => fileUrl(plugin.id, plugin.version, p), demote: true, title: plugin.name }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
+  const out = await drawn(Astro.url.origin, plugin.id, plugin.version, "readme", plugin.readme, { file: (p) => fileUrl(plugin.id, plugin.version, p, kind), demote: true, title: plugin.name }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
   readme = out.html;
   // Kept by shared caches only when what it shows is what it will show (a held or failed drawing isn't).
   if (keepable([out])) publicPage(Astro, [pluginTag(plugin.id)]);
@@ -45,12 +48,12 @@ const structured =
         "@type": "SoftwareApplication",
         name: page.plugin.name,
         description: page.plugin.summary,
-        applicationCategory: "Plugin",
+        applicationCategory: KIND_WORDS[kind].One,
         operatingSystem: "macOS, Windows, Linux",
         softwareVersion: page.plugin.version,
         dateModified: new Date(page.plugin.updated_at).toISOString(),
         ...(page.plugin.author.username ? { author: { "@type": "Person", name: `@${page.plugin.author.username}`, url: new URL(memberUrl(page.plugin.author.username), Astro.site).href } } : {}),
-        url: new URL(pluginUrl(page.plugin.id), Astro.site).href,
+        url: new URL(pluginUrl(page.plugin.id, kind), Astro.site).href,
         offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
       }).replace(/</g, "\\u003c")
     : null;
@@ -58,13 +61,16 @@ const structured =
 
 {
   page.state === "ok" ? (
-    <Store title={`${page.plugin.name}, a plugin for Zeron`} description={page.plugin.summary} canonical={pluginUrl(page.plugin.id)} current="browse" class={hueClass(page.plugin.id)}>
+    <Store title={`${page.plugin.name}, ${KIND_WORDS[kind].a} for Zeron`} description={page.plugin.summary} canonical={pluginUrl(page.plugin.id, kind)} current={kind} class={hueClass(page.plugin.id)}>
       {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
       <div class="wrap">
         <PluginHead plugin={page.plugin} category={page.category} versions={page.versions?.versions ?? page.plugin.versions} latestZeron={page.latestZeron} />
-        <Gallery id={page.plugin.id} name={page.plugin.name} version={page.plugin.version} screenshots={page.plugin.screenshots} />
-        <div class="cols2">
+        {/* (A plugin's pictures are a row across the page; a template's, its preview first, head the article's own column,
+            so its rail, what it runs as at its top, starts beside them.) */}
+        {kind === "plugin" && <Gallery kind={kind} id={page.plugin.id} name={page.plugin.name} version={page.plugin.version} screenshots={page.plugin.screenshots} />}
+        <div class:list={["cols2", { pictured: kind === "template" }]}>
           <div>
+            {kind === "template" && <Gallery kind={kind} lead={page.plugin.cover} id={page.plugin.id} name={page.plugin.name} version={page.plugin.version} screenshots={page.plugin.screenshots} />}
             <PluginTabs plugin={page.plugin} current="overview" versions={page.versions?.total ?? null} />
             {readme.trim() ? <article class="prose" set:html={readme} /> : <p class="prose">{page.plugin.summary}</p>}
           </div>
@@ -73,6 +79,6 @@ const structured =
       </div>
     </Store>
   ) : (
-    <NotHere state={page.state} retry={pluginUrl(asked)} />
+    <NotHere kind={kind} state={page.state} retry={pluginUrl(asked, kind)} />
   )
 }

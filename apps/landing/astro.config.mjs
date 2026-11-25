@@ -59,6 +59,44 @@ const notFoundHeaders = {
   },
 };
 
+/**
+ * The store's public pages, under both prefixes: a template's pages are a
+ * plugin's, given the kind by their address (lib/store/kind.ts), never a
+ * copy. (What a plugin has and a template doesn't, its asks, isn't there.)
+ * @type {import("astro").AstroIntegration}
+ */
+const templatePages = {
+  name: "zeron:template-pages",
+  hooks: {
+    "astro:config:setup": ({ injectRoute }) => {
+      for (const [at, page] of [
+        ["", "index.astro"],
+        ["/sitemap.xml", "sitemap.xml.ts"],
+        ["/[id]", "[id].astro"],
+        ["/[id]/report", "[id]/report.astro"],
+        ["/[id]/versions", "[id]/versions/index.astro"],
+        ["/[id]/versions/[version]", "[id]/versions/[version].astro"],
+        ["/[id]/files/[version]/[...path]", "[id]/files/[version]/[...path].ts"],
+      ])
+        injectRoute({ pattern: `/templates${at}`, entrypoint: `./src/pages/plugins/${page}`, prerender: false });
+      // (The staff's of it; the lists are one, at /admin/plugins.)
+      for (const [at, page] of [
+        ["/[id]", "[id]/index.astro"],
+        ["/[id]/actions/[action]", "[id]/actions/[action].astro"],
+        ["/[id]/[version]", "[id]/[version].astro"],
+        ["/[id]/[version]/[action]", "[id]/[version]/[action].astro"],
+      ])
+        injectRoute({ pattern: `/admin/templates${at}`, entrypoint: `./src/pages/admin/plugins/${page}`, prerender: false });
+      // (Yours of it.)
+      for (const [at, page] of [
+        ["/[id]", "[id].astro"],
+        ["/[id]/versions/[version]/[action]", "[id]/versions/[version]/[action].astro"],
+      ])
+        injectRoute({ pattern: `/account/templates${at}`, entrypoint: `./src/pages/account/plugins/${page}`, prerender: false });
+    },
+  },
+};
+
 /** The landing page's components with scripts of their own (their chunks' names). */
 const LANDING_SCRIPTS = /(^|\/)(Base|CopyCommand|Downloads|GitHubStars|Yours)\.astro_astro_type_script_/;
 
@@ -68,7 +106,7 @@ export default defineConfig({
   // /privacy is served from privacy.html, the URL the app and stores link to.
   build: { format: "file" },
   devToolbar: { enabled: false },
-  integrations: [devPages, notFoundHeaders],
+  integrations: [templatePages, devPages, notFoundHeaders],
   adapter: cloudflare({
     // Pictures are optimized at build time, as before the adapter.
     imageService: "compile",

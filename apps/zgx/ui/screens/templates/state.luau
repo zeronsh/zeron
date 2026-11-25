@@ -17,7 +17,8 @@
 --                            yours, as one .zeron-template file
 --   state.import(from)       from a file (`path`, or `{ path }`) or a link
 --                            (`{ url }`: a .zeron-template's, or a GitHub
---                            repository or release with one): a promise of
+--                            repository or release with one) or the store
+--                            (`{ store, version? }`: it always waits): a promise of
 --                            `{ installed = id, name }` (yours), or
 --                            `{ pending = name }` (someone else's: the host
 --                            opens Zeron's consent window for it)
@@ -44,8 +45,10 @@ export type Template = {
 	active: boolean,
 	-- "ok" | "broken" (it can't run: Zeron's own shows) | "errors" (some of
 	-- its files fall back) | "out_of_date" (made for another Zeron: Zeron
-	-- has updated since)
+	-- has updated since) | "blocked" (Zeron took it down, `blocked.reason`, or
+	-- can't check whether it did, `blocked.unchecked`: it can't be used)
 	status: string,
+	blocked: { reason: string?, unchecked: boolean? }?,
 	error: string?,
 	-- Installed from someone's package: who signed it (`author.kind` "you",
 	-- "verified" with `username`, or "unknown" with `reason`).
@@ -166,8 +169,13 @@ function M.export(id: string, path: string): any
 	return ui.call("templates.export", { id = id, path = path })
 end
 
-function M.import(from: string | { path: string?, url: string? }): any
+function M.import(from: string | { path: string?, url: string?, store: string?, version: string? }): any
 	return ui.call("templates.import", from)
+end
+
+-- The page opens: what the engine says of the store's, asked again.
+function M.refresh()
+	pcall(ui.invoke, "templates.refresh", nil)
 end
 
 function M.check_updates(): any

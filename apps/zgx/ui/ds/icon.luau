@@ -28,6 +28,7 @@ export type Name =
 	| "worktree"
 	| "shield-check"
 	| "pen-new-square"
+	| "key-minimalistic"
 	| "lock-keyhole-unlocked"
 	| "map-arrow-right"
 	| "access-supervised"

@@ -198,6 +198,21 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
     let _ = report;
     let all = [zgx::scene::Rect { x: 0., y: 0., width: w, height: h }];
     gpu.render(&app.ui.scene.borrow(), &all).map_err(|e| format!("render: {e:?}"))?;
+    // A picture's file is decoded off this thread, once a frame has wanted
+    // it: drawn again as each is there (a window's next frame would), until
+    // none comes for a while.
+    let mut quiet = 0;
+    while quiet < 20 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        app.frames(1);
+        quiet += 1;
+        if gpu.images_decoded() {
+            quiet = 0;
+            app.ui.prepare_frame();
+            let _ = app.ui.scene.borrow_mut().flush();
+            gpu.render(&app.ui.scene.borrow(), &all).map_err(|e| format!("render: {e:?}"))?;
+        }
+    }
     let mut rgba = gpu.readback().map_err(|e| format!("readback: {e:?}"))?;
     let (pw, ph) = ((w * scale).round() as u32, (h * scale).round() as u32);
 

@@ -21,8 +21,10 @@
  * sign-in earned (signing in again on the site earns another). Without one:
  * 403 `step_up_required`.
  *
- * `scope` is `{ all: true }` or `{ plugins: [id…] }` (1 to 50 ids, each the
- * caller's now; refused 400 `invalid_scope` with the bad or repeated `ids`,
+ * `scope` is `{ all: true, all_kinds? }` (`["plugin"]`, which it is unless it
+ * says `["plugin", "template"]`) or `{ plugins: [id…] }` (1 to 50 ids of
+ * either kind, each the caller's now; refused 400 `invalid_scope` with the
+ * bad or repeated `ids`,
  * or 403 `not_owner` with the ids that aren't theirs). `expires` (epoch ms,
  * optional) is in the future, within 5 years. Limits (user-directory.ts):
  * 20 live tokens an account, 10 new a day.
@@ -44,7 +46,7 @@ import {
 } from "../../user-directory";
 import { cookieSession, bearerUser, forbidden, headerBearer, sessionRequired, unauthenticated } from "./callers";
 import { readBody } from "./body";
-import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken } from "./deploy-token";
+import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken, readAllKinds, readScopeIds } from "./deploy-token";
 import { PLUGIN_ID_RE } from "./signing";
 
 /** Who owns a store plugin id, since when, and when it was first claimed;
@@ -87,18 +89,21 @@ const readScope = (raw: unknown): DeployTokenScope | Response => {
       status: 400,
       headers: { "content-type": "application/json", "cache-control": "no-store" }
     });
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return invalid("scope is { all: true } or { plugins: [id, …] }.");
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return invalid("scope is { all: true, all_kinds? } or { plugins: [id, …] }.");
   const scope = raw as Record<string, unknown>;
   const keys = Object.keys(scope);
-  if (keys.length === 1 && scope.all === true) return { all: true };
-  if (keys.length !== 1 || !Array.isArray(scope.plugins)) return invalid("scope is { all: true } or { plugins: [id, …] }.");
-  const ids = scope.plugins as unknown[];
-  if (ids.length < 1 || ids.length > MAX_DEPLOY_TOKEN_PLUGINS) return invalid(`A token's scope lists 1 to ${MAX_DEPLOY_TOKEN_PLUGINS} plugins.`);
-  const bad = ids.filter((id) => typeof id !== "string" || !PLUGIN_ID_RE.test(id));
-  if (bad.length) return invalid("Each plugin is a plugin id.", bad);
-  const repeated = ids.filter((id, i) => ids.indexOf(id) !== i);
-  if (repeated.length) return invalid("Name each plugin once.", [...new Set(repeated)]);
-  return { plugins: (ids as string[]).slice().sort() };
+  if (scope.all === true && keys.every((k) => k === "all" || k === "all_kinds")) {
+    // Every item of the account's, of these kinds: a plugin's alone unless it
+    // names both (one made before kinds were named is).
+    const kinds = readAllKinds(scope.all_kinds);
+    if (!kinds) return invalid('all_kinds is ["plugin"] or ["plugin", "template"].');
+    return { all: true, all_kinds: kinds };
+  }
+  if (keys.length !== 1 || !Array.isArray(scope.plugins)) return invalid("scope is { all: true, all_kinds? } or { plugins: [id, …] }.");
+  const read = readScopeIds(scope.plugins as unknown[]);
+  if ("plugins" in read) return read;
+  if (read.error === "count") return invalid(`A token's scope lists 1 to ${MAX_DEPLOY_TOKEN_PLUGINS} plugins or templates.`);
+  return read.error === "id" ? invalid("Each is a plugin's or a template's id.", read.ids) : invalid("Name each one once.", read.ids);
 };
 
 /** The signed-in caller (never a deploy token) with the step-up ticket a
@@ -232,7 +237,7 @@ export const handleDeployTokenAdminRoute = async (request: Request, env: Env, ur
   }
   if (typeof body?.pluginId === "string" && PLUGIN_ID_RE.test(body.pluginId) && body.all === undefined) {
     const owner = await pluginOwner(env, body.pluginId);
-    return fresh({ revoked: owner ? await directory.revokeDeployTokensFor(owner.owner, body.pluginId) : 0 });
+    return fresh({ revoked: owner ? await directory.revokeDeployTokensFor(owner.owner, body.pluginId, owner.kind) : 0 });
   }
   return jsonError(400, "bad_request", "Expected {pluginId} or {all: true}.");
 };

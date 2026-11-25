@@ -34,7 +34,7 @@ const { title, lead, current, plugins = null, tokens = null, action = null } = A
   <p class="lead">{lead}</p>
 </div>
 <nav class="sub" aria-label="Your pages">
-  <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Your plugins{plugins ? <span class="num">{plugins}</span> : null}</a>
+  <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Published{plugins ? <span class="num">{plugins}</span> : null}</a>
   <a href="/account/tokens" aria-current={current === "tokens" ? "page" : undefined}>Deploy tokens{tokens ? <span class="num">{tokens}</span> : null}</a>
 </nav>
 <slot />

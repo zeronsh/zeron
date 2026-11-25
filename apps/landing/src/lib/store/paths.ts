@@ -37,4 +37,4 @@ export function canonicalPath(path: string): string {
 export const isStaffPath = (path: string) => path === "/admin" || path.startsWith("/admin/");
 
 /** Paths of the store's (not the landing page's): answered on the canonical host alone. */
-export const isStorePath = (path: string) => /^\/(plugins|account|admin|auth\/web)(\/|$)/.test(path);
+export const isStorePath = (path: string) => /^\/(plugins|templates|account|admin|auth\/web)(\/|$)/.test(path);
