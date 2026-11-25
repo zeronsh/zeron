@@ -112,41 +112,35 @@ selected = {
 },
 ```
 
+**Start any `ds/tokens.luau` from Zeron's own file of the version you're on** (`.zeron/ds/tokens.luau`, what `create_template` copies) and change only your values. It's one whole file: a copy from an older Zeron is missing the tokens added since, and what draws with them goes wrong (project tiles, the ink a risky ask is said in). When `template_status` lists it in `out_of_date`, start again from the new one and put your values back.
+
 Keep only `ds/tokens.luau` (with this change) in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
 
-### Replace the new-chat page
+### Put words on the new-chat page
 
-`screens/chat/home.luau` is what shows under the composer on a new chat. Keep its `id`, its `hook` and its slot (plugins put greetings there) and its file drop (dropping a file on it attaches it):
+`screens/chat/home.luau` is the page under a new chat. **The composer floats over it**, from the page's middle up, so a column in the page (words above the plugins' slot, say) ends up under the composer, where nobody can read it. Copy Zeron's whole file (`.zeron/screens/chat/home.luau`) and change nothing in it: it has the page's `id`, its `hook`, its slot (plugins put greetings there), its file drop (dropping a file on it attaches it) and Zeron's first launch, which asks for a project. Then add one element, last in the column it returns:
 
 ```lua
--- screens/chat/home.luau
-local shared = require("@app/screens/chat/shared")
-
-local function Home(): Node
-	local zone = shared.drop_zone("home")
-	return ui.column {
-		id = "chat-home",
-		hook = "chat.home",
-		w_full = true,
-		h_full = true,
-		min_h = 0,
-		items = "center",
-		justify = "center",
-		gap = "$space.3",
-		on_file_hover = zone.on_file_hover,
-		on_file_drop = zone.on_file_drop,
-		drop_when = zone.drop_when,
-		on_drag_over = zone.on_drag_over,
-		on_drag_leave = zone.on_drag_leave,
-		on_drop = zone.on_drop,
-		ui.text { "What are we building?", text_size = "$font.size.xl", weight = "$font.weight.semibold", color = "$text.primary" },
-		ui.text { "Ask anything. Drop files to attach them.", color = "$text.tertiary" },
-		ui.slot("chat.home", { w_full = true, items = "center", gap = "$space.3", mb = "$space.8" }),
-	}
-end
-
-return Home
+-- screens/chat/home.luau: Zeron's own, and this last in Home()'s ui.column
+-- Its own words, over the composer (which stands from the page's middle up).
+ui.column {
+	absolute = true,
+	left = 0,
+	right = 0,
+	bottom = "50%",
+	pb = ui.raw(140, "the composer's top over the page's middle, and room under the words"),
+	items = "center",
+	gap = "$space.2",
+	pointer_events = "none",
+	hidden = function(): boolean
+		return route.needs_project:get()
+	end,
+	ui.text { "A clean sheet.", text_size = "$font.size.xl", weight = "$font.weight.semibold", color = "$text.primary" },
+	ui.text { "Write the first line, or drop a file on the desk.", color = "$text.tertiary" },
+},
 ```
+
+`absolute`, with `left` and `right` 0 and `bottom = "50%"`, stands it on the page's middle, where the composer is, and `pb` lifts the words over the composer. It's hidden on first launch, so that screen stays Zeron's, and takes no clicks. These words clear the composer in windows 800 and 600 points tall: look at yours at both.
 
 Save it with the template in use, and the next new chat shows it. If it fails, Zeron's own page shows in its place and `template_status` says why.
 
