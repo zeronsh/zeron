@@ -328,6 +328,8 @@ pub fn snapshot(templates: &Path, id: &str) -> std::io::Result<(PathBuf, bool)> 
     let from = templates.join(id);
     let mut plain = true;
     let mut stack = vec![from.clone()];
+    // (A template folder that isn't there: no copy, never an empty one.)
+    std::fs::read_dir(&from)?;
     while let Some(at) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&at) else {
             plain = false;

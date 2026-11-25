@@ -788,6 +788,18 @@ pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Sen
     heard.recv().await
 }
 
+/// Whether a look with nothing new to lay lays template `id` again, from a
+/// copy: a preview stands, what's laid is `id`'s with an app of its own (a
+/// switch from the preview lays it again after Zeron's own), and what was
+/// laid (`trust`) is approved now, so the switch would happen (a Keep).
+/// Unapproved, nothing lifts the preview: nothing to copy, look after look.
+fn lays_again(previewing: bool, overlay: &live::Overlay, trust: Option<&live::Judged>, id: &str) -> bool {
+    previewing
+        && overlay.template == id
+        && overlay.from_template.iter().any(|rel| zeron_plugin_guard::path::fold(rel) == "app.luau")
+        && trust.is_some_and(|j| j.id == id && (j.official || preview::kept(&j.id, &j.digest)))
+}
+
 /// Template `id` (its `failed` files Zeron's; Zeron's own alone if `whole`)
 /// laid in `.live` off this thread. What `.live` holds is unknown (`laid` a
 /// default, which no look takes for laid) from the start until it's Ok, then
@@ -1790,10 +1802,7 @@ impl Bridge {
         // to one with an app of its own lays it again: from a copy, judged.)
         // (What runs now, read once for this look: the switch's own.)
         let was_previewing = preview::current();
-        let lays_again = was_previewing.is_some() && {
-            let o = self.overlay.borrow();
-            o.template == id && o.from_template.iter().any(|rel| zeron_plugin_guard::path::fold(rel) == "app.luau")
-        };
+        let lays_again = lays_again(was_previewing.is_some(), &self.overlay.borrow(), self.trust.borrow().as_ref(), &id);
         let copy = if id != live::BUILTIN && (compose || lays_again) {
             let (at, of) = (root.to_path_buf(), id.clone());
             off_thread(move || live::snapshot(&at, &of).ok()).await.flatten()

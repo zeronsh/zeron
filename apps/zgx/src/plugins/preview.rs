@@ -426,7 +426,9 @@ pub fn guard(kind: zgx_script::GuardKind, name: &str) -> Result<(), String> {
 pub fn digest(template: &Path) -> String {
     let mut h = Sha256::new();
     for (rel, path) in live::files(template, |rel| !live::template_meta(rel) && !live::never_templated(rel)) {
-        let bytes = std::fs::read(&path).unwrap_or_default();
+        // (One that can't be read isn't counted: the copy leaves it out too,
+        // so what's kept and what's laid are of the same files.)
+        let Ok(bytes) = std::fs::read(&path) else { continue };
         h.update((rel.len() as u64).to_le_bytes());
         h.update(rel.as_bytes());
         h.update((bytes.len() as u64).to_le_bytes());
@@ -1546,6 +1548,22 @@ return ui.column { ui.text { "kept" } }"#;
         // And no copy, no lay-down of a template.
         assert!(!w.lay_from("x", None));
         set(None);
+    }
+
+    /// A look with nothing new to lay, a preview with an app of its own
+    /// standing: it copies and lays again only when what's laid is approved
+    /// (a Keep); else nothing, look after look.
+    #[test]
+    fn a_preview_left_as_it_is_isn_t_copied_again() {
+        let overlay = live::Overlay { template: "x".into(), from_template: ["app.luau".to_string()].into() };
+        let unapproved = live::Judged { id: "x".into(), official: false, digest: "not kept".into() };
+        let official = live::Judged { id: "x".into(), official: true, digest: String::new() };
+        assert!(!super::super::lays_again(true, &overlay, Some(&unapproved), "x"), "nothing changed: nothing laid");
+        assert!(!super::super::lays_again(true, &overlay, None, "x"));
+        assert!(super::super::lays_again(true, &overlay, Some(&official), "x"), "approved: laid again");
+        assert!(!super::super::lays_again(false, &overlay, Some(&official), "x"), "no preview standing");
+        let zerons_app = live::Overlay { template: "x".into(), from_template: ["screens/a.luau".to_string()].into() };
+        assert!(!super::super::lays_again(true, &zerons_app, Some(&official), "x"), "Zeron's app: one lay-down");
     }
 
     /// `now`, for a finish whose lay closure is already ready.
