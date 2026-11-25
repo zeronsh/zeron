@@ -331,9 +331,20 @@ describe("templates: what's refused", () => {
     const plug = uniqueId("x");
     // A plugin's package at the templates' prefix, and the reverse.
     const asPlugin = await publishTemplate(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }));
-    expect([asPlugin.status, await json(asPlugin)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package" })]);
+    expect([asPlugin.status, await json(asPlugin)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: "That isn't a Zeron template" })]);
     const asTemplate = await publish(a.userId, plug, await makeTemplate({ id: plug, version: "1.0.0", signer: a.signer }));
-    expect([asTemplate.status, await json(asTemplate)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package" })]);
+    expect([asTemplate.status, await json(asTemplate)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: "That isn't a Zeron plugin" })]);
+    // What isn't a package at all is told the kind it was sent as, and so is
+    // one of too many files.
+    const many = JSON.stringify({ format: "zeron-template:v1", manifest: {}, files: Object.fromEntries(Array.from({ length: 2_001 }, (_, i) => [`f${i}`, ""])) });
+    for (const [send, kind] of [[publishTemplate, "template"], [publish, "plugin"]] as const) {
+      for (const raw of ["nope", "{}"]) {
+        const res = await send(a.userId, id, new TextEncoder().encode(raw));
+        expect([res.status, await json(res)], `${kind} ${raw}`).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: `That isn't a Zeron ${kind}` })]);
+      }
+      const big = await send(a.userId, id, new TextEncoder().encode(many.replace("zeron-template", `zeron-${kind}`)));
+      expect([big.status, await json(big)], kind).toEqual([413, expect.objectContaining({ error: "too_large", reason: "too_big", message: `It's too big for a ${kind}` })]);
+    }
     // A template signed in the plugin domain.
     const wrongDomain = await publishTemplate(a.userId, id, await makeTemplate({ id, version: "1.0.0", signer: a.signer, prefix: "zeron-plugin:v1\n" }));
     expect(await error(wrongDomain)).toEqual([400, "bad_signature"]);
