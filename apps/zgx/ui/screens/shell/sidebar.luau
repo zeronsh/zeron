@@ -42,6 +42,9 @@ export type Props = {
 	island: boolean?,
 	-- Room left at its top for the title bar laid over it.
 	top: number?,
+	-- Whether the sidebar stands as a card with the window's 5-point gap
+	-- before it (v3's default; v2's sidebar runs flush to the window edge).
+	card: boolean?,
 }
 
 -- What the sidebar and its rail share: the view options (Zeron's Organize,
@@ -1678,6 +1681,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if not props.island then
 		M.card:set(nil)
 	end
+	local card = not props.island and props.card ~= false
 	local bar = ds.Sidebar {
 		compact = shared.compact,
 		organize = shared.organize :: any,
@@ -1687,8 +1691,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		places = shared.places :: any,
 		width = shared.width,
 		default_width = fit.SIDEBAR_DEFAULT,
-		shown = if props.island then nil else view.sidebar_shown,
-		before = if props.island then nil else 5,
+		shown = if card then view.sidebar_shown else nil,
+		before = if card then 5 else nil,
 		-- (Its edge double-clicked: the chat and the panel split again, as
 		-- Zeron's `reset_panel_widths`.)
 		on_reset = function()
@@ -1709,7 +1713,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
-		card = not props.island,
+		card = card,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
@@ -1771,7 +1775,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if props.island then
 		return bar
 	end
-	return ui.div {
+	local holder: { [any]: any } = {
 		id = "shell-sidebar",
 		hook = "shell.sidebar",
 		h_full = true,
@@ -1781,18 +1785,23 @@ M.Sidebar = ui.component(function(props: Props): Node
 		-- going only with its last 5 points, so the card's left edge stands
 		-- still as it folds and comes back. It once closed on the sidebar's
 		-- clock, the whole card sliding 5 points.)
-		pl = function(): number
-			local shown = view.sidebar_shown:get()
-			return ui.raw(math.min(5, shown), "the window's gap before its card")
-		end,
-		-- (That gap's top moves the window, as the bar beside it does.)
-		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
-		bar,
-		rename_dialog(),
-		delete_dialog(),
-		sleep_dialog(),
-		project_dialogs(),
+		pl = if card
+			then function(): number
+				local shown = view.sidebar_shown:get()
+				return ui.raw(math.min(5, shown), "the window's gap before its card")
+			end
+			else nil,
 	}
+	if card then
+		-- (That gap's top moves the window, as the bar beside it does.)
+		table.insert(holder, ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true })
+	end
+	table.insert(holder, bar)
+	table.insert(holder, rename_dialog())
+	table.insert(holder, delete_dialog())
+	table.insert(holder, sleep_dialog())
+	table.insert(holder, project_dialogs())
+	return ui.div(holder)
 end)
 
 -- A project's name and icon edited (Edit project…), from its header's menu
