@@ -1,5 +1,5 @@
 name: Publish a Zeron plugin
-description: Check a Zeron plugin against the store's rules and publish it (live at once, verified once Zeron has read it) with a deploy token.
+description: Check a Zeron plugin or template against the store's rules and publish it (live at once, verified once Zeron has read it) with a deploy token.
 author: Zeron
 branding:
   icon: upload-cloud
@@ -10,12 +10,12 @@ inputs:
     description: >-
       A deploy token (zdt_…), from your repository's secrets. Make one with
       `zeron plugin token create --name "GitHub Actions" --plugins <id>`, in
-      Zeron, or on the store's site. Without it, the plugin is only checked
-      (`zeron plugin check`).
+      Zeron, or on the store's site. Without it, the plugin (or template) is
+      only checked (`zeron plugin check`, `zeron template check`).
     required: false
     default: ""
   path:
-    description: The plugin's folder (the one with zeron-plugin.json), relative to the workspace.
+    description: The plugin's or template's folder (the one with zeron-plugin.json or zeron-template.json), relative to the workspace.
     required: false
     default: "."
   dry-run:

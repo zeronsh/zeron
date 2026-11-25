@@ -253,11 +253,49 @@ async fn ci_checks_and_publishes_a_template_with_a_deploy_token() {
     assert_eq!(older.status.code(), Some(1), "{}", text(&older));
     assert!(text(&older).contains("error: not_newer (version)"), "{}", text(&older));
     assert_eq!(store.state.lock().unwrap().submitted_templates.len(), 1);
+    // What it leaves out is said, and in no one's way.
+    version("1.0.1");
+    std::fs::create_dir_all(folder.join("account")).unwrap();
+    write("account/page.luau", b"return {}");
+    let said = run.run(&store, None, "template", &["check", &arg]).await;
+    assert_eq!(said.status.code(), Some(0), "{}", text(&said));
+    assert!(text(&said).contains("warning: left_out (account/page.luau)"), "{}", text(&said));
+    std::fs::remove_dir_all(folder.join("account")).unwrap();
+    // The rest is the running Zeron's (2, when none is), never a token's.
+    for (token, args, words) in [
+        (None, vec!["publish", "midnight"], "Zeron isn't running here"),
+        (None, vec!["store"], "`zeron template store` needs Zeron running"),
+        (None, vec!["yank", "midnight", "1.0.0"], "`zeron template yank` needs Zeron running"),
+        (Some(secret.as_str()), vec!["unyank", "midnight", "1.0.0"], "a deploy token only publishes"),
+    ] {
+        let out = run.run(&store, token, "template", &args).await;
+        assert!(out.status.code() == Some(2) && text(&out).contains(words), "{args:?}: {}", text(&out));
+    }
     // No token, no such folder, a folder that's no template (2).
     for (token, args) in [(None, vec!["publish", &arg]), (Some(secret.as_str()), vec!["publish", "/no/such/folder"]), (None, vec!["check", run.home.to_str().unwrap()])] {
         let out = run.run(&store, token, "template", &args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
     }
+}
+
+/// A release's own template files, from its source: JSON alone on stdout (a
+/// file is made of it), or nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_s_stock_is_printed_whole_or_not_at_all() {
+    let store = FakeStore::start().await;
+    let run = Run::new();
+    let ui = run.home.join("ui");
+    std::fs::create_dir_all(&ui).unwrap();
+    let arg = ui.display().to_string();
+    for (args, words) in [(["stock", &arg, "--version", "0.3.20"], "no app.luau"), (["stock", &arg, "--version", "0.0.0"], "development build")] {
+        let out = run.run(&store, None, "template", &args).await;
+        assert!(out.status.code() == Some(2) && out.stdout.is_empty() && text(&out).contains(words), "{args:?}: {}", text(&out));
+    }
+    std::fs::write(ui.join("app.luau"), "return {}").unwrap();
+    let out = run.run(&store, None, "template", &["stock", &arg, "--version", "0.3.20"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stock: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((&stock["version"], stock["files"]["app.luau"].as_array().map(Vec::len)), (&json!("0.3.20"), Some(1)), "{stock}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

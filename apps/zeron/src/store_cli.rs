@@ -1,6 +1,6 @@
 //! `zeron plugin check|publish|status|token|yank|unyank`: the plugin
-//! store from the command line; and `zeron template check|publish`, a
-//! template's, with a deploy token.
+//! store from the command line; and `zeron template
+//! check|publish|store|yank|unyank`, a template's (`store` is its `status`).
 //!
 //! Two ways, one model (the plan's "Who may publish"):
 //! - **In CI**, with a deploy token in `ZERON_DEPLOY_TOKEN` (never an
@@ -10,7 +10,8 @@
 //!   bearer (`store::client`).
 //! - **On your machine**, without it: through the running Zeron, your own
 //!   plugin signed with this device's key and sent with your session
-//!   (`PreparePluginPublish`, then `PublishPlugin` with the ticket it gave).
+//!   (`PreparePluginPublish`, then `PublishPlugin` with the ticket it gave;
+//!   a template's, `PrepareTemplatePublish` and `PublishTemplate`).
 //!
 //! `check` needs neither. Failures say one line each and exit with a code a
 //! CI job can act on ([`code`]).
@@ -160,15 +161,13 @@ pub async fn standalone_template(command: TemplateCommand, data_dir: &Path) -> a
             out!("{} {} meets the store's rules.", checked.id, checked.version);
             Ok(None)
         }
-        TemplateCommand::Stock { zeron } => {
-            let stock = zeron_engine::plugins::templates::stock(&zeron).map_err(|e| exit(SETUP, e))?;
+        TemplateCommand::Stock { ui, version } => {
+            let stock = zeron_engine::plugins::templates::stock(&ui, &version).map_err(|e| exit(SETUP, e))?;
             println!("{}", serde_json::to_string_pretty(&stock)?);
             Ok(None)
         }
         TemplateCommand::Publish { target, dry_run } => {
-            let Some(token) = deploy_token()? else {
-                return Err(exit(SETUP, format!("Set {} to a deploy token to publish a template (`zeron plugin token create`).", deploy_token::ENV)));
-            };
+            let Some(token) = deploy_token()? else { return Ok(Some(TemplateCommand::Publish { target, dry_run })) };
             let prepared = read_template(&template_folder(&target, data_dir)?)?;
             publish_with(token, Kind::Template, Checked::from(&prepared), || prepared.pack(None), dry_run).await?;
             Ok(None)
@@ -260,15 +259,30 @@ pub fn needs_zeron(command: &PluginCommand) -> String {
         PluginCommand::Status { .. } => "status",
         _ => "publish",
     };
+    without_zeron("plugin", what)
+}
+
+/// [`needs_zeron`], of a template's command.
+pub fn template_needs_zeron(command: &TemplateCommand) -> String {
+    let what = match command {
+        TemplateCommand::Yank { .. } => "yank",
+        TemplateCommand::Unyank { .. } => "unyank",
+        TemplateCommand::Store { .. } => "store",
+        _ => "publish",
+    };
+    without_zeron("template", what)
+}
+
+fn without_zeron(noun: &str, what: &str) -> String {
     if what != "publish" && std::env::var(deploy_token::ENV).is_ok_and(|s| !s.trim().is_empty()) {
         format!(
-            "`zeron plugin {what}` needs Zeron running here and signed in: a deploy token only publishes ({} can't do this)",
+            "`zeron {noun} {what}` needs Zeron running here and signed in: a deploy token only publishes ({} can't do this)",
             deploy_token::ENV
         )
     } else if what == "publish" {
         format!("Zeron isn't running here. From CI, set {} to a deploy token (`zeron plugin token create`).", deploy_token::ENV)
     } else {
-        format!("`zeron plugin {what}` needs Zeron running here and signed in. Open it, or start it with `zeron headless`.")
+        format!("`zeron {noun} {what}` needs Zeron running here and signed in. Open it, or start it with `zeron headless`.")
     }
 }
 
@@ -356,21 +370,30 @@ fn submitted(what: &str, reply: &Value, page: &str) {
     }
 }
 
-/// `zeron plugin status`'s lines: each plugin, then each version's state.
-fn print_status(reply: &Value, only: Option<&str>) {
-    for line in status_lines(reply, only) {
+/// `zeron plugin status`'s lines (`zeron template store`'s): each plugin or
+/// template, then each version's state.
+fn print_status(kind: Kind, reply: &Value, only: Option<&str>) {
+    for line in status_lines(kind, reply, only) {
         println!("{line}");
     }
 }
 
 /// [`print_status`]'s lines, each [`listing::escaped`] (the store's words).
-fn status_lines(reply: &Value, only: Option<&str>) -> Vec<String> {
-    let plugins: Vec<&Value> = reply["plugins"].as_array().into_iter().flatten().filter(|p| only.is_none_or(|id| p["id"] == id)).collect();
+fn status_lines(kind: Kind, reply: &Value, only: Option<&str>) -> Vec<String> {
+    let items: Vec<&Value> = reply[kind.segment()].as_array().into_iter().flatten().filter(|p| only.is_none_or(|id| p["id"] == id)).collect();
     let mut lines = Vec::new();
-    if plugins.is_empty() {
-        lines.push(if only.is_some() { "That plugin isn't yours in the store." } else { "You have no plugins in the store yet." }.to_owned());
+    if items.is_empty() {
+        lines.push(
+            match (kind, only.is_some()) {
+                (Kind::Plugin, true) => "That plugin isn't yours in the store.",
+                (Kind::Plugin, false) => "You have no plugins in the store yet.",
+                (Kind::Template, true) => "That template isn't yours in the store.",
+                (Kind::Template, false) => "You have no templates in the store yet.",
+            }
+            .to_owned(),
+        );
     }
-    for plugin in plugins {
+    for plugin in items {
         lines.push(listing::escaped(plugin["id"].as_str().unwrap_or("?")));
         for version in plugin["versions"].as_array().into_iter().flatten() {
             let mark = if version["verified"] == true { "verified" } else { "not verified" };
@@ -403,11 +426,13 @@ fn size(bytes: u64) -> String {
 
 // ── Through the running Zeron ───────────────────────────────────────────────
 
+const TOO_OLD: &str = "This Zeron is too old for the store. Update it first.";
+
 /// `method` asked of the running Zeron: its failure as an exit.
 async fn ask(client: &zeron_rpc::RpcClient, method: &'static str, params: Value) -> anyhow::Result<Value> {
     client.call(method, params).await.map_err(|error| match error {
         zeron_rpc::RpcError::Failed(message) => failed(&message),
-        zeron_rpc::RpcError::UnknownMethod(_) => exit(SETUP, "This Zeron is too old for the store. Update it first."),
+        zeron_rpc::RpcError::UnknownMethod(_) => exit(SETUP, TOO_OLD),
         other => exit(UNREACHABLE, other.to_string()),
     })
 }
@@ -417,33 +442,64 @@ pub async fn through_zeron(command: PluginCommand, data_dir: &Path, client: &zer
     let call = |method: &'static str, params: Value| ask(client, method, params);
     match command {
         PluginCommand::Publish { target, dry_run } => {
-            let id = own_id(&target, data_dir)?;
-            let prepared = call(methods::PREPARE_PLUGIN_PUBLISH, json!({ "id": id })).await?;
-            for (kind, key) in [("warning", "warnings"), ("error", "problems")] {
-                for p in prepared[key].as_array().into_iter().flatten() {
-                    let at = p["path"].as_str().or(p["field"].as_str()).map(|a| format!(" ({a})")).unwrap_or_default();
-                    note!("{kind}: {}{at}: {}", p["rule"].as_str().unwrap_or("?"), p["words"].as_str().unwrap_or(""));
-                }
-            }
-            let what = format!("{id} {}", prepared["version"].as_str().unwrap_or(""));
-            if prepared["ok"] != true {
-                let n = prepared["problems"].as_array().map_or(0, Vec::len);
-                return Err(exit(RULES, format!("{what} doesn't meet the store's rules ({n} problem{}): fix and try again", if n == 1 { "" } else { "s" })));
-            }
-            if dry_run {
-                out!("{what} is ready to publish. Not sent (--dry-run).");
-                return Ok(());
-            }
-            let reply = call(methods::PUBLISH_PLUGIN, json!({ "id": id, "hash": prepared["hash"], "ticket": prepared["ticket"] })).await?;
-            answered(&reply)?;
-            submitted(&what, &reply, reply["url"].as_str().unwrap_or_default());
+            publish_through(client, Kind::Plugin, &target, data_dir, dry_run).await?;
         }
-        PluginCommand::Status { id } => print_status(&call(methods::STORE_MY_PLUGINS, json!({})).await?, id.as_deref()),
-        PluginCommand::Yank { id, version } => action(client, &id, &version, "yank").await?,
-        PluginCommand::Unyank { id, version } => action(client, &id, &version, "unyank").await?,
+        PluginCommand::Status { id } => print_status(Kind::Plugin, &call(methods::STORE_MY_PLUGINS, json!({})).await?, id.as_deref()),
+        PluginCommand::Yank { id, version } => action(client, Kind::Plugin, &id, &version, "yank").await?,
+        PluginCommand::Unyank { id, version } => action(client, Kind::Plugin, &id, &version, "unyank").await?,
         PluginCommand::Token { command } => token(client, command).await?,
         _ => unreachable!("only the store's commands get here"),
     }
+    Ok(())
+}
+
+/// The same of templates.
+pub async fn template_through_zeron(command: TemplateCommand, data_dir: &Path, client: &zeron_rpc::RpcClient) -> anyhow::Result<()> {
+    match command {
+        TemplateCommand::Publish { target, dry_run } => publish_through(client, Kind::Template, &target, data_dir, dry_run).await,
+        TemplateCommand::Store { id } => {
+            let reply = ask(client, methods::STORE_MY_PLUGINS, json!({ "kind": "template" })).await?;
+            // (One that reads no kind answers with your plugins.)
+            if reply["kind"] != "template" {
+                return Err(exit(SETUP, TOO_OLD));
+            }
+            print_status(Kind::Template, &reply, id.as_deref());
+            Ok(())
+        }
+        TemplateCommand::Yank { id, version } => action(client, Kind::Template, &id, &version, "yank").await,
+        TemplateCommand::Unyank { id, version } => action(client, Kind::Template, &id, &version, "unyank").await,
+        _ => unreachable!("only the store's commands get here"),
+    }
+}
+
+/// Your own `target` of `kind`, checked by the running Zeron and published
+/// as it was checked, with the ticket its check gave.
+async fn publish_through(client: &zeron_rpc::RpcClient, kind: Kind, target: &str, data_dir: &Path, dry_run: bool) -> anyhow::Result<()> {
+    let call = |method: &'static str, params: Value| ask(client, method, params);
+    let (prepare, publish) = match kind {
+        Kind::Plugin => (methods::PREPARE_PLUGIN_PUBLISH, methods::PUBLISH_PLUGIN),
+        Kind::Template => (methods::PREPARE_TEMPLATE_PUBLISH, methods::PUBLISH_TEMPLATE),
+    };
+    let id = own_id(kind, target, data_dir)?;
+    let prepared = call(prepare, json!({ "id": id })).await?;
+    for (kind, key) in [("warning", "warnings"), ("error", "problems")] {
+        for p in prepared[key].as_array().into_iter().flatten() {
+            let at = p["path"].as_str().or(p["field"].as_str()).map(|a| format!(" ({a})")).unwrap_or_default();
+            note!("{kind}: {}{at}: {}", p["rule"].as_str().unwrap_or("?"), p["words"].as_str().unwrap_or(""));
+        }
+    }
+    let what = format!("{id} {}", prepared["version"].as_str().unwrap_or(""));
+    if prepared["ok"] != true {
+        let n = prepared["problems"].as_array().map_or(0, Vec::len);
+        return Err(exit(RULES, format!("{what} doesn't meet the store's rules ({n} problem{}): fix and try again", if n == 1 { "" } else { "s" })));
+    }
+    if dry_run {
+        out!("{what} is ready to publish. Not sent (--dry-run).");
+        return Ok(());
+    }
+    let reply = call(publish, json!({ "id": id, "hash": prepared["hash"], "ticket": prepared["ticket"] })).await?;
+    answered(&reply)?;
+    submitted(&what, &reply, reply["url"].as_str().unwrap_or_default());
     Ok(())
 }
 
@@ -456,27 +512,39 @@ fn answered(reply: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn action(client: &zeron_rpc::RpcClient, id: &str, version: &str, action: &str) -> anyhow::Result<()> {
-    let reply = ask(client, methods::STORE_VERSION_ACTION, json!({ "id": id, "version": version, "action": action })).await?;
+async fn action(client: &zeron_rpc::RpcClient, kind: Kind, id: &str, version: &str, action: &str) -> anyhow::Result<()> {
+    let mut params = json!({ "id": id, "version": version, "action": action });
+    if kind == Kind::Template {
+        params["kind"] = json!("template");
+    }
+    let reply = ask(client, methods::STORE_VERSION_ACTION, params).await?;
     answered(&reply)?;
     out!("{}", acted(id, version, action, &reply));
     Ok(())
 }
 
-/// The id of your plugin `target` names: an id, or its folder in Zeron's
-/// plugins folder.
-fn own_id(target: &str, data_dir: &Path) -> anyhow::Result<String> {
-    if manifest::check_id(target).is_ok() && !Path::new(target).is_dir() {
+/// The id of your plugin or template `target` names: an id, or its folder in
+/// Zeron's plugins or templates folder.
+fn own_id(kind: Kind, target: &str, data_dir: &Path) -> anyhow::Result<String> {
+    let (noun, root) = match kind {
+        Kind::Plugin => ("plugin", PLUGINS_DIR),
+        Kind::Template => ("template", TEMPLATES_DIR),
+    };
+    let is_id = match kind {
+        Kind::Plugin => manifest::check_id(target).is_ok(),
+        Kind::Template => zeron_engine::plugins::templates::valid_id(target),
+    };
+    if is_id && !Path::new(target).is_dir() {
         return Ok(target.to_owned());
     }
-    let canonical = std::fs::canonicalize(target).map_err(|_| exit(SETUP, format!("{target}: there's no plugin folder there")))?;
-    let plugins = std::fs::canonicalize(data_dir.join(PLUGINS_DIR)).ok();
+    let canonical = std::fs::canonicalize(target).map_err(|_| exit(SETUP, format!("{target}: there's no {noun} folder there")))?;
+    let root = std::fs::canonicalize(data_dir.join(root)).ok();
     match canonical.file_name().map(|n| n.to_string_lossy().into_owned()) {
-        Some(id) if canonical.parent() == plugins.as_deref() => Ok(id),
+        Some(id) if canonical.parent() == root.as_deref() => Ok(id),
         _ => Err(exit(
             SETUP,
             format!(
-                "{target} isn't in Zeron's plugins folder: a folder anywhere publishes with a deploy token (set {}; make one with `zeron plugin token create`)",
+                "{target} isn't in Zeron's {noun}s folder: a folder anywhere publishes with a deploy token (set {}; make one with `zeron plugin token create`)",
                 deploy_token::ENV
             ),
         )),
@@ -549,6 +617,11 @@ pub fn is_store_command(command: &PluginCommand) -> bool {
             | PluginCommand::Yank { .. }
             | PluginCommand::Unyank { .. }
     )
+}
+
+/// [`is_store_command`], of a template's.
+pub fn is_store_template(command: &TemplateCommand) -> bool {
+    matches!(command, TemplateCommand::Publish { .. } | TemplateCommand::Store { .. } | TemplateCommand::Yank { .. } | TemplateCommand::Unyank { .. })
 }
 
 /// One deploy token, as `zeron plugin token list` says it: its id (what
@@ -627,6 +700,24 @@ mod tests {
     }
 
     #[test]
+    fn your_own_are_named_by_id_or_their_folder_in_zeron_s() {
+        let dir = std::env::temp_dir().join(format!("zeron-own-id-{}", std::process::id()));
+        let of = |kind: Kind, target: &Path| own_id(kind, &target.display().to_string(), &dir).map_err(|e| e.to_string());
+        for at in ["plugins/focus", "templates/midnight", "elsewhere/midnight"] {
+            std::fs::create_dir_all(dir.join(at)).unwrap();
+        }
+        assert_eq!(of(Kind::Template, Path::new("midnight-own")).unwrap(), "midnight-own");
+        assert_eq!(of(Kind::Template, &dir.join("templates/midnight")).unwrap(), "midnight");
+        assert_eq!(of(Kind::Plugin, &dir.join("plugins/focus")).unwrap(), "focus");
+        for (kind, at) in [(Kind::Template, "elsewhere/midnight"), (Kind::Template, "plugins/focus"), (Kind::Plugin, "templates/midnight"), (Kind::Template, "templates")] {
+            let said = of(kind, &dir.join(at)).unwrap_err();
+            assert!(said.contains(if kind == Kind::Template { "Zeron's templates folder" } else { "Zeron's plugins folder" }), "{said}");
+        }
+        assert!(of(Kind::Template, &dir.join("templates/none")).unwrap_err().contains("there's no template folder there"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_store_s_words_in_status_are_never_printed_raw() {
         let reply = json!({ "plugins": [{ "id": HOSTILE, "versions": [
             { "version": "1.0.0\u{1b}[31m", "status": "listed", "verified": false, "review": { "decided": true, "decision": "declined", "reason": HOSTILE } },
@@ -634,12 +725,17 @@ mod tests {
             { "version": "1.2.0", "status": "listed", "verified": true, "review": { "decided": true, "decision": "verified" } },
             { "version": "1.3.0", "status": "yanked", "verified": false, "yanked_by": "superseded", "superseded": { "at": 1, "by": "1.4.0\u{1b}[2J" } },
         ] }] });
-        let lines = status_lines(&reply, None);
+        let lines = status_lines(Kind::Plugin, &reply, None);
         assert_eq!(lines.len(), 5, "{lines:?}");
         assert!(lines.iter().all(|l| raw_free(l)), "{lines:?}");
         assert!(lines[1].contains("not verified: declined: a\\u{a}error: fake line\\u{1b}[2J\\u{202e}"), "{lines:?}");
         assert!(lines[2].ends_with("fine\\u{d}\\u{a}error: forged"), "{lines:?}");
         assert_eq!(lines[3], "  1.2.0  listed  verified");
         assert_eq!(lines[4], "  1.3.0  yanked  not verified: superseded by 1.4.0\\u{1b}[2J");
+        // A template's, in the same words; of a kind, only that's read.
+        assert_eq!(status_lines(Kind::Template, &reply, None), ["You have no templates in the store yet."]);
+        let templates = json!({ "kind": "template", "templates": [{ "id": "midnight", "versions": [{ "version": "1.0.0", "status": "listed", "verified": true }] }] });
+        assert_eq!(status_lines(Kind::Template, &templates, None), ["midnight", "  1.0.0  listed  verified"]);
+        assert_eq!(status_lines(Kind::Template, &templates, Some("other")), ["That template isn't yours in the store."]);
     }
 }

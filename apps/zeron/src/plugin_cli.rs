@@ -51,8 +51,14 @@ pub async fn run_template(
             println!("Using Zeron's own interface.");
             return Ok(());
         }
+        Err(_) if crate::store_cli::is_store_template(&command) => {
+            return Err(crate::store_cli::Exit { code: crate::store_cli::SETUP, message: crate::store_cli::template_needs_zeron(&command) }.into());
+        }
         Err(error) => return Err(error),
     };
+    if crate::store_cli::is_store_template(&command) {
+        return crate::store_cli::template_through_zeron(command, data_dir, &client).await;
+    }
     match command {
         TemplateCommand::List => {
             let list = call(&client, methods::LIST_TEMPLATES, json!({})).await?;
@@ -115,7 +121,12 @@ pub async fn run_template(
                 );
             }
         }
-        TemplateCommand::Check { .. } | TemplateCommand::Publish { .. } | TemplateCommand::Stock { .. } => unreachable!("the store's commands are run above"),
+        TemplateCommand::Check { .. }
+        | TemplateCommand::Publish { .. }
+        | TemplateCommand::Stock { .. }
+        | TemplateCommand::Store { .. }
+        | TemplateCommand::Yank { .. }
+        | TemplateCommand::Unyank { .. } => unreachable!("the store's commands are run above"),
         TemplateCommand::Delete { id } => {
             let reply = call(&client, methods::DELETE_TEMPLATE, json!({ "id": id })).await?;
             println!("Deleted {}.", str_of(&reply, "deleted"));
