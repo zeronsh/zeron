@@ -123,7 +123,7 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
   ["New token, its form", "/account/tokens", "user_ada", async (page) => {
     await page.getByRole("link", { name: "New token" }).click();
     await expect.poll(() => page.getByRole("dialog", { name: "New deploy token" }).isVisible()).toBe(true);
-    await page.getByLabel("Chosen plugins").check();
+    await page.getByLabel("Chosen").check();
     await page.getByLabel("Focus timer", { exact: true }).check();
   }],
   ["a token, shown once", "/account/tokens", "user_ada", async (page) => {
@@ -293,8 +293,14 @@ describe("a deploy token, shown once", () => {
       const dialog = page.getByRole("dialog", { name: "New deploy token" });
       await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
       await dialog.getByLabel("Ends").selectOption("30");
-      await dialog.getByLabel("Chosen plugins").check();
+      const hint = dialog.locator("[data-chosen-hint]");
+      expect(await hint.textContent()).toBe("Only these, up to 50");
+      await dialog.getByLabel("Chosen").check();
       await dialog.getByLabel("Focus timer", { exact: true }).check();
+      await dialog.getByLabel("Control room", { exact: true }).check();
+      await expect.poll(() => hint.textContent()).toBe("1 plugin and 1 template, up to 50");
+      await dialog.getByLabel("Control room", { exact: true }).uncheck();
+      await expect.poll(() => hint.textContent()).toBe("1 plugin, up to 50");
       // (What the browser sends: the form's fields, never a token; what comes back has it.)
       const sent: string[] = [];
       page.on("request", (r) => sent.push(`${r.method()} ${r.url()} ${r.postData() ?? ""}`));

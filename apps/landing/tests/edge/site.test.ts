@@ -722,6 +722,6 @@ describe("signing out", () => {
     expect(browser.cookies.has(SESSION)).toBe(false);
     // The old cookie, kept by someone, opens nothing.
     const reopened = await edge.site("/account", { headers: { cookie: kept } });
-    expect(await reopened.text()).toContain("<h2>Sign in to see the plugins you publish</h2>");
+    expect(await reopened.text()).toContain("<h2>Sign in to see what you&#39;ve published</h2>");
   });
 });

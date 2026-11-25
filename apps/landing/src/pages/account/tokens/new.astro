@@ -18,8 +18,9 @@ import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import { date } from "../../../lib/store/format.ts";
 import { done, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { kindOfItem } from "../../../lib/store/kind.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { addressFields, isRefusal, NO_TOKENS, postedFields, refusalOf, signInAgain, tokenRequest, type Refusal, type TokenFields } from "../../../lib/store/tokens.ts";
+import { addressFields, allWords, howMany, isRefusal, NO_TOKENS, postedFields, refusalOf, signInAgain, tokenRequest, type Refusal, type TokenFields } from "../../../lib/store/tokens.ts";
 import type { NewToken } from "../../../lib/store/types.ts";
 import { lsb } from "../../../lib/store/bearing.ts";
 import { store } from "../../../lib/store/words.ts";
@@ -35,10 +36,10 @@ const session = who.state === "in" ? who.session : null;
 let fields: TokenFields = addressFields(Astro.url);
 let refusal: Refusal | null = null;
 let made: NewToken | null = null;
-const mine = session ? await edge.myPlugins() : null;
-const yours = new Map((mine?.ok ? mine.data.plugins : []).map((p) => [p.id, p]));
+const [mine, templates] = session ? await Promise.all([edge.mine("plugin"), edge.mine("template")]) : [null, null];
+const yours = new Map([...(mine?.ok ? mine.data : []), ...(templates?.ok ? templates.data : [])].map((p) => [p.id, p]));
 /** No plugin of yours to send, and nothing asked: there's nothing to make one for. */
-const none = Astro.request.method === "GET" && mine?.ok === true && !mine.data.plugins.some((p) => p.versions.length > 0);
+const none = Astro.request.method === "GET" && mine?.ok === true && templates?.ok === true && ![...yours.values()].some((p) => p.versions.length > 0);
 const nameOf = (id: string) => yours.get(id)?.name ?? id;
 
 if (Astro.request.method === "POST") {
@@ -68,13 +69,13 @@ if (made) Astro.response.headers.set("referrer-policy", "no-referrer");
 if (who.state === "down") Astro.response.status = 503;
 const again = Astro.request.method === "GET" && Astro.url.searchParams.get("again") === "1";
 const scopeWords = (t: NewToken) =>
-  "all" in t.scope ? store("plugins.store.key.scope.all") : t.scope.plugins.length <= 3 ? t.scope.plugins.map(nameOf).join(", ") : `${t.scope.plugins.length} plugins`;
+  "all" in t.scope ? allWords(t.scope) : t.scope.plugins.length <= 3 ? t.scope.plugins.map(nameOf).join(", ") : howMany(t.scope.plugins, (id) => yours.get(id) && kindOfItem(yours.get(id)!));
 const title = made ? store("plugins.store.key.secret_title") : store("plugins.store.key.new_title");
 ---
 
 <Store title={`${title} · Zeron`} description="Make a deploy token." noindex current="publish" session={session}>
   <div class="wrap rpt">
-    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Published</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
     {
       who.state === "down" ? (
         <Failed />
@@ -106,7 +107,7 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
       ) : (
         <section class="askcard newtoken" aria-labelledby="new-title">
           <h1 id="new-title" class={lsb(title)}>{title}</h1>
-          <TokenForm id="page-token" csrf={session.csrf} fields={fields} plugins={[...yours.values()]} fresh={session.fresh_sign_in === true} again={again} refusal={refusal} back={back} />
+          <TokenForm id="page-token" csrf={session.csrf} fields={fields} items={[...yours.values()]} fresh={session.fresh_sign_in === true} again={again} refusal={refusal} back={back} />
         </section>
       )
     }

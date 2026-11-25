@@ -183,6 +183,17 @@ describe("what's empty, and what to mind", () => {
       }
   }, 60_000);
 
+  test("New token: the list to tick is there for Chosen alone", async () => {
+    for (const [scope, shown] of [["all", false], ["both", false], ["chosen", true]] as const) {
+      const page = await open({ path: `/account/tokens/new?again=1&name=CI&ends=90&scope=${scope}`, user: "user_ada" }, 1440, "dark");
+      try {
+        expect(await page.locator(".picks").isVisible(), scope).toBe(shown);
+      } finally {
+        await page.context().close();
+      }
+    }
+  }, 60_000);
+
   test("a row's second line is at most 720 wide", async () => {
     for (const p of [{ path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" }, { path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_grace" }, { path: "/account", user: "user_ada" }]) {
       const page = await open(p, 1728, "dark");

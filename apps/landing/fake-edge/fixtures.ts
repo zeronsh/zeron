@@ -848,7 +848,7 @@ export interface FakeToken {
   short: string;
   /** The SHA-256 of the secret, in hex (one the fake made; a fixture's secret was never kept). */
   hash: string | null;
-  scope: { all: true } | { plugins: string[] };
+  scope: { all: true; all_kinds?: ("plugin" | "template")[] } | { plugins: string[] };
   last_used_plugin: string | null;
   name: string;
   created_at: number;
@@ -906,6 +906,9 @@ export function tokens(): FakeToken[] {
       expires_at: ends === null ? null : NOW + (ends as number) * DAY,
       revoked_at: revoked === null ? null : NOW - (revoked as number) * DAY,
     })),
+    // (Last: a token's id is its place. Templates too: all of both, and some of each, its last use a template's.)
+    { owner: "user_ada", scope: { all: true, all_kinds: ["plugin", "template"] }, last_used_plugin: "control-room", name: "Monorepo, everything", created_at: NOW - 4 * DAY, last_used_at: NOW - 1 * DAY, expires_at: NOW + 60 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: ["control-room", "dockside", "focus-timer"] }, last_used_plugin: null, name: "Themes and timers", created_at: NOW - 2 * DAY, last_used_at: null, expires_at: NOW + 90 * DAY, revoked_at: null },
   ];
   return rows.map((row, n) => ({ ...row, ...fixtureToken(n), hash: null }));
 }

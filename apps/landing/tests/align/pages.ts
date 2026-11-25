@@ -19,7 +19,7 @@ const newToken = async (page: Page) => {
   await page.getByRole("link", { name: "New token" }).click();
   const dialog = page.getByRole("dialog", { name: "New deploy token" });
   await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
-  await dialog.getByLabel("Chosen plugins").check();
+  await dialog.getByLabel("Chosen").check();
   await dialog.getByLabel("Focus timer", { exact: true }).check();
 };
 
@@ -96,6 +96,10 @@ export const ALIGN_PAGES: AlignPage[] = [
     await Promise.all([page.waitForLoadState("networkidle"), page.getByRole("dialog").getByRole("button", { name: "Create token" }).click()]);
     await page.getByRole("heading", { name: "Copy your token now" }).waitFor();
   } },
+  { name: "mine-template", path: "/account/templates/dockside", user: "user_ada" },
+  { name: "mine-template-worst", path: "/account/templates/template-at-every-limit-there-is-xyz1234", user: "user_ada" },
+  { name: "mine-template-stop", path: "/account/templates/dockside/versions/1.0.0/yank", user: "user_ada" },
+  { name: "new-token-both", path: "/account/tokens/new?again=1&name=All&ends=90&scope=both", user: "user_ada" },
   { name: "mine", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
   { name: "mine-stop", path: "/account/plugins/session-badges/versions/1.2.1/yank", user: "user_ada" },
   // Review.

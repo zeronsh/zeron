@@ -533,7 +533,7 @@ describe("signed-in pages", () => {
       expect(response.status, path).toBe(200);
       expect(response.headers.get("cache-control"), path).toBe("private, no-store");
       expect(body, path).toContain(`<a class="btn pri" href="/auth/web/login?return_to=${encodeURIComponent(path)}">Sign in</a>`);
-      expect(body, path).toMatch(/<h2>Sign in to see (the plugins you publish|your deploy tokens)<\/h2>/);
+      expect(body, path).toMatch(/<h2>Sign in to see (what you&#39;ve published|your deploy tokens)<\/h2>/);
     }
   });
 
@@ -857,7 +857,7 @@ describe("forms", () => {
     expect(body).toContain(steps);
     expect(body.match(/<ol class="steps">/g)).toHaveLength(1);
     expect(body).not.toContain('class="how"');
-    expect(body).toContain('<a href="/account" aria-current="page">Your plugins</a>');
+    expect(body).toContain('<a href="/account" aria-current="page">Published</a>');
   });
 
   test("Deploy tokens with none: the guide's steps from CI; with no plugin, one line and no New token", async () => {
@@ -915,12 +915,12 @@ describe("forms", () => {
   test("the account's deploy tokens: a row each, its name and short id, what it can publish, last used, when it ends, Revoke; the revoked and ended apart", async () => {
     const { body } = await html("/account/tokens", await site.signIn("user_ada"));
     // Twelve live, each with Revoke (a quiet button in the danger's ink); five revoked or ended, in their group.
-    expect(body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(12);
+    expect(body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(14);
     expect(body).toMatch(/<details class="gone"><summary>Revoked and ended tokens · 5/);
     expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
     // Each by its name (one line, whole in its title) and short id beside it, the store's: never more of a token, which this page never has.
     const ids = [...body.matchAll(/<span class="nm" title="[^"]*">[^<]*<\/span><span class="id">([^<]*)<\/span>/g)].map((m) => m[1]);
-    expect(ids).toHaveLength(17);
+    expect(ids).toHaveLength(19);
     for (const id of ids) expect(id).toMatch(/^[0-9A-Za-z]{8}$/);
     expect(body).toContain('<span class="nm" title="GitHub Actions">GitHub Actions</span><span class="id">xJVb81Wo</span>');
     expect(body).not.toMatch(/zdt_[0-9A-Za-z]/);
@@ -928,7 +928,7 @@ describe("forms", () => {
     expect(body).toMatch(/<span class="c-scope" title="\d+ today, and any you publish later"><span class="sw">All your plugins<\/span><\/span>/);
     expect(body).toMatch(/<span class="c-scope"><span class="tiles" aria-hidden="true"><span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span><\/span><span class="sw">Focus timer<\/span><\/span>/);
     const many = body.slice(body.indexOf(">GitHub Actions, the monorepo<"), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
-    expect(many).toMatch(/<details class="every"><summary class="c-scope"><span class="sw">14 plugins<\/span><span class="tiles" aria-hidden="true">(<span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span>){3}<span class="more num">\+11<\/span><\/span><span class="show">Show all<span class="sr-only"> plugins GitHub Actions, the monorepo can publish<\/span><\/span>/);
+    expect(many).toMatch(/<details class="every"><summary class="c-scope"><span class="sw">14 plugins<\/span><span class="tiles" aria-hidden="true">(<span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span>){3}<span class="more num">\+11<\/span><\/span><span class="show">Show all<span class="sr-only"> that GitHub Actions, the monorepo can publish<\/span><\/span>/);
     // (The list, every one by name, opens as a row of its own under the token.)
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
@@ -1013,7 +1013,12 @@ describe("forms", () => {
         expect(form.body).toContain('<input id="page-token-name" class="input" type="text" name="name" value placeholder="GitHub Actions" maxlength="64" required autocomplete="off" spellcheck="false">');
         expect([...form.body.matchAll(/<option value="([^"]+)"( selected)?>([^<]+)<\/option>/g)].map((m) => `${m[1]}${m[2] ?? ""} ${m[3]}`)).toEqual(["30 In 30 days", "90 selected In 90 days", "365 In a year", "never Never"]);
         expect(form.body).toContain('<input type="radio" name="scope" value="all" checked>');
-        expect(form.body.match(/<input type="checkbox" name="plugins" value="[a-z0-9-]+">/g)).toHaveLength(20);
+        expect(form.body.match(/<input type="checkbox" name="plugins" value="[a-z0-9-]+" data-kind="[a-z]+">/g)).toHaveLength(24);
+        // (Three ways: all your plugins, those and your templates, or the ones chosen; a template of yours is marked one.)
+        expect([...form.body.matchAll(/<span class="rc-words"><b>([^<]+)<\/b><small[^>]*>([^<]+)<\/small>/g)].map((m) => `${m[1]}: ${m[2]}`)).toEqual(["All your plugins: 20 today, and any you publish later", "All your plugins and templates: A template can do anything Zeron can.", "Chosen: Only these, up to 50"]);
+        const groups = form.body.slice(form.body.indexOf('<div class="picks"'));
+        expect([...groups.matchAll(/<h3 class="picks-h" id="[^"]+">([^<]+)<\/h3>/g)].map((m) => m[1])).toEqual(["Plugins", "Templates"]);
+        expect(groups.slice(groups.indexOf(">Templates</h3>")).match(/<input type="checkbox"/g)).toHaveLength(4);
         expect(form.body).not.toContain("Zeron will ask you to sign in again first.");
 
         const made = await make(ada, [["name", "Release CI"], ["ends", "30"], ["scope", "chosen"], ["plugins", "focus-timer"], ["plugins", "theme-sync"]]);
@@ -1047,7 +1052,7 @@ describe("forms", () => {
         expect(list.body).toContain(`<span class="id">${short}</span>`);
         expect(list.body).toContain(">Release CI<");
         expect(tokensIn(list.body)).toEqual([]);
-        expect(list.body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect(list.body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(15);
 
         // The sign-in's ticket is spent: another token signs in again first, and comes back to the form as it was, with no token anywhere in the address.
         const again = await make(ada, [["name", "Second"], ["ends", "never"], ["scope", "all"]]);
@@ -1055,7 +1060,7 @@ describe("forms", () => {
         const location = again.response.headers.get("location")!;
         expect(location).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/account/tokens/new?again=1&name=Second&ends=never&scope=all" })}`);
         expect(tokensIn(decodeURIComponent(location))).toEqual([]);
-        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(15);
       } finally {
         await site.fake("tokens");
       }
@@ -1073,16 +1078,20 @@ describe("forms", () => {
         const back = "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather";
         expect(sent.response.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: back })}`);
         // (Nothing was made.)
-        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(14);
         // Signed in again, the form as it was, and a word that it's ready.
         const fresh = await signedIn("user_ada");
         const filled = await html(back, fresh);
         expect(filled.body).toContain('name="name" value="Nightly"');
         expect(filled.body).toContain('<option value="365" selected>');
         expect(filled.body).toContain('<input type="radio" name="scope" value="chosen" checked>');
-        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="focus-timer" checked>');
-        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="weather" checked>');
-        expect(filled.body.match(/name="plugins" value="[a-z0-9-]+" checked/g)).toHaveLength(2);
+        // (Its card says what's ticked, drawn by the server on a form that comes back.)
+        expect(filled.body).toMatch(/<b>Chosen<\/b><small [^>]*>2 plugins, up to 50<\/small>/);
+        const both = await html("/account/tokens/new?again=1&name=CI&ends=90&scope=chosen&plugins=focus-timer,weather,control-room", stale);
+        expect(both.body).toMatch(/<b>Chosen<\/b><small [^>]*>2 plugins and 1 template, up to 50<\/small>/);
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="focus-timer" data-kind="plugin" checked>');
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="weather" data-kind="plugin" checked>');
+        expect(filled.body.match(/name="plugins" value="[a-z0-9-]+" data-kind="[a-z]+" checked/g)).toHaveLength(2);
         expect(filled.body).toContain('<p class="note ok">You signed in again. Create the token to finish.</p>');
       } finally {
         await site.fake("tokens");
@@ -1098,14 +1107,14 @@ describe("forms", () => {
         expect(noName.body).toContain('<p class="said" id="page-token-said">Name the token in 1 to 64 characters.</p>');
         const noneChosen = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"]]);
         expect(noneChosen.response.status).toBe(400);
-        expect(noneChosen.body).toContain("Choose at least one plugin it can publish.");
+        expect(noneChosen.body).toContain("Choose at least one it can publish.");
         // (Someone else's plugin: not_owner, by name.)
         const theirs = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"], ["plugins", "pr-radar"]]);
         expect(theirs.response.status).toBe(403);
         expect(theirs.body).toContain("You don&#39;t own pr-radar any more. Choose again.");
         expect(theirs.body).toContain('name="name" value="CI"');
         // Twenty live, the most: the next is refused, and says what to do.
-        for (let i = 0; i < 8; i++) expect((await make(await signedIn("user_ada"), [["name", `CI ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
+        for (let i = 0; i < 6; i++) expect((await make(await signedIn("user_ada"), [["name", `CI ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
         const full = await make(await signedIn("user_ada"), [["name", "One more"], ["ends", "30"], ["scope", "all"]]);
         expect(full.response.status).toBe(409);
         expect(full.body).toContain('<p class="said" role="alert">You have 20 deploy tokens, the most an account can have. Revoke one to make another.</p>');
@@ -1128,7 +1137,7 @@ describe("forms", () => {
       const noCsrf = await post("/account/tokens/new", ada, fields);
       expect(noCsrf.status).toBe(303);
       expect(flashOf(noCsrf)).toBe("__Host-zeron_flash=expired");
-      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(14);
     });
   });
 
@@ -1349,7 +1358,7 @@ describe("forms", () => {
     // (As the edge does: always the front page, absolute.)
     expect(response.headers.get("location")).toBe("https://zeron.sh/");
     // (Signed out now: the page offers sign-in again.)
-    expect((await html("/account", lin)).body).toContain("<h2>Sign in to see the plugins you publish</h2>");
+    expect((await html("/account", lin)).body).toContain("<h2>Sign in to see what you&#39;ve published</h2>");
   });
 });
 
@@ -1444,12 +1453,89 @@ describe("templates: a plugin's pages, given the kind", () => {
   });
 
   test("the bar's search searches the kind you're on; on a page of neither, plugins", async () => {
-    for (const [path, at] of [["/templates/control-room", "/templates"], ["/plugins/focus-timer", "/plugins"], ["/plugins/publishing", "/plugins"], ["/account", "/plugins"]] as const) {
+    for (const [path, at] of [["/templates/control-room", "/templates"], ["/plugins/focus-timer", "/plugins"], ["/plugins/publishing", "/plugins"], ["/account", "/plugins"], ["/account/tokens", "/plugins"]] as const) {
       const { body } = await html(path);
       expect(body, path).toContain(`<form class="find" role="search" action="${at}"`);
       expect(body, path).toContain(`placeholder="Search ${at.slice(1)}"`);
     }
     expect((await html("/templates")).body).toMatch(/<a href="\/templates" aria-current="page">Templates<\/a>/);
+  });
+});
+
+describe("templates of yours, and your deploy tokens' scopes", () => {
+  test("Your plugins: a Templates table under the plugins' one, only when you have any; each row to its own page", async () => {
+    const { body } = await html("/account", await site.signIn("user_ada"));
+    expect(body).toMatch(/<h2 id="your-plugins">Plugins<span class="num">20<\/span><\/h2>/);
+    expect(body).toMatch(/<h2 id="your-templates">Templates<span class="num">4<\/span><\/h2>/);
+    const table = body.slice(body.indexOf('<ul aria-label="Your templates"'));
+    expect(table).toMatch(/href="\/account\/templates\/control-room"[\s\S]*?<span class="thumb s" aria-hidden="true"><img src="\/templates\/control-room\/files\/1\.2\.0\/preview\.png"/);
+    expect(body.indexOf('id="your-plugins"')).toBeLessThan(body.indexOf('id="your-templates"'));
+    expect(body).toMatch(/aria-current="page">Published<span class="num">24<\/span>/);
+  });
+
+  test("one of yours: its versions, stop and allow installs under its own prefix; the other kind's id, and another's, the 404", async () => {
+    const ada = await site.signIn("user_ada");
+    const { body } = await html("/account/templates/dockside", ada);
+    expect(body).toContain('href="/templates/dockside"');
+    expect(body).toContain('placeholder="Search plugins"');
+    expect(body).toContain('<span class="thumb xl"');
+    expect(verifiedOf(body, "1.0.0")).toBe("Not verified yet");
+    expect(body).toContain('href="/account/templates/dockside/versions/1.0.0/yank"');
+    expect((await html("/account/templates/dockside/versions/1.0.0/yank", ada)).body).toContain("Stop new installs of Dockside 1.0.0?");
+    for (const path of ["/account/plugins/dockside", "/account/templates/focus-timer", "/account/templates/night-board"]) expect((await site.fetch(path, { headers: { cookie: ada } })).status, path).toBe(404);
+    const token = tokenOf(body);
+    const stopped = await post("/account/templates/dockside/versions/1.0.0/yank", ada, { csrf: token });
+    expect([stopped.status, stopped.headers.get("location")]).toEqual([303, "/account/templates/dockside"]);
+    expect(stateOf((await html("/account/templates/dockside", ada)).body, "1.0.0")).toBe("No new installs");
+    const back = await post("/account/templates/dockside/versions/1.0.0/unyank", ada, { csrf: token });
+    expect(back.headers.get("location")).toBe("/account/templates/dockside");
+    expect(stateOf((await html("/account/templates/dockside", ada)).body, "1.0.0")).toBe("Listed");
+  });
+
+  test("Deploy tokens: a scope in words, of either kind; what it last sent, a template by its name", async () => {
+    const { body } = await html("/account/tokens", await site.signIn("user_ada"));
+    const row = (name: string) => body.slice(body.indexOf(`>${name}<`), body.indexOf("</li>", body.indexOf(`>${name}<`)));
+    expect(row("Monorepo, everything")).toContain('<span class="sw">All your plugins and templates</span>');
+    expect(row("Monorepo, everything")).toContain("Control room");
+    expect(row("Themes and timers")).toContain('<span class="sw">3 chosen</span>');
+    expect(row("Themes and timers")).toContain('<span class="thumb xs"');
+  });
+
+  test("the page is Published: its title, tab, crumbs and menu; its foot's first step names the template's command for who has one", async () => {
+    const ada = (await html("/account", await site.signIn("user_ada"))).body;
+    expect(ada).toContain("<title>Published · Zeron</title>");
+    expect(ada).toMatch(/<h1 class="lsb-[^"]*">Published<\/h1>/);
+    expect(ada).toContain("Everything you&#39;ve published, and where each version stands.");
+    expect(ada).toMatch(/<\/svg>Publish<\/a>/);
+    expect(ada).toContain('<a href="/account">Published</a>');
+    expect(ada).toContain("<code>zeron template publish</code>");
+    const grace = (await html("/account", await site.signIn("user_kai"))).body;
+    expect(grace).toContain("<code>zeron template publish</code>");
+    for (const path of ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/templates/dockside", "/account/plugins/focus-timer/versions/1.2.0/yank", "/plugins/publishing"]) expect((await html(path, await site.signIn("user_ada"))).body, path).not.toMatch(/>Your plugins</);
+  });
+
+  test("making one for both kinds asks the edge for both, and says so", async () => {
+    const ada = await site.signIn("user_ada");
+    const { body } = await html("/account/tokens/new?scope=both&name=Everything&ends=90", ada);
+    expect(body).toContain('<input type="radio" name="scope" value="both" checked>');
+    try {
+      const made = await post("/account/tokens/new", ada, { csrf: tokenOf(body), name: "Everything", ends: "90", scope: "both" });
+      expect(made.status).toBe(200);
+      expect(await made.text()).toContain("All your plugins and templates");
+    } finally {
+      await site.fake("tokens");
+    }
+  });
+
+  test("the guide: a template's part, after sending, with what it needs and its two commands", async () => {
+    const { body } = await html("/plugins/publishing");
+    expect(body).toContain("Put your plugin or template in Zeron's store.");
+    expect(body).toContain("<code>--all --templates</code>");
+    expect([...body.matchAll(/<h2 id="([a-z-]+)">/g)].map((m) => m[1])).toEqual(["quick-start", "needs", "send", "templates", "review", "versions", "ci"]);
+    const part = body.slice(body.indexOf('<h2 id="templates">'), body.indexOf('<h2 id="review">'));
+    for (const word of ["preview.png", "README.md", "id", "name", "description", "version", "zeron_version"]) expect(part, word).toContain(`<th scope="row"><code>${word}</code></th>`);
+    expect(part).toContain("zeron template check &lt;folder&gt;\nzeron template publish &lt;id&gt;");
+    expect(part).toContain("it runs as Zeron itself and can do anything Zeron can");
   });
 });
 

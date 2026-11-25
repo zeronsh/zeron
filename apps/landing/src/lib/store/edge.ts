@@ -16,7 +16,9 @@ import type {
   EdgeError,
   ErrorWord,
   KeywordCount,
+  MyPlugin,
   MyPlugins,
+  MyTemplates,
   PluginDetail,
   QueuePage,
   QueueState,
@@ -200,6 +202,20 @@ export class Edge {
     return this.#json("/store/v1/me/plugins", { signedIn: true });
   }
 
+  myTemplates(): Promise<Result<MyTemplates>> {
+    return this.#json("/store/v1/me/templates", { signedIn: true });
+  }
+
+  /** The account's items of a kind (an edge before templates has none of those). */
+  async mine(kind: Kind): Promise<Result<MyPlugin[]>> {
+    if (kind === "plugin") {
+      const result = await this.myPlugins();
+      return result.ok ? { ok: true, data: result.data.plugins } : result;
+    }
+    const result = await this.myTemplates();
+    return result.ok ? { ok: true, data: result.data.templates } : result.error === "not_found" ? { ok: true, data: [] } : result;
+  }
+
   /** The account's deploy tokens (contract a315eef5a: the account's, each with its scope; never a secret). */
   tokens(): Promise<Result<{ tokens: DeployToken[] }>> {
     return this.#json("/store/v1/me/tokens", { signedIn: true });
@@ -210,8 +226,8 @@ export class Edge {
     return this.#json("/store/v1/me/tokens", { method: "POST", csrf, body });
   }
 
-  versionAction(id: string, version: string, action: "yank" | "unyank", csrf: string): Promise<Result<unknown>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/versions/${segment(version)}/${action}`, { method: "POST", csrf, body: {} });
+  versionAction(id: string, version: string, action: "yank" | "unyank", csrf: string, kind?: Kind): Promise<Result<unknown>> {
+    return this.#json(`${root(kind)}/${segment(id)}/versions/${segment(version)}/${action}`, { method: "POST", csrf, body: {} });
   }
 
   revokeToken(id: string, csrf: string): Promise<Result<unknown>> {

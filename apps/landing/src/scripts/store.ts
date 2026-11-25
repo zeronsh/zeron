@@ -2,7 +2,7 @@
 // it. "/" to the search; a search field empties on Escape; a copy button
 // copies; and, on a public page (the same for everyone, so drawn without
 // you), who you are and Review, read from your session once the page is in.
-export {};
+import { chosenHint } from "../lib/store/chosen.ts";
 
 document.documentElement.classList.add("js");
 
@@ -338,4 +338,17 @@ if (names.length > 0) {
       all();
     }
   });
+}
+
+// ── New token: the Chosen card says what's ticked ──────────────────────
+for (const form of document.querySelectorAll<HTMLFormElement>("form.tokform")) {
+  const hint = form.querySelector<HTMLElement>("[data-chosen-hint]");
+  if (!hint) continue;
+  const say = () => {
+    const of = (kind: string) => form.querySelectorAll(`input[name="plugins"][data-kind="${kind}"]:checked`).length;
+    hint.textContent = chosenHint(of("plugin"), of("template"));
+  };
+  form.addEventListener("change", say);
+  // (A form the browser brings back, its boxes as they were: pageshow.)
+  addEventListener("pageshow", say);
 }

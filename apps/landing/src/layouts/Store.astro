@@ -52,8 +52,8 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
 // (As the script says it on a public page, and as the store says an author: "@ada".)
 const handle = session ? (session.username ? `@${session.username}` : (session.user.name ?? "You")) : "";
 const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
-/** What the bar's search searches: the kind you're on; on a page of neither, plugins. */
-const finds = kindOf(Astro.url);
+/** What the bar's search searches: the kind you're on; on a page of neither (the guide, yours, the staff's), plugins. */
+const finds = Astro.url.pathname.startsWith("/account/") || Astro.url.pathname.startsWith("/admin/") ? "plugin" : kindOf(Astro.url);
 const find = `Search ${KIND_WORDS[finds].many}`;
 const SECTIONS: { id: Section; label: string; href: string }[] = [
   { id: "plugin", label: "Plugins", href: "/plugins" },
@@ -116,7 +116,7 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
     {(isPublic || session) && (
       <div class="menu" id="me-menu" popover>
         <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>
-        <a href="/account">Your plugins</a>
+        <a href="/account">Published</a>
         <a href="/account/tokens">Deploy tokens</a>
         <a href="/plugins/publishing">Publishing guide</a>
         <hr />

@@ -11,16 +11,19 @@ import "../../../../../../styles/look/account.css";
 import { AUTHOR_ACTIONS, isAuthorAction } from "../../../../../../lib/store/actions.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../../../../lib/store/forms.ts";
 import { unbidi } from "../../../../../../lib/store/format.ts";
+import { kindOf } from "../../../../../../lib/store/kind.ts";
 import { privatePage, purge } from "../../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, versionParam } from "../../../../../../lib/store/names.ts";
+import { pluginUrl } from "../../../../../../lib/store/urls.ts";
 import { requireSession } from "../../../../../../lib/store/session.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id, action } = Astro.params;
 const version = versionParam(Astro.params.version);
 if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return new Response(null, { status: 404 });
-const back = `/account/plugins/${id}`;
+const back = `/account${pluginUrl(id, kind)}`;
 
 if (Astro.request.method === "POST") {
   // (A post without a session: off to sign in, and back to this question.)
@@ -29,7 +32,7 @@ if (Astro.request.method === "POST") {
   const ask = AUTHOR_ACTIONS[action].ask(id, version);
   const form = await formOf(Astro.request);
   if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
-  const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
+  const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf, kind);
   if (result.ok) await purge(Astro, id);
   return done(Astro, flashFor(result, ask.flash), back);
 }
@@ -40,8 +43,8 @@ const session = who.state === "in" ? who.session : null;
 privatePage(Astro);
 if (who.state === "down") Astro.response.status = 503;
 // The question names the plugin as its page does; someone else's is the 404, as there.
-const mine = session ? await edge.myPlugins() : null;
-const plugin = mine?.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+const mine = session ? await edge.mine(kind) : null;
+const plugin = mine?.ok ? mine.data.find((p) => p.id === id) : undefined;
 if (mine?.ok && !plugin) return new Response(null, { status: 404 });
 const name = unbidi(plugin?.name ?? id);
 const ask = AUTHOR_ACTIONS[action].ask(name, version);
@@ -49,14 +52,14 @@ const ask = AUTHOR_ACTIONS[action].ask(name, version);
 
 <Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="publish" session={session}>
   <div class="wrap rpt">
-    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>{name}</a></nav>
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Published</a><Icon name="chev" /><a href={back}>{name}</a></nav>
     {
       who.state === "down" ? (
         <Failed level={1} />
       ) : session ? (
         <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
       ) : (
-        <SignInPlease what="the plugins you publish" />
+        <SignInPlease what="what you've published" />
       )
     }
   </div>

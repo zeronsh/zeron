@@ -8,6 +8,8 @@
 // again). A second line only for what the pills can't say: why a newer
 // version stopped it, a reviewer's note, why it was taken down.
 // Its deploy tokens are your account's (contract a315eef5a): Deploy tokens.
+// A template of yours is this page too, under /account/templates, its
+// preview in the tile's place (astro.config.mjs).
 // Yours only: anyone else's id is the 404 page. Signed out, it says so and
 // offers sign-in.
 import AccountHead from "../../../components/look/AccountHead.astro";
@@ -18,7 +20,7 @@ import Icon from "../../../components/look/Icon.astro";
 import Question from "../../../components/look/Question.astro";
 import Seal from "../../../components/look/Seal.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
-import Tile from "../../../components/look/Tile.astro";
+import Thumb from "../../../components/look/Thumb.astro";
 import Words from "../../../components/look/Words.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
@@ -27,6 +29,7 @@ import { reasonLabel } from "../../../lib/store/admin.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { day, unbidi } from "../../../lib/store/format.ts";
 import { hueClass } from "../../../lib/store/hue.ts";
+import { KIND_WORDS, kindOf } from "../../../lib/store/kind.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
 import { everListed, listingState, PILL_TONE, versionState } from "../../../lib/store/states.ts";
@@ -37,19 +40,20 @@ import { lsb } from "../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
+const kind = kindOf(Astro.url);
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
 const edge = Astro.locals.edge;
 // (Signed in, signed out, or not known: an edge that doesn't answer is never "signed out".)
 const who = await edge.who();
 const session = who.state === "in" ? who.session : null;
-const mine = session ? await edge.myPlugins() : null;
-const plugin = mine?.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+const mine = session ? await edge.mine(kind) : null;
+const plugin = mine?.ok ? mine.data.find((p) => p.id === id) : undefined;
 if (mine?.ok && !plugin) return new Response(null, { status: 404 });
 privatePage(Astro);
 if (who.state === "down") Astro.response.status = 503;
 const flash = takeFlash(Astro.cookies);
-const here = `/account/plugins/${id}`;
+const here = `/account${pluginUrl(id, kind)}`;
 const name = unbidi(plugin?.name ?? id);
 const now = Date.now();
 
@@ -76,23 +80,23 @@ const idle = plugin && plugin.versions.length > 0 && !plugin.versions.some((v) =
 const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions)) : null;
 ---
 
-<Store title={`${name} · Your plugins · Zeron`} description="One of your plugins." noindex current="publish" session={session} class={hueClass(id)}>
+<Store title={`${name} · Published · Zeron`} description={`One of your ${KIND_WORDS[kind].many}.`} noindex current="publish" session={session} class={hueClass(id)}>
   <div class="wrap acct">
-    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Published</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
     <Flash flash={flash} />
     {
       who.state === "down" ? (
         <Failed href={here} level={1} />
       ) : !session ? (
-        <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} tokens={null}>
-          <SignInPlease what="the plugins you publish" />
+        <AccountHead title="Published" lead="Everything you've published, and where each version stands." current="plugins" plugins={null} tokens={null}>
+          <SignInPlease what="what you've published" />
         </AccountHead>
       ) : !plugin ? (
-        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} level={1} />
+        <Failed title={`This ${KIND_WORDS[kind].one} can't be loaded right now`} line="Try again in a moment." href={here} level={1} />
       ) : (
         <>
           <header class="ohead">
-            <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="xl" />
+            <Thumb item={plugin} version={plugin.versions[0]?.version ?? plugin.version} size="xl" />
             <div class="txt">
               <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
@@ -100,7 +104,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 {listing && plugin.listing !== "listed" && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
               </p>
             </div>
-            {plugin.listing === "listed" && <div class="head-act"><a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a></div>}
+            {plugin.listing === "listed" && <div class="head-act"><a class="btn sec" href={pluginUrl(plugin.id, kind)}>See it in the store<Icon name="out" /></a></div>}
           </header>
 
           {idle && <p class="flash info">No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</p>}

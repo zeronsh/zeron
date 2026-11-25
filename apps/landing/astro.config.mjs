@@ -79,6 +79,12 @@ const templatePages = {
         ["/[id]/files/[version]/[...path]", "[id]/files/[version]/[...path].ts"],
       ])
         injectRoute({ pattern: `/templates${at}`, entrypoint: `./src/pages/plugins/${page}`, prerender: false });
+      // (Yours of it.)
+      for (const [at, page] of [
+        ["/[id]", "[id].astro"],
+        ["/[id]/versions/[version]/[action]", "[id]/versions/[version]/[action].astro"],
+      ])
+        injectRoute({ pattern: `/account/templates${at}`, entrypoint: `./src/pages/account/plugins/${page}`, prerender: false });
     },
   },
 };

@@ -1,12 +1,13 @@
 ---
-// Your plugins, as Vercel's dashboard lists projects: a row a plugin, one
+// Published: your plugins, as Vercel's dashboard lists projects: a row a plugin, one
 // line, the whole row its link. Its tile and name; its newest version and
 // where that stands (a pill); when it was published (and "via token" when a
 // deploy token sent it, its name on hover: one of your devices is the usual,
 // said by nothing); how many have it. A second line only for what's
 // unusual: the newest verified when the newest isn't, the reviewer's note,
 // why it was taken down. One person's page: never cached, never indexed.
-// None yet: the guide's steps to the first, and nothing else.
+// Your templates are a table of their own under them, when you have any.
+// None of either yet: the guide's steps to the first, and nothing else.
 // Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../components/look/AccountHead.astro";
 import Failed from "../../components/look/Failed.astro";
@@ -15,14 +16,16 @@ import Icon from "../../components/look/Icon.astro";
 import PublishSteps from "../../components/look/PublishSteps.astro";
 import Seal from "../../components/look/Seal.astro";
 import SignInPlease from "../../components/look/SignInPlease.astro";
-import Tile from "../../components/look/Tile.astro";
+import Thumb from "../../components/look/Thumb.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/account.css";
 import { count, day, since } from "../../lib/store/format.ts";
+import { KIND_WORDS } from "../../lib/store/kind.ts";
 import { hueClass } from "../../lib/store/hue.ts";
 import { takeFlash } from "../../lib/store/flash.ts";
 import { privatePage } from "../../lib/store/http.ts";
 import type { MyPlugin } from "../../lib/store/types.ts";
+import { pluginUrl } from "../../lib/store/urls.ts";
 import { statusWords, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
@@ -34,8 +37,11 @@ const session = who.state === "in" ? who.session : null;
 privatePage(Astro);
 if (who.state === "down") Astro.response.status = 503;
 const flash = takeFlash(Astro.cookies);
-const [result, tokensResult] = session ? await Promise.all([edge.myPlugins(), edge.tokens()]) : [null, null];
-const plugins = result?.ok ? result.data.plugins : [];
+const [result, templatesResult, tokensResult] = session ? await Promise.all([edge.mine("plugin"), edge.mine("template"), edge.tokens()]) : [null, null, null];
+const plugins = result?.ok ? result.data : [];
+const templates = templatesResult?.ok ? templatesResult.data : [];
+/** The page's tables: your plugins, and your templates under them when you have any (named then; plugins alone need no name). */
+const tables = ([["plugin", plugins], ["template", templates]] as const).filter(([, items]) => items.length > 0);
 const now = Date.now();
 const liveTokens = tokensResult?.ok ? tokensResult.data.tokens.filter((k) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now)).length : null;
 
@@ -62,73 +68,81 @@ function standing(p: MyPlugin): { tone: string; label: string; notes: string[] }
 const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "removed"].includes(p.versions[0]?.status ?? "");
 ---
 
-<Store title="Your plugins · Zeron" description="The plugins you publish." noindex current="publish" session={session}>
+<Store title="Published · Zeron" description="Everything you've published." noindex current="publish" session={session}>
   <div class="wrap acct">
     <AccountHead
-      title="Your plugins"
-      lead="What you've published, and where each version stands."
+      title="Published"
+      lead="Everything you've published, and where each version stands."
       current="plugins"
-      plugins={result?.ok ? plugins.length : null}
+      plugins={result?.ok ? plugins.length + templates.length : null}
       tokens={liveTokens}
-      action={session ? { label: "Publish a plugin", icon: "plus", href: "/plugins/publishing#send" } : null}
+      action={session ? { label: "Publish", icon: "plus", href: "/plugins/publishing#send" } : null}
     >
       <Flash flash={flash} />
       {
         who.state === "down" ? (
           <Failed />
         ) : !session ? (
-          <SignInPlease what="the plugins you publish" />
+          <SignInPlease what="what you've published" />
         ) : (
           <>
             {!session.username && (
               <p class="flash info">Claim a username first: Zeron asks for one right after you sign in, and your plugins read “by @username”. Then you can publish.</p>
             )}
-            {!result?.ok ? (
+            {!result?.ok || (tables.length === 0 && !templatesResult?.ok) ? (
               <Failed href="/account" />
-            ) : plugins.length === 0 ? (
+            ) : tables.length === 0 ? (
               <section class="howto" aria-labelledby="first">
                 <h2 id="first">Publish your first plugin</h2>
                 <PublishSteps />
               </section>
             ) : (
-              <div class="tbl mine">
-                <div class="trow th" aria-hidden="true"><span>Plugin</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
-                <ul aria-label="Your plugins">
-                  {plugins.map((p) => {
-                    const s = standing(p);
-                    const v = p.versions[0];
-                    return (
-                      <li>
-                        <a class:list={["trow", hueClass(p.id), { off: gone(p), two: s.notes.length > 0 }]} href={`/account/plugins/${encodeURIComponent(p.id)}`}>
-                          <span class="c-name">
-                            <Tile id={p.id} name={p.name} icon={p.icon} version={v?.version ?? null} size="s" />
-                            <span class="nm" title={p.name}>{p.name}</span>
-                          </span>
-                          <span class="c-ver pills">
-                            {v && <b class="mono">{v.version}</b>}
-                            <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
-                          </span>
-                          <span class="c-pub">
-                            {v && <><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></>}
-                            {v?.via === "deploy_token" && <span class="via" title={v.deploy_token?.name ? `Sent by the deploy token “${v.deploy_token.name}”` : "Sent by a deploy token"}><Icon name="key" />via token<span class="sr-only">: {v.deploy_token?.name ?? "a deploy token"}</span></span>}
-                          </span>
-                          <span class="c-n num">{count(p.installs)}<span class="sr-only unit"> {p.installs === 1 ? "install" : "installs"}</span></span>
-                          <Icon name="chev" />
-                          {s.notes.length > 0 && <span class="c-note">{s.notes.join(" · ")}</span>}
-                        </a>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
+              <>
+                {tables.map(([kind, items]) => (
+                  <section class:list={{ yours: templates.length > 0 }} aria-labelledby={templates.length > 0 ? `your-${kind}s` : undefined}>
+                    {templates.length > 0 && <h2 id={`your-${kind}s`}>{KIND_WORDS[kind].Many}<span class="num">{count(items.length)}</span></h2>}
+                    <div class="tbl mine">
+                      <div class="trow th" aria-hidden="true"><span>{KIND_WORDS[kind].One}</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
+                      <ul aria-label={`Your ${KIND_WORDS[kind].many}`}>
+                        {items.map((p) => {
+                          const s = standing(p);
+                          const v = p.versions[0];
+                          return (
+                            <li>
+                              <a class:list={["trow", hueClass(p.id), { off: gone(p), two: s.notes.length > 0 }]} href={`/account${pluginUrl(p.id, kind)}`}>
+                                <span class="c-name">
+                                  <Thumb item={p} version={v?.version ?? null} size="s" />
+                                  <span class="nm" title={p.name}>{p.name}</span>
+                                </span>
+                                <span class="c-ver pills">
+                                  {v && <b class="mono">{v.version}</b>}
+                                  <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
+                                </span>
+                                <span class="c-pub">
+                                  {v && <><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></>}
+                                  {v?.via === "deploy_token" && <span class="via" title={v.deploy_token?.name ? `Sent by the deploy token “${v.deploy_token.name}”` : "Sent by a deploy token"}><Icon name="key" />via token<span class="sr-only">: {v.deploy_token?.name ?? "a deploy token"}</span></span>}
+                                </span>
+                                <span class="c-n num">{count(p.installs)}<span class="sr-only unit"> {p.installs === 1 ? "install" : "installs"}</span></span>
+                                <Icon name="chev" />
+                                {s.notes.length > 0 && <span class="c-note">{s.notes.join(" · ")}</span>}
+                              </a>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  </section>
+                ))}
+                {templatesResult && !templatesResult.ok && <p class="mkeys">Your templates can't be loaded right now. Try again in a moment.</p>}
+              </>
             )}
           </>
         )
       }
 
-      {plugins.length > 0 && (
+      {tables.length > 0 && (
         <section class="how" aria-label="How publishing works">
-          <div><h3><b>1</b>Send it from its folder</h3><p>Run <code>zeron plugin publish</code> in the plugin's folder, or use Publish in Zeron's Settings, under Plugins. The first version claims its id.</p></div>
+          <div><h3><b>1</b>Send it from its folder</h3><p>Run <code>zeron plugin publish</code> in the plugin's folder{templates.length > 0 && <> (<code>zeron template publish</code> in a template's)</>}, or use Publish in Zeron's Settings, under Plugins. The first version claims its id.</p></div>
           <div><h3><b>2</b>It is live at once</h3><p>People can install the new version straight away. It says “Not verified yet”, and Zeron asks them before it installs.</p></div>
           <div><h3><b>3</b>Zeron verifies it</h3><p>When a reviewer at Zeron has read the version, it gets the check. If they find a problem, you get their note saying what to change.</p></div>
         </section>

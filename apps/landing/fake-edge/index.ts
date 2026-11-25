@@ -740,7 +740,7 @@ const fresh = (id: string) => {
   return typeof until === "number" && until > Date.now();
 };
 
-const wireToken = ({ owner: _, hash: __, ...t }: (typeof state.tokens)[number]) => t;
+const wireToken = ({ owner: _, hash: __, ...t }: (typeof state.tokens)[number]) => ({ ...t, scope: "all" in t.scope ? { all: true, all_kinds: t.scope.all_kinds ?? ["plugin"] } : t.scope });
 const refuse = (status: number, error: string, message: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ error, message, ...extra }), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
 
@@ -769,9 +769,11 @@ async function tokenRoute(request: Request, method: string, id: string | undefin
   const expires = body?.expires ?? null;
   if (expires !== null && !(Number.isSafeInteger(expires) && (expires as number) > now && (expires as number) <= now + 5 * 365 * DAY)) return refuse(400, "invalid_expiry", "expires must be a future time in epoch milliseconds, within 5 years.");
   const raw = body?.scope as Record<string, unknown> | undefined;
-  let scope: { all: true } | { plugins: string[] };
+  let scope: { all: true; all_kinds: Kind[] } | { plugins: string[] };
   const badScope = (message: string, ids?: unknown[]) => refuse(400, "invalid_scope", message, ids?.length ? { ids: ids.map(String) } : {});
-  if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length === 1 && raw.all === true) scope = { all: true };
+  // (`all` names its kinds; left out, plugins alone, and always said on an answer.)
+  const kinds = JSON.stringify(raw?.all_kinds ?? ["plugin"]);
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && raw.all === true && Object.keys(raw).every((k) => k === "all" || k === "all_kinds") && (kinds === '["plugin"]' || kinds === '["plugin","template"]')) scope = { all: true, all_kinds: JSON.parse(kinds) as Kind[] };
   else if (raw && typeof raw === "object" && Object.keys(raw).length === 1 && Array.isArray(raw.plugins)) {
     const ids = raw.plugins as unknown[];
     if (ids.length < 1 || ids.length > MOST_SCOPE) return badScope(`A token's scope lists 1 to ${MOST_SCOPE} plugins.`);

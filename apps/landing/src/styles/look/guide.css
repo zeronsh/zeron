@@ -8,7 +8,7 @@
 
 /* The title block; the first section's heading keeps its own step above it, as every section's does. */
 .guide-head h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
-.guide-head .lead { margin-top: var(--head); max-width: 36em; }
+.guide-head .lead { margin-top: var(--head); max-width: 36em; text-wrap: pretty; }
 .guide-head + * { margin-top: var(--title); }
 
 /* Headings: a section's 64 above and 16 below; a part's 32 above and 12 below. Each clears the bar when it's

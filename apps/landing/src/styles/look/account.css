@@ -57,7 +57,13 @@ a.trow:focus-visible { outline-offset: -2px; }
 .c-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
 .mine .trow > svg { width: 16px; height: 16px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
 .mine a.trow:hover > svg { transform: translateX(2px); stroke: var(--text); }
-.trow.off .tile { filter: grayscale(1); opacity: 0.7; }
+/* (Plugins and templates, each a table under its name, when you have both or templates alone.) */
+.yours { margin-top: var(--s32); }
+.yours + .yours { margin-top: var(--s64); }
+.yours h2, .yours h2 .num { font-size: 19px; line-height: 26px; }
+.yours h2 .num { margin-left: var(--s8); font-size: 14px; font-weight: 450; color: var(--text-3); }
+.yours .tbl { margin-top: var(--s16); }
+.trow.off :is(.tile, .thumb) { filter: grayscale(1); opacity: 0.7; }
 .trow.off .nm, .trow.off .c-n { color: var(--text-2); }
 
 
@@ -109,6 +115,7 @@ a.trow:focus-visible { outline-offset: -2px; }
 .c-scope .sw { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .c-scope .tiles { display: flex; flex: none; align-items: center; gap: var(--s4); }
 .c-scope .tile.xs { width: 20px; height: 20px; font-size: 9px; }
+.c-scope .thumb.xs { width: 32px; height: 20px; }
 .c-scope .more { font-size: 12px; color: var(--text-3); }
 .c-scope .show { font-size: 13px; color: var(--text-2); font-weight: 500; }
 .every { display: contents; }
@@ -148,9 +155,11 @@ a.trow:focus-visible { outline-offset: -2px; }
 .tokform .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
 /* (Its scope: the report page's cards to choose, .rcard; the chosen plugins' list under them.) */
 .tokform .scopes .rcard + .rcard { margin-top: var(--s8); }
-/* (Chosen plugins: each to tick, the list in its own well; with all of yours, nothing to choose.) */
-.tokform .picks { --pad: var(--s16); display: grid; gap: var(--s4); max-height: 248px; overflow: auto; margin: var(--s8) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
-.tokform .scopes:has(input[value="all"]:checked) .picks { display: none; }
+/* (The chosen: each to tick, the list in its own well; with all of yours, nothing to choose.) */
+.tokform .picks { --pad: var(--s16); display: grid; gap: var(--s12); max-height: 288px; overflow: auto; margin: var(--s8) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
+.picks ul { display: grid; gap: var(--s4); margin: 0; padding: 0; list-style: none; }
+.picks .picks-h { padding-block: var(--s4); font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); }
+.tokform .scopes:not(:has(input[value="chosen"]:checked)) .picks { display: none; }
 .tokform .pick-pl { display: flex; align-items: center; gap: var(--s12); min-height: 36px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; cursor: pointer; }
 .tokform .pick-pl input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
 .tokform .pick-pl > span:last-child { min-width: 0; padding-block: var(--s8); }
@@ -237,6 +246,7 @@ a.trow:focus-visible { outline-offset: -2px; }
   /* (A plugin's head on a phone: its tile at the title's first line, its action under its words.) */
   .ohead { --tile: 56px; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); }
   .ohead > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
+  .ohead > .thumb.xl { width: 56px; height: 35px; border-radius: 6px; margin-top: var(--s12); }
   .ohead .txt { justify-content: flex-start; min-height: 0; }
   .ohead h1 { font-size: 26px; line-height: 32px; margin-top: var(--s12); }
   .head-act { grid-column: 1 / -1; justify-content: flex-start; min-height: 0; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }

@@ -300,8 +300,18 @@ export interface MyPlugins {
   plugins: MyPlugin[];
 }
 
-/** What a deploy token may publish: all the account's plugins, or the ones named (sorted). */
-export type TokenScope = { all: true } | { plugins: string[] };
+/** `GET /store/v1/me/templates`: the same, of the account's templates. */
+export interface MyTemplates {
+  publisher_id?: string;
+  templates: MyPlugin[];
+}
+
+/**
+ * What a deploy token may publish: all the account's, of which kinds
+ * (`all_kinds`; an edge before templates leaves it out: plugins), or the
+ * ones named, of either kind (sorted; no kind beside an id).
+ */
+export type TokenScope = { all: true; all_kinds?: Kind[] } | { plugins: string[] };
 
 /**
  * A deploy token, the account's (contract a315eef5a): named only by its short id (the 8 characters after
@@ -314,7 +324,7 @@ export interface DeployToken {
   scope: TokenScope;
   created_at: number;
   last_used_at: number | null;
-  /** The plugin it last published a version of. */
+  /** What it last published a version of, of either kind. */
   last_used_plugin: string | null;
   expires_at: number | null;
   /** Null while it's live. */
