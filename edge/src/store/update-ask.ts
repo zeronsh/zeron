@@ -22,29 +22,26 @@ export interface Installed {
   readonly verifiedOnly: boolean;
 }
 
-/** One list of the request, as `kind`, or undefined when it isn't one. */
+/** Whether a member of an item is left out, or a boolean. */
+const isFlag = (value: unknown): boolean => value === undefined || typeof value === "boolean";
+
+/** One list of the request, as `kind`, or undefined when it isn't one: not a
+ * list, an item that isn't an object, an id twice. An item whose id, version,
+ * hash or flags aren't ones is as an item the store hasn't got: left out, and
+ * the rest answered. */
 export const parseList = (kind: Kind, value: unknown): Installed[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   const items: Installed[] = [];
   const seen = new Set<string>();
   for (const item of value as unknown[]) {
-    const p = item as Record<string, unknown> | null;
-    if (
-      !p ||
-      typeof p.id !== "string" ||
-      !ID_RE.test(p.id) ||
-      typeof p.version !== "string" ||
-      p.version.length > 128 ||
-      typeof p.hash !== "string" ||
-      !HASH_RE.test(p.hash) ||
-      (p.prerelease !== undefined && typeof p.prerelease !== "boolean") ||
-      (p.verified_only !== undefined && typeof p.verified_only !== "boolean") ||
-      seen.has(p.id)
-    ) {
-      return undefined;
-    }
-    seen.add(p.id);
-    items.push({ kind, id: p.id, version: p.version, hash: p.hash, prerelease: p.prerelease === true, verifiedOnly: p.verified_only === true });
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const { id, version, hash, prerelease, verified_only } = item as Record<string, unknown>;
+    if (typeof id !== "string" || !ID_RE.test(id)) continue;
+    if (seen.has(id)) return undefined;
+    seen.add(id);
+    if (typeof version !== "string" || !parseVersion(version) || typeof hash !== "string" || !HASH_RE.test(hash)) continue;
+    if (!isFlag(prerelease) || !isFlag(verified_only)) continue;
+    items.push({ kind, id, version, hash, prerelease: prerelease === true, verifiedOnly: verified_only === true });
   }
   return items;
 };
@@ -58,6 +55,6 @@ export const parseRequest = (body: Record<string, unknown> | undefined): { zeron
   }
   const plugins = parseList("plugin", body.plugins);
   const templates = parseList("template", body.templates ?? []);
-  if (!plugins || !templates) return "Each item is { id, version, hash, prerelease?, verified_only? }, each id once in its list.";
+  if (!plugins || !templates) return "Each item is an object, { id, version, hash, prerelease?, verified_only? }, each id once in its list.";
   return { zeron, items: [...plugins, ...templates] };
 };

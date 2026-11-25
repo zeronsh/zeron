@@ -14,7 +14,10 @@
  * offer. A yanked version is never offered. A suspended item offers nothing.
  *
  * An id asked about as the other kind than it is is answered as an unknown
- * one: never offered, never blocked.
+ * one: never offered, never blocked. So is an item whose id, version or hash
+ * isn't one, and the rest are answered: only the request's own shape (a list,
+ * at most `max_update_items` over both, objects, an id once in its list) is
+ * 400.
  *
  * `blocked` names installed versions staff took down, when the installed
  * contents are the ones taken down (`hash`): the device turns them off and
