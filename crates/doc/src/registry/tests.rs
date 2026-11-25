@@ -3366,6 +3366,29 @@ fn a_session_waiting_on_long_commands_queues_only_ops_that_fit_and_coalesces() {
 }
 
 #[test]
+fn a_split_op_keeps_its_pieces_in_one_batch() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut ops: Vec<RowOp> = (0..399)
+        .map(|i| raw_op_of_len(&format!("c-{i}"), 200))
+        .collect();
+    let mut big = raw_op_of_len("big", 200);
+    for f in ["a", "b", "c"] {
+        big.set.as_mut().unwrap().insert(f.into(), json!("x".repeat(7_000)));
+    }
+    ops.push(big);
+    doc.enqueue_ops(ops);
+    let holding: Vec<usize> = doc
+        .pending
+        .iter()
+        .map(|b| b.ops.iter().filter(|o| o.id == "big").count())
+        .filter(|&n| n > 0)
+        .collect();
+    assert_eq!(holding.len(), 1);
+    assert!(holding[0] > 1);
+    assert!(doc.pending.iter().all(|b| b.ops.len() <= 400));
+}
+
+#[test]
 fn a_short_waiting_label_syncs_as_is() {
     let mut doc = RegistryDoc::new("dev-a");
     let mut row = session("chat-1", "dev-a", SessionStatus::Idle);

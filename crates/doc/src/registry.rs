@@ -1054,7 +1054,7 @@ impl RegistryDoc {
         }
         // An op over the room's size limit is refused with its whole batch,
         // on every replay, forever. Queue only ops that fit.
-        let mut ops: Vec<RowOp> = ops.into_iter().flat_map(op_budget::fit_op).collect();
+        let groups: Vec<Vec<RowOp>> = ops.into_iter().map(op_budget::fit_op).collect();
         // The registry room rejects any batch over its op cap (500), and a
         // rejected batch is a PERMANENT wedge: error frames carry no batch
         // id, so the client can never retire it — it replays and fails on
@@ -1065,12 +1065,16 @@ impl RegistryDoc {
         // atomically (only cross-chunk atomicity is given up).
         const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
-        while !ops.is_empty() {
-            let tail = if ops.len() > MAX_OPS_PER_BATCH {
-                ops.split_off(MAX_OPS_PER_BATCH)
+        let mut chunks: Vec<Vec<RowOp>> = vec![Vec::new()];
+        for group in groups {
+            let last = chunks.last_mut().expect("never empty");
+            if !last.is_empty() && last.len() + group.len() > MAX_OPS_PER_BATCH {
+                chunks.push(group);
             } else {
-                Vec::new()
-            };
+                last.extend(group);
+            }
+        }
+        for ops in chunks.into_iter().filter(|c| !c.is_empty()) {
             // Batch ids only need device-lifetime uniqueness; the HLC of a
             // fresh tick provides exactly that without a rng dependency.
             let batch = format!("b-{}", self.next_hlc());
@@ -1079,7 +1083,6 @@ impl RegistryDoc {
                 ops,
                 in_flight: false,
             });
-            ops = tail;
         }
         self.coalesce_unsent();
     }
