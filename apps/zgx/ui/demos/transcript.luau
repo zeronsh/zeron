@@ -80,7 +80,44 @@ local function with_tools(list: { Message }): { Message }
 	})
 	return list
 end
-local messages = ui.state("transcript_messages_v5", with_tools(with_pictures(samples.conversation(TURNS))) :: { Message })
+-- Work handed to other chats (ds/delegation), and what woke the chat after.
+local function with_delegation(list: { Message }): { Message }
+	table.insert(list, {
+		id = "handed",
+		role = "assistant",
+		text = "",
+		blocks = {
+			{ id = "handed-t", kind = "text", text = "The parser and the notes don't depend on each other, so I'll have both done at once." },
+			{
+				id = "handed-d",
+				kind = "delegated",
+				what = "subagents",
+				tasks = {
+					{ title = "Audit the parser", agent = "openai", chat = "demo-audit" },
+					{ title = "Draft the release notes", agent = "cursor", chat = "demo-notes" },
+					{ title = "Time the benchmark", agent = "claude", failed = true },
+				},
+			},
+		},
+	} :: any)
+	table.insert(list, {
+		id = "woke",
+		role = "wake",
+		text = "",
+		wake = {
+			kind = "results",
+			open = 1,
+			tasks = { { chat = "demo-audit", title = "Audit the parser", agent = "openai", status = "done", said = "No unsafe paths left: 3 fuzz targets, 41 million inputs, no crash" } },
+		},
+	} :: any)
+	return list
+end
+-- What the demo's children do now, as the sidebar would say.
+local CHILDREN: { [string]: any } = {
+	["demo-audit"] = { title = "Audit the parser", mark = "openai", detail = "Codex · Build box" },
+	["demo-notes"] = { title = "Draft the release notes", mark = "cursor", status = "working", detail = "Cursor" },
+}
+local messages = ui.state("transcript_messages_v6", with_delegation(with_tools(with_pictures(samples.conversation(TURNS)))) :: { Message })
 
 -- The whole of a tool's output or diff, as the engine's sidecar gives it,
 -- a moment late.
@@ -340,6 +377,9 @@ return {
 					offset = offset,
 					draft = draft,
 					pictures = pictures,
+					chat_of = function(id: string): any
+						return CHILDREN[id]
+					end,
 					on_mention = function(q)
 						local line = Quote.line(q)
 						local kept = table.clone(quotes:peek())

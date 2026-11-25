@@ -195,6 +195,36 @@ function M.children(id: string?): { Child }
 	return (M.now:get().children or {})[id] or {}
 end
 
+-- What a chat runs on, in words: its agent, and its device where that isn't
+-- the one it was started from ("Codex · Build box"). Nil with nothing to say.
+function M.ran_on(c: { [string]: any }): string?
+	local now = M.now:get()
+	local home: string? = nil
+	if c.parent then
+		for _, p in now.chats do
+			if p.id == c.parent then
+				home = p.device
+				break
+			end
+		end
+	end
+	local said: { string } = {}
+	if c.harness_name and c.harness_name ~= "" then
+		table.insert(said, c.harness_name)
+	end
+	for _, d in now.devices or {} do
+		if d.id == c.device then
+			-- (A chat of its own: where it isn't this device.)
+			local away = if home then home ~= d.id else not d.here
+			if away and d.name and d.name ~= "" then
+				table.insert(said, d.name)
+			end
+			break
+		end
+	end
+	return if #said > 0 then table.concat(said, " · ") else nil
+end
+
 function M.archive(id: string)
 	ui.call("sessions.archive", id):after(function() end, quietly())
 end

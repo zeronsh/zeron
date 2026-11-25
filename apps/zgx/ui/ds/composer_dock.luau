@@ -28,7 +28,8 @@
 -- running is ours: a row a task or terminal, how long it has run, Stop at
 -- its end, Stop all in the header. The chat's subagents run in the same
 -- tab (`kind = "agent"`): a row with its title that opens it
--- (`on_open_task`), no Stop; those done fold behind "N finished", and the
+-- (`on_open_task`), with a Stop where it can be stopped alone (`stops`) and
+-- what it asks, answered, under it (`ask`); those done fold behind "N finished", and the
 -- header counts what runs and leads with an agent's name over a command's.
 -- A list longer than the deck's cap scrolls, its edges fading as there is
 -- more past them.
@@ -47,6 +48,7 @@ local control = require("@self/control")
 local cargo = require("@self/composer_cargo")
 local locale = require("@self/locale")
 local Grid = require("@self/grid")
+local SelectionMenu = require("@self/selection_menu")
 
 local M = {}
 
@@ -90,12 +92,14 @@ export type Task = {
 	state: ("waiting" | "input" | "approval")?,
 	-- A subagent that can be stopped on its own (a chat's).
 	stops: boolean?,
-	-- What a subagent asks the person, under its row: its words or what it
-	-- would run, and its answers side by side (each an `id` that comes to
-	-- `on_answer_task`, the first the one meant).
+	-- What a subagent asks the person, under its row: what it would run, its
+	-- words, and its answers (each an `id` that comes to `on_answer_task`):
+	-- a question's options each a choice on its own, else buttons at the
+	-- row's end, as an approval's are. `id`: another ask of its, another id.
 	ask: Ask?,
 }
-export type Ask = { words: string?, code: string?, answers: { { id: string, label: string } } }
+export type Answer = { id: string, label: string, primary: boolean? }
+export type Ask = { id: string?, words: string?, code: string?, options: boolean?, answers: { Answer } }
 export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 -- Something to know about the chat (a context nearly full, a rate limit, a
 -- server that failed to start): how serious, what it is, a word more, and
@@ -1176,6 +1180,128 @@ local function one_line(text: string): string
 	return (string.gsub(string.gsub(text, "%s*[\r\n]+%s*", " "), "^%s+", ""))
 end
 
+-- What a subagent asks, under its row: as the composer's own ask reads
+-- (ds/composer_ask), at the tray's size. What it would run in its face, on
+-- the code's wash; its words; and its answers, an approval's where an
+-- approval's always are, a question's options in a wrapping line of their
+-- own. An answer pressed holds (the others out of reach) until its chat
+-- moves on, or a moment passes and it hasn't.
+local ASK_HOLD = 4000
+local function ask_card(t: Task, asked: () -> Ask?, props: Props): Node
+	local held = ui.use_state(nil :: string?)
+	local letting_go: (() -> ())? = nil
+	ui.on_cleanup(function()
+		if letting_go then
+			letting_go()
+		end
+	end)
+	local function pick(id: string)
+		if not props.on_answer_task or held:peek() then
+			return
+		end
+		-- ("open" answers nothing: there's nothing to wait on.)
+		if id ~= "open" then
+			held:set(id)
+			letting_go = ui.after(ASK_HOLD, function()
+				letting_go = nil
+				held:set(nil)
+			end)
+		end
+		props.on_answer_task(t.id, id)
+	end
+	local function ask(): Ask
+		return asked() or { answers = {} }
+	end
+	local first = ask()
+	local answers = ui.computed(function(): { Answer }
+		return ask().answers
+	end)
+	local function answer(x: Answer, choice: boolean): Node
+		return Button {
+			x.label,
+			size = "sm",
+			shape = "pill",
+			tone = if x.primary then "primary" elseif choice and x.id ~= "open" then "secondary" else "ghost",
+			h = 24,
+			px = "$zeron.space.snug",
+			max_w = "100%",
+			text_size = "$font.size.xs",
+			disabled = function(): boolean
+				return held:get() ~= nil
+			end,
+			busy = function(): boolean
+				return held:get() == x.id
+			end,
+			on_click = function()
+				pick(x.id)
+			end,
+		}
+	end
+	return ui.column {
+		hook = false,
+		w_full = true,
+		pl = ui.raw(34, "under the row's words: its inset, the glyph and the gap"),
+		pr = "$space.2",
+		pb = "$space.2",
+		gap = "$space.2",
+		if first.code
+			then ui.column {
+				w_full = true,
+				px = "$zeron.space.snug",
+				py = "$zeron.space.tight",
+				rounded = "$zeron.composer.tray.row_radius",
+				bg = "$zeron.code.wash",
+				border = 1,
+				border_color = "$zeron.prose.code.edge",
+				SelectionMenu {
+					w_full = true,
+					ui.text {
+						function(): string
+							return ask().code or ""
+						end,
+						literal = true,
+						wrap = true,
+						font = "$font.mono",
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.primary",
+					},
+				},
+			}
+			else nil,
+		if first.words
+			then ui.text {
+				function(): string
+					return ask().words or ""
+				end,
+				literal = true,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = if first.code then "$text.tertiary" else "$text.primary",
+			}
+			else nil,
+		ui.row {
+			w_full = true,
+			gap = "$space.1",
+			wrap = first.options == true,
+			items = "center",
+			justify = if first.options then nil else "end",
+			-- (A ghost's words, not its box, on the edge the rest share.)
+			ui.each(answers, function(x: Answer): Node
+				return answer(x, first.options == true)
+			end, {
+				key = function(x: Answer): string
+					return x.id
+				end,
+				row = true,
+				gap = "$space.1",
+				wrap = first.options == true,
+			}),
+		},
+	}
+end
+
 local function task_row(t: Task, row: State<Task>, now: State<number>, props: Props, height: number): Node
 	local function ended(): boolean
 		return row:get().ended ~= nil
@@ -1300,72 +1426,23 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		local r = row:get()
 		return if r.ended then nil else r.ask
 	end
-	local UNDER = ui.raw(34, "under the row's words: its inset, the glyph and the gap")
-	local function words(text: () -> string?, mono: boolean): Node
-		return ui.show(function(): boolean
-			return text() ~= nil
-		end, ui.text {
-			function(): string
-				return text() or ""
-			end,
-			literal = true,
-			wrap = true,
-			pl = UNDER,
-			pr = "$space.2",
-			font = if mono then "$font.mono" else nil,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			color = if mono then "$text.primary" else "$text.secondary",
-		})
-	end
+	local shown_ask = ui.computed(function(): string?
+		local a = asked()
+		return if a then a.id or "" else nil
+	end)
 	return ui.column {
 		w_full = true,
 		ui.row(p),
-		ui.show(function(): boolean
-			return asked() ~= nil
+		-- (Another ask in the same row, a new card: what was pressed on the
+		-- last isn't still pressed.)
+		ui.presence(function(): string?
+			return shown_ask:get()
 		end, function(): Node
-			return ui.column {
-				w_full = true,
-				pb = "$space.2",
-				gap = "$space.2",
-				words(function(): string?
-					local a = asked()
-					return a and a.words
-				end, false),
-				words(function(): string?
-					local a = asked()
-					return a and a.code
-				end, true),
-				ui.row {
-					pl = UNDER,
-					pr = "$space.2",
-					gap = "$space.2",
-					wrap = true,
-					ui.each(ui.computed(function(): { { id: string, label: string } }
-						local a = asked()
-						return if a then a.answers else {}
-					end), function(x: { id: string, label: string }, i: number): Node
-						return Button {
-							x.label,
-							size = "sm",
-							tone = if i == 1 then "primary" else "ghost",
-							h = 24,
-							px = "$space.2",
-							text_size = "$font.size.xs",
-							on_click = function()
-								if props.on_answer_task then
-									props.on_answer_task(t.id, x.id)
-								end
-							end,
-						}
-					end, {
-						key = function(x: { id: string, label: string }): string
-							return x.id
-						end,
-					}),
-				},
-			}
-		end),
+			return ask_card(t, asked, props)
+		end, {
+			w_full = true,
+			enter = motion.transition { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
+		}),
 	}
 end
 
@@ -2061,8 +2138,11 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 				end
 				return "none"
 			end
-			local function mark(size: number): Node
-				return ui.switch(asking, {
+			-- (In its own head, its rows show what asks: said once.)
+			local function mark(size: number, head: boolean): Node
+				return ui.switch(function(): string
+					return if head and open:get() == id then "none" else asking()
+				end, {
 					none = Icon { name = glyph_name, size = size },
 					approval = status.StatusIcon { kind = "approval", size = size },
 					input = status.StatusIcon { kind = "input", size = size },
@@ -2072,8 +2152,8 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			table.insert(tabs, {
 				id = id,
 				-- (One of them asking for you: that, until it's answered.)
-				glyph = mark(16),
-				pill_glyph = mark(14),
+				glyph = mark(16, true),
+				pill_glyph = mark(14, false),
 				-- (Nothing running, the tab held open: what finished.)
 				title = function(): string
 					return if #running() > 0 or agents then name_key else "ds.composer_dock.finished"

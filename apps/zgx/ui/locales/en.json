@@ -776,6 +776,11 @@
         "started": "{n, plural, one {Started a chat} other {Started # chats}}",
         "messaging": "{n, plural, one {Messaging a chat} other {Messaging # chats}}",
         "messaged": "{n, plural, one {Messaged a chat} other {Messaged # chats}}",
+        "running": "{n, plural, one {# running} other {# running}}",
+        "need_you": "{n, plural, one {# needs you} other {# need you}}",
+        "needs_approval": "Needs approval",
+        "asks": "Has a question",
+        "failed": "Failed",
         "untitled": "Subagent"
       }
     },
@@ -3335,7 +3340,8 @@
     "delegates": {
       "allow": "Allow once",
       "deny": "Deny",
-      "open": "Open its chat",
+      "answer": "Answer in its chat",
+      "other": "Something else",
       "failed": "Couldn't answer that subagent",
       "stop_failed": "Couldn't stop that subagent"
     }

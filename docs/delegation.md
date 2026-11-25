@@ -57,16 +57,17 @@ A turn whose only open tool calls block on another chat (`wait_for_turn`, or `mo
 When the parent has no turn in flight, everything settled within 800 ms of the last goes in one message
 (`wake: "all"`: once the whole cohort has). It is marked `Delivered` before it's sent and `Acknowledged` once its turn
 starts; a stop between the two finds it missing from the transcript on boot and sends it again. It isn't a queue row, so
-a paused queue never holds it. Transcripts show it as a row of chips; the children's replies are quoted so nothing in
-them can end their block or pass for another chat's message.
+a paused queue never holds it. Transcripts show it as a line and a row a child, each with a line of its reply
+(`delegation::wake_excerpts`); the replies are quoted so nothing in them can end their block or pass for another chat's
+message.
 
 A result a tool call already returned (`mode: "wait"`, `wait_for_turn`) is acknowledged and not sent again. A blocking
 call that times out goes on in the background.
 
 ## In the transcript
 
-The call that hands work over is a row of chips, one per chat: how each stands now (it follows the chat), its agent and
-title; a click opens it. Which chat each request became is said by Zeron's MCP server as the call goes
+The call that hands work over is a line on the transcript's activity tree and a row a chat (`ds/delegation`): how each
+stands now (it follows the chat), its title, agent and device; a click opens it. Which chat each request became is said by Zeron's MCP server as the call goes
 (`NoteHanded` → `AgentEvent::Handed`), since harnesses drop MCP results before the engine sees them. The transcript keeps
 titles, agents, recipients and chat ids of these calls, never the prompt or message (`delegation::badge`).
 
@@ -77,7 +78,7 @@ waits on, and for how long, is on its hover card.
 
 A child's question wakes a waiting parent after 5 s, with its request id for `respond_to_input`; answered or dismissed
 first, the wake is dropped. An approval is never an agent's to give here. Both show on the child's row in the
-parent's Subagents tray (an approval with Allow once and Deny), whose tab and pill wear the ask, and on the parent's own
+parent's Subagents tray (an approval with Allow once and Deny, a short question with its options to press), whose rows come first and whose tab and pill wear the ask, and on the parent's own
 row in the sidebar. Nothing opens itself.
 
 ## Stop

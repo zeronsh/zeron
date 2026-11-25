@@ -189,7 +189,7 @@ do
 		title = "The asking child asks a question instead",
 		run = function()
 			ui.shared("chat.ask_details", {} :: { [string]: any }):set({
-				k1 = { request = "r2", kind = "question", detail = "Which branch should I audit?" },
+				k1 = { request = "r2", kind = "question", detail = "Which branch should I audit?", options = { "main", "release/1.9", "The one this chat is on" } },
 			})
 			ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "question" })
 		end,
@@ -218,10 +218,53 @@ do
 			},
 		}
 	end
+	-- A dozen at once, their names long, every way one can stand.
+	ui.command {
+		id = "delegated_many",
+		title = "s2 delegated to a dozen, in every state",
+		run = function()
+			local names = {
+				"Audit the parser for panics reachable from untrusted input, and write up each with a reproducer", "Draft the release notes",
+				"Time the benchmark", "Port the settings page", "Check the Windows installer signs every binary it ships", "Read the docs",
+				"Find the flaky test", "Bisect the regression", "Review the migration", "Translate the new strings", "Profile the cold start", "Tidy the changelog",
+			}
+			local looks = { { "openai", "Codex" }, { "cursor", "Cursor" }, { "claude", "Claude" } }
+			local stands = { "input", "working", "working", nil, "failed", "waiting", "input", nil, "working", nil, "working", nil }
+			local now = table.clone(sessions.now:peek() :: any)
+			local children = table.clone(now.children or {})
+			local rows, handed, results = {}, {}, {}
+			for i, name in names do
+				local look = looks[i % 3 + 1]
+				table.insert(rows, {
+					id = `n{i}`, parent = "s2", title = name, device = if i % 4 == 1 then "box" else "mac", status = stands[i], agent = look[1],
+					harness_name = look[2], updated = 40, created = i, since = os.time() - 37 * i, child_kind = "subagent",
+				})
+				table.insert(handed, { title = name, agent = look[1], chat = `n{i}`, pending = false })
+				if stands[i] == nil then
+					table.insert(results, { chat = `n{i}`, title = name, agent = look[1], status = "done", said = "Done: four files changed, every test passes, and one thing to decide before it merges, which I left in the pull request" })
+				end
+			end
+			children.s2 = rows
+			now.children = children
+			sessions.now:set(now)
+			ui.shared("chat.ask_details", {} :: { [string]: any }):set({
+				n1 = { request = "r1", kind = "approval", command = "cargo fuzz run parse -- -max_total_time=60 -max_len=65536 \\\n  -dict=fuzz/dictionaries/parse.dict fuzz/corpus/parse", detail = "Runs for a minute and writes to fuzz/corpus" },
+				n7 = { request = "r7", kind = "question", detail = "The test passes alone and fails beside two others. Should I quarantine it, or keep looking?", options = { "Quarantine it", "Keep looking" } },
+			})
+			ui.shared("chat.asks", {} :: { [string]: string }):set({ n1 = "approval", n7 = "question" })
+			store.messages:push { id = "many1", role = "assistant", text = "", model = "Opus", blocks = {
+				{ id = "t1", kind = "text", text = "I'll split this up." },
+				{ id = "d:many", kind = "delegated", what = "subagents", live = false, tasks = handed },
+			} }
+			store.messages:push { id = "many2", role = "wake", text = "", wake = { kind = "results", open = 8, tasks = results } }
+			store.messages:push { id = "many3", role = "assistant", text = "Four are back.", model = "Opus" }
+		end,
+	}
 	ui.command {
 		id = "delegating",
 		title = "s2 is handing work to children",
 		run = function()
+			publish("s2", { running = true })
 			store.messages:push(handing(true))
 		end,
 	}
@@ -232,6 +275,7 @@ do
 			local list = table.clone(store.messages:peek())
 			list[#list] = handing(false)
 			store.messages:set(list)
+			publish("s2", { running = false })
 		end,
 	}
 	-- s2 was woken with what they came to.
@@ -247,8 +291,8 @@ do
 					kind = "results",
 					open = 1,
 					tasks = {
-						{ chat = "k1", title = "Audit the parser", agent = "openai", status = "done" },
-						{ chat = "k2", title = "Draft the release notes", agent = "cursor", status = "failed" },
+						{ chat = "k1", title = "Audit the parser", agent = "openai", status = "done", said = "No unsafe paths left: 3 fuzz targets, 41 million inputs, no crash" },
+						{ chat = "k2", title = "Draft the release notes", agent = "cursor", status = "failed", said = "Cursor isn't signed in on this device" },
 						{ chat = "gone", title = "Time the benchmark", agent = "claude", status = "stopped" },
 					},
 				},
@@ -598,8 +642,8 @@ stub.interrupt = function(id: string)
 	note(`interrupt:{id}`)
 end
 -- A child's approval answered, and a child chat stopped.
-stub.respond_child = function(chat: string, request: string, decision: string): any
-	note(`respond_child:{chat}:{request}:{decision}`)
+stub.respond_child = function(chat: string, request: string, decision: string, option: string?): any
+	note(`respond_child:{chat}:{request}:{option or decision}`)
 	return settled(nil)
 end
 do

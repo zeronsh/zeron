@@ -776,6 +776,11 @@
         "started": "{n, plural, other {已启动 # 个对话}}",
         "messaging": "{n, plural, other {正在向 # 个对话发送消息}}",
         "messaged": "{n, plural, other {已向 # 个对话发送消息}}",
+        "running": "{n, plural, other {# 个运行中}}",
+        "need_you": "{n, plural, other {# 个需要你处理}}",
+        "needs_approval": "需要批准",
+        "asks": "有问题",
+        "failed": "失败",
         "untitled": "子代理"
       }
     },
@@ -3335,7 +3340,8 @@
     "delegates": {
       "allow": "允许一次",
       "deny": "拒绝",
-      "open": "打开其对话",
+      "answer": "在其对话中回答",
+      "other": "其他",
       "failed": "无法回复该子代理",
       "stop_failed": "无法停止该子代理"
     }

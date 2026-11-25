@@ -834,10 +834,10 @@ end
 
 -- A chat as it's listed now, for what says who sent a message: its title (its
 -- short id, untitled), its agent's mark, what it's doing (a status' kind, nil
--- at rest; "connecting" for one not begun) and the device it runs on. Nil for
--- one that isn't listed.
+-- at rest; "connecting" for one not begun) and what it runs on (`ran_on`). Nil
+-- for one that isn't listed.
 local chat_asks = ui.shared("chat.asks", {} :: { [string]: string })
-function M.chat_of(id: string): { title: string, mark: string?, status: string?, device: string? }?
+function M.chat_of(id: string): { title: string, mark: string?, status: string?, detail: string? }?
 	local now = sessions.now:get()
 	local found: any = nil
 	for _, c in now.chats do
@@ -882,7 +882,7 @@ function M.chat_of(id: string): { title: string, mark: string?, status: string?,
 		title = if title ~= "" then title else string.sub(id, 1, 8),
 		mark = found.agent,
 		status = status,
-		device = found.device,
+		detail = sessions.ran_on(found),
 	}
 end
 

@@ -10,6 +10,12 @@
 
 local M = {}
 
+-- The transcript's tree, in points (ds/activity, ds/delegation): the trunk's
+-- x (under the working loader's middle), the bend of a branch and where it
+-- ends, the glyph's place and size, the gutter before a row's words, and a
+-- row's and the header's heights.
+M.TREE = { loader = 16, trunk = 8.5, bend = 6, tip = 20, glyph_left = 24, glyph = 16, gutter = 48, row = 28, header = 26 }
+
 local HALF = 0.5
 
 export type Branch = { x: number, mid: number, tip: number, h: number, bend: number, on: boolean }

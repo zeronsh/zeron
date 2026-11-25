@@ -145,44 +145,35 @@ local ask_details = ui.shared("chat.ask_details", {} :: { [string]: any })
 -- What a child asks, as its row shows it: an approval, what it would do, to
 -- allow or not; a question, its words (the parent answers those it can;
 -- whoever does, it's answered in the child's chat).
+local OPTION = "option:"
 local function ask_of(child: string): any
 	local kind = asks:get()[child]
 	local ask = ask_details:get()[child]
 	if not kind or not ask then
 		return nil
 	end
-	local open = { id = "open", label = locale.s("chat.delegates.open") }
 	if ask.kind == "approval" then
 		return {
+			id = ask.request,
 			code = ask.command,
-			words = if ask.command then nil else ask.detail,
+			words = ask.detail,
 			answers = {
-				{ id = "once", label = locale.s("chat.delegates.allow") },
 				{ id = "deny", label = locale.s("chat.delegates.deny") },
-				open,
+				{ id = "once", label = locale.s("chat.delegates.allow"), primary = true },
 			},
 		}
 	end
-	return { words = ask.detail, answers = { open } }
-end
-local function device_name(id: string): string?
-	for _, d in sessions.now:get().devices or {} do
-		if d.id == id then
-			return d.name
-		end
+	local answers = {}
+	for _, option in ask.options or {} do
+		table.insert(answers, { id = OPTION .. option, label = option })
 	end
-	return nil
-end
-local function home_of(id: string?): string?
-	for _, c in sessions.now:get().chats do
-		if c.id == id then
-			return c.device
-		end
-	end
-	return nil
+	local picks = #answers > 0
+	-- (Its words are its chat's to write: the press that gets there says so.)
+	table.insert(answers, { id = "open", label = locale.s(if picks then "chat.delegates.other" else "chat.delegates.answer"), primary = not picks })
+	return { id = ask.request, words = ask.detail, options = picks, answers = answers }
 end
 function M.tasks(session: string?): { any }
-	local active, finished = {}, {}
+	local asking, active, finished = {}, {}, {}
 	for _, s in subagents:get() do
 		local task = { id = s.ref, kind = "agent", name = s.title }
 		if s.status == "done" or s.status == "failed" then
@@ -201,18 +192,11 @@ function M.tasks(session: string?): { any }
 	end)
 	for _, c in children do
 		if c.child_kind ~= nil then
-			local where = if c.device ~= home_of(session) then device_name(c.device) else nil
-			local said: { string } = {}
-			for _, word in { c.harness_name or "", where or "" } do
-				if word ~= "" then
-					table.insert(said, word)
-				end
-			end
 			local task: any = {
 				id = CHILD .. c.id,
 				kind = "agent",
 				name = c.title,
-				detail = if #said > 0 then table.concat(said, " · ") else nil,
+				detail = sessions.ran_on(c),
 			}
 			local st = c.status
 			if st == "working" or st == "waiting" or st == "input" then
@@ -224,7 +208,8 @@ function M.tasks(session: string?): { any }
 				elseif st == "waiting" then
 					task.state = "waiting"
 				end
-				table.insert(active, task)
+				-- (What needs the person, first: a long list keeps it in view.)
+				table.insert(if task.state == "approval" or task.state == "input" then asking else active, task)
 			else
 				task.ended = if st == "failed" then "failed" else "done"
 				task.failed = st == "failed" or nil
@@ -232,10 +217,9 @@ function M.tasks(session: string?): { any }
 			end
 		end
 	end
-	for _, t in finished do
-		table.insert(active, t)
-	end
-	return active
+	table.move(active, 1, #active, #asking + 1, asking)
+	table.move(finished, 1, #finished, #asking + 1, asking)
+	return asking
 end
 
 -- A tray row's subagent, opened as a tab of the session's panel; a child
@@ -264,7 +248,7 @@ function M.child_of(ref: string): string?
 	return if string.sub(ref, 1, #CHILD) == CHILD then string.sub(ref, #CHILD + 1) else nil
 end
 
--- An answer picked on a child's row ("once", "deny"; "open" its chat).
+-- An answer picked on a child's row ("once", "deny", an option; "open" its chat).
 -- `failed`: it didn't reach it.
 function M.answer_task(session: string, ref: string, answer: string, failed: () -> ())
 	local child = M.child_of(ref)
@@ -272,7 +256,8 @@ function M.answer_task(session: string, ref: string, answer: string, failed: () 
 		M.open_task(session, ref)
 	elseif child then
 		local ask = ask_details:peek()[child]
-		store.respond_child(child, if ask then ask.request else "", answer):after(function() end, failed)
+		local option = if string.sub(answer, 1, #OPTION) == OPTION then string.sub(answer, #OPTION + 1) else nil
+		store.respond_child(child, if ask then ask.request else "", if option then "option" else answer, option):after(function() end, failed)
 	end
 end
 
