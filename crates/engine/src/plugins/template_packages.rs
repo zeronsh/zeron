@@ -703,6 +703,17 @@ pub fn shown_publisher(store: &install::StoreSource) -> String {
     listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER)
 }
 
+/// Each template here from the store: its folder, and its record.
+pub fn from_store(dir: &Path) -> Vec<(String, install::StoreSource)> {
+    templates::installed(dir)
+        .into_iter()
+        .filter_map(|id| {
+            let store = came_from(&imported(&dir.join(&id))?["source"])?.store?;
+            Some((id, store))
+        })
+        .collect()
+}
+
 /// The most of a path or a link, and of a publisher's name, that's shown.
 const MAX_SHOWN_PATH: usize = 1024;
 const MAX_SHOWN_PUBLISHER: usize = 64;

@@ -513,17 +513,19 @@ impl FakeStore {
             ("GET", ["store", "v1", "categories"]) => json_reply(200, json!({ "categories": [{ "id": "productivity", "name": "Productivity", "count": 1 }] })),
             ("GET", ["store", "v1", "stats"]) => {
                 let state = self.state.lock().unwrap();
-                let plugins = state.plugins.values().filter(|p| p.newest().is_some()).count();
-                let verified = state.plugins.values().filter(|p| p.newest().is_some_and(|v| v.verified)).count();
-                json_reply(200, json!({ "plugins": plugins, "verified": verified }))
+                let segment = if query.get("kind").is_some_and(|k| k == "template") { "templates" } else { "plugins" };
+                let items = state.items(segment);
+                let listed = items.values().filter(|p| p.newest().is_some()).count();
+                let verified = items.values().filter(|p| p.newest().is_some_and(|v| v.verified)).count();
+                json_reply(200, json!({ segment: listed, "verified": verified }))
             }
-            ("GET", ["store", "v1", "plugins"]) => {
+            ("GET", ["store", "v1", kind @ ("plugins" | "templates")]) => {
                 let state = self.state.lock().unwrap();
                 let featured_only = query.get("featured").is_some_and(|v| v == "true");
                 let verified_only = query.get("verified").is_some_and(|v| v == "1");
                 // (As the edge: filters; the order is the listing's.)
                 let items: Vec<Value> = state
-                    .plugins
+                    .items(kind)
                     .iter()
                     .filter(|(_, p)| !featured_only || p.featured)
                     .filter_map(|(id, p)| {
@@ -622,9 +624,13 @@ impl FakeStore {
                     _ => json_reply(200, json!({ "events": [], "head": head, "reset": true })),
                 }
             }
-            ("POST", ["store", "v1", "plugins", id, "reports"]) => {
+            ("POST", ["store", "v1", kind @ ("plugins" | "templates"), id, "reports"]) => {
                 if caller.is_none() {
                     return unauthorized();
+                }
+                // (As the edge: an id of the other kind isn't here.)
+                if *kind == "templates" && !self.state.lock().unwrap().template_items.contains_key(*id) {
+                    return not_found();
                 }
                 let body: Value = serde_json::from_slice(body).unwrap_or_default();
                 self.state.lock().unwrap().reports.push(((*id).to_owned(), body));
@@ -797,7 +803,8 @@ impl FakeStore {
                 if state.without_templates {
                     return not_found();
                 }
-                let templates: Vec<Value> = state.templates.iter().filter(|(_, (o, _))| *o == owner).map(|(id, _)| json!({ "id": id, "kind": "template" })).collect();
+                let mut templates: Vec<Value> = state.templates.iter().filter(|(_, (o, _))| *o == owner).map(|(id, _)| json!({ "id": id, "kind": "template" })).collect();
+                templates.extend(state.template_items.iter().filter(|(_, p)| p.owner == owner).map(|(id, p)| carded(&state, json!({ "id": id, "kind": "template", "versions": p.versions.iter().map(|v| version_info(&state, v)).collect::<Vec<_>>() }))));
                 json_reply(200, json!({ "publisher_id": publisher_id(&owner), "templates": templates }))
             }
             // Templates, under their own prefix: what a deploy token does.
@@ -917,10 +924,11 @@ impl FakeStore {
                 token.revoked = true;
                 json_reply(200, json!({ "revoked": true }))
             }
-            ("POST", ["store", "v1", "plugins", id, "versions", version, action]) => {
+            ("POST", ["store", "v1", kind @ ("plugins" | "templates"), id, "versions", version, action]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };
                 let mut state = self.state.lock().unwrap();
-                let Some(p) = state.plugins.get_mut(*id) else { return not_found() };
+                let items = if *kind == "templates" { &mut state.template_items } else { &mut state.plugins };
+                let Some(p) = items.get_mut(*id) else { return not_found() };
                 if p.owner != owner || scope.is_some() {
                     return json_reply(403, json!({ "error": "forbidden", "message": "Not yours." }));
                 }

@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
-use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
+use super::client::{self, Caller, Installed as Asked, Kind, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
 use super::deploy_token::Scope;
 use super::notices;
 use super::publish;
@@ -72,6 +72,8 @@ pub fn handles(method: &str) -> bool {
             | methods::STORE_FILE
             | methods::SET_PLUGIN_PRERELEASES
             | methods::SET_PLUGIN_UPDATES
+            | methods::SET_TEMPLATE_UPDATES
+            | methods::SET_TEMPLATE_PRERELEASES
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
             | methods::STORE_MY_PLUGINS
@@ -84,6 +86,34 @@ pub fn handles(method: &str) -> bool {
     )
 }
 
+/// The kind of item a call is about: a plugin, unless it says. One this
+/// Zeron doesn't know is refused, so it's never taken as the other.
+fn kind_of(params: &Value) -> Result<Kind, RpcError> {
+    match &params["kind"] {
+        Value::Null => Ok(Kind::Plugin),
+        Value::String(kind) if kind == "plugin" => Ok(Kind::Plugin),
+        Value::String(kind) if kind == "template" => Ok(Kind::Template),
+        _ => Err(failed("The kind is plugin or template")),
+    }
+}
+
+/// `id` can be an item of `kind`'s in the store.
+fn check_item_id(kind: Kind, id: &str) -> Result<(), RpcError> {
+    match kind {
+        Kind::Plugin => manifest::check_id(id).map_err(failed),
+        Kind::Template if crate::plugins::templates::valid_id(id) => Ok(()),
+        Kind::Template => Err(failed(format!("\"{}\" can't be a template's id", plain(id, 64)))),
+    }
+}
+
+/// A template's answer says what it is, at its top: one from a Zeron that
+/// reads no kind doesn't, so it's never taken for one.
+fn says_kind(reply: &mut Value, kind: Kind) {
+    if kind == Kind::Template {
+        reply["kind"] = json!("template");
+    }
+}
+
 /// What a store template's consent window draws of its record.
 #[derive(Deserialize)]
 pub(in crate::plugins) struct ShownRecord {
@@ -91,6 +121,40 @@ pub(in crate::plugins) struct ShownRecord {
     publisher: String,
     publisher_id: String,
     version: String,
+}
+
+/// What's installed here of one kind ([`Plugins::installed_of`]): templates'
+/// rows by the store's id; plugins' are the list's.
+enum InstalledOf {
+    Plugins,
+    Templates(BTreeMap<String, Value>),
+}
+
+impl InstalledOf {
+    /// What the store's pages say of `id` installed here.
+    fn of(&self, plugins: &Plugins, id: &str) -> Option<Value> {
+        let row = match self {
+            InstalledOf::Plugins => return plugins.installed_here(id),
+            InstalledOf::Templates(rows) => rows.get(id)?,
+        };
+        let source = &row["imported"]["source"];
+        let mut installed = json!({
+            "version": row["imported"]["version"],
+            "hash": row["imported"]["hash"],
+            "status": row["status"],
+            "store": true,
+            "folder": row["id"],
+            "verified": source["verified"],
+            "edited": row["edited"] == true,
+            "updates": lock(&plugins.inner.state).template_updates(id).word(),
+        });
+        for key in ["update", "blocked"] {
+            if let Some(value) = row.get(key) {
+                installed[key] = value.clone();
+            }
+        }
+        Some(installed)
+    }
 }
 
 /// A record's mark and publisher, as a review is good for them.
@@ -388,25 +452,29 @@ impl Plugins {
     pub(in crate::plugins) async fn store_method(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
         match method {
             methods::STORE_SEARCH => {
+                let kind = kind_of(&params)?;
                 let search: Search = parse_params(params)?;
                 let (client, caller) = self.store_reader()?;
-                let mut reply = client.search(&search, &caller).await.map_err(failed)?;
-                self.rescan().await;
+                let mut reply = client.of(kind).search(&search, &caller).await.map_err(failed)?;
+                let here = self.installed_of(kind).await;
                 if let Some(items) = reply.get_mut("items").and_then(Value::as_array_mut) {
                     for item in items {
                         clean_card(item);
-                        if let Some(installed) = item["id"].as_str().and_then(|id| self.installed_here(id)) {
+                        if let Some(installed) = item["id"].as_str().and_then(|id| here.of(self, id)) {
                             item["installed"] = installed;
                         }
+                        says_kind(item, kind);
                     }
                 }
+                says_kind(&mut reply, kind);
                 RpcReply::value(&reply)
             }
             methods::STORE_PLUGIN => {
+                let kind = kind_of(&params)?;
                 let p: PluginParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+                check_item_id(kind, &p.id)?;
                 let (client, caller) = self.store_reader()?;
-                let (mut reply, _) = client.plugin(&p.id, &caller).await.map_err(failed)?;
+                let (mut reply, _) = client.of(kind).plugin(&p.id, &caller).await.map_err(failed)?;
                 clean_card(&mut reply);
                 let zeron = match p.for_zeron.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
                     Some(v) => Version::parse(v).map_err(failed)?,
@@ -420,33 +488,40 @@ impl Plugins {
                         reply["incompatible"] = json!(why);
                     }
                 }
-                self.rescan().await;
-                if let Some(installed) = self.installed_here(&p.id) {
+                if let Some(installed) = self.installed_of(kind).await.of(self, &p.id) {
                     reply["installed"] = installed;
                 }
+                says_kind(&mut reply, kind);
                 RpcReply::value(&reply)
             }
             methods::STORE_VERSIONS => {
+                let kind = kind_of(&params)?;
                 let p: VersionsParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+                check_item_id(kind, &p.id)?;
                 let (client, caller) = self.store_reader()?;
-                let mut reply = client.versions(&p.id, p.cursor.as_deref(), p.limit, &caller).await.map_err(failed)?;
+                let mut reply = client.of(kind).versions(&p.id, p.cursor.as_deref(), p.limit, &caller).await.map_err(failed)?;
                 clean_card(&mut reply);
+                says_kind(&mut reply, kind);
                 RpcReply::value(&reply)
             }
             methods::STORE_VERSION => {
+                let kind = kind_of(&params)?;
                 let p: VersionParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+                check_item_id(kind, &p.id)?;
                 let (client, caller) = self.store_reader()?;
-                let (mut reply, _) = client.version(&p.id, p.version.trim(), &caller).await.map_err(failed)?;
+                let (mut reply, _) = client.of(kind).version(&p.id, p.version.trim(), &caller).await.map_err(failed)?;
+                says_kind(&mut reply, kind);
                 if let Some(text) = reply.get_mut("notes").and_then(|n| n.as_str().map(str::to_owned)) {
                     reply["notes"] = json!(notes(&text, listing::MAX_NOTES_BYTES));
                 }
                 RpcReply::value(&reply)
             }
             methods::STORE_STATS => {
+                let kind = kind_of(&params)?;
                 let (client, _) = self.store_reader()?;
-                RpcReply::value(&client.stats().await.map_err(failed)?)
+                let mut reply = client.of(kind).stats().await.map_err(failed)?;
+                says_kind(&mut reply, kind);
+                RpcReply::value(&reply)
             }
             methods::SET_PLUGIN_UPDATES => {
                 let p: UpdatesParams = parse_params(params)?;
@@ -471,11 +546,15 @@ impl Plugins {
                     (None, prefer) => state.store_updates = prefer,
                 })?;
                 let state = lock(&self.inner.state).clone();
-                let device = state.store_updates.unwrap_or(crate::plugins::status::DEFAULT_UPDATES);
+                let device = state.device_updates();
                 let effective = p.id.as_deref().map_or(device, |id| state.updates_for(id));
                 RpcReply::value(&json!({ "prefer": effective.word(), "device": device.word() }))
             }
             methods::STORE_CATEGORIES => {
+                // (Templates have none.)
+                if kind_of(&params)? == Kind::Template {
+                    return RpcReply::value(&json!({ "kind": "template", "categories": [] }));
+                }
                 // Offline, the fixed list this Zeron knows.
                 let reply = match self.store_reader() {
                     Ok((client, _)) => client.categories().await.ok(),
@@ -486,8 +565,44 @@ impl Plugins {
                 }))
             }
             methods::STORE_FILE => {
+                let kind = kind_of(&params)?;
                 let p: FileParams = parse_params(params)?;
-                RpcReply::value(&self.store_file(p).await.map_err(failed)?)
+                check_item_id(kind, &p.id)?;
+                let mut reply = self.store_file(kind, p).await.map_err(failed)?;
+                says_kind(&mut reply, kind);
+                RpcReply::value(&reply)
+            }
+            methods::SET_TEMPLATE_UPDATES => {
+                let p: UpdatesParams = parse_params(params)?;
+                let id = p.id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+                let prefer = match p.prefer.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+                    None => None,
+                    Some(word) => Some(UpdatePreference::parse(word).ok_or_else(|| failed("Updates are newest or verified"))?),
+                };
+                self.store_template_here(&id).await?;
+                self.update_state(|state| match prefer {
+                    Some(prefer) => {
+                        state.template_updates_for.insert(id.clone(), prefer);
+                    }
+                    None => {
+                        state.template_updates_for.remove(&id);
+                    }
+                })?;
+                let state = lock(&self.inner.state).clone();
+                RpcReply::value(&json!({ "prefer": state.template_updates(&id).word(), "device": state.device_updates().word() }))
+            }
+            methods::SET_TEMPLATE_PRERELEASES => {
+                let p: PrereleaseParams = parse_params(params)?;
+                let id = p.id.trim().to_owned();
+                self.store_template_here(&id).await?;
+                self.update_state(|state| {
+                    if p.on {
+                        state.template_prerelease.insert(id.clone());
+                    } else {
+                        state.template_prerelease.remove(&id);
+                    }
+                })?;
+                RpcReply::value(&json!({ "id": id, "on": p.on }))
             }
             methods::SET_PLUGIN_PRERELEASES => {
                 let p: PrereleaseParams = parse_params(params)?;
@@ -548,26 +663,30 @@ impl Plugins {
                 RpcReply::value(&self.publish(&p.id, &p.hash).await)
             }
             methods::STORE_MY_PLUGINS => {
+                let kind = kind_of(&params)?;
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                let mut reply = client.my_plugins(&caller).await.map_err(failed)?;
-                for plugin in reply.get_mut("plugins").and_then(Value::as_array_mut).into_iter().flatten() {
+                let mut reply = client.of(kind).my_plugins(&caller).await.map_err(failed)?;
+                says_kind(&mut reply, kind);
+                for plugin in reply.get_mut(kind.segment()).and_then(Value::as_array_mut).into_iter().flatten() {
                     clean_card(plugin);
                 }
                 RpcReply::value(&reply)
             }
             methods::STORE_VERSION_ACTION => {
+                let kind = kind_of(&params)?;
                 let p: VersionActionParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+                check_item_id(kind, &p.id)?;
                 Version::parse(&p.version).map_err(failed)?;
                 // (What an author does to a version: amendment 45.)
                 if !matches!(p.action.as_str(), "yank" | "unyank") {
                     return Err(failed("The action is yank or unyank"));
                 }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                let reply = client.version_action(&p.id, &p.version, &p.action, &caller).await;
+                let reply = client.of(kind).version_action(&p.id, &p.version, &p.action, &caller).await;
                 RpcReply::value(&match reply {
                     Ok(mut value) => {
                         value["ok"] = json!(true);
+                        says_kind(&mut value, kind);
                         value
                     }
                     Err(error) => not_ok(&error),
@@ -582,16 +701,18 @@ impl Plugins {
                 RpcReply::value(&self.create_deploy_token(p).await)
             }
             methods::STORE_REPORT => {
+                let kind = kind_of(&params)?;
                 let p: ReportParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+                check_item_id(kind, &p.id)?;
                 if !REPORT_REASONS.contains(&p.reason.as_str()) {
                     return Err(failed(format!("The reason is one of {}", REPORT_REASONS.join(", "))));
                 }
                 let text = p.text.as_deref().map(|t| notes(t, 2000)).filter(|t| !t.is_empty());
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&match client.report(&p.id, &p.reason, text.as_deref(), &caller).await {
+                RpcReply::value(&match client.of(kind).report(&p.id, &p.reason, text.as_deref(), &caller).await {
                     Ok(mut value) => {
                         value["ok"] = json!(true);
+                        says_kind(&mut value, kind);
                         value
                     }
                     Err(error) => not_ok(&error),
@@ -615,6 +736,37 @@ impl Plugins {
             }
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
+    }
+
+    /// Refused unless store template `id` (the store's) is installed here,
+    /// in whatever folder.
+    async fn store_template_here(&self, id: &str) -> Result<(), RpcError> {
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let wanted = id.to_owned();
+        let here = tokio::task::spawn_blocking(move || template_packages::from_store(&dir).into_iter().any(|(_, store)| store.id == wanted)).await.unwrap_or(false);
+        if here { Ok(()) } else { Err(failed(format!("There's no template {} from the store here", plain(id, 64)))) }
+    }
+
+    /// What's installed here of a kind, for the store's pages to say.
+    async fn installed_of(&self, kind: Kind) -> InstalledOf {
+        if kind == Kind::Plugin {
+            self.rescan().await;
+            return InstalledOf::Plugins;
+        }
+        let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
+        let rows = tokio::task::spawn_blocking(move || -> BTreeMap<String, Value> {
+            let mut rows = BTreeMap::new();
+            for (folder, store) in template_packages::from_store(&dir) {
+                // (Installed twice: the one in the folder of its id.)
+                if folder == store.id || !rows.contains_key(&store.id) {
+                    rows.insert(store.id.clone(), crate::plugins::templates::installed_row(&dir, &folder));
+                }
+            }
+            rows
+        })
+        .await
+        .unwrap_or_default();
+        InstalledOf::Templates(rows)
     }
 
     /// What the store's pages say of a plugin installed here.
@@ -769,13 +921,21 @@ impl Plugins {
 
     /// One file of a store version, from this device's cache or fetched
     /// into it.
-    async fn store_file(&self, p: FileParams) -> Result<Value, String> {
-        manifest::check_id(&p.id)?;
+    async fn store_file(&self, kind: Kind, p: FileParams) -> Result<Value, String> {
         Version::parse(&p.version)?;
-        if !package::plain_path(&p.path) || p.path == manifest::MANIFEST_FILE {
-            return Err("That isn't a file in a plugin".into());
+        let manifest_file = match kind {
+            Kind::Plugin => manifest::MANIFEST_FILE,
+            Kind::Template => crate::plugins::templates::MANIFEST,
+        };
+        if !package::plain_path(&p.path) || p.path == manifest_file {
+            return Err(format!("That isn't a file in a {}", if kind == Kind::Plugin { "plugin" } else { "template" }));
         }
-        let cache = self.inner.data_dir.join(CACHE_DIR).join(&p.id);
+        // (Apart by kind: a plugin's call never answers a template's file. No
+        // id starts with a dot.)
+        let cache = match kind {
+            Kind::Plugin => self.inner.data_dir.join(CACHE_DIR).join(&p.id),
+            Kind::Template => self.inner.data_dir.join(CACHE_DIR).join(".templates").join(&p.id),
+        };
         // Named by the version's exact text, hashed: `1.0.0-RC` and
         // `1.0.0-rc` are two versions, also on a disk that ignores case.
         let version_dir = cache.join(&signing::sha256_hex(p.version.as_bytes())[..32]);
@@ -787,7 +947,7 @@ impl Plugins {
             return Ok(shown(&path, meta.len()));
         }
         let (client, caller) = self.store_reader().map_err(|e| e.to_string())?;
-        let bytes = client.file(&p.id, &p.version, &p.path, &caller, MAX_FILE_BYTES).await?;
+        let bytes = client.of(kind).file(&p.id, &p.version, &p.path, &caller, MAX_FILE_BYTES).await?;
         let written = path.clone();
         let len = bytes.len() as u64;
         tokio::task::spawn_blocking(move || -> Result<(), String> {

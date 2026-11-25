@@ -456,6 +456,12 @@ fn entry(
     out
 }
 
+/// The row of template `id`, as the store's pages say it.
+pub(super) fn installed_row(dir: &Path, id: &str) -> Value {
+    let zeron: Manifest = zeron_dir(dir).map(|zeron| read_json(&zeron.join(MANIFEST))).unwrap_or_default();
+    entry(dir, id, &dir.join(id), &active(dir), &zeron.zeron_version.unwrap_or_default())
+}
+
 /// `ListTemplates`: `{dir, active, templates: [..]}`, Zeron's first, then by
 /// name.
 pub fn list(dir: &Path) -> Result<Value, String> {

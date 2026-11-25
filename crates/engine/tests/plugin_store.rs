@@ -1046,6 +1046,120 @@ async fn a_store_template_that_cannot_be_checked_waits() {
     assert_eq!(decide(good).await.unwrap()["installed"], "midnight");
 }
 
+/// A call that names a kind asks under its own routes and answers what it's
+/// of; one that names none is a plugin's, as it was; any other kind is
+/// refused, asking nothing.
+#[tokio::test]
+async fn the_store_s_calls_are_of_one_kind() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    store.add_template("ada", &template_package(&key, "midnight", "1.0.0", "return 1"), "listed");
+    store.add_template("ada", &template_package(&key, "midnight", "1.1.0", "return 2"), "listed");
+    let d = device(&store, Some("ada"));
+    let calls = [
+        (methods::STORE_SEARCH, json!({}), "/store/v1/templates"),
+        (methods::STORE_PLUGIN, json!({ "id": "midnight" }), "/store/v1/templates/midnight"),
+        (methods::STORE_VERSIONS, json!({ "id": "midnight" }), "/store/v1/templates/midnight/versions"),
+        (methods::STORE_VERSION, json!({ "id": "midnight", "version": "1.0.0" }), "/store/v1/templates/midnight/versions/1.0.0"),
+        (methods::STORE_FILE, json!({ "id": "midnight", "version": "1.0.0", "path": "app.luau" }), "/store/v1/templates/midnight/files/1.0.0/app.luau"),
+        (methods::STORE_STATS, json!({}), "/store/v1/stats?kind=template"),
+        (methods::STORE_MY_PLUGINS, json!({}), "/store/v1/me/templates"),
+        (methods::STORE_VERSION_ACTION, json!({ "id": "midnight", "version": "1.0.0", "action": "yank" }), "/store/v1/templates/midnight/versions/1.0.0/yank"),
+        (methods::STORE_REPORT, json!({ "id": "midnight", "reason": "malware" }), "/store/v1/templates/midnight/reports"),
+    ];
+    let of = |params: &Value, kind: Value| {
+        let mut params = params.clone();
+        params["kind"] = kind;
+        params
+    };
+    let sent = || store.state.lock().unwrap().requests.len();
+    for (method, params, path) in &calls {
+        let before = sent();
+        let reply = d.call(method, of(params, json!("template"))).await.unwrap_or_else(|e| panic!("{method}: {e}"));
+        assert_eq!(reply["kind"], "template", "{method}: {reply}");
+        let asked: Vec<String> = store.state.lock().unwrap().requests[before..].iter().map(|(_, p, _)| p.clone()).collect();
+        assert_eq!(asked, [*path], "{method}");
+        for odd in [json!("theme"), json!(1), json!("Template"), json!([])] {
+            let before = sent();
+            assert!(d.call(method, of(params, odd.clone())).await.is_err(), "{method} {odd}");
+            assert_eq!(sent(), before, "{method} {odd}: nothing asked");
+        }
+        // As a plugin's, said or not, it isn't there: a template's id is no
+        // plugin's. (Nothing here acts on the plugin of an id.)
+        if params.get("id").is_some() {
+            for plugin in [params.clone(), of(params, json!("plugin"))] {
+                let reply = d.call(method, plugin.clone()).await;
+                let refused = reply.is_err() || reply.as_ref().is_ok_and(|r| r["ok"] == false) || *method == methods::STORE_REPORT;
+                assert!(refused, "{method} {plugin}: {reply:?}");
+            }
+        }
+    }
+    let found = d.call(methods::STORE_SEARCH, json!({ "kind": "template" })).await.unwrap();
+    assert!(found["items"].as_array().unwrap().iter().all(|i| i["kind"] == "template" && i["id"] == "midnight"), "{found}");
+    assert_eq!(d.call(methods::STORE_STATS, json!({ "kind": "template" })).await.unwrap()["templates"], 1);
+    assert_eq!(d.call(methods::STORE_CATEGORIES, json!({ "kind": "template" })).await.unwrap(), json!({ "kind": "template", "categories": [] }));
+    assert_eq!(d.call(methods::STORE_MY_PLUGINS, json!({ "kind": "template" })).await.unwrap()["templates"][0]["id"], "midnight");
+    let file = d.call(methods::STORE_FILE, json!({ "kind": "template", "id": "midnight", "version": "1.0.0", "path": "app.luau" })).await.unwrap();
+    assert_eq!(std::fs::read(file["file"].as_str().unwrap()).unwrap(), b"return 1");
+    assert!(d.call(methods::STORE_FILE, json!({ "kind": "template", "id": "midnight", "version": "1.0.0", "path": "zeron-template.json" })).await.is_err());
+    // A plugin's answers are as they were: no kind where none was asked of.
+    for (method, params) in [(methods::STORE_PLUGIN, json!({ "id": "focus" })), (methods::STORE_SEARCH, json!({})), (methods::STORE_STATS, json!({})), (methods::STORE_VERSIONS, json!({ "id": "focus" }))] {
+        assert!(d.call(method, params).await.unwrap().get("kind").is_none(), "{method}");
+    }
+}
+
+/// What a device chose of a store template is by the store's id, whatever
+/// folder it's in, said of each row, and never a plugin's choice.
+#[tokio::test]
+async fn a_template_s_updates_are_chosen_by_its_store_id() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    store.add_template("ada", &template_package(&key, "midnight", "1.0.0", "return 1"), "listed");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    let templates = d._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.16"}"#).unwrap();
+    store_template(&templates, "midnight", "1.0.0");
+    // (Copies of its folder, listed before it and after.)
+    for copy in ["another", "other"] {
+        std::fs::create_dir_all(templates.join(copy)).unwrap();
+        for file in ["zeron-template.json", ".imported.json"] {
+            std::fs::copy(templates.join("midnight").join(file), templates.join(copy).join(file)).unwrap();
+        }
+    }
+    std::fs::create_dir_all(templates.join("mine")).unwrap();
+    std::fs::write(templates.join("mine/zeron-template.json"), "{}").unwrap();
+    let list = || async { d.call(methods::LIST_TEMPLATES, json!({})).await.unwrap() };
+    let rows = || async { list().await["templates"].as_array().unwrap().iter().filter(|t| t["id"] == "midnight" || t["id"] == "other").map(|t| (t["prefer"].clone(), t["prerelease"].clone())).collect::<Vec<_>>() };
+    assert_eq!((list().await["prefs"].clone(), rows().await), (json!({ "device": "newest" }), vec![(Value::Null, Value::Null); 2]));
+    let set = d.call(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": "verified" })).await.unwrap();
+    assert_eq!(set, json!({ "prefer": "verified", "device": "newest" }));
+    let on = d.call(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": true })).await.unwrap();
+    assert_eq!(on, json!({ "id": "midnight", "on": true }));
+    assert_eq!(rows().await, vec![(json!("verified"), json!(true)); 2]);
+    let page = d.call(methods::STORE_PLUGIN, json!({ "id": "midnight", "kind": "template" })).await.unwrap()["installed"].clone();
+    assert_eq!((&page["updates"], &page["folder"], &page["version"], &page["store"], &page["edited"]), (&json!("verified"), &json!("midnight"), &json!("1.0.0"), &json!(true), &json!(true)), "{page}");
+    // The device's is over both kinds; a template's own is over it.
+    d.call(methods::SET_PLUGIN_UPDATES, json!({ "prefer": "verified" })).await.unwrap();
+    assert_eq!(list().await["prefs"]["device"], "verified");
+    let set = d.call(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": "newest" })).await.unwrap();
+    assert_eq!(set, json!({ "prefer": "newest", "device": "verified" }));
+    let set = d.call(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": null })).await.unwrap();
+    assert_eq!(set["prefer"], "verified", "as the device does");
+    d.call(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": "midnight", "on": false })).await.unwrap();
+    assert_eq!(rows().await, vec![(Value::Null, Value::Null); 2]);
+    // Not by a folder's name, a plugin's id, what isn't the store's, or no word.
+    for id in ["other", "mine", "focus", "", "../midnight"] {
+        assert!(d.call(methods::SET_TEMPLATE_UPDATES, json!({ "id": id, "prefer": "verified" })).await.is_err(), "{id}");
+        assert!(d.call(methods::SET_TEMPLATE_PRERELEASES, json!({ "id": id, "on": true })).await.is_err(), "{id}");
+    }
+    assert!(d.call(methods::SET_TEMPLATE_UPDATES, json!({ "id": "midnight", "prefer": "oldest" })).await.is_err());
+    assert!(d.call(methods::SET_PLUGIN_UPDATES, json!({ "id": "midnight", "prefer": "newest" })).await.is_err(), "a template's isn't a plugin's");
+}
+
 /// A package that isn't from the store asks nobody, and needs nothing shown.
 #[tokio::test]
 async fn a_file_s_template_is_allowed_as_before() {

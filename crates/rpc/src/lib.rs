@@ -798,6 +798,15 @@ pub mod methods {
     /// verified, the newest verified beside it; `verified`: the newest
     /// verified. Taking an unverified version always asks.
     pub const SET_PLUGIN_UPDATES: &str = "SetPluginUpdates";
+    /// `{id, prefer: "newest" | "verified" | null}` → `{prefer, device}`: as
+    /// [`SET_PLUGIN_UPDATES`], for store template `id`. `id` is the store's:
+    /// one installed twice (`midnight` and `midnight-2`) shares it. (The
+    /// device's own choice, over plugins and templates, is
+    /// [`SET_PLUGIN_UPDATES`] without an id.)
+    pub const SET_TEMPLATE_UPDATES: &str = "SetTemplateUpdates";
+    /// `{id, on}` → `{id, on}`: whether this device takes store template
+    /// `id`'s pre-releases; by the store's id, as [`SET_TEMPLATE_UPDATES`].
+    pub const SET_TEMPLATE_PRERELEASES: &str = "SetTemplatePrereleases";
     /// `{ids}` → `{}`: the app has shown these of the plugin list's
     /// `store_notices` (each `{id, plugin, version, name?, via: "device" |
     /// "deploy_token", token_name?, at, words}`: a publish of one of the
@@ -933,6 +942,8 @@ pub fn local_only(method: &str) -> bool {
             | methods::PREPARE_TEMPLATE_PUBLISH
             | methods::PUBLISH_TEMPLATE
             | methods::INSTALL_VERIFIED_TEMPLATE
+            | methods::SET_TEMPLATE_UPDATES
+            | methods::SET_TEMPLATE_PRERELEASES
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             // Themes: this device's library and choice, never another's.
@@ -1403,6 +1414,8 @@ mod tests {
             methods::PREPARE_TEMPLATE_PUBLISH,
             methods::PUBLISH_TEMPLATE,
             methods::INSTALL_VERIFIED_TEMPLATE,
+            methods::SET_TEMPLATE_UPDATES,
+            methods::SET_TEMPLATE_PRERELEASES,
             methods::DESCRIBE_APP,
             methods::LIST_THEMES,
             methods::GET_THEME,
@@ -1802,6 +1815,8 @@ mod tests {
             methods::UPDATE_TEMPLATE,
             methods::PUBLISH_TEMPLATE,
             methods::INSTALL_VERIFIED_TEMPLATE,
+            methods::SET_TEMPLATE_UPDATES,
+            methods::SET_TEMPLATE_PRERELEASES,
             methods::APPLY_UPDATE,
             methods::ACCESS_TOKEN,
             methods::STEP_UP,

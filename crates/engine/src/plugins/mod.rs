@@ -1388,7 +1388,7 @@ impl Plugins {
             // Which store updates this device stages: for every plugin, and
             // each one set otherwise.
             let updates = serde_json::json!({
-                "device": state.store_updates.unwrap_or(status::DEFAULT_UPDATES).word(),
+                "device": state.device_updates().word(),
                 "plugins": state.store_updates_for.iter().map(|(id, prefer)| (id.clone(), serde_json::json!(prefer.word()))).collect::<serde_json::Map<_, _>>(),
             });
             (notices, updates)
@@ -1546,7 +1546,19 @@ impl Plugins {
             return reply;
         };
         let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+        let state = lock(&self.inner.state).clone();
         for entry in list.iter_mut() {
+            // What this device chose of a store template, by the store's id.
+            if entry["imported"]["source"]["kind"] == install::STORE
+                && let Some(id) = entry["imported"]["source"]["id"].as_str().map(str::to_owned)
+            {
+                if let Some(prefer) = state.template_updates_for.get(&id) {
+                    entry["prefer"] = serde_json::json!(prefer.word());
+                }
+                if state.template_prerelease.contains(&id) {
+                    entry["prerelease"] = serde_json::json!(true);
+                }
+            }
             // (The store's record says whose one from it is.)
             if let Some(key) = entry["imported"]["key"].as_str().map(str::to_owned)
                 && entry["imported"]["source"]["kind"] != install::STORE
@@ -1574,6 +1586,7 @@ impl Plugins {
             })
             .collect();
         reply["pending"] = serde_json::json!(pending);
+        reply["prefs"] = serde_json::json!({ "device": state.device_updates().word() });
         reply
     }
 
