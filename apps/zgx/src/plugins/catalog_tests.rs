@@ -10,7 +10,8 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, testing::TestApp};
 
-use super::{Engine, install_with};
+use super::{Asker, Engine, install_with, keep_prepared};
+use crate::plugins::preview;
 
 /// What the engine was asked: (method, params, device).
 type Asked = Rc<RefCell<Vec<(String, Json, Option<String>)>>>;
@@ -18,7 +19,10 @@ type Asked = Rc<RefCell<Vec<(String, Json, Option<String>)>>>;
 /// A script that makes `call` (Luau, one `ui.call`) as a button's click and
 /// shows its outcome as `#out`: `ok:<json of what it got>` or `err:<word>`.
 fn script(call: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-store-seam-{}-{}", std::process::id(), rand_name(call)));
+    // (Its own folder: tests making the same call run at once.)
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zgx-store-seam-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let code = format!(
@@ -56,17 +60,14 @@ return ui.column {{
     path
 }
 
-fn rand_name(s: &str) -> String {
-    let mut n: u64 = 1469598103934665603;
-    for b in s.bytes() {
-        n = (n ^ b as u64).wrapping_mul(1099511628211);
-    }
-    format!("{n:x}")
-}
-
 /// `call` made against an engine answering `reply` to every method; what
 /// the script showed, and what the engine was asked.
 fn run(call: &str, reply: Json) -> (String, Vec<(String, Json, Option<String>)>) {
+    run_asking(call, reply, Rc::new(|_| Box::pin(async { panic!("asked, with no template but Zeron's run") })))
+}
+
+/// `run`, what you do as yourself asked by `asker` (act_consent.rs).
+fn run_asking(call: &str, reply: Json, asker: Asker) -> (String, Vec<(String, Json, Option<String>)>) {
     let asked: Asked = Rc::default();
     let path = script(call);
     let (a, r) = (asked.clone(), reply.clone());
@@ -77,7 +78,7 @@ fn run(call: &str, reply: Json) -> (String, Vec<(String, Json, Option<String>)>)
             let r = r.clone();
             Box::pin(async move { Ok(r) })
         });
-        install_with(&host, engine);
+        install_with(&host, engine, asker.clone());
         host
     });
     app.frames(3);
@@ -140,8 +141,9 @@ fn a_search_sends_what_was_asked_and_nothing_empty() {
 
 #[test]
 fn an_answer_that_says_no_is_its_word() {
+    let (publish, _) = prepared_publish("focus", "h");
     for (call, method) in [
-        (r#"ui.call("plugins.store.publish", { id = "focus", hash = "h", ticket = "t" })"#, "PublishPlugin"),
+        (publish.as_str(), "PublishPlugin"),
         (r#"ui.call("plugins.store.report", { id = "focus", reason = "broken" })"#, "StoreReport"),
         (r#"ui.call("plugins.store.version_action", { id = "focus", version = "1.0.0", action = "yank" })"#, "StoreVersionAction"),
     ] {
@@ -149,8 +151,9 @@ fn an_answer_that_says_no_is_its_word() {
         assert_eq!(asked[0].0, method);
         assert_eq!(out, "err:rate_limited: Too many", "{method}");
     }
-    let (out, asked) = run(r#"ui.call("plugins.store.publish", { id = "focus", hash = "h1", ticket = "t1" })"#, json!({ "ok": true, "version": "1.2.0", "status": "pending" }));
-    assert_eq!(asked[0].1, json!({ "id": "focus", "hash": "h1", "ticket": "t1" }));
+    let (publish, ticket) = prepared_publish("focus", "h1");
+    let (out, asked) = run(&publish, json!({ "ok": true, "version": "1.2.0", "status": "pending" }));
+    assert_eq!(asked[0].1, json!({ "id": "focus", "hash": "h1", "ticket": ticket }));
     assert!(out.contains("status=pending"), "{out}");
 }
 
@@ -177,12 +180,17 @@ fn a_deploy_token_that_isn_t_allowed_says_so() {
 fn a_deploy_token_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
     let (_, asked) = run(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
     assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true } }));
+    let (_, asked) = run(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true, all_kinds = { "plugin", "template" } } })"#, json!({ "ok": true }));
+    assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true, "all_kinds": ["plugin", "template"] } }));
     for bad in [
         r#"{ name = "CI" }"#,
         r#"{ name = "CI", scope = { plugins = {} } }"#,
         r#"{ name = "CI", scope = { plugins = { "focus", "focus" } } }"#,
         r#"{ name = "CI", scope = { plugins = { "../etc" } } }"#,
         r#"{ name = "CI", scope = { all = false } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = { "template" } } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = { "template", "plugin" } } }"#,
+        r#"{ name = "CI", scope = { all = true, all_kinds = "template" } }"#,
     ] {
         let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_token", {bad})"#), json!({ "ok": true }));
         assert_eq!(out, "err:invalid_scope", "{bad}");
@@ -268,4 +276,208 @@ fn a_picture_is_the_engine_s_kept_file_and_never_anything_else() {
     let (out, asked) = run(r#"ui.call("plugins.store.picture", { id = "focus", version = "1.0.0", path = "%2e%2e/a.png" })"#, json!({}));
     assert_eq!(out, "err:not_in_store");
     assert!(asked.is_empty());
+}
+
+/// The engine's ticket never reaches the page: it has a handle, good for
+/// what was checked and nothing else, once.
+#[test]
+fn a_publish_s_ticket_stays_in_the_host() {
+    let prepared = json!({ "id": "focus", "name": "Focus", "version": "1.2.0", "hash": "h", "ok": true, "ticket": "ticket-real" });
+    let (out, _) = run(r#"ui.call("plugins.store.prepare", "focus")"#, prepared);
+    assert!(out.contains("ticket=prepared-") && !out.contains("ticket-real"), "{out}");
+    // Not all said: no ticket at all.
+    let (out, _) = run(r#"ui.call("plugins.store.prepare", "focus")"#, json!({ "id": "focus", "ok": true, "ticket": "ticket-real" }));
+    assert!(!out.contains("ticket"), "{out}");
+    let (publish, _) = prepared_publish("focus", "h");
+    let (_, asked) = run(&publish, json!({ "ok": true }));
+    assert_eq!(asked.len(), 1);
+    let (out, asked) = run(&publish, json!({ "ok": true }));
+    assert_eq!((out.as_str(), asked.len()), ("err:changed", 0), "good once");
+    for other in ["prepared-0", "ticket-real", ""] {
+        let (out, asked) = run(&format!(r#"ui.call("plugins.store.publish", {{ id = "focus", hash = "h", ticket = "{other}" }})"#), json!({ "ok": true }));
+        assert_eq!((out.as_str(), asked.len()), ("err:changed", 0), "{other}");
+    }
+}
+
+/// A publish of `id` the engine checked: the page's call for it (its handle),
+/// and the engine's own ticket.
+fn prepared_publish(id: &str, hash: &str) -> (String, &'static str) {
+    let shown = keep_prepared(json!({ "id": id, "name": "Focus timer", "version": "1.3.0", "hash": hash, "ticket": "ticket-real" }), "plugin");
+    let handle = shown["ticket"].as_str().unwrap();
+    assert_ne!(handle, "ticket-real");
+    (format!(r#"ui.call("plugins.store.publish", {{ id = "{id}", hash = "{hash}", ticket = "{handle}", name = "Anything", version = "9.9.9" }})"#), "ticket-real")
+}
+
+/// An asker that says yes (or no), and what it was asked.
+fn asker(allow: bool) -> (Asker, Rc<RefCell<Vec<Json>>>) {
+    let items: Rc<RefCell<Vec<Json>>> = Rc::default();
+    let seen = items.clone();
+    let asker: Asker = Rc::new(move |act| {
+        seen.borrow_mut().push(act.item);
+        match allow {
+            true => (act.run)(),
+            false => Box::pin(async { Err("cancelled".to_string()) }),
+        }
+    });
+    (asker, items)
+}
+
+/// What the engine was asked to do.
+fn acts(asked: &[(String, Json, Option<String>)]) -> Vec<&str> {
+    asked.iter().map(|a| a.0.as_str()).filter(|method| *method != "StoreMyPlugins").collect()
+}
+
+/// Once a template that isn't Zeron's has run, publishing, taking new
+/// installs again and a new token are asked in Zeron's own window, saying
+/// what the engine said of it; not allowed, the engine is asked for nothing
+/// (but what's yours there, which the window says it by).
+/// Before, and for anything else, nothing is asked.
+#[test]
+fn acting_as_you_is_asked_in_zeron_s_window_once_another_s_template_ran() {
+    let publish = prepared_publish("focus-timer", "h1").0;
+    let publish = publish.as_str();
+    let unyank = r#"ui.call("plugins.store.version_action", { id = "focus-timer", version = "1.2.0", action = "unyank" })"#;
+    let yank = r#"ui.call("plugins.store.version_action", { id = "focus-timer", version = "1.2.0", action = "yank" })"#;
+    let token = r#"ui.call("plugins.store.create_token", { name = "CI", scope = { plugins = { "focus-timer" } }, expires = 5 })"#;
+    let made = json!({ "ok": true, "token": { "id": "t" }, "secret": "zdt_secret" });
+
+    // Zeron's own alone: as it was (`run`'s asker would panic).
+    preview::another_s_ran_for_test(false);
+    for call in [publish, unyank, yank, token] {
+        assert_eq!(run(call, made.clone()).1.len(), 1, "{call}");
+    }
+    assert!(run(token, made.clone()).0.contains("secret=zdt_secret"), "the app's own flow shows it");
+
+    preview::another_s_ran_for_test(true);
+    let again = prepared_publish("focus-timer", "h1").0;
+    let publish = again.as_str();
+    for (call, method, item) in [
+        (publish, "PublishPlugin", json!({ "act": "publish", "kind": "plugin", "id": "focus-timer", "name": "Focus timer", "version": "1.3.0" })),
+        (unyank, "StoreVersionAction", json!({ "act": "unyank", "kind": "plugin", "id": "focus-timer", "name": "focus-timer", "version": "1.2.0" })),
+        (token, "CreateDeployToken", json!({ "act": "token", "name": "CI", "scope": { "plugins": ["focus-timer"] }, "expires": 5, "templates": null })),
+    ] {
+        let (no, items) = asker(false);
+        let (out, asked) = run_asking(call, made.clone(), no);
+        assert_eq!((out.as_str(), acts(&asked).len()), ("err:cancelled", 0), "{call}");
+        assert_eq!(*items.borrow(), vec![item], "{call}");
+        let (yes, _) = asker(true);
+        let (_, asked) = run_asking(call, made.clone(), yes);
+        assert_eq!(acts(&asked), [method], "{call}");
+    }
+    // What's yours there says its name, and which of a token's are templates
+    // (of those it names alone); never the page.
+    let mine = json!({ "ok": true, "plugins": [{ "id": "focus-timer", "name": "Focus timer" }], "templates": [{ "id": "midnight" }, { "id": "dusk" }], "token": { "id": "t" }, "secret": "zdt_secret" });
+    let of_templates = { let mut v = mine.clone(); v["kind"] = json!("template"); v };
+    let (no, items) = asker(false);
+    run_asking(&unyank.replace("focus-timer\",", "focus-timer\", name = \"Anything\","), mine.clone(), no);
+    assert_eq!(items.borrow()[0]["name"], "Focus timer");
+    let (no, items) = asker(false);
+    run_asking(&token.replace("{ \"focus-timer\" }", "{ \"focus-timer\", \"midnight\" }"), of_templates, no);
+    assert_eq!(items.borrow()[0]["templates"], json!(["midnight"]));
+    // (An engine that reads no kind: not known, never a plugin's list.)
+    let (no, items) = asker(false);
+    run_asking(token, made.clone(), no);
+    assert_eq!(items.borrow()[0]["templates"], Json::Null);
+    // The token itself never reaches the window that asked for it.
+    let (yes, _) = asker(true);
+    let (out, _) = run_asking(token, made.clone(), yes);
+    assert!(out.contains("id=t") && !out.contains("zdt_") && !out.contains("secret"), "{out}");
+    // Stopping installs takes nothing from anyone: not asked.
+    assert_eq!(run(yank, made.clone()).1.len(), 1);
+    // A handle for something else: nothing to say of it.
+    let (other, _) = prepared_publish("focus-timer", "h2");
+    let (yes, items) = asker(true);
+    let (out, asked) = run_asking(&other.replace("hash = \"h2\"", "hash = \"h1\""), made.clone(), yes);
+    assert_eq!((out.as_str(), asked.len(), items.borrow().len()), ("err:changed", 0, 0));
+}
+
+/// Another's template starting while the app's own flow has a token on its
+/// way: the window it draws never gets it.
+#[test]
+fn a_token_made_as_another_s_template_starts_isn_t_shown_in_the_main_window() {
+    preview::another_s_ran_for_test(false);
+    let asked: Asked = Rc::default();
+    let path = script(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true } })"#);
+    let a = asked.clone();
+    let mut app = TestApp::new(move |runtime| {
+        let host = ScriptHost::new(runtime, path.clone());
+        let engine: Engine = Rc::new(move |method, params, device| {
+            a.borrow_mut().push((method.to_string(), params, device));
+            // (It starts as the engine answers.)
+            preview::another_s_ran_for_test(true);
+            Box::pin(async { Ok(json!({ "ok": true, "token": { "id": "t" }, "secret": "zdt_secret" })) })
+        });
+        install_with(&host, engine, Rc::new(|_| Box::pin(async { Err("cancelled".to_string()) })));
+        host
+    });
+    app.frames(3);
+    app.click("role:button \"go\"");
+    assert!(app.wait_until(|app| !app.text("out").is_empty()));
+    // (And revoked: it's nobody's.)
+    assert_eq!(app.text("out"), "err:cancelled");
+    assert_eq!(asked.borrow().iter().map(|a| (a.0.clone(), a.1["id"].clone())).next_back().unwrap(), ("RevokeDeployToken".into(), json!("t")));
+}
+
+/// A template's calls are the engine's with its kind, its own publish pair,
+/// and neither kind is ever answered with the other's.
+#[test]
+fn a_template_s_calls_say_what_they_re_for() {
+    for (call, method, params) in [
+        (r#"ui.call("templates.store.search", { q = "dark", verified = true })"#, "StoreSearch", json!({ "q": "dark", "verified": true, "kind": "template" })),
+        (r#"ui.call("templates.store.detail", "midnight")"#, "StorePlugin", json!({ "id": "midnight", "kind": "template" })),
+        (r#"ui.call("templates.store.versions", { id = "midnight" })"#, "StoreVersions", json!({ "id": "midnight", "kind": "template" })),
+        (r#"ui.call("templates.store.version", { id = "midnight", version = "1.0.0" })"#, "StoreVersion", json!({ "id": "midnight", "version": "1.0.0", "kind": "template" })),
+        (r#"ui.call("templates.store.mine", nil)"#, "StoreMyPlugins", json!({ "kind": "template" })),
+        (r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "yank" })"#, "StoreVersionAction", json!({ "id": "midnight", "version": "1.0.0", "action": "yank", "kind": "template" })),
+        (r#"ui.call("templates.store.updates", { id = "midnight", prefer = "verified" })"#, "SetTemplateUpdates", json!({ "id": "midnight", "prefer": "verified" })),
+        (r#"ui.call("templates.store.prereleases", { id = "midnight", on = true })"#, "SetTemplatePrereleases", json!({ "id": "midnight", "on": true })),
+        (r#"ui.call("templates.store.report", { id = "midnight", reason = "malware" })"#, "StoreReport", json!({ "id": "midnight", "reason": "malware", "kind": "template" })),
+        (r#"ui.call("templates.store.prepare", "midnight")"#, "PrepareTemplatePublish", json!({ "id": "midnight" })),
+    ] {
+        let (out, asked) = run(call, json!({ "ok": true, "kind": "template", "templates": [{ "id": "midnight" }] }));
+        assert!(out.starts_with("ok:"), "{call}: {out}");
+        let last = asked.last().unwrap();
+        assert_eq!((last.0.as_str(), &last.1), (method, &params), "{call}");
+    }
+    // An engine that reads no kind, and would act on (or answer with) the
+    // plugin of that id: nothing is done, and nothing of it shown.
+    for (call, only) in [
+        (r#"ui.call("templates.store.versions", { id = "focus" })"#, "StoreVersions"),
+        (r#"ui.call("templates.store.mine", nil)"#, "StoreMyPlugins"),
+        (r#"ui.call("templates.store.picture", { id = "focus", version = "1.0.0", path = "a.png" })"#, "StoreFile"),
+        (r#"ui.call("templates.store.version_action", { id = "focus", version = "1.0.0", action = "yank" })"#, "StoreMyPlugins"),
+        (r#"ui.call("templates.store.report", { id = "focus", reason = "malware" })"#, "StorePlugin"),
+    ] {
+        let (out, asked) = run(call, json!({ "ok": true, "id": "focus", "plugins": [{ "id": "focus" }], "versions": [], "file": "/tmp/a.png", "type": "image/png" }));
+        assert_eq!(out, "err:not_in_store", "{call}");
+        assert_eq!(asked.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), [only], "{call}");
+    }
+    // Nor one of yours that's a plugin, whatever the engine.
+    let (out, asked) = run(r#"ui.call("templates.store.version_action", { id = "focus", version = "1.0.0", action = "yank" })"#, json!({ "ok": true, "kind": "template", "templates": [{ "id": "midnight" }] }));
+    assert_eq!((out.as_str(), asked.len()), ("err:not_in_store", 1));
+    for (call, kind) in [("plugins.store.detail", "template"), ("templates.store.detail", "plugin")] {
+        let (out, _) = run(&format!(r#"ui.call("{call}", "midnight")"#), json!({ "id": "midnight", "kind": kind }));
+        assert_eq!(out, "err:not_in_store", "{call}");
+    }
+    let ids = |kind: super::Kind| {
+        let reply = json!({ "items": [{ "id": "midnight", "kind": "template" }, { "id": "focus", "kind": "plugin" }, { "id": "old" }] });
+        let Some(zgx_script::Value::List(items)) = kind.all(reply).unwrap().field("items").cloned() else { panic!("no items") };
+        items.iter().map(|item| crate::auth::text(item.field("id").unwrap())).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(super::TEMPLATES), ["midnight"]);
+    assert_eq!(ids(super::PLUGINS), ["focus", "old"], "a store that says no kind has plugins alone");
+    // A handle of one kind publishes nothing of the other's, and a template's
+    // goes out by its own call.
+    let shown = keep_prepared(json!({ "id": "midnight", "version": "1.0.0", "hash": "h", "ticket": "ticket-real" }), "template");
+    let call = |calls: &str| format!(r#"ui.call("{calls}.publish", {{ id = "midnight", hash = "h", ticket = "{}" }})"#, shown["ticket"].as_str().unwrap());
+    let (out, asked) = run(&call("plugins.store"), json!({ "ok": true }));
+    assert_eq!((out.as_str(), asked.len()), ("err:changed", 0));
+    let (_, asked) = run(&call("templates.store"), json!({ "ok": true }));
+    assert_eq!((asked[0].0.as_str(), &asked[0].1), ("PublishTemplate", &json!({ "id": "midnight", "hash": "h", "ticket": "ticket-real" })));
+    // Asked in Zeron's window, as a template's.
+    preview::another_s_ran_for_test(true);
+    let (no, items) = asker(false);
+    run_asking(r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "unyank" })"#, json!({ "kind": "template", "templates": [{ "id": "midnight", "name": "Midnight" }] }), no);
+    assert_eq!((&items.borrow()[0]["kind"], &items.borrow()[0]["name"]), (&json!("template"), &json!("Midnight")));
+    preview::another_s_ran_for_test(false);
 }

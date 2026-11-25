@@ -509,12 +509,19 @@ mod tests {
                         | "template_consent.luau"
                         | "template_consent_fixture.luau"
                         | "templates_consent.test.luau"
+                        // Acting as you in the store, once a template that
+                        // isn't Zeron's has run: its own window.
+                        | "act_consent.rs"
+                        | "act_consent.luau"
+                        | "store_consent.luau"
+                        | "store_consent_fixture.luau"
+                        | "store_consent.test.luau"
                 );
                 if allowed || !(name.ends_with(".rs") || name.ends_with(".luau")) {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
-                for word in ["DecidePlugin", "SignPlugin", "ReviewPlugin", "ReviewTemplate", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide"] {
+                for word in ["DecidePlugin", "SignPlugin", "ReviewPlugin", "ReviewTemplate", "plugins.decide", "plugins.sign", "DecideTemplate", "templates.decide", "InstallVerifiedTemplate", "templates.install_verified", "\"store.decide\""] {
                     if text.contains(word) {
                         found.push(format!("{word} in {}", path.display()));
                     }

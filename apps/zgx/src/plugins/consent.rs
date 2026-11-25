@@ -38,7 +38,7 @@ type On = Option<(String, String)>;
 /// How long a sheet shows before the host takes its Allow: a window that
 /// opened under a click mid-way never takes it. (The sheet arms its button
 /// a little later, screens/plugins/consent.luau `ARM_MS`.)
-const ARMED: Duration = Duration::from_millis(600);
+pub(super) const ARMED: Duration = Duration::from_millis(600);
 
 /// What the sheet shows of a plugin's own words, at most: a name, a
 /// version, a description, a tool's words.
@@ -100,7 +100,7 @@ fn key(on: &On, item: &super::Item) -> String {
 /// `text` shown as a plugin's words: one line of what prints, no
 /// direction overrides or invisible marks (words that read as Zeron's own,
 /// "✓ Zeron", among them), at most `most` characters.
-fn plain(text: &str, most: usize) -> String {
+pub(super) fn plain(text: &str, most: usize) -> String {
     let mut out: String = text
         .chars()
         .map(|c| if c.is_whitespace() { ' ' } else { c })
@@ -472,7 +472,7 @@ fn tampered_shown(bridge: &Bridge, arg: &Value, on: &On, shown_id: &str) -> Opti
 /// Whether an Allow of the sheet `key` may be taken `now`: it's the sheet
 /// shown (on whichever device: the key names it), and it has shown `ARMED`
 /// at least.
-fn may_allow(seen: &Option<(String, Instant)>, key: &str, now: Instant) -> bool {
+pub(super) fn may_allow(seen: &Option<(String, Instant)>, key: &str, now: Instant) -> bool {
     seen.as_ref().is_some_and(|(shown, since)| shown == key && now.duration_since(*since) >= ARMED)
 }
 

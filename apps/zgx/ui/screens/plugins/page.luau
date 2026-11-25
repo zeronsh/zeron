@@ -38,6 +38,7 @@ local nav = require("@app/screens/plugins/nav")
 local browse = require("@app/screens/plugins/browse")
 local listing = require("@app/screens/plugins/listing")
 local publish = require("@app/screens/plugins/publish")
+local template_publish = require("@app/screens/templates/publish")
 local store = require("@app/screens/plugins/store")
 local keys = require("@app/screens/plugins/keys")
 
@@ -859,7 +860,7 @@ local function catalog(): Node
 		below = {
 			installed = store_updates_section,
 			yours = function(): Node
-				return keys.Section { plugins = publish.owned }
+				return keys.Section { plugins = publish.owned, templates = template_publish.owned }
 			end,
 		},
 		found = found,
@@ -906,6 +907,8 @@ function M.View(): Node
 	ui.effect(function()
 		if tab:get() == "yours" and nav.view:get() == "catalog" then
 			publish.load()
+			-- (A token's scope names either kind.)
+			template_publish.load()
 		end
 	end)
 	-- A device shown that was away coming back: looked at again.

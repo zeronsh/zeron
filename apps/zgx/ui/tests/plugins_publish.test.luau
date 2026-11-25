@@ -176,8 +176,10 @@ test("a deploy token is made for the plugins chosen, after a fresh sign-in, the 
 	app:click("#keys-new")
 	settle(app)
 	app:type('role:dialog >> role:textbox "Name"', "Release job")
-	-- Chosen plugins, none ticked yet: it can't be made.
-	app:click('#key-scope >> role:radio "Chosen plugins"')
+	-- Chosen, none ticked yet: it can't be made.
+	app:click("#key-scope-choice")
+	settle(app)
+	app:click('role:menuitem "Chosen"')
 	settle(app)
 	expect(app:tree('role:dialog >> role:button "Create token"')).to_contain("disabled")
 	app:click('#key-scope >> role:checkbox "Pomodoro clock"')
@@ -244,9 +246,9 @@ test("a new token's Can publish is labelled as its Name and Ends are", function(
 	expect(ends_h).to_be(name_h)
 	-- Above the choice it names.
 	local _, label_y = string.match(tree, 'text "Can publish" (%-?%d+),(%-?%d+)')
-	local _, radio_y = string.match(tree, 'radio "All your plugins" (%-?%d+),(%-?%d+)')
-	assert(label_y and radio_y, tree)
-	expect((tonumber(label_y) :: number) < (tonumber(radio_y) :: number)).to_be(true)
+	local _, choice_y = string.match(tree, "#key%-scope%-choice (%-?%d+),(%-?%d+)")
+	assert(label_y and choice_y, tree)
+	expect((tonumber(label_y) :: number) < (tonumber(choice_y) :: number)).to_be(true)
 end)
 
 test("waiting on the sign-in can be stopped; a token for all your plugins is the first choice", function()
@@ -403,7 +405,7 @@ test("a deploy token waits for a plugin of yours in the store, its first version
 	expect(app:tree()).to_contain("Not in the plugin store")
 	app:scroll("#fixture-scroll", 2000)
 	app:frames(10)
-	expect(app:tree()).to_contain("Publish one of your plugins from this computer first.")
+	expect(app:tree()).to_contain("Publish one of your plugins or templates from this computer")
 	expect(app:tree("#keys-new")).to_contain("disabled")
 end)
 
@@ -521,6 +523,40 @@ test("a publish the store refuses for a listing's cause says which and why", fun
 	app:click("#publish-submit")
 	settle(app)
 	expect(app:tree()).to_contain("Its description has “✅”, which reads as the store's mark.")
+end)
+
+-- Once a template that isn't Zeron's has run, Zeron asks in its own window
+-- first: Not now there is no failure, and it can be sent as it is.
+test("Not now, asked before a publish, says nothing went wrong, and Submit still sends", function()
+	local app = publishing()
+	app:command("store_stub.fixed")
+	app:click('role:button "Check again"')
+	settle(app)
+	expect(app:tree()).to_contain("signed as yours")
+	app:command("store_stub.not_now")
+	app:click("#publish-submit")
+	settle(app)
+	expect(app:tree("#publish-submit")).never.to_contain("disabled")
+	-- (The line by Submit still says what it sends: an error takes its place.)
+	expect(app:tree()).to_contain("signed as yours")
+	app:click("#publish-submit")
+	settle(app)
+	local again = app
+	app = publishing()
+	app:command("store_stub.fixed")
+	app:click('role:button "Check again"')
+	settle(app)
+	app:command("store_stub.asked_lately")
+	app:click("#publish-submit")
+	settle(app)
+	-- Asked again too soon after a Not now: said.
+	expect(app:tree()).to_contain("You answered Not now to this a moment ago")
+	app = again
+	local sent = 0
+	for _ in string.gmatch(calls(app), "publish:pomodoro%-clock:") do
+		sent += 1
+	end
+	expect(sent).to_be(2)
 end)
 
 test("HTML and math in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()

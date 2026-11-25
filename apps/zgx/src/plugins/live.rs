@@ -39,58 +39,15 @@ pub const BUILTIN: &str = "zeron";
 /// is stamped with, and what a template made from it records.
 pub const ZERON_VERSION: &str = env!("ZERON_VERSION");
 
-/// Paths no template replaces: allowing plugins, your account and signing
-/// in, and the aliases every module resolves by. A template's copies of them
-/// are left out.
-pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
-
-/// What of `ui/` isn't the main window's interface: the gallery and its
-/// demos, tests and their fixtures, the intro, the consent windows (each
-/// its own host, always Zeron's own), and the official templates' files
-/// (`official`: each installed as a template of its own).
-fn not_the_app(rel: &str) -> bool {
-    let first = rel.split('/').next().unwrap_or(rel);
-    matches!(first, "demos" | "tests" | ".zgx") || super::official::source_file(rel)
-        || matches!(rel, "gallery.luau" | "intro.luau" | "consent.luau" | "template_consent.luau")
-        || (!rel.contains('/') && rel.ends_with("_fixture.luau"))
-}
-
-/// Compared as a case-insensitive filesystem (macOS's, Windows') names
-/// files (`zeron_plugin_guard::path::fold`): `Screens/Plugins/page.luau`,
-/// `ſcreens/plugins/page.luau` (U+017F folds to s) and
-/// `screens/plugins./page.luau` are Zeron's plugins page there too.
-pub fn never_templated(rel: &str) -> bool {
-    use zeron_plugin_guard::path::fold;
-    let rel = fold(rel);
-    NEVER_TEMPLATED.iter().any(|p| {
-        let p = fold(p);
-        rel == p || rel.starts_with(&format!("{p}/"))
-    })
-}
-
-/// A template's own files that aren't part of its interface (its README
-/// links the authoring guide).
-pub fn template_meta(rel: &str) -> bool {
-    matches!(rel, "zeron-template.json" | "preview.png" | "README.md")
-}
+/// Which of a template's files are what: the engine's and the app's one answer
+/// (zeron-plugin-guard `template`).
+pub use zeron_plugin_guard::template::{meta as template_meta, plain, protected as never_templated};
+use zeron_plugin_guard::template::{composed, of_the_app};
 
 pub fn hash(bytes: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
     format!("{:016x}", h.finish())
-}
-
-/// Whether `rel` is a plain relative path: normal parts, none a dotfile but
-/// `.luaurc` at the top.
-pub fn plain(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel).components().all(|c| match c {
-            Component::Normal(name) => {
-                let name = name.to_string_lossy();
-                !name.starts_with('.') || rel == ".luaurc"
-            }
-            _ => false,
-        })
 }
 
 /// Every regular file under `dir` (no links followed), by its path from `dir`,
@@ -101,6 +58,15 @@ pub fn files(dir: &Path, keep: impl Fn(&str) -> bool) -> BTreeMap<String, PathBu
         out.insert(rel, path);
     });
     out
+}
+
+/// A path under a folder, as a package names it: `/` between its parts. Only
+/// Windows separates them with `\`; elsewhere it's a character in a name,
+/// which no package path has (`path::is_safe`), so such a file is no file of
+/// it: `screens\sidebar.luau` is never Zeron's `screens/sidebar.luau`.
+pub fn rel_path(rel: &Path) -> String {
+    let rel = rel.to_string_lossy();
+    if cfg!(windows) { rel.replace('\\', "/") } else { rel.into_owned() }
 }
 
 /// Each regular file under `dir` that `keep` keeps, as [`files`] finds them,
@@ -114,12 +80,12 @@ fn walk(dir: &Path, keep: impl Fn(&str) -> bool, mut each: impl FnMut(String, Pa
             let Ok(kind) = entry.file_type() else { continue };
             let path = entry.path();
             let Ok(rel) = path.strip_prefix(dir) else { continue };
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            let rel = rel_path(rel);
             if kind.is_dir() {
                 if !entry.file_name().to_string_lossy().starts_with('.') {
                     stack.push(path);
                 }
-            } else if kind.is_file() && plain(&rel) && keep(&rel) {
+            } else if kind.is_file() && plain(&rel) && zeron_plugin_guard::path::is_safe(&rel) && keep(&rel) {
                 each(rel, path, &entry);
             }
         }
@@ -221,7 +187,7 @@ fn in_parallel<T: Sync>(jobs: &[T], work: impl Fn(&T) -> std::io::Result<()> + S
 /// (`official::install`). How many of `.zeron`'s files changed.
 pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
     let dir = templates.join(ZERON);
-    let want = files(ui, |rel| !not_the_app(rel));
+    let want = files(ui, of_the_app);
     // Each file's hash from the bytes the copy read (`ui/` read once).
     let hashes = std::sync::Mutex::new(BTreeMap::new());
     let changed = mirror_reading(&dir, &want, |rel| rel == "zeron-template.json", |rel, bytes| {
@@ -248,12 +214,14 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
 
 /// The active template's id, from `.active` (Zeron's own if none, or if it's
 /// gone or isn't a plain id), and Zeron's own whatever it says in safe mode
-/// (`preview::safe`): no template re-selects itself from there.
+/// (`preview::safe`): no template re-selects itself from there. And Zeron's
+/// own for one Zeron took down, or can't check (`blocks`).
 pub fn active(templates: &Path) -> String {
     if super::preview::safe() {
         return BUILTIN.to_string();
     }
-    chosen(templates)
+    let id = chosen(templates);
+    if super::blocks::blocked(templates, &id).is_some() { BUILTIN.to_string() } else { id }
 }
 
 /// What `.active` names, safe mode or not (the Templates page shows it).
@@ -297,8 +265,8 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
-        for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
-            if never_templated(&rel) || failed.contains(&rel) {
+        for (rel, path) in files(&templates.join(id), |_| true) {
+            if !composed(&rel) || failed.contains(&rel) {
                 continue;
             }
             if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
@@ -483,7 +451,7 @@ pub fn ui_stamp(ui: &Path) -> String {
 
 /// What of `ui/` a sync copies: the app's files, and the official templates'.
 fn synced(rel: &str) -> bool {
-    !not_the_app(rel) || super::official::source_file(rel)
+    of_the_app(rel) || super::official::source_file(rel)
 }
 
 /// What a look found, off the UI thread: `.zeron` brought up to date (only
@@ -599,7 +567,7 @@ pub struct Installed {
     /// says so, never a save while developing. Which files changed is
     /// `template_status`'s (`.base.json` against `.zeron/.hashes.json`).
     pub out_of_date: bool,
-    /// Installed from someone's signed package: `.imported.json`'s
+    /// Installed from someone's package: `.imported.json`'s
     /// `{key, author}` (the engine's `template_packages`).
     pub imported: Option<serde_json::Value>,
     /// One of Zeron's official templates, exactly as this build wrote it
@@ -643,7 +611,9 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             out_of_date,
             imported: (id != BUILTIN)
                 .then(|| read_json(&dir.join(".imported.json")))
-                .filter(|v| v["key"].is_string()),
+                // (Known by its record, never by its key: one published with
+                // a deploy token has none.)
+                .filter(|v| v.is_object()),
             official: (id != BUILTIN).then(|| super::official::verified(dir)).flatten(),
         })
     };
@@ -901,6 +871,116 @@ mod tests {
             overlay.from_template,
             BTreeSet::from(["screens/extra.luau".to_string(), "screens/shell/sidebar.luau".to_string()])
         );
+    }
+
+    /// The engine installs a change to a template's listing without asking,
+    /// so nothing of it is ever laid down, kept by digest or counted. Anything
+    /// else under `screenshots/`, however it's spelled, is code a change to
+    /// asks about, there as here, and is never laid down either.
+    #[test]
+    fn a_template_s_listing_is_never_loaded() {
+        use super::super::preview::digest;
+        let t = setup("listing");
+        let dir = t.join("t");
+        let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/shot.JPG", "screenshots/deep/shot.jpeg"];
+        let before = digest(&dir);
+        for rel in listing {
+            assert!(template_meta(rel) && !zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
+            write(&dir, rel, "return 1");
+        }
+        assert_eq!(digest(&dir), before, "no part of what's kept");
+        let strays = ["screenshots/app.luau", "screenshots/deep/run.luau", "screenshots/png", "screenshots", "Screenshots/shot.png", "SCREENSHOTS/app.luau", "\u{17f}creenshots/app.luau", "screenshots./app.luau"];
+        for rel in strays {
+            assert!(!template_meta(rel) && zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
+        }
+        write(&dir, "screenshots/app.luau", "return 1");
+        write(&dir, "screenshots/deep/run.luau", "return 1");
+        assert_ne!(digest(&dir), before, "a stray is code");
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        for rel in listing.iter().chain(&["screenshots/app.luau", "screenshots/deep/run.luau"]) {
+            assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
+            assert!(!overlay.from_template.contains(*rel), "{rel}");
+        }
+        for rel in ["screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
+            assert!(!template_meta(rel) && !zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
+        }
+        write(&dir, "screenshots.luau", "return 2");
+        compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        assert!(t.join(LIVE).join("screenshots.luau").is_file());
+    }
+
+    /// A stray under `screenshots/` added to a kept template asks, and is
+    /// never laid down; a picture or a changelog added asks nothing.
+    #[test]
+    fn a_stray_added_to_a_kept_template_asks_and_is_never_laid_down() {
+        use super::super::preview::{approve_at, approved_at, digest, trusted_at};
+        let t = setup("stray");
+        let (dir, approvals) = (t.join("t"), t.join("approvals.json"));
+        let kept = digest(&dir);
+        approve_at(&approvals, "t", &kept).unwrap();
+        for rel in ["screenshots/a.png", "screenshots/b.JPEG", "CHANGELOG.md", "README.md", "preview.png"] {
+            write(&dir, rel, "x");
+            assert!(trusted_at(&t, "t", &approvals), "{rel}");
+        }
+        for rel in ["screenshots/x.luau", "screenshots/a.svg", "Screenshots/y.luau", "\u{17f}creenshots/z.luau"] {
+            write(&dir, rel, "return 1");
+            assert!(!trusted_at(&t, "t", &approvals), "{rel} asks");
+            assert!(approved_at(&approvals, "t", &kept), "{rel}: the record stays");
+            compose(&t, "t", &BTreeSet::new(), false).unwrap();
+            assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
+            std::fs::remove_file(dir.join(rel)).unwrap();
+            assert!(trusted_at(&t, "t", &approvals), "{rel} gone");
+        }
+    }
+
+    /// A path a disk could open as another file (Windows by its short name,
+    /// HFS+ by leaving out what isn't seen) is never laid down, on any system. A template kept with one runs without it and
+    /// isn't asked about again; one byte of that file different asks, as ever.
+    #[test]
+    #[cfg(unix)]
+    fn a_backslash_in_a_name_is_never_a_folder_s() {
+        let (ui, t) = (crate::ui_dir(), std::env::temp_dir().join(format!("zgx-backslash-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&t);
+        sync_zeron(&ui, &t).unwrap();
+        let dir = t.join("odd");
+        std::fs::create_dir_all(dir.join("screens")).unwrap();
+        std::fs::write(dir.join("zeron-template.json"), r#"{"id":"odd","name":"Odd"}"#).unwrap();
+        std::fs::write(dir.join("screens/extra.luau"), "-- t only").unwrap();
+        std::fs::write(dir.join("screens\\shell"), "-- not Zeron's").unwrap();
+        std::fs::write(dir.join("a:b.luau"), "-- not a package's name").unwrap();
+        assert_eq!(files(&dir, |_| true).keys().cloned().collect::<Vec<_>>(), ["screens/extra.luau", "zeron-template.json"]);
+        let before = super::super::preview::digest(&dir);
+        std::fs::write(dir.join("screens\\shell"), "-- changed").unwrap();
+        assert_eq!(super::super::preview::digest(&dir), before, "nor counted");
+        let (want, overlay) = plan(&t, "odd", &BTreeSet::new(), false);
+        assert!(!want.keys().any(|rel| rel.contains('\\') || rel.contains(':')), "{:?}", overlay.from_template);
+        assert!(overlay.from_template.contains("screens/extra.luau"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_windows_short_name_is_never_laid_down() {
+        use super::super::preview::{approve_at, digest, trusted_at};
+        let t = setup("short");
+        let (dir, approvals) = (t.join("t"), t.join("approvals.json"));
+        let short = ["screens/TEMPLA~1/page.luau", "SCREEN~2/plugins/page.luau", "LUAURC~1", "account~0/x.luau", "screens/extra~1.luau", "screens/a~12b.luau", "screens/tem\u{200c}plates/page.luau"];
+        for rel in short {
+            write(&dir, rel, "-- short");
+            assert!(zeron_plugin_guard::template::short_name(rel) || zeron_plugin_guard::template::unseen(rel), "{rel}");
+        }
+        // Kept with them, as an earlier Zeron did (its digest counts them).
+        approve_at(&approvals, "t", &digest(&dir)).unwrap();
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        for rel in short {
+            assert!(!t.join(LIVE).join(rel).exists() && !overlay.from_template.contains(rel), "{rel}");
+        }
+        assert_eq!(read(&t.join(LIVE), "screens/extra.luau"), "-- t only", "the rest runs");
+        assert!(trusted_at(&t, "t", &approvals), "not asked again");
+        write(&dir, short[0], "-- shorT");
+        assert!(!trusted_at(&t, "t", &approvals));
+        for rel in ["screens/a~b.luau", "screens/a~.luau", "screens/~.luau", "screens/a1~.luau"] {
+            assert!(!zeron_plugin_guard::template::short_name(rel), "{rel}");
+        }
     }
 
     /// R30: a protected path spelled as a case-insensitive filesystem reads

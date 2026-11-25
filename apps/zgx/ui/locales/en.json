@@ -4039,7 +4039,7 @@
       "body_mismatch": "It changed on its way to the store. Send it again.",
       "too_many_tokens": "You have 20 deploy tokens, the most an account can have. Revoke one to make another.",
       "invalid_token": "The store didn't take that deploy token: it's wrong, revoked or ended.",
-      "token_not_allowed": "That deploy token can't publish this plugin. A plugin's first version is published from your computer.",
+      "token_not_allowed": "That deploy token can't publish this. The first version of a plugin or template is published from your computer.",
       "session_required": "This needs you signed in to Zeron, not a deploy token.",
       "key_taken": "That key is already in use.",
       "invalid_name": "Give the key a shorter name.",
@@ -4048,7 +4048,10 @@
       "bad_csrf": "The store refused a request it couldn't trust. Try again.",
       "not_owner": "Some of those plugins aren't yours in the store.",
       "invalid_scope": "Choose at least one of your plugins for it.",
-      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
+      "template_taken_down": "Zeron took this template down, so it can't be used.",
+      "template_unchecked": "Zeron couldn't check whether this template was taken down. Try again in a moment.",
+      "asked_lately": "You answered Not now to this a moment ago, so Zeron isn't asking again yet. Try again in a little while."
     },
     "store": {
       "browse": "Browse",
@@ -4172,7 +4175,7 @@
       "couldnt_prereleases": "Couldn't change {name}'s pre-releases",
       "publish_link": "Publish…",
       "publish_title": "Publish {name}",
-      "publish_body": "Send a version to the plugin store. Zeron's reviewers read every version before anyone else can install it; you can use it on your own devices straight away.",
+      "publish_body": "Send a version to the plugin store. It's there at once, under your username, for everyone to install; it shows as not verified until Zeron's reviewers have read it.",
       "checks_title": "What the store needs",
       "check": {
         "readme": "A README",
@@ -4264,7 +4267,7 @@
         "none_verified": "nothing verified yet"
       },
       "keys": "Deploy tokens",
-      "keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each token publishes the plugins chosen when it's made.",
+      "keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins and templates without your session. Each token publishes the ones chosen when it's made.",
       "keys_none": "No tokens yet.",
       "keys_failed": "Couldn't see your tokens",
       "key": {
@@ -4286,7 +4289,7 @@
         "timed_out": "The sign-in didn't finish. Try again.",
         "made_today": "You've made 10 deploy tokens today. You can make more tomorrow.",
         "secret_title": "Copy your token now",
-        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins it's for, as you.",
+        "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins and templates it's for, as you.",
         "done": "I've copied it",
         "show_token": "Show token",
         "copied": "Copied. Zeron clears it from the clipboard in a minute.",
@@ -4307,16 +4310,21 @@
         "scope": {
           "label": "Can publish",
           "all": "All your plugins",
-          "chosen": "Chosen plugins",
+          "chosen": "Chosen",
           "one": "{name}",
           "two": "{a} and {b}",
           "all_now": "All your plugins: {n} today, and any you publish later",
           "more": "{a}, {b} and {n} more",
           "every": "{list} and {last}",
           "show_all": "Show all",
-          "fewer": "Show fewer"
+          "fewer": "Show fewer",
+          "all_both": "All your plugins and templates",
+          "all_both_hint": "A template can do anything Zeron can.",
+          "templates": "Templates",
+          "all_both_now": "All your plugins and templates: {n} today, and any you publish later"
         },
-        "not_used_made": "Not used yet · made {date}"
+        "not_used_made": "Not used yet · made {date}",
+        "one": "Deploy token"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
@@ -4325,7 +4333,7 @@
       "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
       "update_new_key": "This version is signed with a different key than the one you have.",
       "update_asks_first": "Zeron asks you to allow it before it updates.",
-      "keys_publish_first": "Publish one of your plugins from this computer first.",
+      "keys_publish_first": "Publish one of your plugins or templates from this computer first.",
       "version_installs": "Version {version} · {n, plural, one {# install} other {# installs}}",
       "show_installed": "Show it in Installed",
       "readme_more": "Show more",
@@ -4396,6 +4404,30 @@
         "repeated": {
           "keywords": "The keyword “{word}” is there twice."
         }
+      },
+      "act": {
+        "not_now": "Not now",
+        "id": "Id",
+        "version": "Version",
+        "why_title": "Why Zeron asks here",
+        "why_body": "A template that isn't Zeron's has run since Zeron started. Templates draw Zeron's main window, so Zeron asks you in a window of its own.",
+        "publish": {
+          "title": "Publish {name} {version}?",
+          "body": "It's in the store at once, under your username, for everyone to install.",
+          "allow": "Publish"
+        },
+        "unyank": {
+          "title": "Allow new installs of {name} {version}?",
+          "body": "People can install this version again.",
+          "allow": "Allow installs"
+        },
+        "token": {
+          "title": "Make this deploy token?",
+          "body": "Anyone with it can publish new versions of what it's for, as you. Zeron will ask you to sign in again first, and shows the token in this window.",
+          "allow": "Create token"
+        },
+        "chosen": "{n, plural, one {# chosen} other {# chosen}}",
+        "maybe_templates": "Any template among them can do anything Zeron can."
       }
     }
   },
@@ -4419,7 +4451,10 @@
         "errors": "Some parts show the default interface: {error}",
         "out_of_date": "Made for Zeron {version}. Zeron has updated since.",
         "out_of_date_unversioned": "Made for an earlier Zeron. Zeron has updated since.",
-        "no_description": "No description."
+        "no_description": "No description.",
+        "taken_down": "Zeron took this version down. It can't be used.",
+        "taken_down_reason": "Zeron took this version down, so it can't be used: {reason}",
+        "unchecked": "Off for now: Zeron couldn't check whether it was taken down. It comes back once Zeron has checked."
       },
       "package_filter": "Zeron template",
       "export_title": "Export Template",
@@ -4495,7 +4530,96 @@
       "not_now": "Not now",
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
-      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}.",
+      "update_title": "Update {name}?",
+      "new_owner": "Its publisher changed: it's now @{username}'s.",
+      "store_record": "It's exactly what the store has",
+      "store_record_detail": "Published with a deploy token, so it isn't signed.",
+      "from_store": "From the store",
+      "from_store_detail": "Published by @{username}.",
+      "from_file": "From a file, not from the store",
+      "from_link": "From a link, not from the store",
+      "store_changed": "What the store says of it changed. Look again.",
+      "now_unverified": "Zeron's mark was taken off it just now. Look again.",
+      "now_verified": "Zeron verified it just now. Look again.",
+      "now_publisher": "Its publisher changed just now. Look again.",
+      "taken_down": "Zeron took this version down, so it can't be installed.",
+      "not_in_store": "This version isn't in the template store anymore.",
+      "own_words": "In its own words",
+      "version": "Version {version}"
+    },
+    "store": {
+      "search": "Search templates",
+      "none_verified": "No version of this template is verified yet.",
+      "offline_title": "Can't reach the template store",
+      "offline_body": "Your templates still work. Try again when you're online.",
+      "failed_title": "The template store didn't answer",
+      "failed_body": "Your templates still work. Try again in a moment.",
+      "more_failed": "More templates didn't load.",
+      "nothing_here": "No templates here",
+      "empty_title": "No templates in the store yet",
+      "empty_body": "Templates people publish appear here.",
+      "count": "{n, plural, one {# template} other {# templates}}",
+      "list_title": "Templates",
+      "runs_as_zeron_list": "A template runs as Zeron itself: it can do anything Zeron can.",
+      "not_found_title": "This template isn't in the store",
+      "not_found_body": "It may have been taken down, or the link is wrong.",
+      "browse_all": "Browse templates",
+      "report": {
+        "link": "Report this template",
+        "title": "Report {name}",
+        "body": "Zeron's reviewers read every report."
+      },
+      "other_title": "You already have a template with this id",
+      "other_body": "It came from somewhere else. This one installs beside it.",
+      "updates_body": "Take every new version of this template, or only the ones Zeron has verified.",
+      "update_body": "What's new. A version with new code asks you first.",
+      "update_asks_first": "Zeron asks you to allow it before it updates.",
+      "blocked_body": "This version was taken down from the store, so it can't be used.",
+      "blocked_body_reason": "This version was taken down from the store, so it can't be used: {reason}",
+      "couldnt_updates": "Couldn't change {name}'s updates",
+      "runs_as_zeron": "Runs as Zeron itself",
+      "runs_as_zeron_body": "It can do anything Zeron can.",
+      "update_replaces_edits": "You changed this template on this device. Updating replaces your changes.",
+      "changed_here": "Changed on this device",
+      "publish_body": "Send a version to the template store. It's there at once, under your username, for everyone to install; it shows as not verified until Zeron's reviewers have read it.",
+      "sent_toast": "{name} {version} is in the template store",
+      "check": {
+        "preview": "A preview picture",
+        "zeron_version": "The Zeron it's made for"
+      },
+      "summary": {
+        "none": "Not in the template store",
+        "unknown": "Share it in the template store",
+        "listed_verified": "{version} in the template store, verified",
+        "listed_waiting": "{version} in the template store, not verified yet",
+        "listed_declined": "{version} in the template store, not verified"
+      },
+      "fix": {
+        "not_semver": "Give it a version of three numbers, like 1.2.0, in zeron-template.json.",
+        "id_reserved": "This id is taken: Zeron keeps it for itself, for the store's own pages, or for someone else. Duplicate the template under another name.",
+        "not_newer": "Give it a version newer than every one you've sent, in zeron-template.json.",
+        "version_exists": "You've sent this version already. Give it a new one in zeron-template.json.",
+        "protected_file": "This file is Zeron's own, and no template can replace it. Delete it.",
+        "bad_package": "It holds a file Zeron doesn't write for a template. Leave it out.",
+        "none_of": "A template has no “{field}”. Take it out of zeron-template.json.",
+        "missing_listing": {
+          "preview": "Add a picture of it, preview.png, to its folder: it's the first thing people see.",
+          "description": "Say what it looks like in zeron-template.json (\"description\").",
+          "name": "Give it a name in zeron-template.json (\"name\").",
+          "keywords": "Add keywords in zeron-template.json (\"keywords\").",
+          "screenshots": "Add its pictures in zeron-template.json (\"screenshots\").",
+          "homepage": "Add its website in zeron-template.json (\"homepage\").",
+          "repository": "Add where its source is in zeron-template.json (\"repository\").",
+          "license": "Name its license in zeron-template.json (\"license\").",
+          "zeron_version": "Say which Zeron it's made for in zeron-template.json (\"zeron_version\")."
+        },
+        "bad_listing": {
+          "preview": "Its preview.png must be a PNG the store can show, and not too big.",
+          "zeron_version": "The Zeron it's made for must be three numbers, like 0.3.20."
+        },
+        "missing_readme": "Write README.md in its folder: it's the template's page in the store."
+      }
     }
   },
   "themes": {

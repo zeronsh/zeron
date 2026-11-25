@@ -701,5 +701,6 @@ require("./registry_stub")
 -- The plugin store, answered with its made-up catalog (Settings → Plugins
 -- → Browse, a store plugin's page, its `zeron://open/plugin/` links).
 require("./store_stub")
+require("./template_store_stub")
 
 return M

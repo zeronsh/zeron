@@ -700,11 +700,12 @@ end
 -- read by the host (src/links.rs): `{ seq, chat?, settings?, tab?, plugin? }`,
 -- `seq` moving with each. Followed once each, never on a reload. A plugin's
 -- opens its page in Settings → Plugins (screens/plugins/nav), never
--- installing anything (a `version`, that version chosen on it); a `tab`,
+-- installing anything (a `version`, that version chosen on it), a template's
+-- its own in Settings → Templates; a `tab`,
 -- that tab of Settings → Plugins.
 local link = ui.shared(
 	"app.link",
-	{ seq = 0 } :: { seq: number, chat: string?, settings: string?, tab: string?, plugin: string?, version: string? }
+	{ seq = 0 } :: { seq: number, chat: string?, settings: string?, tab: string?, plugin: string?, template: string?, version: string? }
 )
 local followed = ui.state("shell_link_followed", 0)
 ui.effect(function()
@@ -727,6 +728,12 @@ ui.effect(function()
 		require("@app/screens/plugins/nav").open_listing(l.plugin, not there, true, if type(l.version) == "string" then l.version else nil)
 		M.settings("plugins")
 		-- Followed: a window made later isn't sent here again.
+		pcall(ui.invoke, "app.link_followed", l.seq)
+	elseif type(l.template) == "string" then
+		local r = at()
+		local there = r.name == "settings" and r.params.page == "templates"
+		require("@app/screens/templates/nav").open_listing(l.template, not there, true, if type(l.version) == "string" then l.version else nil)
+		M.settings("templates")
 		pcall(ui.invoke, "app.link_followed", l.seq)
 	end
 end)

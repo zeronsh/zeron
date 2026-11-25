@@ -32,12 +32,18 @@ local ds = require("@ds")
 local Menu = require("@ds/menu")
 local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
+local nav = require("@app/screens/templates/nav")
+local visits = require("@app/screens/settings/visits")
+local browse = require("@app/screens/templates/browse")
+local listing = require("@app/screens/templates/listing")
+local publish = require("@app/screens/templates/publish")
 local words = require("@app/screens/plugins/words")
 local ThemeSwatch = require("@ds/theme_swatch")
 
 local M = {}
 
-local tab = ui.state("templates_tab", "installed")
+-- (Kept where a link reaches it too: screens/templates/nav.)
+local tab = nav.tab
 local query = ui.state("templates_query", "")
 local deleting = ui.state("templates_deleting", nil :: string?)
 local deleting_open = ui.state("templates_deleting_open", false)
@@ -74,9 +80,33 @@ local function author(t: state.Template): string
 	return ui.t("templates.page.author.named", { name = tostring(t.author) }):get()
 end
 
+-- Whether it's the store's, and the engine's word on it there: "verified"
+-- (while its files are the version's it verified), "edited" (changed here: no
+-- mark), or "" (neither, or not told yet).
+local function of_store(t: any): boolean
+	local source = t.imported and t.imported.source
+	return type(source) == "table" and source.kind == "store"
+end
+local function mark(t: any): string
+	if not of_store(t) then
+		return ""
+	elseif t.edited == true then
+		return "edited"
+	end
+	return if t.imported.source.verified == true then "verified" else ""
+end
+
 -- What a template's row says under its name.
 local function about(t: state.Template): string
-	if t.status == "broken" then
+	if t.status == "blocked" then
+		local b: any = t.blocked or {}
+		if b.unchecked then
+			return ui.t("templates.page.about.unchecked"):get()
+		end
+		return if type(b.reason) == "string" and b.reason ~= ""
+			then ui.t("templates.page.about.taken_down_reason", { reason = string.sub(b.reason, 1, 300) }):get()
+			else ui.t("templates.page.about.taken_down"):get()
+	elseif t.status == "broken" then
 		return ui.t("templates.page.about.broken", { error = t.error or "" }):get()
 	elseif t.status == "errors" then
 		return ui.t("templates.page.about.errors", { error = t.error or "" }):get()
@@ -415,6 +445,14 @@ local function controls(t: state.Template, now: State<any>): Node
 		ui.show(function(): boolean
 			return unverified(now:get())
 		end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "template-unverified" }),
+		-- The store's mark, while its files are the ones it verified; or that
+		-- it was changed here.
+		ui.show(function(): boolean
+			return mark(now:get()) == "verified"
+		end, ds.Badge { ui.t("plugins.store.verified"), tone = "success", class = "template-mark" }),
+		ui.show(function(): boolean
+			return mark(now:get()) == "edited"
+		end, ds.Badge { ui.t("templates.store.changed_here"), tone = "neutral", class = "template-mark" }),
 		-- Its version, centred on the row.
 		ui.show(function(): boolean
 			local v = now:get().version
@@ -437,6 +475,10 @@ local function controls(t: state.Template, now: State<any>): Node
 				size = "sm",
 				min_w = slot_w,
 				on_resize = grow,
+				-- (One taken down, or that can't be checked: its line says so.)
+				disabled = function(): boolean
+					return now:get().status == "blocked"
+				end,
 				on_click = function()
 					settle(state.use(id), ui.t("templates.page.couldnt_use", { name = now:peek().name }))
 				end,
@@ -448,40 +490,79 @@ local function controls(t: state.Template, now: State<any>): Node
 	}
 end
 
+-- (`store_line`: where it stands in the store and Publish… in the detail's
+-- place.)
+local function row_body(t: state.Template, now: State<any>, store_line: boolean): Node
+	return ds.Settings.Row {
+		label = function(): string
+			return now:get().name
+		end,
+		description = function(): string
+			return about(now:get())
+		end,
+		-- Who made it, on its own line; for one whose author can't be
+		-- told and that came from nowhere named, none: its Unknown author
+		-- badge says it.
+		byline = function(): string
+			local t = now:get()
+			if unverified(t) and words.from(t.imported and t.imported.source) == nil then
+				return ""
+			end
+			-- (The store's: what it is, with whose it is.)
+			return if of_store(t) then `{author(t)} · {ui.t("templates.store.runs_as_zeron"):get()}` else author(t)
+		end,
+		lead = preview(t),
+		badge = ui.show(function(): boolean
+			return now:get().active == true
+		end, ds.Badge { ui.t("templates.page.in_use"), tone = "accent", class = "template-in-use" }),
+		-- A newer version found where it came from.
+		detail = function(): string?
+			local it: any = now:get()
+			if store_line then
+				return publish.summary(it.id) or ui.t("templates.store.summary.unknown"):get()
+			end
+			-- (And a store version the store hasn't verified, as Plugins' rows
+			-- say it; one changed here says that instead.)
+			return if it.builtin
+				then nil
+				else words.update(it)
+					or (if it.edited == true or it.status == "blocked" then nil else words.store_unverified { source = it.imported and it.imported.source, version = it.version })
+		end,
+		detail_action = if store_line then nil else UpdateLink { now = now },
+		detail_link = if store_line
+			then {
+				label = ui.t("plugins.store.publish_link"),
+				on_click = function()
+					nav.open_publish(now:peek().id)
+				end,
+			}
+			else nil,
+		truncate = true,
+		control = controls(t, now),
+	}
+end
+
+-- (Rows are built for their tab: Yours' own say where they stand in the
+-- store, as Plugins' do; one an update was found for, or taken down, keeps
+-- its line.)
 local function row(t: state.Template, _i: number, now: State<any>): Node
+	local publishing = tab:peek() == "yours" and state.yours(t)
 	return ui.column {
 		id = `template-{t.id}`,
 		w_full = true,
-		ds.Settings.Row {
-			label = function(): string
-				return now:get().name
-			end,
-			description = function(): string
-				return about(now:get())
-			end,
-			-- Who made it, on its own line; for one whose author can't be
-			-- told and that came from nowhere named, none: its Unknown author
-			-- badge says it.
-			byline = function(): string
-				local t = now:get()
-				if unverified(t) and words.from(t.imported and t.imported.source) == nil then
-					return ""
-				end
-				return author(t)
-			end,
-			lead = preview(t),
-			badge = ui.show(function(): boolean
-				return now:get().active == true
-			end, ds.Badge { ui.t("templates.page.in_use"), tone = "accent", class = "template-in-use" }),
-			-- A newer version found where it came from.
-			detail = function(): string?
+		if publishing
+			then ui.switch(function(): string
 				local it: any = now:get()
-				return if it.builtin then nil else words.update(it)
-			end,
-			detail_action = UpdateLink { now = now },
-			truncate = true,
-			control = controls(t, now),
-		},
+				return if words.update(it) or it.status == "blocked" then "base" else "store"
+			end, {
+				base = function(): Node
+					return row_body(t, now, false)
+				end,
+				store = function(): Node
+					return row_body(t, now, true)
+				end,
+			})
+			else row_body(t, now, false),
 	}
 end
 
@@ -581,15 +662,32 @@ local function dialogs(): { Node }
 	}
 end
 
-function M.View(): Node
-	-- As it opens: each one from a package checked where it came from.
-	if os.time() - checked_at:peek() > 600 then
-		checked_at:set(os.time())
-		local p: any = state.check_updates()
-		if p ~= nil then
-			p:after(function(_: any) end, function(_: any) end)
+-- What a store template's page needs of this one: it's this device's, always
+-- here, and its outcomes.
+local here = {
+	device = function(): string?
+		return nil
+	end,
+	device_name = function(): string
+		return ""
+	end,
+	away = function(): boolean
+		return false
+	end,
+	-- (Someone's waits in Zeron's consent window, opened as it came: nothing
+	-- to say of it here.)
+	settled = function(_plain: string, _versioned: string): (done: any) -> ()
+		return function(done: any)
+			if type(done) == "table" and done.updated then
+				ds.toast.show { title = ui.t("templates.page.updated_toast", { name = tostring(done.name or "") }), tone = "success" }
+			end
 		end
-	end
+	end,
+	failed = failed,
+}
+
+-- The page's tabs.
+local function catalog(): Node
 	return ds.Settings.Catalog {
 		title = ui.t("templates.page.title"),
 		description = ui.t("templates.page.description"),
@@ -600,7 +698,14 @@ function M.View(): Node
 			options = {
 				{ value = "installed", label = ui.t("templates.page.installed"), count = count("installed") },
 				{ value = "yours", label = ui.t("templates.page.yours"), count = count("yours") },
+				{ value = "browse", label = ui.t("plugins.store.browse") },
 			},
+		},
+		-- The store's, searched on its own terms (screens/templates/browse).
+		views = {
+			browse = function(): Node
+				return browse.View {}
+			end,
 		},
 		-- (No New for now: templates of yours arrive by an agent or as a
 		-- copy of Zeron's. Install brings in someone else's, as Plugins'.)
@@ -625,6 +730,62 @@ function M.View(): Node
 		end,
 		none = none,
 		overlays = dialogs(),
+	}
+end
+
+function M.View(): Node
+	-- As it opens: each one from a package checked where it came from. (From
+	-- an effect, as Plugins': a check that can't be asked leaves the page.)
+	ui.effect(function()
+		if os.time() - checked_at:peek() > 600 then
+			checked_at:set(os.time())
+			local p: any = state.check_updates()
+			if p ~= nil then
+				p:after(function(_: any) end, function(_: any) end)
+			end
+		end
+	end)
+	-- Once a visit: the tabs, unless a link opened a template's page as
+	-- Settings came up.
+	visits.once("templates", function()
+		nav.arrive()
+		state.refresh()
+	end)
+	-- While it shows: what the engine says of the store's, asked again now
+	-- and then (one not in use isn't watched; once a minute, never as it's
+	-- left).
+	local showing = true
+	ui.on_cleanup(function()
+		showing = false
+	end)
+	local function again()
+		ui.after(60000, function()
+			if showing then
+				state.refresh()
+				again()
+			end
+		end)
+	end
+	again()
+	-- Yours shown: where your templates stand in the store, read again.
+	ui.effect(function()
+		if tab:get() == "yours" and nav.view:get() == "catalog" then
+			publish.load()
+		end
+	end)
+	return ui.column {
+		w_full = true,
+		items = "center",
+		ui.presence(function(): string
+			return nav.view:get()
+		end, function(v: string): Node
+			local id = string.match(v, "^store:(.+)$")
+			local own = string.match(v, "^publish:(.+)$")
+			if own then
+				return ui.column { w_full = true, items = "center", publish.Page { plugin = own, here = here } }
+			end
+			return ui.column { w_full = true, items = "center", if id then listing.Page { plugin = id, here = here } else catalog() }
+		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 	}
 end
 

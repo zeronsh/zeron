@@ -68,6 +68,13 @@ pub const BLOCKED: &[&str] = &[
     "plugins.store.prereleases",
     "plugins.store.updates",
     "plugins.store.report",
+    "templates.store.mine",
+    "templates.store.prepare",
+    "templates.store.publish",
+    "templates.store.version_action",
+    "templates.store.prereleases",
+    "templates.store.updates",
+    "templates.store.report",
     "templates.use",
     "templates.create",
     "templates.duplicate",
@@ -154,6 +161,53 @@ static SAFE: AtomicBool = AtomicBool::new(false);
 /// A template other than Zeron's own is laid over it now (approved or not).
 static TEMPLATE_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// A template that isn't Zeron's has run since Zeron started: what the main
+/// window shows since may be drawn, or wired, by someone else.
+static ANOTHER_S_RAN: AtomicBool = AtomicBool::new(false);
+
+/// Whether one has (`note_running`). Never cleared: a switch or a reload
+/// leaves what it may have set up. Publishing as you and a new deploy token
+/// are asked in Zeron's own window from then on (act_consent.rs).
+pub fn another_s_ran() -> bool {
+    #[cfg(test)]
+    if let Some(ran) = TEST_RAN.with(std::cell::Cell::get) {
+        return ran;
+    }
+    ANOTHER_S_RAN.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own, on its thread alone.
+    static TEST_RAN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub fn another_s_ran_for_test(ran: bool) {
+    TEST_RAN.with(|r| r.set(Some(ran)));
+}
+
+/// Whether template `id` in `templates` isn't Zeron's: neither the default
+/// nor an official one exactly as this build wrote it (`official::verified`,
+/// never the id or the mark alone).
+pub fn another_s(templates: &Path, id: &str) -> bool {
+    id != live::BUILTIN && super::official::verified(&templates.join(id)).is_none()
+}
+
+/// Template `id` is about to run. Told before it's laid over Zeron's own, and
+/// after Zeron's official templates are brought up to this build's
+/// (`live::sync_zeron`): before it, one an update is about to rewrite still
+/// holds the last Zeron's files, which aren't this one's.
+pub fn note_running(templates: &Path, id: &str) {
+    if another_s_ran() || !another_s(templates, id) {
+        return;
+    }
+    #[cfg(test)]
+    TEST_RAN.with(|r| r.set(Some(true)));
+    #[cfg(not(test))]
+    ANOTHER_S_RAN.store(true, Ordering::Relaxed);
+}
+
 pub fn current() -> Option<Preview> {
     NOW.with(|n| n.borrow().clone())
 }
@@ -221,6 +275,12 @@ pub fn refused(error: &str) -> bool {
 /// answer for themselves (`refuse`), with a promise that rejects.
 pub fn guard(kind: zgx_script::GuardKind, name: &str) -> Result<(), String> {
     use zgx_script::GuardKind as Kind;
+    // A secret on the clipboard (a deploy token you just copied) isn't for
+    // what a template that isn't Zeron's may have wired to read it, kept or
+    // not. (A paste you make, and a program in a terminal, read it still.)
+    if matches!(kind, Kind::Clipboard) && name.starts_with("read") && another_s_ran() && crate::secrets::held() {
+        return Err("The clipboard holds a secret Zeron copied. It can be read once it's gone.".into());
+    }
     let Some(p) = current() else { return Ok(()) };
     let refused = || Err(format!("{}{IS_A_PREVIEW}. Keep it first, or go back to Zeron v3.", p.name));
     match kind {
@@ -246,20 +306,43 @@ pub fn guard(kind: zgx_script::GuardKind, name: &str) -> Result<(), String> {
 /// What a template lays over Zeron's own, as one hash: each file it supplies
 /// (by its path, its length and its bytes), as `live::compose` takes them.
 pub fn digest(template: &Path) -> String {
-    let mut h = Sha256::new();
-    for (rel, path) in live::files(template, |rel| !live::template_meta(rel) && !live::never_templated(rel)) {
+    digests(template).0
+}
+
+/// What counted as a template's own files before its whole listing was left
+/// out of them: its changelog and screenshots too.
+fn counted_before(rel: &str) -> bool {
+    !matches!(rel, "zeron-template.json" | "preview.png" | "README.md") && !live::never_templated(rel)
+}
+
+/// `digest`, and what it was when the changelog and screenshots still counted,
+/// if that differs. Both of the same bytes, each file read once: a file
+/// changed meanwhile is in both or in neither.
+fn digests(template: &Path) -> (String, Option<String>) {
+    use zeron_plugin_guard::template::{Counting, counted};
+    let (mut now, mut before, mut differ) = (Counting::default(), Counting::default(), false);
+    for (rel, path) in live::files(template, counted_before) {
         let bytes = std::fs::read(&path).unwrap_or_default();
-        h.update((rel.len() as u64).to_le_bytes());
-        h.update(rel.as_bytes());
-        h.update((bytes.len() as u64).to_le_bytes());
-        h.update(&bytes);
+        before.add(&rel, &bytes);
+        match counted(&rel) {
+            true => now.add(&rel, &bytes),
+            false => differ = true,
+        }
     }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    (now.finish(), differ.then(|| before.finish()))
 }
 
 /// Where what you kept is recorded: the app's own data folder.
 pub fn approvals_path() -> Option<PathBuf> {
     zgx_script::app_data_dir(crate::APP_ID).map(|d| d.join("template-trust").join("approvals.json"))
+}
+
+/// Held over each change to the record: it's read on worker threads too, and
+/// a change reads the whole of it before writing it.
+static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn changing() -> std::sync::MutexGuard<'static, ()> {
+    CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn read_approvals(path: &Path) -> BTreeMap<String, String> {
@@ -274,14 +357,35 @@ pub fn approved_at(path: &Path, id: &str, digest: &str) -> bool {
 /// Template `id` as it is (`digest`) kept: only the keep sheet and an
 /// allowed package's install call this.
 pub fn approve_at(path: &Path, id: &str, digest: &str) -> std::io::Result<()> {
+    let _held = changing();
     let mut all = read_approvals(path);
     all.insert(id.to_string(), digest.to_string());
     live::put(path, &serde_json::to_vec_pretty(&all).unwrap_or_default()).map(|_| ())
 }
 
+/// Template `id`'s record moved from `before` to `now`, if it still says
+/// `before`: the same files, as they're counted now. Whether it did.
+fn recount_at(path: &Path, id: &str, before: &str, now: &str) -> bool {
+    let _held = changing();
+    let mut all = read_approvals(path);
+    if all.get(id).is_none_or(|d| d != before) {
+        return false;
+    }
+    all.insert(id.to_string(), now.to_string());
+    // (Unwritten, it's the template you kept all the same: moved next time.)
+    let _ = live::put(path, &serde_json::to_vec_pretty(&all).unwrap_or_default());
+    true
+}
+
 /// Forgotten (a template deleted, so one made later under its id starts
 /// anew).
+/// The templates anything was allowed of.
+pub fn allowed_at(path: &Path) -> Vec<String> {
+    read_approvals(path).into_keys().collect()
+}
+
 pub fn forget_at(path: &Path, id: &str) {
+    let _held = changing();
     let mut all = read_approvals(path);
     if all.remove(id).is_some() {
         let _ = live::put(path, &serde_json::to_vec_pretty(&all).unwrap_or_default());
@@ -307,7 +411,13 @@ pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
         return true;
     }
     let dir = templates.join(id);
-    super::official::verified(&dir).is_some() || approved_at(approvals, id, &digest(&dir))
+    if super::official::verified(&dir).is_some() {
+        return true;
+    }
+    let (now, before) = digests(&dir);
+    // Kept when its changelog and screenshots still counted, and every file
+    // just as it was: what you kept, so its record moves and nothing asks.
+    approved_at(approvals, id, &now) || before.is_some_and(|before| recount_at(approvals, id, &before, &now))
 }
 
 // ── Safe mode ───────────────────────────────────────────────────────────────
@@ -389,6 +499,10 @@ fn write_safe(on: bool) -> std::io::Result<()> {
 /// Into safe mode: Zeron's own from now on (and across launches), and the
 /// terminals templates started closed.
 pub fn enter_safe() {
+    #[cfg(test)]
+    if TEST_SAFE.with(std::cell::Cell::get).is_some() {
+        return enter_safe_for_test(true);
+    }
     SAFE.store(true, Ordering::Relaxed);
     if let Err(error) = write_safe(true) {
         eprintln!("zeron-zgx: safe mode isn't remembered: {error}");
@@ -649,6 +763,101 @@ mod tests {
         set(None);
     }
 
+    /// A secret you copied isn't read by the window while a template that
+    /// isn't Zeron's has run; with Zeron's own, and once it's copied over or
+    /// gone, reading is as ever, and writing always is.
+    #[test]
+    fn a_secret_on_the_clipboard_isn_t_another_s_to_read() {
+        use zgx_script::GuardKind::Clipboard;
+        let desktop = std::rc::Rc::new(zgx_script::testing::FakeDesktop::default());
+        let service = zgx::platform::PlatformService(desktop.clone());
+        let can_read = || ["read", "read_html", "read_type", "read_image"].map(|name| guard(Clipboard, name).is_ok());
+        set(None);
+        service.0.set_clipboard_text("zdt_secret".into());
+        crate::secrets::hold_for_test(Some(service.clone()), "zdt_secret");
+        another_s_ran_for_test(false);
+        assert_eq!(can_read(), [true; 4], "Zeron's own");
+        another_s_ran_for_test(true);
+        assert_eq!(can_read(), [false; 4]);
+        assert!(guard(Clipboard, "write").is_ok());
+        service.0.set_clipboard_text("something else".into());
+        assert_eq!(can_read(), [true; 4], "copied over");
+        service.0.set_clipboard_text("zdt_secret".into());
+        assert_eq!(can_read(), [false; 4]);
+        crate::secrets::hold_for_test(None, "");
+        assert_eq!(can_read(), [true; 4], "let go");
+        another_s_ran_for_test(false);
+    }
+
+    /// A template that isn't Zeron's, by what its folder holds and never by
+    /// its id or its mark: one that says it's official isn't until it is.
+    #[test]
+    fn another_s_template_is_any_but_zeron_s_own() {
+        let root = dir("another");
+        let templates = root.join("templates");
+        assert!(!another_s(&templates, live::BUILTIN));
+        write(&templates, "mine/zeron-template.json", r#"{"id":"mine"}"#);
+        write(&templates, "zeron-v2/zeron-template.json", r#"{"id":"zeron-v2","builtin_template":"zeron-v2"}"#);
+        write(&templates, "zeron-v2/app.luau", "-- someone's");
+        assert!(another_s(&templates, "mine"));
+        assert!(another_s(&templates, "zeron-v2"), "a mark isn't enough");
+        assert!(another_s(&templates, "gone"), "nor is being gone");
+        let installed = super::super::official::install_one(&crate::ui_dir(), &root.join("real"), super::super::official::find("zeron-v2").as_ref().unwrap()).unwrap();
+        assert!(!another_s(&root.join("real"), &installed), "Zeron's own, as this build wrote it");
+    }
+
+    /// A template kept while its changelog and screenshots still counted is
+    /// kept: its record moves to the new count and nothing asks. With one
+    /// byte of it different it asks, whichever file that is, as before.
+    #[test]
+    fn a_template_kept_before_its_listing_was_left_out_is_still_kept() {
+        let root = dir("recount");
+        let (templates, approvals) = (root.join("templates"), root.join("trust/approvals.json"));
+        let t = templates.join("t");
+        // As this was kept by an earlier Zeron: every file but three.
+        let kept_before = |templates: &Path| {
+            let mut h = Sha256::new();
+            for (rel, text) in [("CHANGELOG.md", "# 1.0.0"), ("screens/x.luau", "-- x"), ("screenshots/a.png", "shot")] {
+                write(templates, &format!("t/{rel}"), text);
+                for part in [rel, text] {
+                    h.update((part.len() as u64).to_le_bytes());
+                    h.update(part.as_bytes());
+                }
+            }
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        write(&templates, "t/zeron-template.json", r#"{"id":"t"}"#);
+        write(&templates, "t/README.md", "# T");
+        let before = kept_before(&templates);
+        assert_ne!(before, digest(&t));
+        approve_at(&approvals, "other", "theirs").unwrap();
+        approve_at(&approvals, "t", &before).unwrap();
+        assert!(trusted_at(&templates, "t", &approvals), "not asked again");
+        assert!(approved_at(&approvals, "t", &digest(&t)), "its record moved");
+        assert!(approved_at(&approvals, "other", "theirs"), "no other did");
+        // From there its listing is nothing to ask about, and its code is.
+        write(&templates, "t/CHANGELOG.md", "# 1.0.1");
+        assert!(trusted_at(&templates, "t", &approvals));
+        write(&templates, "t/screens/x.luau", "-- y");
+        assert!(!trusted_at(&templates, "t", &approvals));
+        // Kept before, and changed since: asked, and the record stays.
+        for (rel, text) in [("screens/x.luau", "-- y"), ("screens/y.luau", ""), ("screenshots/a.png", "shoz"), ("CHANGELOG.md", "# 1.0.2")] {
+            let before = kept_before(&templates);
+            let _ = std::fs::remove_file(t.join("screens/y.luau"));
+            approve_at(&approvals, "t", &before).unwrap();
+            write(&templates, &format!("t/{rel}"), text);
+            assert!(!trusted_at(&templates, "t", &approvals), "{rel}");
+            assert!(approved_at(&approvals, "t", &before), "{rel}");
+        }
+        // Never another's record.
+        let before = kept_before(&templates);
+        let _ = std::fs::remove_file(t.join("screens/y.luau"));
+        forget_at(&approvals, "t");
+        approve_at(&approvals, "other", &before).unwrap();
+        assert!(!trusted_at(&templates, "t", &approvals));
+        assert!(approved_at(&approvals, "other", &before));
+    }
+
     /// A server on this machine: how many requests for `/<token>` reached it.
     /// (By token: a port freed by another process on this machine may have
     /// something still asking it.)
@@ -814,7 +1023,12 @@ return ui.column {{
         }
         for action in BLOCKED {
             let (checked, aloud) = (format!("refuse(\"{action}"), format!("refuse_aloud(\"{action}"));
-            assert!(sources.contains(&checked) || sources.contains(&aloud), "nothing refuses {action}");
+            // (The store's, of either kind: catalog.rs `Kind::hold`.)
+            let of_a_kind = ["plugins.store.", "templates.store."].iter().find_map(|calls| action.strip_prefix(calls)).map(|name| format!("kind.hold(\"{name}\")"));
+            assert!(
+                sources.contains(&checked) || sources.contains(&aloud) || of_a_kind.is_some_and(|held| sources.contains(&held)),
+                "nothing refuses {action}"
+            );
         }
     }
 

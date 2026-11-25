@@ -22,6 +22,7 @@ local state = require("@app/screens/plugins/state")
 local page = require("@app/screens/plugins/page")
 local sessions = require("@account/sessions")
 local stub = require("./store_stub")
+require("./template_store_stub")
 
 -- This device, its Zeron as the engine says.
 sessions.now:set_key("devices", { { id = "mac", name = "This Mac", platform = "macos", here = true, online = true, version = "0.4.2" } :: any })

@@ -30,7 +30,7 @@ local asks_view = require("@screens/plugins/asks")
 local M = {}
 
 -- How long a sheet shows before Allow takes a click.
-M.ARM_MS = 800
+M.ARM_MS = require("@screens/plugins/arm").MS
 
 local consent = ui.shared("consent", { busy = false } :: any)
 
