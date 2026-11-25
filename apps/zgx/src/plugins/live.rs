@@ -282,14 +282,98 @@ pub struct Overlay {
 /// `failed` files (Zeron's show in their place) and the paths never templated.
 /// Zeron's own alone for `BUILTIN`, or `whole_failed`. How many files changed.
 pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> std::io::Result<(usize, Overlay)> {
-    let (want, overlay) = plan(templates, id, failed, whole_failed);
+    compose_from(templates, id, &templates.join(id), failed, whole_failed)
+}
+
+/// `compose`, template `id`'s files read from `source` (a `snapshot` of it).
+pub fn compose_from(templates: &Path, id: &str, source: &Path, failed: &BTreeSet<String>, whole_failed: bool) -> std::io::Result<(usize, Overlay)> {
+    let (want, overlay) = plan_from(templates, id, source, failed, whole_failed);
     let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
     Ok((changed, overlay))
+}
+
+/// Where a look keeps the copy of a template it judges and lays from
+/// (`snapshot`): the host's own, a dot folder no template's id can be.
+pub const SNAPSHOTS: &str = ".snapshots";
+
+static SNAPSHOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Template `id`'s files copied once into a folder of the host's own
+/// (`SNAPSHOTS/<n>/<id>`): what's judged (`preview::trusted_copy`) and what's
+/// laid (`compose_from`), so no edit comes between. Every regular file, read
+/// once (what's copied is what's judged); a link or anything else that isn't
+/// a file or folder is left out, never followed, and said (`plain` false:
+/// such a folder is never Zeron's official one). Earlier copies go.
+pub fn snapshot(templates: &Path, id: &str) -> std::io::Result<(PathBuf, bool)> {
+    let root = templates.join(SNAPSHOTS);
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let n = SNAPSHOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let to = root.join(format!("{}-{n}", std::process::id())).join(id);
+    std::fs::create_dir_all(&to)?;
+    let from = templates.join(id);
+    let mut plain = true;
+    let mut stack = vec![from.clone()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at)?.flatten() {
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let Ok(rel) = path.strip_prefix(&from) else { continue };
+            if kind.is_dir() {
+                std::fs::create_dir_all(to.join(rel))?;
+                stack.push(path);
+            } else if kind.is_file() {
+                std::fs::write(to.join(rel), std::fs::read(&path)?)?;
+            } else {
+                plain = false;
+            }
+        }
+    }
+    Ok((to, plain))
+}
+
+/// How what `.live` holds of a template was judged when it was laid
+/// (`preview::judged` of the copy laid): its id, whether it's Zeron's official
+/// one, and its digest, by which what you kept is asked. Kept beside `.live`
+/// (`JUDGED`), so a launch that runs `.live` as it is judges what it runs,
+/// never the folder as it is now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Judged {
+    pub id: String,
+    pub official: bool,
+    pub digest: String,
+}
+
+pub const JUDGED: &str = ".laid-judged.json";
+
+impl Judged {
+    pub fn read(templates: &Path) -> Option<Self> {
+        let v = read_json(&templates.join(JUDGED));
+        Some(Self { id: v["id"].as_str()?.to_string(), official: v["official"].as_bool()?, digest: v["digest"].as_str()?.to_string() })
+    }
+
+    pub fn write(&self, templates: &Path) -> std::io::Result<bool> {
+        let v = serde_json::json!({ "id": self.id, "official": self.official, "digest": self.digest });
+        put(&templates.join(JUDGED), &serde_json::to_vec_pretty(&v).unwrap_or_default())
+    }
+
+    /// Gone: what `.live` holds is unknown (a lay-down under way).
+    pub fn forget(templates: &Path) {
+        let _ = std::fs::remove_file(templates.join(JUDGED));
+    }
 }
 
 /// What `compose` lays down, each file's source by its path in `.live`, and
 /// the overlay that is: folders listed, nothing read.
 pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
+    plan_from(templates, id, &templates.join(id), failed, whole_failed)
+}
+
+/// `plan`, template `id`'s files read from `source`.
+pub fn plan_from(templates: &Path, id: &str, source: &Path, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
     let mut from_template = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
@@ -297,7 +381,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
-        for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
+        for (rel, path) in files(source, |rel| !template_meta(rel)) {
             if never_templated(&rel) || failed.contains(&rel) {
                 continue;
             }

@@ -479,6 +479,21 @@ pub fn trusted(templates: &Path, id: &str) -> bool {
     id == live::BUILTIN || approvals_path().is_some_and(|p| trusted_at(templates, id, &p))
 }
 
+/// Template `id` as its copy `copy` holds it (`live::snapshot`, what's then
+/// laid): whether it's Zeron's official one exactly as this build wrote it
+/// (only a `plain` copy: a folder with a link or the like never is), and its
+/// digest, by which what you kept is asked (`kept`). What's judged is what's
+/// laid: no edit of the folder comes between.
+pub fn judged(id: &str, copy: &Path, plain: bool) -> (bool, String) {
+    let official = id != live::BUILTIN && plain && super::official::verified(copy).is_some();
+    (official, digest(copy))
+}
+
+/// Whether you kept template `id` as it was when its digest was `digest`.
+pub fn kept(id: &str, digest: &str) -> bool {
+    approvals_path().is_some_and(|p| approved_at(&p, id, digest))
+}
+
 /// `trusted`, with what you kept recorded at `approvals`.
 pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
     if id == live::BUILTIN {
@@ -1366,7 +1381,7 @@ return ui.column { ui.text { "its app" } }"#;
             write(&root.join(live::ZERON), "app.luau", ZERONS_APP);
             write(&root.join(live::ZERON), "screens/shell/sidebar.luau", "return {}");
             let (laid, overlay) = (std::cell::RefCell::default(), std::cell::RefCell::default());
-            block_on(super::super::lay_down(&root, live::BUILTIN.into(), std::collections::BTreeSet::new(), false, Self::laid_as(live::BUILTIN), &laid, &overlay)).unwrap();
+            block_on(super::super::lay_down(&root, live::BUILTIN.into(), None, std::collections::BTreeSet::new(), false, Self::laid_as(live::BUILTIN), None, &laid, &overlay)).unwrap();
             let entry = root.join(live::LIVE).join("app.luau");
             let answered = std::rc::Rc::new(std::cell::Cell::new(0));
             let a = answered.clone();
@@ -1387,7 +1402,7 @@ return ui.column { ui.text { "its app" } }"#;
 
         /// Template `id` laid, as a look lays it: Ok or not.
         fn lay(&self, id: &str) -> bool {
-            block_on(super::super::lay_down(&self.root, id.into(), std::collections::BTreeSet::new(), false, Self::laid_as(id), &self.laid, &self.overlay)).is_ok()
+            block_on(super::super::lay_down(&self.root, id.into(), None, std::collections::BTreeSet::new(), false, Self::laid_as(id), None, &self.laid, &self.overlay)).is_ok()
         }
 
         /// A template whose app is `ITS_APP` and, with `across`, a file
@@ -1537,6 +1552,47 @@ return ui.column { ui.text { "moves at load" } }"#;
             assert_eq!(ran.get(), 0, "{case}: nothing of it ran (called {})", called.get());
             set(None);
         }
+    }
+
+    /// What's judged is what's laid: a template copied once (`live::snapshot`),
+    /// its copy judged (kept by the copy's digest), and `.live` laid from the
+    /// copy, so an edit of the folder after it's copied never lands under the
+    /// trust given; a link in it is never followed out of it, and a folder
+    /// with one is never judged official.
+    #[test]
+    fn what_s_judged_is_what_s_laid() {
+        let root = dir("judged").join("templates");
+        write(&root.join(live::ZERON), "app.luau", "return ui.column {}");
+        write(&root.join("k"), "zeron-template.json", r#"{"id":"k","name":"k"}"#);
+        write(&root.join("k"), "screens/x.luau", "-- as kept");
+        let (copy, plain) = live::snapshot(&root, "k").unwrap();
+        assert!(plain && copy.ends_with("k") && copy.starts_with(root.join(live::SNAPSHOTS)));
+        let (official, digest) = judged("k", &copy, plain);
+        assert!(!official);
+        assert_eq!(digest, super::digest(&root.join("k")), "the copy's digest is the folder's as copied");
+
+        // Edited after it was copied: what's laid is the copy.
+        write(&root.join("k"), "screens/x.luau", "-- edited after");
+        write(&root.join("k"), "screens/y.luau", "-- added after");
+        live::compose_from(&root, "k", &copy, &std::collections::BTreeSet::new(), false).unwrap();
+        let live_dir = root.join(live::LIVE);
+        assert_eq!(std::fs::read_to_string(live_dir.join("screens/x.luau")).unwrap(), "-- as kept");
+        assert!(!live_dir.join("screens/y.luau").exists());
+        assert_ne!(super::digest(&root.join("k")), digest, "and the edit is another digest, not kept");
+
+        // A link in the folder: left out, never followed; never official.
+        #[cfg(unix)]
+        {
+            let outside = root.parent().unwrap().join("outside");
+            write(&outside, "secret.luau", "-- outside the folder");
+            std::os::unix::fs::symlink(&outside, root.join("k/screens/linked")).unwrap();
+            let (copy, plain) = live::snapshot(&root, "k").unwrap();
+            assert!(!plain, "a link was met");
+            assert!(!copy.join("screens/linked").exists() && !copy.join("screens/linked/secret.luau").exists());
+            assert!(!judged("k", &copy, plain).0);
+        }
+        // One copy at a time: the earlier ones go.
+        assert_eq!(std::fs::read_dir(root.join(live::SNAPSHOTS)).unwrap().count(), 1);
     }
 
     fn files_under(dir: &Path) -> Vec<PathBuf> {
