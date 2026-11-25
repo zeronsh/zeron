@@ -17,7 +17,7 @@
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -190,6 +190,11 @@ try {
     const script = join(copy, "scripts/staging-seed/seed.mjs");
     mkdirSync(join(copy, "edge"), { recursive: true });
     writeFileSync(join(copy, "edge/wrangler.jsonc"), `// its config\n${JSON.stringify({ vars: { WORKOS_CLIENT_ID: edge.clientId } })}`);
+    // (A hand-made file as a person could write it: production's WorkOS, a
+    // Zeron of production's, no edge, and --edge one that's allowed.)
+    const { edge: _none, ...handMade } = right;
+    const byHand = await refused(script, handMade);
+    check("a hand-made file for production's Zeron is refused", byHand.startsWith("seed"), byHand);
     const named = await refused(script, right);
     check("production's WorkOS is refused, though the accounts file names it", named.includes("production's"), named);
     const signedIn = await refused(script, { ...right, workos_client_id: "client_other" }, ["--dry-run"]);
@@ -200,13 +205,18 @@ try {
     const { edge: _edge, ...edgeless } = right;
     const none = await refused(join(here, "seed.mjs"), edgeless);
     const other = await refused(join(here, "seed.mjs"), { ...right, edge: "https://other.example.com" });
-    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("isn't --edge"), `${none} / ${other}`);
+    check("and an accounts file whose edge isn't --edge, or that has none", none.includes("isn't --edge") && other.includes("SEED_ALLOWED_EDGES"), `${none} / ${other}`);
   }
   // A Zeron signed in elsewhere (as a wrong accounts file would name): refused
   // before it publishes anything.
   writeFileSync(join(work, "elsewhere.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(work, "accounts.json"), "utf8")), workos_client_id: "client_elsewhere" }));
   const elsewhere = await run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "elsewhere.json"), "--edge", edge.url], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
   check("a Zeron signed in to another WorkOS publishes nothing (exit 2)", elsewhere.code === 2 && elsewhere.err.includes("another WorkOS") && !elsewhere.out.includes("published"), elsewhere.err.trim().split("\n")[0]);
+  // A dry run: every version checked, nothing in any Zeron's folder touched.
+  const folders = () => JSON.stringify(authors.map((d) => readdirSync(d.data, { recursive: true }).map(String).filter((p) => p.startsWith("plugins")).sort()));
+  const before = folders();
+  const dry = await run(process.execPath, [join(here, "seed.mjs"), "--accounts", join(work, "accounts.json"), "--edge", edge.url, "--dry-run"], { env: { ...process.env, SEED_ALLOWED_EDGES: edge.url } });
+  check(`a dry run checks all ${VERSIONS} versions and writes in no Zeron's folder`, dry.code === 0 && (dry.out.match(/^ready /gm) ?? []).length === VERSIONS && folders() === before, (dry.err || dry.out).trim().split("\n").pop());
   const firstPass = await seed({});
   process.stdout.write(firstPass.out);
   check("the first pass publishes the 30 first versions and stops for tokens (exit 3)", firstPass.code === 3 && (firstPass.out.match(/^published .* \(device\)$/gm) ?? []).length === 30, `exit ${firstPass.code}`);
