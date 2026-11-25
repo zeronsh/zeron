@@ -311,7 +311,8 @@ pub fn take_rows(templates: &Path, said: &Json) -> bool {
     true
 }
 
-/// A store version as a record names one: the store's id, a version and its
+/// A store version as a record names one: the store's id, a version (of at
+/// most 32, the store's) and its
 /// content hash, each as it's written; else it's no record (the engine's rule
 /// too).
 fn of_store(id: &Json, version: &Json, hash: &Json) -> Option<(String, String)> {
@@ -319,7 +320,7 @@ fn of_store(id: &Json, version: &Json, hash: &Json) -> Option<(String, String)> 
     let named = (2..=40).contains(&id.len())
         && id.bytes().enumerate().all(|(i, b)| b.is_ascii_lowercase() || b.is_ascii_digit() || (b == b'-' && i > 0));
     let hashed = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    (named && hashed && (1..=128).contains(&version.len())).then(|| (id.to_owned(), version.to_owned()))
+    (named && hashed && (1..=32).contains(&version.len())).then(|| (id.to_owned(), version.to_owned()))
 }
 
 /// The store versions a folder is or came from. `None`: it can't be told.
@@ -627,7 +628,7 @@ mod tests {
             assert_eq!(r.why("torn"), None);
         }
         // One that isn't a store id, a version and a content hash is no record.
-        let long = "9".repeat(129);
+        let long = "9".repeat(33);
         for (id, version, hash) in [("Midnight", "1.0.0", HASH), ("-x", "1.0.0", HASH), ("x", "1.0.0", HASH), ("midnight ", "1.0.0", HASH), ("dusk", "", HASH), ("dusk", &long, HASH), ("dusk", "1.0.0", ""), ("dusk", "1.0.0", &HASH.to_uppercase()), ("dusk", "1.0.0", &HASH[1..])] {
             let entry = json!({ "id": id, "version": version, "hash": hash });
             r.write(&format!("torn/{LINEAGE}"), &json!([entry]).to_string());
