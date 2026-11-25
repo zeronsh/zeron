@@ -112,41 +112,35 @@ selected = {
 },
 ```
 
+**Start any `ds/tokens.luau` from Zeron's own file of the version you're on** (`.zeron/ds/tokens.luau`, what `create_template` copies) and change only your values. It's one whole file: a copy from an older Zeron is missing the tokens added since, and what draws with them goes wrong (project tiles, the ink a risky ask is said in). When `template_status` lists it in `out_of_date`, start again from the new one and put your values back.
+
 Keep only `ds/tokens.luau` (with this change) in the template, plus `zeron-template.json`. Everything else inherits Zeron's, so it stays current. For more, copy `ds/sidebar.luau` too: its constants (row heights, paddings) are at the top. Keep `class = "session-row"` and its `provide = { session = … }` so plugins still find each row.
 
-### Replace the new-chat page
+### Put words on the new-chat page
 
-`screens/chat/home.luau` is what shows under the composer on a new chat. Keep its `id`, its `hook` and its slot (plugins put greetings there) and its file drop (dropping a file on it attaches it):
+`screens/chat/home.luau` is the page under a new chat. **The composer floats over it**, from the page's middle up, so a column in the page (words above the plugins' slot, say) ends up under the composer, where nobody can read it. Copy Zeron's whole file (`.zeron/screens/chat/home.luau`) and change nothing in it: it has the page's `id`, its `hook`, its slot (plugins put greetings there), its file drop (dropping a file on it attaches it) and Zeron's first launch, which asks for a project. Then add one element, last in the column it returns:
 
 ```lua
--- screens/chat/home.luau
-local shared = require("@app/screens/chat/shared")
-
-local function Home(): Node
-	local zone = shared.drop_zone("home")
-	return ui.column {
-		id = "chat-home",
-		hook = "chat.home",
-		w_full = true,
-		h_full = true,
-		min_h = 0,
-		items = "center",
-		justify = "center",
-		gap = "$space.3",
-		on_file_hover = zone.on_file_hover,
-		on_file_drop = zone.on_file_drop,
-		drop_when = zone.drop_when,
-		on_drag_over = zone.on_drag_over,
-		on_drag_leave = zone.on_drag_leave,
-		on_drop = zone.on_drop,
-		ui.text { "What are we building?", text_size = "$font.size.xl", weight = "$font.weight.semibold", color = "$text.primary" },
-		ui.text { "Ask anything. Drop files to attach them.", color = "$text.tertiary" },
-		ui.slot("chat.home", { w_full = true, items = "center", gap = "$space.3", mb = "$space.8" }),
-	}
-end
-
-return Home
+-- screens/chat/home.luau: Zeron's own, and this last in Home()'s ui.column
+-- Its own words, over the composer (which stands from the page's middle up).
+ui.column {
+	absolute = true,
+	left = 0,
+	right = 0,
+	bottom = "50%",
+	pb = ui.raw(140, "the composer's top over the page's middle, and room under the words"),
+	items = "center",
+	gap = "$space.2",
+	pointer_events = "none",
+	hidden = function(): boolean
+		return route.needs_project:get()
+	end,
+	ui.text { "A clean sheet.", text_size = "$font.size.xl", weight = "$font.weight.semibold", color = "$text.primary" },
+	ui.text { "Write the first line, or drop a file on the desk.", color = "$text.tertiary" },
+},
 ```
+
+`absolute`, with `left` and `right` 0 and `bottom = "50%"`, stands it on the page's middle, where the composer is, and `pb` lifts the words over the composer. It's hidden on first launch, so that screen stays Zeron's, and takes no clicks. These words clear the composer in windows 800 and 600 points tall: look at yours at both.
 
 Save it with the template in use, and the next new chat shows it. If it fails, Zeron's own page shows in its place and `template_status` says why.
 
@@ -156,4 +150,31 @@ Save it with the template in use, and the next new chat shows it. If it fails, Z
 
 `import_template { path }` checks the signature over every file before anything is written; an unsigned or changed package is refused. One signed on this device installs at once, as a preview until the person keeps it. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they allow it in Zeron's own consent window, which shows who signed it. No tool can allow it for them; the reply says `needs_consent`. Protected files in a package are never installed (`ignored` names them). Once installed, `list_templates` shows it with `imported.author`.
 
+`import_template { store }` brings one from Zeron's store, by its id there. An agent brings only a version Zeron has verified, and it always waits for the person, whoever made it; its update is theirs to take too. What a device takes of one (the newest, or the newest verified; pre-releases) is chosen on its page. If Zeron takes a version down as harmful, devices that have it, or a copy made of it, stop using it within about 15 minutes.
+
 A template installed from a link is checked there for a newer version, signed by the same key. Only a later version is taken. One whose files differ from what's installed (anything but its `preview.png`) waits in Zeron's consent window like a new import, and replaces the installed one only once the person allows it there.
+
+## Publishing to the store
+
+The store lists templates people made, beside plugins and under the same rules: a version is live as soon as it's published, Zeron marks the ones it has read **verified**, a version that isn't verified stops taking new installs once a newer one is published, and each version is published once, later than every one before it. docs/plugins.md ("Publishing to the store") says all of that. What's a template's own:
+
+- **It runs as Zeron itself.** A template asks for no permissions, because it can do anything Zeron can: its page, its card and Zeron's consent window say so.
+- **Its id is one nobody has**, plugin or template: they're one list of ids, with a plugin's rules (none starting with `zeron`, none that looks like a brand's). Yours is its folder's name, and `zeron-template.json` must say the same.
+- **`zeron-template.json`** has `id`, `name` (at most 64 characters), `description` (one line, at most 300), `version` and `zeron_version` (both strict semver; `zeron_version` is the Zeron it was made from, and one older than that can't install it). It may have `keywords`, `screenshots`, `homepage`, `repository` and `license`, as a plugin's may. Nothing else is sent: a template has no categories, permissions, commands, tools or services.
+- **`README.md`** is its page, and must be yours: the one Zeron wrote with the template counts as missing.
+- **`preview.png`** is its card's cover: a still PNG, at most 4 MB. Screenshots are PNG or JPEG files under `screenshots/`, up to 8. `CHANGELOG.md` gives each version's notes. None of these is part of the interface.
+- **Files no template may replace aren't sent**, nor any whose name some disk takes for another's. Each is named by the check (`left_out`, with the manifest's members that aren't sent): changed or added ones one by one, Zeron's own untouched ones as a count. It's never in the way of publishing.
+
+### Checking it
+
+`zeron template check <folder or id>` lists every problem before anything is sent, with no Zeron running and no sign-in. Each has a stable `rule`, as a plugin's does.
+
+### Publishing it
+
+Publishing is the person's act: in Zeron, on its Templates pages, or on the command line. No tool publishes one.
+
+- **From your machine:** `zeron template publish <id>`, with Zeron running and signed in. It's signed with this device's key and sent with your session. `--dry-run` checks it without sending it.
+- **From CI:** with a deploy token in `ZERON_DEPLOY_TOKEN`, `zeron template publish <folder>` sends it with no Zeron running. The same tokens publish plugins and templates (`zeron plugin token create --plugins <id>`, an id of either; `--all --templates` for all of both); a template's first version comes from your machine. The GitHub Action (`zeronsh/zeron/actions/publish-plugin`) publishes a template from a folder with `zeron-template.json`.
+- **Yank** a version with `zeron template yank <id> <version>` (`unyank` undoes it), and see each version's state with `zeron template store [id]`. (`zeron template status <id>` is how one is on this device.)
+
+A copy of another template is yours to publish only if its author lets you; Zeron won't publish a copy of one that was taken down.
