@@ -554,7 +554,7 @@ const restore = async (db: D1Database, adminId: string, id: string, v: VersionRo
  * only an id, which take either.) */
 const versionAction = async (db: D1Database, adminId: string, kind: Kind | undefined, id: string, versionText: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
-  if (!plugin || (kind !== undefined && plugin.kind !== kind) || !v) return notFound();
+  if (!plugin || (kind !== undefined && plugin.kind !== kind) || !v) return notFound(kind);
   switch (action) {
     case "verify":
       return verify(db, adminId, id, v);
@@ -567,13 +567,13 @@ const versionAction = async (db: D1Database, adminId: string, kind: Kind | undef
     case "restore":
       return restore(db, adminId, id, v, body);
     default:
-      return notFound();
+      return notFound(kind);
   }
 };
 
 const pluginAction = async (env: Env, db: D1Database, adminId: string, kind: Kind, id: string, action: string, body: Record<string, unknown> | undefined): Promise<Response> => {
   const plugin = await pluginRow(db, id);
-  if (!plugin || plugin.kind !== kind) return notFound();
+  if (!plugin || plugin.kind !== kind) return notFound(kind);
   const now = Date.now();
   let conflict: Response | undefined;
   switch (action) {
@@ -644,7 +644,7 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, kind: Kin
       break;
     }
     default:
-      return notFound();
+      return notFound(kind);
   }
   if (conflict) return conflict;
   await purgeCatalog(db, id);
@@ -655,7 +655,7 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, kind: Kin
 
 const adminPlugin = async (env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
   const plugin = await pluginRow(db, id);
-  if (!plugin || plugin.kind !== kind) return notFound();
+  if (!plugin || plugin.kind !== kind) return notFound(kind);
   const [versions, reportRows, authors] = await Promise.all([
     db.prepare(`SELECT * FROM versions WHERE plugin_id = ? ORDER BY ${VERSION_ORDER}`).bind(id).all<VersionRow>(),
     db.prepare(`SELECT ${REPORT_COLUMNS} FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id WHERE r.plugin_id = ? ORDER BY r.id DESC LIMIT 100`).bind(id).all<ReportRow>(),
@@ -877,7 +877,7 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, bu
     if (parts.length === 4 && post && b) return pluginAction(env, db, admin.userId, kind, a, b, body);
     if (parts.length === 6 && post && b === "versions" && c && (d === "take-down" || d === "remove" || d === "restore")) {
       const versionText = decodeSegment(c);
-      return versionText ? versionAction(db, admin.userId, kind, a, versionText, d, body) : notFound();
+      return versionText ? versionAction(db, admin.userId, kind, a, versionText, d, body) : notFound(kind);
     }
   }
   if (section === "reports") {

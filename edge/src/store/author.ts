@@ -93,7 +93,7 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
   const versionText = decodeSegment(versionSegment);
   const plugin = await pluginRow(db, id);
   const version = versionText && plugin ? await versionRow(db, id, versionText) : null;
-  if (!plugin || plugin.kind !== kind || !version || plugin.owner_id !== publisher.userId) return notFound();
+  if (!plugin || plugin.kind !== kind || !version || plugin.owner_id !== publisher.userId) return notFound(kind);
   if (action === "yank" && version.status !== "listed") {
     return fail(409, "invalid_state", `Version ${version.version} is ${version.status}: only a listed version can be yanked.`);
   }
@@ -157,7 +157,7 @@ export const handleInstalled = async (request: Request, env: Env, db: D1Database
   ]);
   const counted = (results[0]?.meta.changes ?? 0) === 1;
   if (!counted && !(await db.prepare(`SELECT 1 FROM plugins p WHERE p.id = ? AND ${listedOf(kind)}`).bind(id).first())) {
-    return notFound();
+    return notFound(kind);
   }
   return answer({ counted });
 };
@@ -178,7 +178,7 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, k
   if (typeof text !== "string" || text.length > MAX_REPORT_TEXT) return fail(400, "bad_request", `text is at most ${MAX_REPORT_TEXT} characters.`);
   if (version !== null && (typeof version !== "string" || version.length > MAX_VERSION_LENGTH)) return fail(400, "bad_request", `version is a version of this ${kind}.`);
   const plugin = await pluginRow(db, id);
-  if (!plugin || plugin.kind !== kind || plugin.status !== "active" || !plugin.listed_version) return notFound();
+  if (!plugin || plugin.kind !== kind || plugin.status !== "active" || !plugin.listed_version) return notFound(kind);
   const open = await db
     .prepare("SELECT id FROM reports WHERE plugin_id = ? AND reporter_id = ? AND status = 'open'")
     .bind(id, caller.userId)

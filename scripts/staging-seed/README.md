@@ -26,15 +26,14 @@ The seed never signs anyone in. Each author is a running Zeron (`zeron
 headless`, or the app), signed in as that account, with a username. On one
 machine, each author has their own `HOME`, `ZERON_DATA_DIR` and
 `ZERON_IPC_PORT`. Each author signs in once, by any real path:
-`zeron login`'s headless code, or the app. The usernames the catalog's
-authors are listed under are in `catalog.mjs` (`stg-ada`, `stg-ben`, `stg-cy`, `stg-dee`, `stg-eli`, `stg-fen`).
+`zeron login`'s headless code, or the app. Their accounts and usernames are the logins file's: none is in this folder.
 
 The accounts file names them:
 
 ```json
 {
-  "edge": "https://staging.zeron.sh",
-  "workos_client_id": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
+  "edge": "<edge>",
+  "workos_client_id": "<client id>",
   "zeron": "/path/to/zeron",
   "authors": [
     { "slot": 1, "home": "/seed/ada/home", "data_dir": "/seed/ada/data", "ipc_port": 27701, "token_env": "SEED_TOKEN_1" }
@@ -45,6 +44,19 @@ The accounts file names them:
 `slot` is the catalog's author (1–6), and `zeron` defaults to the one on
 `PATH`. Deploy tokens are never in the file, only in the environment, under
 each author's `token_env`.
+
+## Where it may write (where.mjs)
+
+An id published is never released, so the seeds and `sessions.mjs` write only
+to an edge the operator allows by name: `--edge` must be one of
+`SEED_ALLOWED_EDGES` (addresses, separated by commas). Production's hosts are
+refused even when they're listed. Both seeds also refuse an author's Zeron
+that's signed in to another WorkOS than the accounts file's: what it publishes
+goes to its own edge.
+
+```sh
+export SEED_ALLOWED_EDGES=<edge>
+```
 
 ## Making the sessions (sessions.mjs)
 
@@ -62,17 +74,18 @@ browser (Playwright) fills the hosted page with each account's email and
 password: nothing is bypassed.
 
 ```sh
-node scripts/staging-seed/sessions.mjs up --zeron <zeron build> --edge https://staging.zeron.sh \
-  --client-id client_01KWD0E9SYPV2WE4QN9TP9DP0W --logins <logins.json> --dir <folder> --playwright <folder with playwright and ws>
-node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json            # pass 1, exit 3
+node scripts/staging-seed/sessions.mjs up --zeron <zeron build> --edge <edge> \
+  --client-id <client id> --logins <logins.json> --dir <folder> --playwright <folder with playwright and ws>
+node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json --edge <edge>   # pass 1, exit 3
 node scripts/staging-seed/sessions.mjs tokens …the same…                        # writes <folder>/tokens.env (0600)
 node scripts/staging-seed/sessions.mjs up …the same…                            # restarts the engines `tokens` stopped
-(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json)
+(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed.mjs --accounts <folder>/accounts.json --edge <edge>)
 node scripts/staging-seed/sessions.mjs down --dir <folder>                      # stops the engines by their own pids
 ```
 
-The logins file lists the six accounts in the catalog's order, as
-`{username, email, user_id, password}`. Passwords are read only: never printed,
+The logins file lists the accounts in the catalogs' order (six authors of
+plugins, then two of templates), as `{username, email, user_id, password}`.
+`--only 7,8` does some authors only. Passwords are read only: never printed,
 logged or written.
 
 The folder keeps each author's home and data, `accounts.json` and `tokens.env`,
@@ -86,7 +99,7 @@ engine at a time.
 ## Running it
 
 ```sh
-node scripts/staging-seed/seed.mjs --accounts accounts.json
+node scripts/staging-seed/seed.mjs --accounts accounts.json --edge <edge>
 ```
 
 1. **The first pass** publishes every plugin's first version from its author's
@@ -115,6 +128,44 @@ The store's limits shape the catalog:
 - it publishes at most 10 versions an hour and 50 a day, so at most 10
   versions an author;
 - it takes 30 writes a minute, so the seed waits 2.5 s between writes.
+
+## Templates (seed-templates.mjs)
+
+`templates.mjs` is eight templates by two more authors (slots 7 and 8 of the
+logins file). They have accounts of their own because an account claims at
+most 5 new ids in 7 days, plugins and templates together. `pictures.mjs` draws
+each one's preview and two screenshots (1280×800) in a headless browser.
+
+- Each has a palette of its own (`theme.luau`), and some a file of Zeron's made
+  over with the few lines they mean to change (tokens, the new-chat page, a
+  preference), or one unchanged. A review then has files that are the same as
+  Zeron's, changed and new.
+- First versions come from the author's own Zeron, as the app publishes one
+  (`PrepareTemplatePublish`, `PublishTemplate` over its IPC). The CLI publishes
+  a template only with a deploy token (`zeron plugin token create --all
+  --templates`).
+- A first set of versions was published with drawn pictures (`pictures.mjs`)
+  that showed more than the files change. The versions after put that right:
+  files, words and pictures (`rendered`), the pictures being the app's own.
+- `wide-margin` has a pre-release ahead of its release.
+- For staff: never verify `green-phosphor`; take `slate-grid` down.
+
+```sh
+git archive <commit> apps/zgx/ui | tar -x -C <folder>     # Zeron's own files, as the app they run in has them
+node scripts/staging-seed/sessions.mjs up --only 7,8 --edge <edge> …as above…   # writes accounts-templates.json
+node scripts/staging-seed/seed-templates.mjs --accounts <folder>/accounts-templates.json --ui <folder>/apps/zgx/ui --playwright <folder> --edge <edge>   # pass 1, exit 3
+node scripts/staging-seed/sessions.mjs tokens --only 7,8 --templates …
+node scripts/staging-seed/sessions.mjs up --only 7,8 …
+(set -a; . <folder>/tokens.env; set +a; node scripts/staging-seed/seed-templates.mjs …the same…)
+node scripts/staging-seed/sessions.mjs down --only 7,8 --dir <folder>
+```
+
+The versions that correct a template's pictures and words use the app's own
+renderings (`--pictures <folder>`) and wait without them.
+
+`--dry-run` checks every version with `zeron template check`. The engine must
+be one that publishes templates. `local-templates.mjs` runs it all against a
+local edge first, as `local.mjs` does for the plugins.
 
 ## What's left for staff (in the browser)
 

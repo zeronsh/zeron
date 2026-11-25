@@ -53,9 +53,9 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
   if (read && (parts[2] === "categories" || kind !== undefined) && !(await allowRead(request, env))) return rateLimited();
   const catalog = await handleCatalog(request, env, db, url, parts);
   if (catalog) return catalog;
-  if (kind === undefined || parts.length < 5) return notFound();
+  if (kind === undefined || parts.length < 5) return notFound(kind);
   const id = parts[3]!;
-  if (!ID_RE.test(id)) return notFound();
+  if (!ID_RE.test(id)) return notFound(kind);
   const sub = parts[4];
   if (sub === "versions" && parts.length === 5 && method === "POST") return handlePublish(request, env, db, bucket, kind, id);
   if (sub === "installed" && parts.length === 5 && method === "POST") return handleInstalled(request, env, db, kind, id);
@@ -68,7 +68,7 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
     }
   }
   if (sub === "files" && parts.length >= 7 && read) return serveFile(request, env, db, bucket, kind, id, parts[5]!, parts.slice(6));
-  return notFound();
+  return notFound(kind);
 };
 
 export const handleStoreRoute = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {

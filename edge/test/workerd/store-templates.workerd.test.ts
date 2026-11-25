@@ -148,6 +148,33 @@ describe("templates: what's cached from before them", () => {
   });
 });
 
+describe("templates: what isn't there", () => {
+  it("is said to be no such template under /templates, and no such plugin under /plugins", async () => {
+    const a = await author();
+    const plug = uniqueId("p");
+    const temp = uniqueId("t");
+    await listed(a, plug, "1.0.0");
+    await listedTemplate(a, temp, "1.0.0");
+    const none = uniqueId("n");
+    const said = async (res: Response, what: string) => [res.status, (await json<{ message: string }>(res)).message, what];
+    for (const [prefix, word, ids] of [["templates", "template", [plug, none, "Not-An-Id"]], ["plugins", "plugin", [temp, none, "Not-An-Id"]]] as const) {
+      for (const id of ids) {
+        const there = (method: string, path: string, bearer?: string, body?: unknown) => call(bearer, method, `/store/v1/${prefix}/${id}${path}`, body);
+        for (const path of ["", "/versions", "/versions/1.0.0", "/versions/not-one", "/versions/1.0.0/package", "/files/1.0.0/README.md", "/nothing/here"]) {
+          expect(await said(await there("GET", path), `${prefix}/${id}${path}`)).toEqual([404, `There's no such ${word}.`, `${prefix}/${id}${path}`]);
+        }
+        for (const [path, body] of [["/installed", undefined], ["/reports", { reason: "broken", text: "x" }], ["/versions/1.0.0/yank", undefined]] as const) {
+          expect(await said(await there("POST", path, a.userId, body), `${prefix}/${id}${path}`)).toEqual([404, `There's no such ${word}.`, `${prefix}/${id}${path}`]);
+        }
+        if (id === "Not-An-Id") continue;
+        expect(await said(await adminCall("GET", `/store/v1/admin/${prefix}/${id}`), id)).toEqual([404, `There's no such ${word}.`, id]);
+        expect(await said(await adminCall("POST", `/store/v1/admin/${prefix}/${id}/suspend`, { reason: "x" }), id)).toEqual([404, `There's no such ${word}.`, id]);
+        expect(await said(await adminCall("POST", `/store/v1/admin/${prefix}/${id}/versions/1.0.0/take-down`, { reason: "x" }), id)).toEqual([404, `There's no such ${word}.`, id]);
+      }
+    }
+  });
+});
+
 describe("templates: one namespace", () => {
   it("is 409 wrong_kind to the owner under the other prefix, 403 id_taken to anyone else, and never takes a plugin's id", async () => {
     const a = await author();
