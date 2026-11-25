@@ -837,7 +837,7 @@ impl FakeStore {
                 if state.without_templates {
                     return not_found();
                 }
-                let mut templates: Vec<Value> = state.templates.iter().filter(|(_, (o, _))| *o == owner).map(|(id, _)| json!({ "id": id, "kind": "template" })).collect();
+                let mut templates: Vec<Value> = state.templates.iter().filter(|(id, (o, _))| *o == owner && !state.template_items.contains_key(*id)).map(|(id, _)| json!({ "id": id, "kind": "template" })).collect();
                 templates.extend(state.template_items.iter().filter(|(_, p)| p.owner == owner).map(|(id, p)| carded(&state, json!({ "id": id, "kind": "template", "versions": p.versions.iter().map(|v| version_info(&state, v)).collect::<Vec<_>>() }))));
                 json_reply(200, json!({ "publisher_id": publisher_id(&owner), "templates": templates }))
             }
@@ -863,11 +863,40 @@ impl FakeStore {
                     Err(e) => return refused(400, "bad_package", &e),
                 };
                 let version = package.version();
+                if scope.is_none() {
+                    let item = state.template_items.get(*id);
+                    if item.is_some_and(|item| item.owner != owner) {
+                        return refused(409, "id_taken", "Someone else has that id.");
+                    }
+                    if item.is_some_and(|item| item.versions.iter().any(|v| v.version == version)) {
+                        return refused(409, "version_exists", "That version was published already.");
+                    }
+                }
                 let stored = state.templates.entry((*id).to_owned()).or_insert_with(|| (owner.clone(), Vec::new()));
                 if stored.1.contains(&version) {
                     return refused(409, "version_exists", "That version was published already.");
                 }
                 stored.1.push(version.clone());
+                if scope.is_none() {
+                    let published_at = state.tick();
+                    let item = state.template_items.entry((*id).to_owned()).or_insert_with(|| StoredPlugin { owner: owner.clone(), ..Default::default() });
+                    item.versions.push(StoredVersion {
+                        version: version.clone(),
+                        status: "listed".into(),
+                        verified: false,
+                        raw: body.to_vec(),
+                        hash: package.content_hash.clone(),
+                        key: package.key.clone(),
+                        notes: String::new(),
+                        engines: None,
+                        blocked: None,
+                        via: "device".into(),
+                        deploy_token: None,
+                        published_at,
+                        superseded_by: None,
+                        publisher_account: String::new(),
+                    });
+                }
                 state.submitted_templates.push(((*id).to_owned(), body.to_vec()));
                 json_reply(201, json!({ "id": id, "version": version, "kind": "template", "status": "listed", "verified": false, "checks": [], "superseded": [] }))
             }

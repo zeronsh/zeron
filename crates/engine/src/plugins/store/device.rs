@@ -25,7 +25,7 @@ use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
-use crate::plugins::status::{Blocked, UpdatePreference};
+use crate::plugins::status::{Blocked, State, UpdatePreference};
 use crate::plugins::version::{self, Version};
 use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing, template_blocks, template_packages};
 
@@ -76,6 +76,8 @@ pub fn handles(method: &str) -> bool {
             | methods::SET_TEMPLATE_PRERELEASES
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
+            | methods::PREPARE_TEMPLATE_PUBLISH
+            | methods::PUBLISH_TEMPLATE
             | methods::STORE_MY_PLUGINS
             | methods::STORE_VERSION_ACTION
             | methods::LIST_DEPLOY_TOKENS
@@ -112,6 +114,13 @@ fn says_kind(reply: &mut Value, kind: Kind) {
     if kind == Kind::Template {
         reply["kind"] = json!("template");
     }
+}
+
+/// A refusal of a template's.
+fn not_template(error: &str) -> Value {
+    let mut value = not_ok(error);
+    says_kind(&mut value, Kind::Template);
+    value
 }
 
 /// What a store template's consent window draws of its record.
@@ -305,6 +314,10 @@ struct Candidate {
     /// Which update this device stages for it.
     prefer: UpdatePreference,
 }
+
+/// What's said of a check whose plugin or template had other updates chosen
+/// for it meanwhile.
+const CHOSEN_ANEW: &str = "You chose other updates of it while Zeron looked; check again";
 
 /// What a full check of the store found.
 struct StoreCheck {
@@ -536,7 +549,7 @@ impl Plugins {
                         return Err(failed("Only a plugin installed from the store has store updates to choose"));
                     }
                 }
-                self.update_state(|state| match (&p.id, prefer) {
+                self.choose_updates(|state| match (&p.id, prefer) {
                     (Some(id), Some(prefer)) => {
                         state.store_updates_for.insert(id.clone(), prefer);
                     }
@@ -544,7 +557,8 @@ impl Plugins {
                         state.store_updates_for.remove(id);
                     }
                     (None, prefer) => state.store_updates = prefer,
-                })?;
+                })
+                .await?;
                 let state = lock(&self.inner.state).clone();
                 let device = state.device_updates();
                 let effective = p.id.as_deref().map_or(device, |id| state.updates_for(id));
@@ -580,14 +594,15 @@ impl Plugins {
                     Some(word) => Some(UpdatePreference::parse(word).ok_or_else(|| failed("Updates are newest or verified"))?),
                 };
                 self.store_template_here(&id).await?;
-                self.update_state(|state| match prefer {
+                self.choose_updates(|state| match prefer {
                     Some(prefer) => {
                         state.template_updates_for.insert(id.clone(), prefer);
                     }
                     None => {
                         state.template_updates_for.remove(&id);
                     }
-                })?;
+                })
+                .await?;
                 let state = lock(&self.inner.state).clone();
                 RpcReply::value(&json!({ "prefer": state.template_updates(&id).word(), "device": state.device_updates().word() }))
             }
@@ -595,13 +610,14 @@ impl Plugins {
                 let p: PrereleaseParams = parse_params(params)?;
                 let id = p.id.trim().to_owned();
                 self.store_template_here(&id).await?;
-                self.update_state(|state| {
+                self.choose_updates(|state| {
                     if p.on {
                         state.template_prerelease.insert(id.clone());
                     } else {
                         state.template_prerelease.remove(&id);
                     }
-                })?;
+                })
+                .await?;
                 RpcReply::value(&json!({ "id": id, "on": p.on }))
             }
             methods::SET_PLUGIN_PRERELEASES => {
@@ -611,13 +627,14 @@ impl Plugins {
                 if entry.store.is_none() {
                     return Err(failed("Only a plugin installed from the store has pre-releases to take"));
                 }
-                self.update_state(|state| {
+                self.choose_updates(|state| {
                     if p.on {
                         state.prerelease.insert(p.id.clone());
                     } else {
                         state.prerelease.remove(&p.id);
                     }
-                })?;
+                })
+                .await?;
                 self.rescan().await;
                 self.item(&p.id)
             }
@@ -661,6 +678,43 @@ impl Plugins {
                 }
                 lock(&self.inner.reviews).redeem(reviews::Kind::Publish, &reviews::Origin::Local, &p.id, &p.hash, p.ticket.as_deref())?;
                 RpcReply::value(&self.publish(&p.id, &p.hash).await)
+            }
+            methods::PREPARE_TEMPLATE_PUBLISH => {
+                let p: IdParams = parse_params(params)?;
+                let id = p.id.trim().to_owned();
+                let mut prepared = self.own_template(&id).await.map_err(failed)?;
+                // As a plugin's: newer than what the store has, as it said a
+                // moment ago, when it can be asked.
+                let versions = match self.store_as_person().await {
+                    Ok((client, caller)) => client.of(Kind::Template).my_plugins(&caller).await.ok().map(|mine| {
+                        mine["templates"].as_array().into_iter().flatten().find(|item| item["id"] == prepared.id()).map(|item| item["versions"].clone())
+                    }),
+                    Err(_) => None,
+                };
+                if let Some(Some(Value::Array(versions))) = &versions
+                    && let Some(problem) = publish::newer_problem(prepared.version(), versions)
+                {
+                    prepared.problems.push(problem);
+                }
+                let mut reply = prepared.shown();
+                reply["store_checked"] = json!(versions.is_some());
+                if versions.is_none() {
+                    reply["note"] = json!("Couldn't ask the store which versions it has: the store has the last word on whether this one is newer");
+                }
+                if prepared.ok() && zeron_rpc::caller().is_local() {
+                    let ticket = lock(&self.inner.reviews).mint(reviews::Kind::PublishTemplate, reviews::Origin::Local, &id, &prepared.hash)?;
+                    reply["ticket"] = json!(ticket);
+                }
+                RpcReply::value(&reply)
+            }
+            methods::PUBLISH_TEMPLATE => {
+                let p: PublishParams = parse_params(params)?;
+                if !zeron_rpc::caller().is_local() {
+                    return Err(reviews::needed("Publishing a template"));
+                }
+                let id = p.id.trim().to_owned();
+                lock(&self.inner.reviews).redeem(reviews::Kind::PublishTemplate, &reviews::Origin::Local, &id, &p.hash, p.ticket.as_deref())?;
+                RpcReply::value(&self.publish_template(&id, &p.hash).await)
             }
             methods::STORE_MY_PLUGINS => {
                 let kind = kind_of(&params)?;
@@ -864,6 +918,70 @@ impl Plugins {
             }
             Err((error, fields)) => refused(&error, &fields),
         }
+    }
+
+    /// Template `id`, one of your own here, read and checked for publishing:
+    /// not Zeron's, not one installed from a package, nor one (or a copy of
+    /// one) that was taken down.
+    async fn own_template(&self, id: &str) -> Result<publish::PreparedTemplate, String> {
+        let (dir, id) = (self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR), id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let folder = crate::plugins::templates::own_dir(&dir, &id)?;
+            template_blocks::refuse(&dir, &folder, "published")?;
+            let prepared = publish::read_template(&folder)?;
+            // (Here a template is its folder's id; published elsewhere, its
+            // manifest's: one that says both is no surprise.)
+            if prepared.id() != id {
+                return Err(failure(crate::plugins::listing::rule::BAD_PACKAGE, format!("Its zeron-template.json says its id is {:?}: make that {id:?}, its folder's name", plain(prepared.id(), 80))));
+            }
+            Ok(prepared)
+        })
+        .await
+        .map_err(|_| "Couldn't read it".to_string())?
+    }
+
+    /// Your template `id`, as checked (`hash`), signed with this device's key
+    /// in the templates' domain and sent with your session: the store's
+    /// answer.
+    async fn publish_template(&self, id: &str, hash: &str) -> Value {
+        let (client, caller) = match self.store_as_person().await {
+            Ok(store) => store,
+            Err(error) => return not_template(&error),
+        };
+        let client = client.of(Kind::Template);
+        self.register_key().await;
+        // (Read again: what's sent is what was checked.)
+        let prepared = match self.own_template(id).await {
+            Ok(prepared) => prepared,
+            Err(error) => return not_template(&error),
+        };
+        if prepared.hash != hash {
+            return not_template(&failure("changed", "It changed since it was checked: check it again"));
+        }
+        if !prepared.ok() {
+            let first = &prepared.problems[0];
+            let mut value = refused(&failure(first.rule, publish::lines(&prepared.problems).join("; ")), &json!({ "field": first.field, "cause": first.cause, "word": first.word }));
+            says_kind(&mut value, Kind::Template);
+            return value;
+        }
+        let (item, data_dir) = (prepared.id().to_owned(), self.inner.data_dir.clone());
+        let packed = tokio::task::spawn_blocking(move || prepared.pack(Some(&signing::load_or_create_key(&data_dir)?))).await;
+        let raw = match packed {
+            Ok(Ok(raw)) => raw,
+            Ok(Err(error)) => return not_template(&error),
+            Err(_) => return not_template("Couldn't pack it"),
+        };
+        let mut reply = match client.publish(&item, raw, &caller).await {
+            Ok(mut reply) => {
+                reply["ok"] = json!(true);
+                *lock(&self.inner.publishes_checked) = None;
+                reply["url"] = json!(client.page_url(&item));
+                reply
+            }
+            Err((error, fields)) => refused(&error, &fields),
+        };
+        says_kind(&mut reply, Kind::Template);
+        reply
     }
 
     /// A deploy token for the account (contract a315eef5a), its scope fixed
@@ -1118,10 +1236,12 @@ impl Plugins {
     /// The newest verified version of `id` this Zeron can run, other than
     /// `asked` (whose asks are `asks`), for a sheet's "instead": its record
     /// says verified, it's listed, and its package (fetched and checked as
-    /// any install's) asks `added` and `removed` against `asked`. None when
+    /// any install's) asks `added` and `removed` against `asked`. A
+    /// pre-release only where this device takes them of it. None when
     /// there's none, or the store can't say.
     async fn verified_alternative(&self, client: &StoreClient, caller: &Caller, id: &str, asked: &str, asks: &[String], publisher: &client::Publisher) -> Option<install::Alternative> {
         let zeron = version::zeron();
+        let prereleases = lock(&self.inner.state).prerelease.contains(id);
         let mut cursor: Option<String> = None;
         for _ in 0..ALTERNATIVE_PAGES {
             let page = client.versions(id, cursor.as_deref(), Some(50), caller).await.ok()?;
@@ -1130,6 +1250,7 @@ impl Plugins {
                     && v["status"] == "listed"
                     && v["yanked"] != true
                     && v["version"].as_str().is_some_and(|x| !same_version(x, asked))
+                    && v["version"].as_str().is_some_and(|x| prereleases || Version::parse(x).is_ok_and(|x| !x.is_prerelease()))
                     && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
             });
             if let Some(found) = found {
@@ -1324,6 +1445,77 @@ impl Plugins {
         tokio::task::spawn_blocking(move || template_packages::update_from_store(&dir, &id, &now, alternative)).await.map_err(|_| failed("Couldn't reach the templates folder"))?.map_err(failed)
     }
 
+    /// `change` what updates this device takes. What was found for a plugin
+    /// or a template by another choice than its own now is forgotten: the
+    /// next check, or its update, looks by this one.
+    async fn choose_updates(&self, change: impl FnOnce(&mut State)) -> Result<(), RpcError> {
+        self.ensure_scanned().await;
+        // (In the one lock: two at once each see what the other chose.)
+        let mut before = State::default();
+        let saved = self.update_state(|state| {
+            before = state.clone();
+            change(state);
+        });
+        let plugins: Vec<String> = {
+            let now = lock(&self.inner.state).clone();
+            let entries = lock(&self.inner.entries);
+            entries.iter().filter(|e| e.store.is_some() && before.choice(&e.item.id) != now.choice(&e.item.id)).map(|e| e.item.id.clone()).collect()
+        };
+        let (this, dir) = (self.clone(), self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR));
+        let forgotten = !plugins.is_empty();
+        tokio::task::spawn_blocking(move || {
+            {
+                let _finding = install::finding();
+                for id in &plugins {
+                    install::forget_found(&this.inner.plugins_dir, id);
+                }
+            }
+            let _changing = template_packages::changing();
+            let now = lock(&this.inner.state).clone();
+            for (folder, store) in template_packages::from_store(&dir) {
+                if before.template_choice(&store.id) != now.template_choice(&store.id) {
+                    template_packages::forget_found(&dir, &folder);
+                }
+            }
+        })
+        .await
+        .map_err(|_| failed("Couldn't reach the templates folder"))?;
+        if forgotten {
+            self.rescan().await;
+        }
+        saved
+    }
+
+    /// Whether this device still takes what a check of `c` looked by.
+    fn chosen_still(&self, c: &Candidate) -> Result<(), String> {
+        match lock(&self.inner.state).choice(&c.id) == (c.prefer, c.prerelease) {
+            true => Ok(()),
+            false => Err(CHOSEN_ANEW.into()),
+        }
+    }
+
+    /// Keep what a check by `choice` found for store template `t` (none:
+    /// nothing), unless another was made since.
+    async fn keep_template_found(&self, t: &template_packages::Installed, choice: (UpdatePreference, bool), found: Option<Found>, package: Option<template_packages::Package>) -> Result<(), String> {
+        let (this, dir) = (self.clone(), self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR));
+        let (id, store_id) = (t.id.clone(), t.store.id.clone());
+        tokio::task::spawn_blocking(move || {
+            let _changing = template_packages::changing();
+            if lock(&this.inner.state).template_choice(&store_id) != choice {
+                return Err(CHOSEN_ANEW.into());
+            }
+            match found {
+                Some(found) => template_packages::keep_found(&dir, &id, &found, package.as_ref()),
+                None => {
+                    template_packages::forget_found(&dir, &id);
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Couldn't keep the update".to_string())?
+    }
+
     /// The update check of the store's templates here (`only`: the one in
     /// that folder): each one's update by this device's choice, its package
     /// kept, never installed: `(updates, errors)`, as a plugin's check says
@@ -1374,7 +1566,8 @@ impl Plugins {
         for t in &here {
             let Some((_, offer)) = answered.iter().find(|(asked, _)| asked.id == t.store.id && asked.version == t.version && asked.hash == t.store.hash) else { continue };
             let offer = offer.as_ref().filter(|o| install::newer_by_precedence(&o.version, &t.version));
-            let (staged, beside) = match (offer, state.template_updates(&t.store.id)) {
+            let choice = state.template_choice(&t.store.id);
+            let (staged, beside) = match (offer, choice.0) {
                 (None, _) => (None, None),
                 (Some(offer), UpdatePreference::Newest) => (Some(offer), offer.verified_update.as_deref()),
                 (Some(offer), UpdatePreference::Verified) if offer.verified => (Some(offer), None),
@@ -1390,19 +1583,9 @@ impl Plugins {
                     held: true,
                     ..Found::default()
                 });
-                let kept = {
-                    let (dir, id, held) = (dir.clone(), t.id.clone(), held.clone());
-                    tokio::task::spawn_blocking(move || match held {
-                        Some(held) => template_packages::keep_found(&dir, &id, &held, None),
-                        None => {
-                            template_packages::forget_found(&dir, &id);
-                            Ok(())
-                        }
-                    })
-                    .await
-                };
-                if let Ok(Err(error)) = kept {
+                if let Err(error) = self.keep_template_found(t, choice, held.clone(), None).await {
                     errors.push(said(t, &error));
+                    continue;
                 }
                 if let Some(held) = held {
                     let mut shown = held.shown();
@@ -1412,7 +1595,7 @@ impl Plugins {
                 }
                 continue;
             };
-            match self.found_template(&client, &caller, t, staged, beside).await {
+            match self.found_template(&client, &caller, t, choice, staged, beside).await {
                 Ok(mut shown) => {
                     shown["id"] = json!(t.id);
                     shown["name"] = json!(t.name);
@@ -1427,7 +1610,7 @@ impl Plugins {
     /// `offer` as the update found for store template `t`: its package
     /// fetched by its own record (or the one kept, when it's that), checked
     /// and kept.
-    async fn found_template(&self, client: &StoreClient, caller: &Caller, t: &template_packages::Installed, offer: &Offer, beside: Option<&Offer>) -> Result<Value, String> {
+    async fn found_template(&self, client: &StoreClient, caller: &Caller, t: &template_packages::Installed, choice: (UpdatePreference, bool), offer: &Offer, beside: Option<&Offer>) -> Result<Value, String> {
         let dir = self.inner.data_dir.join(crate::plugins::TEMPLATES_DIR);
         let kept = {
             let (dir, id, hash) = (dir.clone(), t.id.clone(), t.hash.clone());
@@ -1478,13 +1661,8 @@ impl Plugins {
             ..Found::default()
         };
         let shown = found.shown();
-        let id = t.id.clone();
-        tokio::task::spawn_blocking(move || {
-            let keep = found.refused.is_none().then_some(&package);
-            template_packages::keep_found(&dir, &id, &found, keep)
-        })
-        .await
-        .map_err(|_| "Couldn't keep the update".to_string())??;
+        let keep = found.refused.is_none().then_some(package);
+        self.keep_template_found(t, choice, Some(found), keep).await?;
         Ok(shown)
     }
 
@@ -1748,7 +1926,7 @@ impl Plugins {
     /// Look over the account's publishes (`/me/plugins`) for any this
     /// device didn't make, and keep a notice of each for the app, with a
     /// desktop banner: once per version. Signed out, nothing. An account
-    /// with no plugins is asked again only every few hours.
+    /// with nothing there is asked again only every few hours.
     pub async fn check_publishes(&self) {
         let Ok((client, caller)) = self.store_as_person().await else { return };
         let idle_for = publishes_idle(super::super::lifecycle::local_every());
@@ -1756,35 +1934,50 @@ impl Plugins {
         if idle {
             return;
         }
-        let mine = match client.my_plugins(&caller).await {
-            Ok(mine) => mine,
-            Err(error) => {
-                tracing::debug!(%error, "store: the account's publishes couldn't be read");
-                return;
-            }
-        };
-        let had = mine["plugins"].as_array().is_some_and(|plugins| !plugins.is_empty());
-        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
-        let account = own_publisher_id(&mine).unwrap_or_default();
+        // Each kind on its own: one that can't be read holds up no other.
+        let (plugins, templates) = (client.my_plugins(&caller).await, client.of(Kind::Template).my_plugins(&caller).await);
         let own_key = signing::load_key(&self.inner.data_dir).map(|key| key.public()).unwrap_or_default();
-        let before = lock(&self.inner.state).publishes.clone().filter(|seen| seen.account == account);
-        let (mut seen, new) = notices::look(before.as_ref(), &mine, &own_key, |text| plain(text, 120));
-        seen.account = account;
-        if before.as_ref() == Some(&seen) && new.is_empty() {
-            return;
+        let (mut had, mut banners) = (false, Vec::new());
+        for (kind, answer) in [(Kind::Plugin, plugins), (Kind::Template, templates)] {
+            let mine = match answer {
+                Ok(mine) => mine,
+                // (A store without templates has none of yours.)
+                Err(error) if kind == Kind::Template && install::reason_of(&error) == Some(client::reason::NOT_IN_STORE) => continue,
+                Err(error) => {
+                    tracing::debug!(%error, kind = kind.segment(), "store: the account's publishes couldn't be read");
+                    had = true;
+                    continue;
+                }
+            };
+            had |= mine[kind.segment()].as_array().is_some_and(|items| !items.is_empty());
+            let account = own_publisher_id(&mine).unwrap_or_default();
+            let before = match kind {
+                Kind::Plugin => lock(&self.inner.state).publishes.clone(),
+                Kind::Template => lock(&self.inner.state).template_publishes.clone(),
+            }
+            .filter(|seen| seen.account == account);
+            let (mut seen, new) = notices::look(kind, before.as_ref(), &mine, &own_key, |text| plain(text, 120));
+            seen.account = account;
+            if before.as_ref() == Some(&seen) && new.is_empty() {
+                continue;
+            }
+            banners.extend(new.iter().map(|n| (if n.template { "Template published" } else { "Plugin published" }, n.words())));
+            let _ = self.update_state(|state| {
+                match kind {
+                    Kind::Plugin => state.publishes = Some(seen),
+                    Kind::Template => state.template_publishes = Some(seen),
+                }
+                notices::add(&mut state.publish_notices, new);
+            });
         }
-        let banners: Vec<String> = new.iter().map(notices::PublishNotice::words).collect();
-        let _ = self.update_state(|state| {
-            state.publishes = Some(seen);
-            notices::add(&mut state.publish_notices, new);
-        });
+        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
         if banners.is_empty() {
             return;
         }
         self.publish_list();
         if let Some(notify) = lock(&self.inner.notifier).clone() {
-            for words in banners {
-                notify("zeron", "Plugin published", &words, None);
+            for (title, words) in banners {
+                notify("zeron", title, &words, None);
             }
         }
     }
@@ -2020,6 +2213,10 @@ impl Plugins {
             let Some(staged) = staged else {
                 // Only unverified updates, and this device stages verified
                 // ones: said, not kept.
+                if let Err(error) = self.chosen_still(c) {
+                    errors.push(said(c, &error));
+                    continue;
+                }
                 install::forget_found(&plugins_dir, &c.id);
                 updates.push(json!({
                     "id": c.id, "name": c.name, "version": offer.version, "verified": false, "held": true,
@@ -2145,6 +2342,8 @@ impl Plugins {
             held: false,
         };
         let keep = found.refused.is_none().then_some(&package);
+        let _finding = install::finding();
+        self.chosen_still(c)?;
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;
         Ok(found)
     }
@@ -2279,11 +2478,9 @@ async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result
 /// than `asked`: as its pages say, and its own record too. None when there's
 /// none, the store can't say, or it can't go over what's here (`place`): it's
 /// what's installed, or older than a verified one. (Never one older than it.)
-/// A pre-release only where this device takes them of it (`prereleases`), or
-/// `asked` is one.
+/// A pre-release only where this device takes them of it (`prereleases`).
 async fn verified_template(client: &StoreClient, caller: &Caller, id: &str, asked: &str, publisher: &client::Publisher, place: Option<&template_packages::Place>, prereleases: bool) -> Option<install::Alternative> {
     super::vouched(publisher).ok()?;
-    let prereleases = prereleases || Version::parse(asked).is_ok_and(|v| v.is_prerelease());
     let zeron = version::zeron();
     let mut cursor: Option<String> = None;
     for _ in 0..ALTERNATIVE_PAGES {

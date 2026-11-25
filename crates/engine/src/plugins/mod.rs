@@ -1723,6 +1723,7 @@ impl Plugins {
             reviews::Kind::Plugin => "Allowing a plugin",
             reviews::Kind::Template => "Allowing a template",
             reviews::Kind::Publish => "Publishing a plugin",
+            reviews::Kind::PublishTemplate => "Publishing a template",
         };
         let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
         if kind == reviews::Kind::Template && origin != reviews::Origin::Local {

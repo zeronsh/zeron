@@ -46,6 +46,9 @@ pub enum Kind {
     /// `PreparePluginPublish` checked it, sent to the store. Minted for this
     /// device's app or CLI alone.
     Publish,
+    /// `PublishTemplate {id, hash}`: as [`Kind::Publish`], of one of your
+    /// templates.
+    PublishTemplate,
 }
 
 /// Who a review was minted for, and so the only one who may use it.
@@ -148,6 +151,7 @@ impl Reviews {
             Kind::Plugin => "Allowing a plugin",
             Kind::Template => "Allowing a template",
             Kind::Publish => "Publishing a plugin",
+            Kind::PublishTemplate => "Publishing a template",
         };
         let Some(token) = token.filter(|t| !t.is_empty()) else {
             return Err(needed(what));

@@ -187,6 +187,18 @@ pub fn read_template(dir: &Path) -> Result<PreparedTemplate, String> {
     let hashes = package::hashes(&files);
     let hash = signing::content_hash_of(&manifest, &hashes);
     let (mut problems, mut warnings) = listing::check_template(&manifest, &files);
+    // What's there and isn't sent, each said.
+    let left = template_packages::left_out(dir, &files);
+    let warning = |field: &'static str, path: Option<String>, word: Option<String>, words: String| Problem { rule: listing::rule::LEFT_OUT, field: Some(field), path, line: None, cause: None, word, words };
+    warnings.extend(left.files.into_iter().map(|(rel, why)| warning("files", Some(rel.clone()), None, format!("\"{rel}\" isn't sent: {why}"))));
+    if left.zeron_s > 0 {
+        let n = left.zeron_s;
+        warnings.push(warning("files", None, None, format!("{n} of Zeron's own files {} sent (no template can replace them).", if n == 1 { "isn't" } else { "aren't" })));
+    }
+    warnings.extend(left.members.into_iter().map(|member| {
+        let word = listing::problem_word(&member);
+        warning("manifest", None, Some(word.clone()), format!("\"{word}\" in its zeron-template.json isn't sent: a template's manifest in the store doesn't say it"))
+    }));
     if let Some(measure) = SigningKey::from_seed(&[0; 32]) {
         problems.extend(sizes(&measure.sign_manifest_for(signing::TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes), template_packages::FORMAT, &files));
     }
@@ -213,6 +225,25 @@ impl PreparedTemplate {
     /// Whether nothing stands in the way of publishing it.
     pub fn ok(&self) -> bool {
         self.problems.is_empty()
+    }
+
+    /// What the person (or an agent) is shown of it.
+    pub fn shown(&self) -> Value {
+        let bytes: u64 = self.files.values().map(|b| b.len() as u64).sum();
+        json!({
+            "kind": "template",
+            "id": self.id(),
+            "name": self.manifest["name"],
+            "version": self.version(),
+            "description": self.manifest["description"],
+            "hash": self.hash,
+            "ok": self.ok(),
+            "problems": self.problems,
+            "warnings": self.warnings,
+            "listing": Listing::of_template(&self.manifest),
+            "notes": self.notes,
+            "package": { "files": self.files.len(), "bytes": bytes },
+        })
     }
 
     /// It packed, signed by `key` in the templates' domain or (none) unsigned

@@ -273,27 +273,52 @@ pub(super) fn listing_files(template: &Path) -> Vec<String> {
     files
 }
 
-/// Whether something in `template` (its own dot files aside) isn't one of its
-/// files as [`app_files`] lists them: a name Zeron doesn't write, or what
-/// isn't a file. (The app may make a file of one all the same.)
-pub(super) fn has_others(template: &Path) -> bool {
-    fn walk(root: &Path, at: &Path, prefix: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(at) else { return true };
-        entries.flatten().any(|entry| {
-            let Ok(name) = entry.file_name().into_string() else { return true };
-            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-            if name.starts_with('.') && rel != LUAURC {
-                return false;
+/// The folder of `id`, one of your own templates: not Zeron's, nor one
+/// installed from a package.
+pub(super) fn own_dir(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let folder = template_dir(dir, id).filter(|_| id != ZERON).ok_or_else(|| format!("There's no template {id} of yours. list_templates names them."))?;
+    let manifest: Manifest = read_json(&folder.join(MANIFEST));
+    if official(id, &folder, &manifest) || super::template_packages::has_record(&folder) {
+        return Err("Only a template you're making on this device can be published from here (a folder anywhere publishes with `zeron template publish <folder>` and a deploy token)".into());
+    }
+    Ok(folder)
+}
+
+/// What in `template` (its own dot files aside) isn't one of its files as
+/// [`app_files`] lists them: a name Zeron doesn't write, or what isn't a file.
+/// (The app may make a file of one all the same.) At most `most`, as text.
+pub(super) fn others(template: &Path, most: usize) -> Vec<String> {
+    fn walk(root: &Path, at: &Path, prefix: &str, most: usize, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            out.push(prefix.to_owned());
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= most {
+                return;
+            }
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            let rel = if prefix.is_empty() { text.to_string() } else { format!("{prefix}/{text}") };
+            if name.to_str().is_some_and(|name| name.starts_with('.')) && rel != LUAURC {
+                continue;
             }
             match entry.file_type() {
-                _ if inside(root, &rel).is_none() => true,
-                Ok(kind) if kind.is_dir() => walk(root, &entry.path(), &rel),
-                Ok(kind) => !kind.is_file(),
-                Err(_) => true,
+                _ if name.to_str().is_none() || inside(root, &rel).is_none() => out.push(rel),
+                Ok(kind) if kind.is_dir() => walk(root, &entry.path(), &rel, most, out),
+                Ok(kind) if kind.is_file() => {}
+                _ => out.push(rel),
             }
-        })
+        }
     }
-    walk(template, template, "")
+    let mut out = Vec::new();
+    walk(template, template, "", most, &mut out);
+    out
+}
+
+/// Whether there are any of [`others`].
+pub(super) fn has_others(template: &Path) -> bool {
+    !others(template, 1).is_empty()
 }
 
 /// The active template's id, as `.active` says: `zeron` when it's absent,

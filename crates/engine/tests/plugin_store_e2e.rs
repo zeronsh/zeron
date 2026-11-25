@@ -1066,7 +1066,7 @@ impl Env {
 }
 
 /// `version` of the template, fetched from the store and waiting on `device`
-/// as an install from it leaves it (until the device installs one itself).
+/// though it's installed there already (an install from it wouldn't).
 async fn template_waits(e: &Env, device: &Device, version: &str) -> Result<(String, String), String> {
     let client = StoreClient::new(&e.edge).of(Kind::Template);
     let (_, record) = client.version(TEMPLATE, version, &Caller::Anonymous).await?;
@@ -1108,12 +1108,18 @@ async fn the_template_store_end_to_end() {
     e.claim_username(&desk, "tess-e2e").await;
     let folder = e.work.join("templates").join(TEMPLATE);
     template_folder(&folder, TEMPLATE, "1.0.0");
+    let own = desk.data.join("templates").join(TEMPLATE);
+    template_folder(&own, TEMPLATE, "1.0.0");
     let (manifest, files) = template_packages::contents(&folder, TEMPLATE).unwrap();
     let key = signing::load_key(&desk.data).expect("the desk's signing key");
     let signed = template_packages::pack(&manifest, &files, Some(&key)).unwrap();
     let versions = format!("/store/v1/templates/{TEMPLATE}/versions");
-    let (status, answer) = e.post_as(&desk, &versions, signed.clone()).await;
-    e.must("21", "the author publishes a template signed by the device's key: listed at once, not verified", status == 201 && answer["status"] == "listed" && answer["verified"] == false, format!("{status} {answer}"));
+    let prepared = desk.call(methods::PREPARE_TEMPLATE_PUBLISH, json!({ "id": TEMPLATE })).await.unwrap_or_else(|e| json!(e));
+    e.must("21", "the author's own template is checked, and the store asked", prepared["ok"] == true && prepared["kind"] == "template" && prepared["store_checked"] == true && prepared["warnings"] == json!([]) && prepared["ticket"].is_string(), &prepared);
+    let answer = desk.call(methods::PUBLISH_TEMPLATE, json!({ "id": TEMPLATE, "hash": prepared["hash"], "ticket": prepared["ticket"] })).await.unwrap_or_else(|e| json!(e));
+    e.must("21", "and published from Zeron, signed by the device's key: listed at once, not verified", answer["ok"] == true && answer["kind"] == "template" && answer["status"] == "listed" && answer["verified"] == false && answer["url"].as_str().is_some_and(|u| u.ends_with(&format!("/templates/{TEMPLATE}"))), &answer);
+    let again = desk.call(methods::PREPARE_TEMPLATE_PUBLISH, json!({ "id": TEMPLATE })).await.unwrap_or_else(|e| json!(e));
+    e.check("21", "checked again, its version is the store's already", again["ok"] == false && again["problems"][0]["rule"] == "version_exists", &again);
     let (status, answer) = e.post_as(&desk, &versions, signed.clone()).await;
     e.check("21", "the same package again is answered as it was", status == 201 && answer["version"] == "1.0.0", format!("{status} {answer}"));
     let mut other = files.clone();
@@ -1181,7 +1187,9 @@ async fn the_template_store_end_to_end() {
     std::fs::create_dir_all(templates.join(".zeron")).unwrap();
     std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.20"}"#).unwrap();
     std::fs::write(templates.join(".zeron/app.luau"), "return 1").unwrap();
-    let (name, hash) = template_waits(&e, &phone, "1.1.0").await.unwrap();
+    let staged = phone.call(methods::IMPORT_TEMPLATE, json!({ "store": TEMPLATE })).await.unwrap_or_else(|e| json!(e));
+    e.must("24", "the newest from the store is fetched, and needs allowing", staged["needs_consent"] == true && staged["version"] == "1.1.0", &staged);
+    let (name, hash) = (staged["pending"].as_str().unwrap_or_default().to_owned(), staged["hash"].as_str().unwrap_or_default().to_owned());
     let waiting = template_waiting(&phone).await;
     let drawn = &waiting["store"];
     e.must("24", "it waits, by its author, not verified, with no key", drawn["publisher"] == "tess-e2e" && drawn["verified"] == false && waiting["key"].is_null() && waiting["digest"].as_str().is_some_and(|d| d.len() == 64), &waiting);
@@ -1220,6 +1228,13 @@ async fn the_template_store_end_to_end() {
     e.check("25", "asked as a plugin, it's one the store hasn't got", status == 200 && answer["updates"] == json!([]) && answer["template_updates"] == json!([]) && answer["blocked"] == json!([]), format!("{status} {answer}"));
     let (status, answer) = e.post_as(&phone, "/store/v1/updates", ask(json!([]), json!([{ "id": TEMPLATE, "version": "x".repeat(33), "hash": "h" }]))).await;
     e.check("25", "an item that isn't one is unknown, the request answered", status == 200, format!("{status} {answer}"));
+
+    let checked = phone.call(methods::CHECK_TEMPLATE_UPDATES, json!({ "id": TEMPLATE })).await.unwrap_or_else(|e| json!(e));
+    e.check("25", "its own check finds it, not verified, with none to have instead", checked["errors"] == json!([]) && checked["updates"][0]["version"] == "1.2.0" && checked["updates"][0]["verified"] == false && checked["updates"][0].get("verified_alternative").is_none(), &checked);
+    let waits = phone.call(methods::UPDATE_TEMPLATE, json!({ "id": TEMPLATE })).await.unwrap_or_else(|e| json!(e));
+    e.check("25", "taken, it waits for the person, over the one that's here", waits["version"] == "1.2.0" && waits["update_of"] == TEMPLATE && template_row(&phone, TEMPLATE).await["imported"]["version"] == "1.1.0", &waits);
+    let declined = phone.call(methods::DECIDE_TEMPLATE, json!({ "pending": waits["pending"], "allow": false, "hash": waits["hash"] })).await;
+    e.check("25", "and is declined", declined.is_ok() && template_waiting(&phone).await.is_null(), format!("{declined:?}"));
 
     // ── 26: taken down, it and its copy are blocked by the feed ──
     let again = template_waits(&e, &phone, "1.1.0").await.unwrap();

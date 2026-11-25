@@ -52,6 +52,9 @@ pub struct State {
     /// (`store::notices`): none until it first looks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishes: Option<super::store::notices::Seen>,
+    /// The same of its templates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_publishes: Option<super::store::notices::Seen>,
     /// Publishes not made on this device that the app hasn't shown yet,
     /// oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -106,6 +109,17 @@ impl State {
     /// The update preference for store template `id` here.
     pub fn template_updates(&self, id: &str) -> UpdatePreference {
         self.template_updates_for.get(id).copied().unwrap_or(self.device_updates())
+    }
+
+    /// What updates of store plugin `id` this device takes: which, and
+    /// whether pre-releases.
+    pub fn choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.updates_for(id), self.prerelease.contains(id))
+    }
+
+    /// [`Self::choice`], of store template `id`.
+    pub fn template_choice(&self, id: &str) -> (UpdatePreference, bool) {
+        (self.template_updates(id), self.template_prerelease.contains(id))
     }
 }
 

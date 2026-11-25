@@ -167,7 +167,7 @@ impl Package {
 /// Held while a package is put where a template is, from reading what's
 /// there: one allowed as another's updated never lands over what it wasn't
 /// allowed over. (File work alone: nothing waits on the network under it.)
-fn changing() -> std::sync::MutexGuard<'static, ()> {
+pub(in crate::plugins) fn changing() -> std::sync::MutexGuard<'static, ()> {
     static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -255,6 +255,44 @@ pub fn contents(folder: &Path, id: &str) -> Result<(Value, BTreeMap<String, Vec<
         }
     }
     Ok((manifest, files))
+}
+
+/// What a template's folder has and its package doesn't carry.
+pub struct LeftOut {
+    /// Each file, and why.
+    pub files: Vec<(String, &'static str)>,
+    /// How many of Zeron's own files there are as the template was made with
+    /// them, which no template replaces (and no one it's sent to lacks).
+    pub zeron_s: usize,
+    /// Each member of its manifest that isn't its signature or its author.
+    pub members: Vec<String>,
+}
+
+/// What template folder `folder` has that its package (`files`) doesn't.
+pub fn left_out(folder: &Path, files: &BTreeMap<String, Vec<u8>>) -> LeftOut {
+    const MOST: usize = 200;
+    let base: BTreeMap<String, String> = templates::read_regular(&folder.join(templates::BASE)).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let as_made = |rel: &String| protected(rel) && base.get(rel).is_some_and(|hash| templates::read_regular(&folder.join(rel)).is_some_and(|b| signing::sha256_hex(&b) == *hash));
+    let (zeron_s, theirs): (Vec<String>, Vec<String>) = templates::app_files(folder, &[MANIFEST, templates::BASE]).into_iter().filter(|rel| !files.contains_key(rel)).partition(as_made);
+    let mut left: Vec<(String, &'static str)> = theirs
+        .into_iter()
+        .map(|rel| {
+            let why = if protected(&rel) {
+                "it's one of Zeron's own files no template replaces"
+            } else if rel == listing::README {
+                "it's the README Zeron wrote: write your own"
+            } else {
+                "its name could be another file's on some disk"
+            };
+            (listing::shown(&rel, MAX_SHOWN_PATH), why)
+        })
+        .collect();
+    left.extend(templates::others(folder, MOST).into_iter().map(|rel| (listing::shown(&rel, MAX_SHOWN_PATH), "its name, or what it is, isn't one Zeron writes")));
+    left.truncate(MOST);
+    let own: Value = templates::read_regular(&folder.join(MANIFEST)).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let carried = [listing::TEMPLATE_REQUIRED, listing::TEMPLATE_OPTIONAL, &["author", "signature"]];
+    let members = own.as_object().into_iter().flatten().map(|(key, _)| key.clone()).filter(|key| !carried.iter().any(|list| list.contains(&key.as_str()))).take(MOST).collect();
+    LeftOut { files: left, zeron_s: zeron_s.len(), members }
 }
 
 /// `manifest` and `files` as a package's bytes: signed by `key` in the
@@ -966,7 +1004,7 @@ fn stage_held(dir: &Path, package: &Package, mut source: Source, at: Option<&str
     });
     let name = match waiting_already.as_ref().and_then(|item| item["pending"].as_str()) {
         Some(name) => {
-            keep_record(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
+            keep_record_held(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
             name.to_owned()
         }
         None => stage_as(dir, package, install::STORE, &source, update_of.as_deref(), older)?,
@@ -1026,6 +1064,12 @@ pub fn drop_unusable(dir: &Path) {
 /// The waiting store package `pending`'s record as the store has it now
 /// (`now`): its mark and its publisher, for the list to say.
 pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Result<(), String> {
+    let _changing = changing();
+    keep_record_held(dir, pending, now)
+}
+
+/// [`keep_record`], under [`changing`].
+fn keep_record_held(dir: &Path, pending: &str, now: &install::StoreSource) -> Result<(), String> {
     let (about_path, _) = pending_paths(dir, pending)?;
     let mut about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).ok_or("What waits can't be read")?;
     let mut source = came_from(&about["origin"]).ok_or("What waits can't be read")?;

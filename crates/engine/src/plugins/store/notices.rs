@@ -1,15 +1,18 @@
 //! Publishes this device didn't make (amendment 45). A version is public as
-//! soon as it's published, so every publish of the account's plugins that
-//! wasn't sent from here raises a notice on the account's devices: which
-//! version, and whether another device or which deploy token sent it. A
-//! device reads them from the owner's view of its versions (`/me/plugins`:
-//! `via`, `key`, `deploy_token`), keeps each until the app has shown it, and
-//! raises one once per version.
+//! soon as it's published, so every publish of the account's plugins and
+//! templates that wasn't sent from here raises a notice on the account's
+//! devices: which version, and whether another device or which deploy token
+//! sent it. A device reads them from the owner's view of its versions
+//! (`/me/plugins` and `/me/templates`, each looked over on its own: `via`,
+//! `key`, `deploy_token`), keeps each until the app has shown it, and raises
+//! one once per version.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use super::client::Kind;
 
 /// How far back, by the store's clock, a device remembers which publishes
 /// it has looked over (older ones are behind [`Seen::before`]).
@@ -37,7 +40,11 @@ pub struct Seen {
 pub struct PublishNotice {
     /// `id@version`: what the app acknowledges it by.
     pub id: String,
+    /// Its id, a plugin's or a template's (one namespace).
     pub plugin: String,
+    /// It's a template's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub template: bool,
     pub version: String,
     /// The plugin's name in the store, when it gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +73,7 @@ impl PublishNotice {
     pub fn shown(&self) -> Value {
         json!({
             "id": self.id,
+            "kind": if self.template { "template" } else { "plugin" },
             "plugin": self.plugin,
             "version": self.version,
             "name": self.name,
@@ -77,19 +85,19 @@ impl PublishNotice {
     }
 }
 
-/// Look over `mine` (`/me/plugins`' answer) after `seen`: what's been
-/// looked over now, and a notice for each publish after `seen` that this
-/// device (`own_key`, its signing key) didn't send. The first look notices
+/// Look over `mine` (`/me/plugins`' answer, or `/me/templates`' for that
+/// `kind`) after `seen`: what's been looked over now, and a notice for each
+/// publish after `seen` that this device (`own_key`, its signing key) didn't send. The first look notices
 /// nothing: what was there before a device looked isn't news to it. A
 /// version another account published (a plugin transferred in, by its
 /// former owner: its `publisher_id` isn't the account's) isn't noticed.
 /// `clean` makes the store's words safe to keep and show.
-pub fn look(seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&str) -> String) -> (Seen, Vec<PublishNotice>) {
+pub fn look(kind: Kind, seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&str) -> String) -> (Seen, Vec<PublishNotice>) {
     let account = mine["publisher_id"].as_str();
-    let versions = mine["plugins"].as_array().into_iter().flatten().flat_map(|plugin| {
-        let id = plugin["id"].as_str().unwrap_or_default();
-        let name = plugin["name"].as_str();
-        plugin["versions"].as_array().into_iter().flatten().filter_map(move |v| {
+    let versions = mine[kind.segment()].as_array().into_iter().flatten().flat_map(|item| {
+        let id = item["id"].as_str().unwrap_or_default();
+        let name = item["name"].as_str();
+        item["versions"].as_array().into_iter().flatten().filter_map(move |v| {
             let (version, at) = (v["version"].as_str()?, v["published_at"].as_i64()?);
             (!id.is_empty()).then_some((id, name, version, at, v))
         })
@@ -119,6 +127,7 @@ pub fn look(seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&st
         notices.push(PublishNotice {
             id: key,
             plugin: id.to_owned(),
+            template: kind == Kind::Template,
             version: clean(version),
             name: name.map(&clean).filter(|n| !n.is_empty()),
             via: if via == "deploy_token" { "deploy_token" } else { "device" }.to_owned(),
@@ -169,7 +178,7 @@ mod tests {
 
     #[test]
     fn the_first_look_notices_nothing_and_later_publishes_not_from_here_are_noticed_once() {
-        let (seen, notices) = look(None, &mine(&[("focus", "1.0.0", 100, "device", "OTHER", None)]), "MINE", same);
+        let (seen, notices) = look(Kind::Plugin, None, &mine(&[("focus", "1.0.0", 100, "device", "OTHER", None)]), "MINE", same);
         assert!(notices.is_empty());
         assert_eq!(seen.before, 100);
 
@@ -179,7 +188,7 @@ mod tests {
             ("focus", "1.2.0", 300, "device", "OTHER", None),
             ("focus", "1.3.0", 400, "deploy_token", "", Some("ci")),
         ]);
-        let (seen, notices) = look(Some(&seen), &now, "MINE", same);
+        let (seen, notices) = look(Kind::Plugin, Some(&seen), &now, "MINE", same);
         assert_eq!(notices.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["focus@1.2.0", "focus@1.3.0"]);
         assert_eq!(notices[0].via, "device");
         assert!(notices[0].words().contains("another of your devices"), "{}", notices[0].words());
@@ -187,18 +196,32 @@ mod tests {
         assert!(notices[1].words().starts_with("Focus 1.3.0 was published with your deploy token \"ci\""), "{}", notices[1].words());
 
         // Once per version.
-        let (_, again) = look(Some(&seen), &now, "MINE", same);
+        let (seen, again) = look(Kind::Plugin, Some(&seen), &now, "MINE", same);
         assert!(again.is_empty());
+
+        // A template's the same, said to be one; of a kind, only that's looked at.
+        let with = json!({ "publisher_id": "pub_a", "templates": [{ "id": "midnight", "name": "Midnight", "versions": [
+            { "version": "1.0.0", "published_at": 500, "via": "device", "key": "MINE" },
+            { "version": "1.1.0", "published_at": 600, "via": "deploy_token", "key": null, "deploy_token": { "name": "ci" } },
+        ] }] });
+        assert!(look(Kind::Plugin, Some(&seen), &with, "MINE", same).1.is_empty());
+        let (seen, notices) = look(Kind::Template, Some(&Seen::default()), &with, "MINE", same);
+        assert_eq!(notices.iter().map(|n| (n.id.as_str(), n.template)).collect::<Vec<_>>(), [("midnight@1.1.0", true)]);
+        assert_eq!((notices[0].shown()["kind"].as_str(), notices[0].shown()["plugin"].as_str()), (Some("template"), Some("midnight")));
+        assert!(look(Kind::Template, Some(&seen), &with, "MINE", same).1.is_empty());
+        // One kept by an earlier Zeron, which only knew of plugins.
+        let old: PublishNotice = serde_json::from_value(json!({ "id": "focus@1.0.0", "plugin": "focus", "version": "1.0.0", "via": "device", "at": 1 })).unwrap();
+        assert_eq!(old.shown()["kind"], "plugin");
     }
 
     #[test]
     fn a_version_another_account_published_is_no_notice() {
-        let (seen, _) = look(None, &json!({ "publisher_id": "pub_a", "plugins": [] }), "MINE", same);
+        let (seen, _) = look(Kind::Plugin, None, &json!({ "publisher_id": "pub_a", "plugins": [] }), "MINE", same);
         let mut now = mine(&[("moved", "1.0.0", 100, "device", "OTHER", None), ("moved", "1.1.0", 200, "device", "OTHER", None)]);
         now["publisher_id"] = json!("pub_a");
         now["plugins"][0]["versions"][0]["publisher_id"] = json!("pub_former");
         now["plugins"][0]["versions"][1]["publisher_id"] = json!("pub_a");
-        let (_, notices) = look(Some(&seen), &now, "MINE", same);
+        let (_, notices) = look(Kind::Plugin, Some(&seen), &now, "MINE", same);
         assert_eq!(notices.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["moved@1.1.0"]);
     }
 
@@ -206,7 +229,7 @@ mod tests {
     fn a_device_remembers_thirty_days_of_the_store_s_clock() {
         let seen = Seen { versions: BTreeMap::from([("focus@1.0.0".to_owned(), 10)]), ..Seen::default() };
         let later = 10 + KEEP_MS + 5;
-        let (seen, notices) = look(Some(&seen), &mine(&[("focus", "1.0.0", 10, "device", "OTHER", None), ("focus", "2.0.0", later, "device", "OTHER", None)]), "MINE", same);
+        let (seen, notices) = look(Kind::Plugin, Some(&seen), &mine(&[("focus", "1.0.0", 10, "device", "OTHER", None), ("focus", "2.0.0", later, "device", "OTHER", None)]), "MINE", same);
         assert_eq!(notices.len(), 1);
         assert_eq!(seen.before, 15);
         assert_eq!(seen.versions.keys().collect::<Vec<_>>(), ["focus@2.0.0"]);
@@ -214,7 +237,7 @@ mod tests {
 
     #[test]
     fn waiting_notices_are_kept_unique_and_few() {
-        let notice = |n: i64| PublishNotice { id: format!("p@1.0.{n}"), plugin: "p".into(), version: format!("1.0.{n}"), name: None, via: "device".into(), token_name: None, at: n };
+        let notice = |n: i64| PublishNotice { id: format!("p@1.0.{n}"), plugin: "p".into(), template: false, version: format!("1.0.{n}"), name: None, via: "device".into(), token_name: None, at: n };
         let mut waiting = vec![notice(0)];
         add(&mut waiting, (0..25).map(notice).collect());
         assert_eq!(waiting.len(), MAX_WAITING);
