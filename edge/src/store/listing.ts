@@ -596,7 +596,7 @@ export const checkTemplate = (
   for (const rel of [...files.keys()].sort(byCodePoint)) {
     if (!insideTemplate(rel) || unseenName(rel)) problems.push(problem("bad_package", "files", `It has a file Zeron won't write: "${rel}"`, rel));
     else if (protectedPath(rel)) {
-      problems.push(problem("protected_file", "files", `"${rel}" is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc, any tokens but ds/tokens.luau): leave it out`, rel));
+      problems.push(problem("protected_file", "files", `"${rel}" is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc, any tokens but ds/tokens.luau, ds/themes/template-dark.json and template-light.json): leave it out`, rel));
     } else if (shortName(rel)) {
       problems.push(problem("protected_file", "files", `"${rel}" could be a Windows short name of one of Zeron's own files (a ~ with a digit after it): rename it`, rel));
     } else if (strayScreenshot(rel)) {
