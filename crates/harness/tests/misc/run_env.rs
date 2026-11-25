@@ -40,6 +40,7 @@ fn request(cwd: &Path) -> RunRequest {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

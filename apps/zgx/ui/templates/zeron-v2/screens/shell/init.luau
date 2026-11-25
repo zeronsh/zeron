@@ -493,7 +493,7 @@ return function(): Node
 				min_h = 0,
 				w_full = true,
 				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
+					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H, card = false }
 				end),
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
 					return Page { files = files, width = window_w }
@@ -544,9 +544,13 @@ return function(): Node
 					return ui.div {}
 				end
 				local function chat(): any
-					for _, c in sessions.now:get().chats do
-						if c.id == id then
-							return c
+					local now = sessions.now:get()
+					-- (An archived one's too, from its shelf.)
+					for _, list in { now.chats, now.archived or {} } do
+						for _, c in list do
+							if c.id == id then
+								return c
+							end
 						end
 					end
 					return nil

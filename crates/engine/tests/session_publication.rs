@@ -259,6 +259,7 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
                 access: Default::default(),
                 plan: false,
                 code_mode: false,
+                zeron_mcp_only: false,
                 attachments: vec![],
                 worktree: None,
                 resume: None,

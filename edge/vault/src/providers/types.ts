@@ -21,6 +21,8 @@ export interface RefreshContext {
   readonly now: number;
   readonly githubClientId?: string;
   readonly githubClientSecret?: string;
+  readonly antigravityClientId?: string;
+  readonly antigravityClientSecret?: string;
 }
 
 /**

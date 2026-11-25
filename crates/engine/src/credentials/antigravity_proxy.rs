@@ -39,10 +39,14 @@ use tokio_util::sync::CancellationToken;
 use super::{CredentialBroker, Grant, GrantOutcome, Inner};
 
 pub(super) const CCPA_BASE_URL_ENV: &str = "AGY_ACP_CCPA_BASE_URL";
-/// Far-future naive UTC expiry written to broker-managed `acp_token.json` when
-/// this proxy is active, so `agy_acp_server`'s in-memory `Credentials.valid`
+pub(super) const CLOUD_CODE_URL_ENV: &str = "CLOUD_CODE_URL";
+/// Far-future naive UTC expiry written to broker-managed legacy `acp_token.json`
+/// when this proxy is active, so `agy_acp_server`'s in-memory `Credentials.valid`
 /// never flips to `False` mid-turn while fresh vault tokens are injected here.
 pub(super) const PROXIED_TOKEN_EXPIRY: &str = "2099-01-01T00:00:00";
+/// Far-future RFC3339 UTC expiry written to broker-managed `antigravity-oauth-token`
+/// for the unified Antigravity CLI when this proxy is active.
+pub(super) const PROXIED_TOKEN_EXPIRY_RFC3339: &str = "2099-01-01T00:00:00Z";
 
 const PROD_CCPA_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const DAILY_CCPA_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";

@@ -1,5 +1,12 @@
 # Parity checklist
 
+> **Historical note:** This checklist audited the initial GPUI native rewrite at
+> M6. The GPUI desktop app (`crates/ui`) has since been retired; the shipping
+> desktop app is **zgx** (`apps/zgx`, Rust host + Luau UI), and native
+> iOS/Android mobile apps live in `apps/ios` and `apps/android`. See
+> [`ARCHITECTURE.md`](../ARCHITECTURE.md) and
+> [`apps/zgx/README.md`](../apps/zgx/README.md) for the current architecture.
+
 Status of the native rewrite against `docs/research/feature-inventory.md`
 (§1–§8), audited against the tree after M6. Legend: **done** (implemented and
 tested), **partial** (core in place, listed gaps), **deferred** (intentionally

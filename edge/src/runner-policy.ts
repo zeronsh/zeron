@@ -38,9 +38,19 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
   if (LEGACY_ROOTS.has(root)) return "runner tokens cannot use the legacy rooms";
   switch (root) {
     case "vault":
-      // Grants are the one vault call a runner makes (for its own device; the
-      // vault route re-checks the body's deviceId against the token).
+      // Provider grants, connection grants, and listing authorized connections
+      // are the vault calls a runner makes (for its own device; the vault route
+      // re-checks the body's deviceId against the token).
       if (method === "POST" && parts.length === 3 && (parts[2] === "grant" || parts[2] === "grants")) return undefined;
+      if (method === "GET" && parts.length === 3 && parts[2] === "connections") return undefined;
+      if (
+        method === "POST" &&
+        parts.length === 4 &&
+        parts[2] === "connections" &&
+        (parts[3] === "grant" || parts[3] === "grants")
+      ) {
+        return undefined;
+      }
       return "runner tokens may only request vault grants";
     case "device":
       if (parts[1] === auth.deviceId) return undefined;

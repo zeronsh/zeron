@@ -58,7 +58,7 @@ import type {
   GithubUnavailableView,
   VaultAccountProfile,
   VaultAccountView,
-  VaultConnectionView,
+  VaultProviderConnectionView,
   VaultMaterial,
   VaultProviderId,
   VaultResult,
@@ -475,7 +475,7 @@ export class VaultAccount extends DurableObject<Env> {
 
   /** The provider's connection, summarized from its active account (else
    * its most recent one); null when it holds none. */
-  view(userId: string, provider: VaultProviderId): VaultResult<VaultConnectionView | null> {
+  view(userId: string, provider: VaultProviderId): VaultResult<VaultProviderConnectionView | null> {
     const owner = this.claim(userId, provider);
     if (owner) return owner;
     const rows = this.rows();
@@ -1506,7 +1506,9 @@ export class VaultAccount extends DurableObject<Env> {
       fetch: this.fetchFn,
       now: Date.now(),
       githubClientId: this.env.GITHUB_APP_CLIENT_ID,
-      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET
+      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET,
+      antigravityClientId: this.env.ANTIGRAVITY_OAUTH_CLIENT_ID,
+      antigravityClientSecret: this.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
     });
     let generation = row.generation;
     const done = await this.ctx.blockConcurrencyWhile(async (): Promise<RefreshDone> => {

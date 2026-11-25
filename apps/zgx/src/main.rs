@@ -55,6 +55,7 @@ mod intro_handoff;
 mod links;
 mod pasted;
 mod math;
+mod mcp;
 mod menu_bar;
 mod mermaid;
 mod plugins;
@@ -116,6 +117,8 @@ mod gif_tests;
 mod picture_aspect_tests;
 #[cfg(test)]
 mod chip_copy_tests;
+#[cfg(test)]
+mod composer_atoms_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
@@ -829,6 +832,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if entry != "intro.luau" {
         auth::install(cx, &host);
         agents::install(&host);
+        mcp::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's

@@ -561,7 +561,7 @@ export const handleCloudRoute = async (
       if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
       if (auth.kind === "runner") {
         // A delegate: the project and repository are the parent's.
-        const { chatId, parentChatId, branch, config } = body;
+        const { chatId, parentChatId, branch, config, childKind } = body;
         if (parentChatId === undefined) {
           return jsonError(403, "forbidden", "A Cloud machine starts sessions only for the chat it hosts.");
         }
@@ -571,7 +571,10 @@ export const handleCloudRoute = async (
         if (config !== undefined && !isChildConfig(config)) {
           return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
         }
-        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
+        if (childKind !== undefined && !isChildKind(childKind)) {
+          return jsonError(400, "bad_request", "Expected childKind 'side' or 'subagent'.");
+        }
+        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config, childKind));
       }
       const { chatId, spaceId, repo, branch, reach } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
@@ -658,3 +661,7 @@ const isChildConfig = (config: unknown): config is Record<string, unknown> =>
   isObject(config) &&
   (config.harness === "codex" || config.harness === "claude-code") &&
   JSON.stringify(config).length <= 4096;
+
+/** A delegate's relation to its parent chat (`crates/proto`: `ChildKind`). */
+const isChildKind = (value: unknown): value is "side" | "subagent" =>
+  value === "side" || value === "subagent";

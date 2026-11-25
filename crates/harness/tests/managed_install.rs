@@ -49,6 +49,7 @@ async fn managed_install_reaches_session_started() {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

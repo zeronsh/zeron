@@ -780,15 +780,25 @@ return ui.component(function(props: Props): Node
 	end)
 	local foot: { Node } = {
 		ui.show(has_account_row, account_row()),
-		ui.each(owned, function(it: Owned): Node
-			return option_row(it.option)
-		end, {
-			key = function(it: Owned): string
-				return `{it.model.value}/{it.option.id}`
+		ui.show(
+			function(): boolean
+				return #owned:get() > 0
 			end,
-			w_full = true,
-			gap = "$zeron.list.gap",
-		}),
+			-- (The column is what keeps the rows the menu's width: a list
+			-- straight in a show is as wide as its own rows.)
+			ui.column {
+				w_full = true,
+				ui.each(owned, function(it: Owned): Node
+					return option_row(it.option)
+				end, {
+					key = function(it: Owned): string
+						return `{it.model.value}/{it.option.id}`
+					end,
+					w_full = true,
+					gap = "$zeron.list.gap",
+				}),
+			}
+		),
 		ui.show(
 			function(): boolean
 				return #levels() > 0
@@ -950,6 +960,7 @@ return ui.component(function(props: Props): Node
 		-- (The slider's groove in the panel's foot corners, its fill 2 inside.)
 		extra = ui.column {
 			w_full = true,
+			gap = "$zeron.list.gap",
 			theme = { radius = { md = corner, sm = control.nest(corner, "$zeron.space.hair") } },
 			table.unpack(foot),
 		},

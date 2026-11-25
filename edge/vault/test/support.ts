@@ -1,5 +1,4 @@
 /** Helpers shared by the Node unit tier and the workerd tier (WebCrypto only). */
-import type { VaultProviderId } from "../src/api";
 import { toBase64Url, utf8 } from "../src/encoding";
 
 /** Unsigned JWT-shaped token: the vault only ever reads claims, never verifies. */
@@ -11,8 +10,8 @@ export interface TestDevice {
   /** Raw Ed25519 public key, base64url. */
   readonly publicKey: string;
   sign(message: string): Promise<string>;
-  /** Signature over the vault grant statement. */
-  grantSig(userId: string, provider: VaultProviderId, ts: number): Promise<string>;
+  /** Signature over the vault grant statement (`provider`, `conn:{id}`, `conns:{ids}`, …). */
+  grantSig(userId: string, subject: string, ts: number): Promise<string>;
 }
 
 export const makeDevice = async (deviceId: string): Promise<TestDevice> => {
@@ -24,6 +23,6 @@ export const makeDevice = async (deviceId: string): Promise<TestDevice> => {
     deviceId,
     publicKey: toBase64Url(raw),
     sign,
-    grantSig: (userId, provider, ts) => sign(`zeron-vault-grant\n${userId}\n${deviceId}\n${provider}\n${ts}`)
+    grantSig: (userId, subject, ts) => sign(`zeron-vault-grant\n${userId}\n${deviceId}\n${subject}\n${ts}`)
   };
 };
