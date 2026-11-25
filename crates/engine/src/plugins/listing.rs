@@ -1166,7 +1166,7 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
                 PROTECTED_FILE,
                 Some("files"),
                 rel,
-                format!("{rel:?} is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc, any tokens but ds/tokens.luau, ds/themes/template-dark.json and template-light.json): leave it out"),
+                format!("{rel:?} is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc, ds/themes/template-dark.json and template-light.json, any tokens but ds/tokens.luau): leave it out"),
             ));
         } else if super::template_packages::short_name(rel) {
             problems.push(Problem::at(
