@@ -2832,12 +2832,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					-- (A row not of `f` among them ends a run of them, and more
 					-- may follow it: a session in a state, kept as its place
 					-- folds. Each run stands in as a row of its own: its own
-					-- key, its own height.)
+					-- key, its own height. The count leads the key: a fold's key
+					-- can end in a name of the person's, like `device:mac:2`,
+					-- but never starts with a digit.)
 					local spans = 0
 					local function stand_in()
 						spans += 1
 						local h = rest
-						table.insert(kept, { kind = "rest", key = if spans == 1 then `rest:{f.key}` else `rest:{f.key}:{spans}`, place = rest_place :: string, chain = rest_chain :: { Fold }, base = function(): number
+						table.insert(kept, { kind = "rest", key = if spans == 1 then `rest:{f.key}` else `rest:{spans}:{f.key}`, place = rest_place :: string, chain = rest_chain :: { Fold }, base = function(): number
 							return h
 						end })
 						inside, rest, rest_chain, rest_place = false, 0, nil, nil
