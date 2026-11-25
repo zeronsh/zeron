@@ -111,6 +111,10 @@ fn shown(item: &Json) -> Json {
     if item["version"].as_str().is_some_and(|v| !reads(v) || !v.starts_with(|c: char| c.is_ascii_digit())) {
         out["version"] = json!("");
     }
+    // (What a verified version taken instead replaces: a version, or none.)
+    if let Some(was) = item["from"]["replaced"]["version"].as_str() {
+        out["from"]["replaced"]["version"] = json!(Some(was).filter(|v| reads(v) && v.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(""));
+    }
     if let Some(files) = item["ignored"].as_array() {
         out["ignored_n"] = json!(files.len());
         out["ignored"] = files.iter().filter_map(Json::as_str).take(20).map(|f| super::consent::plain(f, 120)).collect::<Vec<_>>().into();

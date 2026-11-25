@@ -222,6 +222,16 @@ test("a version with words of its own is said in the facts, never beside the mar
 	expect(app:tree("#template-consent-facts")).to_contain("Version 1.0.0-verified")
 end)
 
+test("a verified version taken instead says what it replaces, older or not", function()
+	local app = open()
+	app:command("instead")
+	app:frames(20)
+	expect(app:tree("#template-consent-instead")).to_contain("This replaces 1.3.0 with 1.2.0, the newest verified version.")
+	app:command("store")
+	app:frames(20)
+	expect(app:has("#template-consent-instead")).to_be(false)
+end)
+
 test("a package's own words stand apart from what Zeron says of it", function()
 	local app = open()
 	expect(app:tree("#template-consent-own-words")).to_contain("In its own words")

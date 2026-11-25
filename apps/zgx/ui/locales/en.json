@@ -4546,7 +4546,8 @@
       "taken_down": "Zeron took this version down, so it can't be installed.",
       "not_in_store": "This version isn't in the template store anymore.",
       "own_words": "In its own words",
-      "version": "Version {version}"
+      "version": "Version {version}",
+      "instead": "This replaces {from} with {to}, the newest verified version."
     },
     "store": {
       "search": "Search templates",

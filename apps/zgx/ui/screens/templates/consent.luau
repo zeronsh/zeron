@@ -177,6 +177,11 @@ local function body(key: string): Node
 	local function change(id: string, words_of: Message)
 		table.insert(changes, ui.div { id = id, w_full = true, fact("danger-triangle", words_of, nil, "$zeron.tone.warning.ink") })
 	end
+	-- (The verified version taken instead, which may be older than what's here.)
+	local replaced: string? = if it.instead == true and type(it.from) == "table" and type(it.from.replaced) == "table" and type(it.from.replaced.version) == "string" and it.from.replaced.version ~= "" then it.from.replaced.version else nil
+	if replaced and not keep then
+		table.insert(changes, ui.div { id = "template-consent-instead", w_full = true, fact("info-circle", ui.t("templates.consent.instead", { from = replaced, to = it.version or "" }), nil, "$zeron.tone.info.ink") })
+	end
 	if store and store.verified ~= true and not keep and not alternative then
 		change("template-consent-unverified", ui.t("plugins.store.not_verified_yet", { version = it.version or "" }))
 	end
