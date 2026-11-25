@@ -178,9 +178,14 @@ local function body(key: string): Node
 		table.insert(changes, ui.div { id = id, w_full = true, fact("danger-triangle", words_of, nil, "$zeron.tone.warning.ink") })
 	end
 	-- (The verified version taken instead, which may be older than what's here.)
-	local replaced: string? = if it.instead == true and type(it.from) == "table" and type(it.from.replaced) == "table" and type(it.from.replaced.version) == "string" and it.from.replaced.version ~= "" then it.from.replaced.version else nil
+	local replaced: any = if it.instead == true and type(it.from) == "table" and type(it.from.replaced) == "table" then it.from.replaced else nil
 	if replaced and not keep then
-		table.insert(changes, ui.div { id = "template-consent-instead", w_full = true, fact("info-circle", ui.t("templates.consent.instead", { from = replaced, to = it.version or "" }), nil, "$zeron.tone.info.ink") })
+		local was = if type(replaced.version) == "string" then replaced.version else ""
+		local said = if was == ""
+			then ui.t("templates.consent.instead_unknown", { to = it.version or "" })
+			elseif replaced.older == true then ui.t("templates.consent.instead_older", { from = was, to = it.version or "" })
+			else ui.t("templates.consent.instead", { from = was, to = it.version or "" })
+		table.insert(changes, ui.div { id = "template-consent-instead", w_full = true, fact("info-circle", said, nil, "$zeron.tone.info.ink") })
 	end
 	if store and store.verified ~= true and not keep and not alternative then
 		change("template-consent-unverified", ui.t("plugins.store.not_verified_yet", { version = it.version or "" }))
