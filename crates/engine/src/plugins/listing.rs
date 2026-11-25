@@ -442,11 +442,13 @@ pub fn clashes<'a>(paths: impl IntoIterator<Item = &'a str>, taken: &[&'a str]) 
     found
 }
 
-/// A path as macOS and Windows compare it: Unicode NFC, then
-/// plugin-guard's `fold` (case, separators, trailing dots and spaces). Two
+/// A path as macOS and Windows compare it: without the selectors of emoji
+/// (no name is told apart by one), then Unicode NFC, then plugin-guard's
+/// `fold` (case, separators, trailing dots and spaces). Two
 /// paths that fold the same are one file there.
 pub fn fold_path(rel: &str) -> String {
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(rel);
+    let rel: String = rel.chars().filter(|c| !zeron_plugin_guard::path::selector(*c)).collect();
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&rel);
     zeron_plugin_guard::path::fold(&nfc)
 }
 
@@ -655,6 +657,15 @@ pub fn check(
     }
     check_changelog_size(files, &mut problems);
     check_manifest_size(&manifest.unsigned_value(), &mut problems);
+    // A name that could be another of its files' (a device refuses the
+    // package as it reads it), in code point order.
+    for rel in files.keys() {
+        if super::template_packages::short_name(rel) {
+            problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("{rel:?} could be a Windows short name of another file (a ~ with a digit after it): rename it")));
+        } else if super::template_packages::unseen(rel) {
+            problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("{rel:?} has a control or invisible character in its name: rename it")));
+        }
+    }
     // Two paths that are one file on a Mac or a Windows machine (the
     // manifest's own name among them), or a file where another needs a
     // folder of that name (amendment 42), in code point order.
@@ -1114,7 +1125,7 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
     check_manifest_size(&unsigned, &mut problems);
     // Its files: each one Zeron writes, none of those no template replaces.
     for rel in files.keys() {
-        if super::templates::inside(std::path::Path::new("t"), rel).is_none() {
+        if super::templates::inside(std::path::Path::new("t"), rel).is_none() || super::template_packages::unseen(rel) {
             problems.push(Problem::at(BAD_PACKAGE, Some("files"), rel, format!("It has a file Zeron won't write: {rel:?}")));
         } else if super::template_packages::protected(rel) {
             problems.push(Problem::at(
@@ -1122,6 +1133,13 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
                 Some("files"),
                 rel,
                 format!("{rel:?} is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out"),
+            ));
+        } else if super::template_packages::short_name(rel) {
+            problems.push(Problem::at(
+                PROTECTED_FILE,
+                Some("files"),
+                rel,
+                format!("{rel:?} could be a Windows short name of one of Zeron's own files (a ~ with a digit after it): rename it"),
             ));
         } else if template_stray_screenshot(rel) {
             problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG: {TEMPLATE_SCREENSHOTS}/ holds its pictures alone")));
@@ -1184,6 +1202,27 @@ pub(crate) mod tests {
         let listing = Listing::of(&manifest);
         assert_eq!(listing.categories, vec!["productivity"]);
         assert_eq!(listing.engines_zeron.as_deref(), Some(">=0.3.0"));
+    }
+
+    /// A name that could be another file's: of a plugin's and of a
+    /// template's, the template's short names as its protected files are.
+    #[test]
+    fn a_path_that_could_be_another_s_is_refused() {
+        let (manifest, mut files) = listed();
+        let at = |problems: Vec<Problem>| -> Vec<(&'static str, Option<&'static str>, Option<String>)> {
+            problems.into_iter().filter(|p| p.field == Some("files")).map(|p| (p.rule, p.field, p.path)).collect()
+        };
+        let odd = ["ui/BADGE~1.LUA", "in\u{200c}it.luau"];
+        for rel in ["ui/a~b.luau", odd[0], odd[1]] {
+            files.insert(rel.into(), b"return 1".to_vec());
+        }
+        let refused = |rule| odd.map(|rel| (rule, Some("files"), Some(rel.to_owned())));
+        let (problems, _) = check(&Manifest::from_value(manifest).unwrap(), &files);
+        let mut expected = refused(rule::BAD_PACKAGE);
+        expected.sort_by(|a, b| a.2.cmp(&b.2));
+        assert_eq!(at(problems), expected);
+        let (problems, _) = check_template(&serde_json::json!({ "id": "midnight" }), &files);
+        assert_eq!(at(problems), [(rule::BAD_PACKAGE, Some("files"), Some(odd[1].to_owned())), (rule::PROTECTED_FILE, Some("files"), Some(odd[0].to_owned()))]);
     }
 
     #[test]

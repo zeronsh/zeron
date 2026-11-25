@@ -34,6 +34,7 @@ use super::manifest::{self, MANIFEST_FILE, Manifest};
 use super::package::{self, MAX_PACKAGE_BYTES, Words};
 use super::scan;
 use super::signing::{self, SigCheck};
+use super::template_packages::{short_name, unseen};
 
 pub const FORMAT: &str = "zeron-plugin:v1";
 pub const EXTENSION: &str = "zeron-plugin";
@@ -295,8 +296,12 @@ impl Package {
     }
 }
 
+/// (None that could name another of its files: a Windows short name
+/// (`ZERON-~1.JSO`), or a character drawn as nothing, which some disks look
+/// names up without. Refused as it's read, so of new installs and updates; a
+/// plugin installed before this keeps loading.)
 fn keep_path(rel: &str) -> bool {
-    package::plain_path(rel) && rel != MANIFEST_FILE
+    package::plain_path(rel) && rel != MANIFEST_FILE && !short_name(rel) && !unseen(rel)
 }
 
 /// The first two of `files`' paths that would be one file, or a file where
@@ -1436,8 +1441,19 @@ pub(crate) mod tests {
         refused(&["Zeron-Plugin.json"], &["Zeron-Plugin.json", "zeron-plugin.json"]);
         refused(&["zeron-plugin.j\u{17f}on"], &["zeron-plugin.j\u{17f}on", "zeron-plugin.json"]);
         refused(&["ZERON-PLUGIN.JSON/x.luau"], &["zeron-plugin.json", "ZERON-PLUGIN.JSON/x.luau"]);
-        // (Trailing dots and spaces, which Windows drops, are no file Zeron writes at all.)
-        assert_eq!(reason_of(&with(&["a.luau", "a.luau."]).unwrap_err()), Some(reason::BAD_FILE));
+        // (Trailing dots and spaces, which Windows drops, are no file Zeron writes at all;
+        // nor is a Windows short name, or one with a character drawn as nothing.)
+        for rel in ["a.luau.", "ZERON-~1.JSO", "ui/BADGE~2.LUA", "a~1b.luau", "~1", "ui~3/x.luau", "in\u{200c}it.luau", "ui\u{feff}/x.luau", "\u{fe00}.png", "x\u{e0041}.luau"] {
+            let error = with(&[rel]).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::BAD_FILE), "{rel:?}: {error}");
+        }
+        assert!(with(&["a~b.luau", "x~.luau", "~.luau", "a~\u{661}.luau", "\u{8bbe}.luau"]).is_ok(), "an ASCII digit right after the ~, and nothing less");
+        // An ordinary emoji's selector is a name's own, and tells no two apart.
+        assert!(with(&["\u{2764}\u{fe0f}.png", "\u{260e}\u{fe0e}.png"]).is_ok());
+        refused(&["\u{2764}\u{fe0f}.png", "\u{2764}.png"], &["\u{2764}\u{fe0f}.png", "\u{2764}.png"]);
+        refused(&["e\u{fe0f}\u{301}.luau", "\u{e9}.luau"], &["e\u{fe0f}\u{301}.luau", "\u{e9}.luau"]);
+        refused(&["zeron-plugin\u{fe0f}.json"], &["zeron-plugin\u{fe0f}.json", "zeron-plugin.json"]);
+        refused(&["\u{fe0f}.source.json"], &["\u{fe0f}.source.json", ".source.json"]);
         // Names that only look alike are anyone's.
         with(&["ui/badge.luau", "ui/badge2.luau", "uix/a.luau", "zeron-plugin.json.md"]).unwrap();
     }
@@ -1616,19 +1632,18 @@ pub(crate) mod tests {
         fn a_name_that_would_be_a_dot_name_is_refused_or_is_its_own_file() {
             // Refused as it's read: a dot name is never a package's
             // (`plain_path`), nor one ending in a dot or a space, which APFS
-            // keeps but Windows drops.
-            for rel in [".source.json", ".Source.json", ".\u{17f}ource.json", "x.luau.", "x.luau ", "lib./x.luau"] {
+            // keeps but Windows drops; nor with a character drawn as nothing
+            // (a zero-width space), which APFS keeps apart and HFS+ doesn't.
+            for rel in [".source.json", ".Source.json", ".\u{17f}ource.json", "x.luau.", "x.luau ", "lib./x.luau", "\u{200b}.source.json"] {
                 let error = parse(signed(&[(rel, b"{}")]).0).map(|_| ()).unwrap_err();
                 assert_eq!(reason_of(&error), Some("bad_file"), "{rel:?}: {error}");
             }
-            // A fullwidth dot (leading, or trailing), a one-dot leader, a
-            // zero-width space before the dot: APFS keeps each apart, so
-            // each is a file of its own, installed as signed, Zeron's own
-            // `.source.json` beside it.
+            // A fullwidth dot (leading, or trailing), a one-dot leader: APFS
+            // keeps each apart, so each is a file of its own, installed as
+            // signed, Zeron's own `.source.json` beside it.
             for (rel, apart_from) in [
                 ("\u{ff0e}source.json", ".source.json"),
                 ("\u{2024}source.json", ".source.json"),
-                ("\u{200b}.source.json", ".source.json"),
                 ("x.luau\u{ff0e}", "x.luau"),
             ] {
                 assert!(!folds(apart_from, rel), "{rel:?} is its own name on this disk");

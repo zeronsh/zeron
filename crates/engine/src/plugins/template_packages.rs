@@ -55,7 +55,7 @@ const BUILTIN_TEMPLATE: &str = "builtin_template";
 
 /// What no template replaces: the app always loads Zeron's own. One answer
 /// with the app's.
-pub use zeron_plugin_guard::template::{NEVER_TEMPLATED as PROTECTED, protected};
+pub use zeron_plugin_guard::template::{NEVER_TEMPLATED as PROTECTED, protected, short_name, unseen};
 
 const UNSIGNED: &str = "This template isn't signed, so Zeron can't tell who made it or whether it was changed. Ask its author to export it again from Zeron.";
 const TAMPERED: &str = "This template was changed after it was signed, so Zeron won't install it. Ask its author for a fresh copy.";
@@ -191,7 +191,8 @@ pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Valu
 
 /// What template folder `folder` is packed as, as `id`: its manifest
 /// (unsigned) and every file its package carries. Its interface (the files
-/// no template replaces left out), and its listing files: its preview, its
+/// no template replaces, and those whose names could be another's, left
+/// out), and its listing files: its preview, its
 /// `README.md` (never the one Zeron wrote, which names a folder of its
 /// author's), its `CHANGELOG.md` and its `screenshots/`.
 pub fn contents(folder: &Path, id: &str) -> Result<(Value, BTreeMap<String, Vec<u8>>), String> {
@@ -200,6 +201,7 @@ pub fn contents(folder: &Path, id: &str) -> Result<(Value, BTreeMap<String, Vec<
     let mut rels = templates::own_files(folder);
     rels.retain(|rel| !protected(rel));
     rels.extend(templates::listing_files(folder));
+    rels.retain(|rel| !short_name(rel) && !unseen(rel));
     for rel in rels {
         let path = inside(folder, &rel).ok_or_else(|| format!("{rel} isn't an app file"))?;
         let bytes = templates::read_regular(&path).ok_or_else(|| format!("Couldn't read {rel}"))?;
@@ -317,8 +319,9 @@ pub fn parse_from_store(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
 
 fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     // Every name a plain path inside the template (`templates::inside`: no
-    // `..`, no absolute part, no dotfile but `.luaurc`).
-    let keep = |rel: &str| inside(Path::new("t"), rel).is_some();
+    // `..`, no absolute part, no dotfile but `.luaurc`), with no character
+    // drawn as nothing (some disks look names up without them).
+    let keep = |rel: &str| inside(Path::new("t"), rel).is_some() && !unseen(rel);
     let package::Verified { manifest, key, files: mut decoded, raw, hash } =
         package::parse(raw, FORMAT, TEMPLATE_PAYLOAD_PREFIX, keep, &WORDS, signed)?;
     // Over every file it carries, as its signature is.
@@ -331,11 +334,12 @@ fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     if !valid_id(id) || id == ZERON {
         return Err(format!("{BAD_ID} ({id:?})."));
     }
-    // Checked as signed; then what no template replaces is set aside, and
-    // what isn't an app file (a manifest of its own) too.
+    // Checked as signed; then what no template replaces is set aside (a
+    // Windows short name may be one of those), and what isn't an app file (a
+    // manifest of its own) too.
     let mut ignored = Vec::new();
     decoded.retain(|rel, _| {
-        let keep = !protected(rel) && rel != MANIFEST && !listing::template_stray_screenshot(rel);
+        let keep = !protected(rel) && !short_name(rel) && rel != MANIFEST && !listing::template_stray_screenshot(rel);
         if !keep {
             ignored.push(rel.clone());
         }
@@ -1308,6 +1312,39 @@ mod tests {
         for later in [json!("9999.0.0"), json!(""), json!("0.3"), Value::Null] {
             assert_eq!(install::reason_of(&with(later.clone()).unwrap_err()), Some("incompatible"), "{later}");
         }
+    }
+
+    /// A name that could be another file's on some disk: a Windows short name
+    /// is left out and named, one with a character drawn as nothing refuses
+    /// the package. Neither is ever exported.
+    #[test]
+    fn plugins_template_packages_names_that_could_be_another_s() {
+        let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "", "version": "1.0.0", "zeron_version": "0.3.16" });
+        let package = |rels: &[&str]| {
+            let files: BTreeMap<String, Vec<u8>> = rels.iter().map(|rel| ((*rel).to_owned(), b"x".to_vec())).collect();
+            parse(pack(&manifest, &files, Some(&key())).unwrap())
+        };
+        let taken = package(&["app.luau", "screens/TEMPLA~1/page.luau", "LUAURC~1", "ds/a~1b.luau", "screenshots/A~1.png", "ds/a~b.luau"]).unwrap();
+        assert_eq!(taken.files.keys().collect::<Vec<_>>(), ["app.luau", "ds/a~b.luau"]);
+        assert_eq!(taken.ignored, ["LUAURC~1", "ds/a~1b.luau", "screens/TEMPLA~1/page.luau", "screenshots/A~1.png"]);
+        for rel in ["screens/tem\u{200c}plates/page.luau", ".luau\u{feff}rc", "account\u{e0041}/x.luau", "ds/\u{fe00}.luau"] {
+            let error = package(&["app.luau", rel]).unwrap_err();
+            assert!(error.starts_with(BAD_FILE_START), "{rel:?}: {error}");
+        }
+        // An ordinary emoji's selector is a name's own, and hides no
+        // protected one.
+        let taken = package(&["app.luau", "ds/\u{2764}\u{fe0f}.luau", "screens/templa\u{fe0f}tes/page.luau", "\u{fe0e}.luaurc"]).unwrap();
+        assert_eq!(taken.files.keys().collect::<Vec<_>>(), ["app.luau", "ds/\u{2764}\u{fe0f}.luau"]);
+        assert!(package(&["app.luau", "zeron-template\u{fe0f}.json"]).unwrap_err().starts_with(CLASH));
+        let d = with_template("names");
+        let t = d.join("midnight");
+        for rel in ["ds/TOKENS~1.LUA", "ds/to\u{200b}kens.luau", "screenshots/A~1.png"] {
+            write(&t.join(rel), "x");
+        }
+        let (_, files) = contents(&t, "midnight").unwrap();
+        assert!(files.keys().all(|rel| !short_name(rel) && !unseen(rel)) && files.contains_key("app.luau"), "{:?}", files.keys());
+        // One installed before this is untouched: its own file still counts.
+        assert!(templates::own_files(&t).iter().any(|rel| rel == "ds/TOKENS~1.LUA"));
     }
 
     /// Nothing but pictures is ever installed under `screenshots/`, and the
