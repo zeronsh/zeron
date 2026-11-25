@@ -2074,44 +2074,52 @@ function M.view(): Node
 		end
 	end)
 
+	-- (A section with nothing in it takes no room, its search anchor's neither:
+	-- the anchor is inside what shows it, never round it.)
 	local requests = ui.computed(pending_requests)
-	local waiting = search.anchor(
-		"requests",
-		ui.show(function(): boolean
+	local waiting = ui.show(
+		function(): boolean
 			return #requests:get() > 0
-		end, ds.Settings.Section {
-			title = ui.t("settings.mcp.requests.title"),
-			description = ui.t("settings.mcp.requests.description"),
-			ds.Settings.Each(requests, function(_r: mcp.Request, _i: number, row: State<mcp.Request>): Node
-				return RequestRow { now = row }
-			end, {
-				key = function(r: mcp.Request): string
-					return r.id
-				end,
-			}),
-		})
+		end,
+		search.anchor(
+			"requests",
+			ds.Settings.Section {
+				title = ui.t("settings.mcp.requests.title"),
+				description = ui.t("settings.mcp.requests.description"),
+				ds.Settings.Each(requests, function(_r: mcp.Request, _i: number, row: State<mcp.Request>): Node
+					return RequestRow { now = row }
+				end, {
+					key = function(r: mcp.Request): string
+						return r.id
+					end,
+				}),
+			}
+		)
 	)
 
-	local yours = search.anchor(
-		"servers",
-		ui.show(function(): boolean
+	local yours = ui.show(
+		function(): boolean
 			return #servers:get() > 0
-		end, ds.Settings.Section {
-			title = ui.t("settings.mcp.servers.title"),
-			-- A card a service, as Providers has an agent's.
-			ui.column {
-				w_full = true,
-				gap = "$space.3",
-				ui.each(ui.computed(services), function(_svc: Service, _i: number, row: State<Service>): Node
-					return ServiceCard { now = row }
-				end, {
-					key = function(svc: Service): string
-						return svc.key
-					end,
+		end,
+		search.anchor(
+			"servers",
+			ds.Settings.Section {
+				title = ui.t("settings.mcp.servers.title"),
+				-- A card a service, as Providers has an agent's.
+				ui.column {
 					w_full = true,
-				}),
-			},
-		})
+					gap = "$space.3",
+					ui.each(ui.computed(services), function(_svc: Service, _i: number, row: State<Service>): Node
+						return ServiceCard { now = row }
+					end, {
+						key = function(svc: Service): string
+							return svc.key
+						end,
+						w_full = true,
+					}),
+				},
+			}
+		)
 	)
 
 	local add = search.anchor(

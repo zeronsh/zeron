@@ -40,7 +40,6 @@ const image = new URL("/assets/og.png", Astro.site);
     <link rel="apple-touch-icon" href="/assets/zeron-app-icon.png" />
     <Font cssVariable="--font-sans" preload />
     <Font cssVariable="--font-mono" />
-    <script is:inline>document.documentElement.classList.add("js");</script>
     {telemetry && <script is:inline defer src="/telemetry.js"></script>}
   </head>
   <body>
@@ -49,19 +48,6 @@ const image = new URL("/assets/og.png", Astro.site);
     <Footer />
     <script>
       import "../scripts/downloads.ts";
-
-      // Parts marked data-reveal rise in the first time they are reached.
-      const io = new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            entry.target.classList.add("is-in");
-            io.unobserve(entry.target);
-          }
-        },
-        { rootMargin: "0px 0px -8% 0px" },
-      );
-      for (const el of document.querySelectorAll("[data-reveal]")) io.observe(el);
     </script>
   </body>
 </html>
