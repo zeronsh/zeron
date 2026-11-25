@@ -4051,7 +4051,8 @@
       "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。",
       "template_taken_down": "Zeron 已将此模板下架，无法使用。",
       "template_unchecked": "Zeron 无法确认此模板是否已被下架。请稍后再试。",
-      "asked_lately": "你刚才选择了“暂不”，所以 Zeron 暂时不会再次询问。请稍后再试。"
+      "asked_lately": "你刚才选择了“暂不”，所以 Zeron 暂时不会再次询问。请稍后再试。",
+      "blocks_unreadable": "Zeron 无法确认这个模板是否已从商店下架，所以现在不能使用它。"
     },
     "store": {
       "browse": "浏览",
@@ -4630,8 +4631,9 @@
     "failure": {
       "not_in_store": "模板商店里没有这个模板或这个版本。",
       "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不能改为安装它。",
-      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。"
+      "not_verified": "Zeron 尚未验证这个版本，所以没有安装。",
+      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。",
+      "taken_down": "Zeron 已将这个版本下架，无法安装。"
     }
   },
   "themes": {

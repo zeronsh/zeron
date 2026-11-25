@@ -328,10 +328,6 @@ export const PLUGINS = [
   }
 ];
 
-/** The usernames the seed's six authors claim, by slot (plain words, none
- * reserved or a lookalike of another). */
-export const USERNAMES = { 1: "stg-ada", 2: "stg-ben", 3: "stg-cy", 4: "stg-dee", 5: "stg-eli", 6: "stg-fen" };
-
 /** The plugin as it stands at version index `i`: its permissions, hosts and
  * commands as of that version. */
 export const at = (plugin, i) => {

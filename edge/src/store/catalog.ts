@@ -305,13 +305,13 @@ const versionsPage = async (db: D1Database, id: string, limit: number, after: { 
 
 const pluginDetail = async (env: Env, db: D1Database, kind: Kind, id: string): Promise<Response> => {
   const p = await listedPlugin(db, kind, id);
-  if (!p) return notFound();
+  if (!p) return notFound(kind);
   const [listed, versions, authors] = await Promise.all([
     db.prepare("SELECT * FROM versions WHERE plugin_id = ? AND version = ?").bind(id, p.listed_version).first<VersionRow>(),
     versionsPage(db, id, DETAIL_VERSIONS, undefined),
     authorsOf(env, [p.owner_id])
   ]);
-  if (!listed) return notFound();
+  if (!listed) return notFound(kind);
   return answer(
     {
       ...pluginCard(p, authorCard(authors[p.owner_id]!)),
@@ -340,7 +340,7 @@ const pluginDetail = async (env: Env, db: D1Database, kind: Kind, id: string): P
 };
 
 const pluginVersions = async (db: D1Database, kind: Kind, id: string, url: URL): Promise<Response> => {
-  if (!(await activePlugin(db, kind, id))) return notFound();
+  if (!(await activePlugin(db, kind, id))) return notFound(kind);
   const limit = limitOf(url.searchParams, 20);
   if (limit === undefined) return fail(400, "bad_request", `limit is 1 to ${MAX_LIMIT}.`);
   const cursor = url.searchParams.get("cursor");
@@ -361,9 +361,9 @@ const pluginVersions = async (db: D1Database, kind: Kind, id: string, url: URL):
 
 /** One public version of an active item, by its name. */
 const oneVersion = async (db: D1Database, kind: Kind, id: string, version: string): Promise<Response> => {
-  if (!(await activePlugin(db, kind, id))) return notFound();
+  if (!(await activePlugin(db, kind, id))) return notFound(kind);
   const v = await db.prepare(`SELECT * FROM versions WHERE plugin_id = ? AND version = ? AND ${publicVersion()}`).bind(id, version).first<VersionRow>();
-  return v ? answer(versionInfo(v, kind), 200, publicCache(LIST_TTL)) : notFound();
+  return v ? answer(versionInfo(v, kind), 200, publicCache(LIST_TTL)) : notFound(kind);
 };
 
 /** Each category with the number of listed plugins in it: exactly the set
@@ -532,7 +532,7 @@ export const handleCatalog = async (request: Request, env: Env, db: D1Database, 
     return throughCache(request, cacheKey([segmentOf(kind)], listParams(lq)), LIST_TTL, () => listPlugins(env, db, kind, lq));
   }
   const id = parts[3]!;
-  if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id)) return notFound();
+  if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id)) return notFound(kind);
   if (parts.length === 4) return throughCache(request, itemKey(kind, id), LIST_TTL, () => pluginDetail(env, db, kind, id));
   if (parts.length === 5 && parts[4] === "versions") {
     // The first page only is cached (and purged); later pages are as fresh as a list's.
@@ -541,7 +541,7 @@ export const handleCatalog = async (request: Request, env: Env, db: D1Database, 
   }
   if (parts.length === 6 && parts[4] === "versions") {
     const version = decodeSegment(parts[5]!);
-    if (!version || !parseVersion(version)) return notFound();
+    if (!version || !parseVersion(version)) return notFound(kind);
     return throughCache(request, versionKey(kind, id, version), LIST_TTL, () => oneVersion(db, kind, id, version));
   }
   return undefined;

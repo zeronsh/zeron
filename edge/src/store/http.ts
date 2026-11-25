@@ -1,6 +1,8 @@
 /** Answers of the store's routes: JSON, `{ error, message }` on failure
  * (contract "Errors"), never cached unless a route says so. */
 
+import type { Kind } from "./kind";
+
 export const NO_STORE = "no-store";
 
 export const answer = (value: unknown, status = 200, cacheControl = NO_STORE, extra: Record<string, string> = {}): Response =>
@@ -12,7 +14,9 @@ export const answer = (value: unknown, status = 200, cacheControl = NO_STORE, ex
 export const fail = (status: number, error: string, message: string, extra: Record<string, unknown> = {}): Response =>
   answer({ error, message, ...extra }, status);
 
-export const notFound = (): Response => fail(404, "not_found", "There's no such plugin.");
+/** Nothing of `kind` there (the prefix asked under): a plugin, where the
+ * route is neither's. */
+export const notFound = (kind: Kind = "plugin"): Response => fail(404, "not_found", `There's no such ${kind}.`);
 
 export const rateLimited = (): Response =>
   new Response(JSON.stringify({ error: "rate_limited", message: "Too many requests. Try again in a minute." }), {

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Publish a Zeron plugin from CI: install Zeron's Linux command line (the
-# release's `zeron-engine`, checked against the release's sha256), then run
-# `zeron plugin publish <folder>` with the deploy token in
+# Publish a Zeron plugin or template from CI: install Zeron's Linux command
+# line (the release's `zeron-engine`, checked against the release's sha256),
+# then run `zeron plugin publish <folder>` (`zeron template publish`, of a
+# folder with zeron-template.json) with the deploy token in
 # ZERON_DEPLOY_TOKEN. Without a token it only checks (`zeron plugin check`):
 # what a pull request from a fork, which gets no secrets, can still run.
 #
 # Env (the action sets these from its inputs):
 #   ZERON_DEPLOY_TOKEN the deploy token (zdt_…), or empty
-#   ZERON_PLUGIN_PATH  the plugin's folder (default .)
+#   ZERON_PLUGIN_PATH  the plugin's or template's folder (default .)
 #   ZERON_DRY_RUN      true: check and pack, don't publish; false (or
 #                      unset): publish. Anything else is refused.
 #   ZERON_VERSION      latest, or a release's version (held: the release's
@@ -42,6 +43,19 @@ case "${ZERON_DRY_RUN:-false}" in
   true) dry_run=true ;;
   false) dry_run=false ;;
   *) fail "dry-run is true or false." ;;
+esac
+
+# What's published is what the folder says it is.
+folder="${ZERON_PLUGIN_PATH:-.}"
+case "$folder" in /*) at="$folder" ;; *) at="./$folder" ;; esac
+is_plugin=false is_template=false
+[ -f "$at/zeron-plugin.json" ] && is_plugin=true
+[ -f "$at/zeron-template.json" ] && is_template=true
+case "$is_plugin $is_template" in
+  "true false") kind=plugin ;;
+  "false true") kind=template ;;
+  "true true") fail "$folder has a zeron-plugin.json and a zeron-template.json: publish a plugin or a template." ;;
+  *) fail "$folder: there's no plugin folder there, nor a template's (zeron-plugin.json or zeron-template.json)." ;;
 esac
 
 releases="${ZERON_RELEASES_URL:-https://zeron.sh/releases}"
@@ -89,13 +103,12 @@ echo "Zeron $("$zeron" --version | awk '{print $2}') ($arch)"
 
 # Nothing of this job's is kept: Zeron's data folder is a scratch one.
 export ZERON_DATA_DIR="$work/data"
-folder="${ZERON_PLUGIN_PATH:-.}"
 
 if [ -z "${ZERON_DEPLOY_TOKEN:-}" ]; then
   echo "No deploy token (the token input is empty): checking only."
-  exec "$zeron" plugin check -- "$folder"
+  exec "$zeron" "$kind" check -- "$folder"
 fi
-args=(plugin publish)
+args=("$kind" publish)
 [ "$dry_run" = true ] && args+=(--dry-run)
 # (After `--`: a folder named like an option is a folder.)
 exec "$zeron" "${args[@]}" -- "$folder"

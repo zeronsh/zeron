@@ -89,7 +89,7 @@ const PUBLIC_SQL = "p.status = 'active' AND v.status IN ('listed', 'yanked')";
 
 export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, kind: Kind, id: string, segment: string): Promise<Response> => {
   const versionText = versionSegment(segment);
-  if (!versionText) return notFound();
+  if (!versionText) return notFound(kind);
   const state = await cachedValue<PackageState>(request, packageStateKey(id, versionText), STATE_TTL, async () => {
     const row = await db
       .prepare(`SELECT ${PUBLIC_SQL} AS public, p.kind, p.owner_id, v.version, v.package_sha256 FROM versions v JOIN plugins p ON p.id = v.plugin_id WHERE v.plugin_id = ? AND v.version = ?`)
@@ -98,9 +98,9 @@ export const servePackage = async (request: Request, env: Env, db: D1Database, b
     return row ? { kind: row.kind, public: row.public === 1, owner: row.owner_id, version: row.version, sha256: row.package_sha256 } : undefined;
   });
   // (The state is the item's, whichever prefix asked; only its own answers.)
-  if (!state || (state.kind ?? "plugin") !== kind) return notFound();
+  if (!state || (state.kind ?? "plugin") !== kind) return notFound(kind);
   const isPublic = state.public;
-  if (!isPublic && !(await privileged(request, env, state.owner))) return notFound();
+  if (!isPublic && !(await privileged(request, env, state.owner))) return notFound(kind);
   const read = async () => {
     const object = await bucket.get(packageKey(id, state.version, state.sha256));
     return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
@@ -144,7 +144,7 @@ export const serveFile = async (
   pathSegments: readonly string[]
 ): Promise<Response> => {
   const versionText = versionSegment(segment);
-  if (!versionText) return notFound();
+  if (!versionText) return notFound(kind);
   const decoded = pathSegments.map(decodeSegment);
   if (decoded.some((p) => p === undefined)) return fail(400, "bad_path", "That isn't a file's path.");
   const path = decoded.join("/");
@@ -172,7 +172,7 @@ export const serveFile = async (
       icon: row.icon === path
     };
   });
-  if (!state || (state.itemKind ?? "plugin") !== kind) return notFound();
+  if (!state || (state.itemKind ?? "plugin") !== kind) return notFound(kind);
   const pictureKind = state.kind === "png" || state.kind === "jpeg" || (state.kind === "svg" && state.icon);
   const readRaw = async (): Promise<Uint8Array | undefined> => {
     if (state.bytes === 0) return new Uint8Array(0);
@@ -190,7 +190,7 @@ export const serveFile = async (
   // admins only (to anyone else it doesn't exist).
   const isPublic = pictureKind && state.public;
   const mayRead = isPublic || (await privileged(request, env, state.owner));
-  if (!mayRead) return notFound();
+  if (!mayRead) return notFound(kind);
   if (pictureKind) {
     const bytes = isPublic ? await cachedBytes(request, fileBytesKey(state.sha256, state.kind), readPicture) : await readPicture();
     if (bytes) {
@@ -202,7 +202,7 @@ export const serveFile = async (
   }
   // Anything else, a picture that won't clean included: its owner's and
   // admins' only, and only as an attachment.
-  if (isPublic && !(await privileged(request, env, state.owner))) return notFound();
+  if (isPublic && !(await privileged(request, env, state.owner))) return notFound(kind);
   const raw = await readRaw();
   if (!raw) return fail(503, "unavailable", "The file can't be read right now.");
   const headers = baseHeaders("private, no-store");
