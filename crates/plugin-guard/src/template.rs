@@ -21,10 +21,25 @@ pub const SCREENSHOTS: &str = "screenshots";
 pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
 
 /// Paths no template replaces: allowing plugins, your account and signing
-/// in, the aliases every module resolves by, and where Zeron lays a
-/// template's `ds/tokens.luau` beside its own (a folder of that name too: its
-/// `init.luau` is the same module). It only grows.
-pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/"];
+/// in, the aliases every module resolves by, where Zeron lays a template's
+/// `ds/tokens.luau` beside its own, and a folder of tokens, which would stand
+/// in for Zeron's own. It only grows. (With [`folder_of`] each: see
+/// [`never_templated`].)
+pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens/"];
+
+/// The folder that's the same module as `file`, a `.luau` one: zgx takes a
+/// folder's `init.luau` over the file beside it, so a template's
+/// `ds/x/init.luau` would stand in for Zeron's `ds/x.luau`. (Never the other
+/// way: beside a folder, the file isn't looked at.)
+fn folder_of(file: &str) -> Option<&str> {
+    file.strip_suffix(".luau").filter(|name| !name.is_empty() && !name.ends_with('/'))
+}
+
+/// [`NEVER_TEMPLATED`], each `.luau` file followed by the folder that's the
+/// same module.
+pub fn never_templated() -> Vec<String> {
+    NEVER_TEMPLATED.iter().flat_map(|p| std::iter::once((*p).to_owned()).chain(folder_of(p).map(|folder| format!("{folder}/")))).collect()
+}
 
 /// Whether `rel` is one no template replaces. Compared as a case-insensitive
 /// filesystem (macOS's, Windows') names files (`path::fold`):
@@ -32,10 +47,11 @@ pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/",
 /// s) and `screens/plugins./page.luau` are Zeron's plugins page there too.
 pub fn protected(rel: &str) -> bool {
     let rel = fold(rel);
-    NEVER_TEMPLATED.iter().any(|p| {
+    let under = |p: &str| {
         let p = fold(p);
         rel == p || rel.starts_with(&format!("{p}/"))
-    })
+    };
+    NEVER_TEMPLATED.iter().any(|p| under(p) || folder_of(p).is_some_and(under))
 }
 
 /// Whether `rel` is one of its listing files: its README, its changelog, its
@@ -193,6 +209,8 @@ mod tests {
             ("ds/tokens_template\u{fe0f}.luau", false, false, true, false, false, false),
             ("ds/tokens_template/init.luau", false, false, true, false, false, false),
             ("ds/Tokens_Template./deep/a.luau", false, false, true, false, false, false),
+            ("ds/tokens/init.luau", false, false, true, false, false, false),
+            ("DS/Tokens/colors.luau", false, false, true, false, false, false),
             ("ds/tokens_templates.luau", false, false, false, false, true, true),
             ("ds/tokens_templates/init.luau", false, false, false, false, true, true),
             ("screens/TEMPLA~1/page.luau", false, false, false, true, false, true),
@@ -222,9 +240,27 @@ mod tests {
 
     #[test]
     fn what_s_protected_only_grows() {
-        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/"] {
-            assert!(NEVER_TEMPLATED.contains(&released), "{released}");
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc", "ds/tokens_template.luau", "ds/tokens_template/", "ds/tokens/"] {
+            assert!(never_templated().iter().any(|p| p == released), "{released}");
         }
+    }
+
+    /// A protected module is protected as a folder too, and both are listed
+    /// for whoever reads the list (the store's edge).
+    #[test]
+    fn a_protected_file_s_folder_is_protected() {
+        let all = never_templated();
+        for p in &all {
+            assert!(protected(p) && protected(&format!("{}/x.luau", p.trim_end_matches('/'))), "{p}");
+            let Some(name) = p.strip_suffix(".luau") else { continue };
+            assert!(all.contains(&format!("{name}/")), "{p}");
+            for same in [format!("{name}/init.luau"), format!("{name}/deep/a.luau"), format!("{}/INIT.luau", name.to_uppercase()), format!("{name}./init.luau")] {
+                assert!(protected(&same), "{same}");
+            }
+            assert!(!protected(&format!("{name}s/init.luau")) && !protected(&format!("{name}s.luau")), "{p}");
+        }
+        assert!(all.iter().any(|p| p.ends_with(".luau")), "there is one to hold it to");
+        assert_eq!((folder_of("a/b.luau"), folder_of("a/"), folder_of(".luaurc"), folder_of(".luau"), folder_of("a/.luau")), (Some("a/b"), None, None, None, None));
     }
 
     /// The vector both sides are held to.
@@ -239,7 +275,7 @@ mod tests {
         let vector = "4fee345a38a1f2a65523a1d25ac01fd7cdde15f4524afbe1d7ce72933f47827e";
         assert_eq!(digest(&files), vector);
         // None of these is any part of it.
-        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
+        for rel in [MANIFEST, "README.md", "CHANGELOG.md", "preview.png", "screenshots/a.png", ".luaurc", "account/x.luau", "screens/plugins/x.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", "ds/tokens/init.luau", ".imported.json", ".lineage.json", ".base.json", "screens/.hidden.luau"] {
             files.insert(rel.to_owned(), b"x");
         }
         assert_eq!(digest(&files), vector);

@@ -292,6 +292,16 @@ describe("templates: what's refused", () => {
     expect(await problems({ files: { "screens/plugins/page.luau": "x" } })).toEqual([400, "protected_file", "files", "screens/plugins/page.luau"]);
     expect(await problems({ files: { "Account/x.luau": "x" } })).toEqual([400, "protected_file", "files", "Account/x.luau"]);
     expect(await problems({ files: { ".luaurc": "{}" } })).toEqual([400, "protected_file", "files", ".luaurc"]);
+    // Where the app lays a template's tokens beside Zeron's, and a folder
+    // that would stand in for Zeron's own: never a template's, however
+    // spelt. Its ds/tokens.luau is.
+    for (const path of ["ds/tokens/init.luau", "DS/Tokens/colors.luau", "ds/tokens_template.luau", "ds/tokens_template/init.luau", "ds/tokens_template/deep/x.luau", "DS/Tokens_Template.luau", "ds/tokens_template\ufe0f.luau"]) {
+      expect(await problems({ files: { [path]: "return {}" } }), path).toEqual([400, "protected_file", "files", path]);
+    }
+    for (const path of ["ds/tokens.luau", "ds/tokens_templates.luau"]) {
+      const id = uniqueId("k");
+      expect((await publishTemplate(a.userId, id, await makeTemplate({ id, version: "1.0.0", signer: a.signer, files: { [path]: "return {}" } }))).status, path).toBe(201);
+    }
     for (const member of ["builtin_theme", "builtin_template", "permissions", "icon", "categories", "engines"]) {
       expect(await problems({ manifest: { [member]: member === "engines" ? { zeron: ">=1.0.0" } : true } }), member).toEqual([400, "bad_listing", member, null]);
     }
@@ -331,9 +341,20 @@ describe("templates: what's refused", () => {
     const plug = uniqueId("x");
     // A plugin's package at the templates' prefix, and the reverse.
     const asPlugin = await publishTemplate(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }));
-    expect([asPlugin.status, await json(asPlugin)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package" })]);
+    expect([asPlugin.status, await json(asPlugin)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: "That isn't a Zeron template" })]);
     const asTemplate = await publish(a.userId, plug, await makeTemplate({ id: plug, version: "1.0.0", signer: a.signer }));
-    expect([asTemplate.status, await json(asTemplate)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package" })]);
+    expect([asTemplate.status, await json(asTemplate)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: "That isn't a Zeron plugin" })]);
+    // What isn't a package at all is told the kind it was sent as, and so is
+    // one of too many files.
+    const many = JSON.stringify({ format: "zeron-template:v1", manifest: {}, files: Object.fromEntries(Array.from({ length: 2_001 }, (_, i) => [`f${i}`, ""])) });
+    for (const [send, kind] of [[publishTemplate, "template"], [publish, "plugin"]] as const) {
+      for (const raw of ["nope", "{}"]) {
+        const res = await send(a.userId, id, new TextEncoder().encode(raw));
+        expect([res.status, await json(res)], `${kind} ${raw}`).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "not_a_package", message: `That isn't a Zeron ${kind}` })]);
+      }
+      const big = await send(a.userId, id, new TextEncoder().encode(many.replace("zeron-template", `zeron-${kind}`)));
+      expect([big.status, await json(big)], kind).toEqual([413, expect.objectContaining({ error: "too_large", reason: "too_big", message: `It's too big for a ${kind}` })]);
+    }
     // A template signed in the plugin domain.
     const wrongDomain = await publishTemplate(a.userId, id, await makeTemplate({ id, version: "1.0.0", signer: a.signer, prefix: "zeron-plugin:v1\n" }));
     expect(await error(wrongDomain)).toEqual([400, "bad_signature"]);

@@ -2340,7 +2340,8 @@
     "account/",
     ".luaurc",
     "ds/tokens_template.luau",
-    "ds/tokens_template/"
+    "ds/tokens_template/",
+    "ds/tokens/"
   ],
   "template_readme_stub": "This README isn't part of the interface.",
   "template_refused_members": [
