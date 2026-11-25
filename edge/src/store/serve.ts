@@ -58,7 +58,7 @@ export const decodeSegment = (segment: string): string | undefined => {
 };
 
 /** A version named in a URL segment: decoded, and a version the store
- * takes (so at most 128 characters), before it keys anything. */
+ * takes (so at most `MAX_VERSION_LENGTH` characters), before it keys anything. */
 const versionSegment = (segment: string): string | undefined => {
   const text = segment.length <= 3 * MAX_VERSION_LENGTH ? decodeSegment(segment) : undefined;
   return text !== undefined && parseVersion(text) ? text : undefined;

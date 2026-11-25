@@ -10,6 +10,7 @@ import { crc32 } from "../../src/image-check";
 import { handlePublish } from "../../src/store/publish";
 import { openCache } from "../../src/store/cache";
 import { fileStateKey, packageStateKey } from "../../src/store/serve";
+import { MAX_VERSION_LENGTH } from "../../src/store/semver";
 import { UNUSED_ID_DAYS, releaseRows, releaseUnusedIds } from "../../src/store/release";
 import { stockOf } from "../../src/store/stock";
 import { MAX_UPDATE_ITEMS } from "../../src/store/update-ask";
@@ -392,6 +393,9 @@ describe("templates: what its author and anyone do", () => {
     expect(await json(await call(b.userId, "POST", `/store/v1/templates/${temp}/installed`))).toEqual({ counted: true });
     expect((await json(await get(`/templates/${temp}`, b.userId))).installs).toBe(1);
     const report = { reason: "broken", text: "It doesn't open." };
+    // (A version in it is at most as long as one the store takes: 32.)
+    expect((await call(b.userId, "POST", `/store/v1/templates/${temp}/reports`, { ...report, version: "1".repeat(33) })).status).toBe(400);
+    expect((await call((await author()).userId, "POST", `/store/v1/templates/${temp}/reports`, { ...report, version: "1".repeat(32) })).status).toBe(201);
     expect((await call(b.userId, "POST", `/store/v1/plugins/${temp}/reports`, report)).status).toBe(404);
     expect((await call(b.userId, "POST", `/store/v1/templates/${temp}/reports`, report)).status).toBe(201);
     const reports = await json<{ reports: { plugin: { id: string; kind: string } }[] }>(await adminCall("GET", "/store/v1/admin/reports"));
@@ -563,9 +567,16 @@ describe("templates: staff", () => {
     // Past its while: read again.
     await put("b");
     expect([await mark(599_999), await mark(600_000), reads]).toEqual(["same", "changed", 4]);
-    // Not a version, never a key.
+    // Not a version, or one longer than the store takes (33): never a key.
     expect(await stockOf(bucket, "../0.3.0")).toBeUndefined();
+    const long = `0.3.0-${"a".repeat(MAX_VERSION_LENGTH + 1 - 6)}`;
+    await env.PLUGIN_STORE.put(`stock/${long}.json`, JSON.stringify({ version: long, files: { x: ["0".repeat(64)] } }));
+    expect([long.length, await stockOf(bucket, long)]).toEqual([33, undefined]);
     expect(reads).toBe(4);
+    const longest = long.slice(0, -1);
+    await env.PLUGIN_STORE.put(`stock/${longest}.json`, JSON.stringify({ version: longest, files: { x: ["0".repeat(64)] } }));
+    expect(await stockOf(bucket, longest, 600_000)).toBeDefined();
+    reads = 4;
     // Eight at most: the oldest goes.
     for (let i = 0; i < 8; i++) {
       const other = `0.3.${i}-${randomLetters(8)}`;

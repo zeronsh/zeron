@@ -35,6 +35,7 @@ import { type Kind, segmentOf } from "./kind";
 import { authenticatePublisher, readBody, sessionRequired } from "./principal";
 import { allowWrite } from "./publish";
 import { purgeCatalog } from "./purge";
+import { MAX_VERSION_LENGTH } from "./semver";
 import { decodeSegment } from "./serve";
 
 export const REPORT_REASONS: readonly string[] = STORE_DATA.report_reasons;
@@ -175,7 +176,7 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, k
     return fail(400, "bad_request", `reason is one of ${REPORT_REASONS.join(", ")}.`);
   }
   if (typeof text !== "string" || text.length > MAX_REPORT_TEXT) return fail(400, "bad_request", `text is at most ${MAX_REPORT_TEXT} characters.`);
-  if (version !== null && (typeof version !== "string" || version.length > 128)) return fail(400, "bad_request", `version is a version of this ${kind}.`);
+  if (version !== null && (typeof version !== "string" || version.length > MAX_VERSION_LENGTH)) return fail(400, "bad_request", `version is a version of this ${kind}.`);
   const plugin = await pluginRow(db, id);
   if (!plugin || plugin.kind !== kind || plugin.status !== "active" || !plugin.listed_version) return notFound();
   const open = await db

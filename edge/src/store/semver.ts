@@ -1,7 +1,8 @@
 /**
  * Versions for the store: strict SemVer 2.0.0 as the engine's `semver`
  * crate (1.0.28) parses it, with the store's limits on top (contract
- * amendment 3): each numeric part at most 2^53−1, at most 128 characters.
+ * amendment 3): each numeric part at most 2^53−1, at most `MAX_VERSION_LENGTH`
+ * characters.
  * Build metadata is kept but ignored for precedence, so two versions that
  * differ only in it are the same version.
  *

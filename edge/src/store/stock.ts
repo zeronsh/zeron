@@ -3,10 +3,11 @@
  * "Templates: as the edge built them"): `stock/<zeron_version>.json` =
  * `{version, files: {rel: [sha256, …]}}` in PLUGIN_STORE, written per release by
  * the generator, never by an author: the file as Zeron's default look has it,
- * and as each of its official templates does. A match with any is the same. Each version of a template under review
- * is read against the ones of the Zeron it says it was made from, so staff
- * read what its author wrote rather than all of Zeron. A Zeron whose files aren't there (or
- * can't be read) is unknown, and then nothing is marked: every file is shown.
+ * and as each of its official templates does. A match with any is the same.
+ * Each version of a template under review is read against the ones of the
+ * Zeron it says it was made from, so staff read what its author wrote rather
+ * than all of Zeron. A Zeron whose files aren't there (or can't be read) is
+ * unknown, and then nothing is marked: every file is shown.
  */
 import { fold } from "./paths";
 import { parseVersion } from "./semver";
@@ -16,7 +17,6 @@ export const stockKey = (zeronVersion: string): string => `${STOCK_KEY.prefix}${
 
 /** More than any release's: one past it isn't read. */
 const MAX_STOCK_BYTES = 4 * 1024 * 1024;
-const MAX_VERSION_LEN = 128;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
 export type StockMark = "same" | "changed" | "new";
@@ -51,7 +51,9 @@ const cache = new Map<string, { readonly stock: Stock; readonly until: number }>
 
 /** The files of Zeron `zeronVersion`, or undefined when they aren't known. */
 export const stockOf = async (bucket: R2Bucket, zeronVersion: string, now = Date.now()): Promise<Stock | undefined> => {
-  if (zeronVersion.length > MAX_VERSION_LEN || !parseVersion(zeronVersion)) return undefined;
+  // (A version the store takes, so at most MAX_VERSION_LENGTH, before it keys
+  // anything.)
+  if (!parseVersion(zeronVersion)) return undefined;
   const kept = cache.get(zeronVersion);
   if (kept && now < kept.until) return kept.stock;
   cache.delete(zeronVersion);
