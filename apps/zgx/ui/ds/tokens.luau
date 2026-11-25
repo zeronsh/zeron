@@ -760,6 +760,11 @@ function M.setup()
 	end)
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
+	-- A template's own theme files, laid as these (an empty one each with
+	-- none): over the palette worn, under a palette you chose (ds/palettes
+	-- `wear`), each naming only what it changes.
+	ui.theme.load("ds/themes/template-dark.json")
+	ui.theme.load("ds/themes/template-light.json")
 	-- The theme chosen for each scheme, else the template's own (its
 	-- theme.luau; the default's returns nil), else Zeron's, worn over those
 	-- themes through the one mapping (ds/palettes), and worn again as the

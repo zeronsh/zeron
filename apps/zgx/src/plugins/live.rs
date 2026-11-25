@@ -61,7 +61,11 @@ pub const TEMPLATE_TOKENS: &str = "ds/tokens_template.luau";
 pub fn laid_by_zeron(rel: &str) -> bool {
     let rel = zeron_plugin_guard::path::fold(rel);
     let under = |file: &str| rel.strip_prefix(&zeron_plugin_guard::path::fold(file.trim_end_matches(".luau"))).is_some_and(|rest| rest.starts_with('/'));
-    rel == zeron_plugin_guard::path::fold(TEMPLATE_TOKENS) || under(TEMPLATE_TOKENS) || under(TOKENS)
+    let theme = |scheme: &str| {
+        let at = format!("ds/themes/template-{scheme}.json");
+        rel == zeron_plugin_guard::path::fold(&at) || rel.strip_prefix(&zeron_plugin_guard::path::fold(&at)).is_some_and(|rest| rest.starts_with('/'))
+    };
+    rel == zeron_plugin_guard::path::fold(TEMPLATE_TOKENS) || under(TEMPLATE_TOKENS) || under(TOKENS) || theme("dark") || theme("light")
 }
 
 /// Zeron's own files, as a disk that folds names has them, and the folders
@@ -87,6 +91,9 @@ impl ZeronShape {
         self.folders.contains(&rel) || rel.match_indices('/').any(|(at, _)| self.files.contains(&rel[..at]))
     }
 }
+
+/// What `template_status` says of a theme file that doesn't read as a theme.
+pub const UNREAD_THEME: &str = "Not used: this file doesn't read as a theme.";
 
 /// What `template_status` says of a file `clashes` left out.
 pub const CLASHES: &str = "Not used: Zeron has a folder of this name, or a file where this path has a folder.";
@@ -400,13 +407,67 @@ pub struct Overlay {
     pub laid_as: BTreeMap<String, String>,
     /// The template's files left out for their path (`ZeronShape::clashes`).
     pub clashing: BTreeSet<String>,
+    /// Its theme files laid at `template-*.json` (`.live`'s path → scheme),
+    /// renamed and set over the palette as they're laid (`compose`).
+    pub themes: BTreeMap<String, String>,
+    /// Its theme files left out as they don't read as a theme (its own paths).
+    pub unread_themes: BTreeSet<String>,
 }
+
+/// A template's theme file for `scheme` (`ds/themes/zeron-dark.json`), as a
+/// disk that folds names has it: where Zeron lays it (`template-dark.json`).
+pub fn template_theme(rel: &str) -> Option<(&'static str, String)> {
+    let rel = zeron_plugin_guard::path::fold(rel);
+    ["dark", "light"].into_iter().find(|kind| rel == zeron_plugin_guard::path::fold(&format!("ds/themes/zeron-{kind}.json"))).map(|kind| (kind, format!("ds/themes/template-{kind}.json")))
+}
+
+/// What's in a template's theme file `source`, as Zeron lays it: named
+/// `template-{scheme}`, of that scheme, over the palette worn
+/// (`palette-{scheme}`, ds/palettes `wear`), its tokens as they are. Read as
+/// zgx reads a theme (comments and all), or why not.
+pub fn laid_theme(source: &Path, scheme: &str) -> Result<Vec<u8>, String> {
+    let text = std::fs::read_to_string(source).map_err(|e| e.to_string())?;
+    let theme = zgx::theme::Theme::from_json(&text).map_err(|e| e.to_string())?;
+    let kind = zgx::theme::ThemeKind::parse(scheme).ok_or("no such scheme")?;
+    let mut out = zgx::theme::Theme::new(format!("template-{scheme}"), kind).extending(format!("palette-{scheme}"));
+    for (token, expr) in theme.tokens() {
+        out = out.with_expr(token, expr).map_err(|e| e.to_string())?;
+    }
+    Ok(out.to_json().into_bytes())
+}
+
+/// Where `compose` keeps a template's theme files as it lays them (`laid_theme`):
+/// the host's own, beside the templates.
+pub const LAID_THEMES: &str = ".laid-themes";
 
 /// `.live` as `.zeron` with template `id` on top, leaving out the template's
 /// `failed` files (Zeron's show in their place) and the paths never templated.
 /// Zeron's own alone for `BUILTIN`, or `whole_failed`. How many files changed.
 pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> std::io::Result<(usize, Overlay)> {
-    let (want, overlay) = plan(templates, id, failed, whole_failed);
+    let (mut want, mut overlay) = plan(templates, id, failed, whole_failed);
+    // Its theme files as Zeron lays them (renamed, over the palette); one
+    // that doesn't read as a theme left out, Zeron's empty one in its place.
+    for (laid, scheme) in overlay.themes.clone() {
+        let Some(source) = want.get(&laid).cloned() else { continue };
+        match laid_theme(&source, &scheme) {
+            Ok(bytes) => {
+                let at = templates.join(LAID_THEMES).join(format!("template-{scheme}.json"));
+                if let Some(dir) = at.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                put(&at, &bytes)?;
+                want.insert(laid, at);
+            }
+            Err(_) => {
+                want.insert(laid.clone(), templates.join(ZERON).join(&laid));
+                overlay.from_template.remove(&laid);
+                overlay.themes.remove(&laid);
+                if let Some(own) = overlay.laid_as.remove(&laid) {
+                    overlay.unread_themes.insert(own);
+                }
+            }
+        }
+    }
     let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
     Ok((changed, overlay))
 }
@@ -419,6 +480,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
     let mut from_template = BTreeSet::new();
     let mut laid_as = BTreeMap::new();
     let mut clashing = BTreeSet::new();
+    let mut themes = BTreeMap::new();
     if id != BUILTIN && !whole_failed {
         // Each file is written under one spelling: a template's `App.luau`
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
@@ -455,6 +517,16 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
                 clashing.insert(rel);
                 continue;
             }
+            // Its theme files beside Zeron's, never over them: laid as
+            // template-*.json, over the palette worn and under one you chose
+            // (`compose` renames them), so a token it doesn't name is Zeron's.
+            if let Some((scheme, laid)) = template_theme(&rel) {
+                from_template.insert(laid.clone());
+                laid_as.insert(laid.clone(), rel);
+                themes.insert(laid.clone(), scheme.to_string());
+                want.insert(laid, path);
+                continue;
+            }
             // Its tokens beside Zeron's, never over them: Zeron's run first
             // and then its (ds/tokens.luau), so a token it doesn't name is
             // this Zeron's, the ones added since it was made too.
@@ -478,7 +550,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
             want.insert(laid, path);
         }
     }
-    (want, Overlay { template: id.to_string(), from_template, laid_as, clashing })
+    (want, Overlay { template: id.to_string(), from_template, laid_as, clashing, themes, unread_themes: BTreeSet::new() })
 }
 
 /// Beside the templates: what a launch last laid `.live` down from, and
@@ -1386,6 +1458,33 @@ mod tests {
         assert!(aside[0].join("ds/tokens_template").symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()), "moved, as a link");
         assert_eq!(read(&elsewhere, "init.luau"), "-- not this", "what it's to is untouched");
         assert!(live.join("notes").symlink_metadata().is_ok(), "a link by no module's name is left");
+    }
+
+    /// A template's theme files are laid beside Zeron's, renamed and set over
+    /// the palette worn (`template-*`, `palette-*`), each naming only its
+    /// own tokens (comments and all, read as zgx reads a theme); Zeron's own
+    /// stay. One that doesn't read as a theme is left out, Zeron's empty one
+    /// in its place, and said.
+    #[test]
+    fn a_template_s_theme_files_are_laid_over_the_palette() {
+        let t = setup("themes");
+        let z = t.join(ZERON);
+        write(&z, "ds/themes/zeron-dark.json", r#"{ "name": "zeron-dark", "type": "dark", "extends": "zgx-dark", "tokens": { "zeron": { "list": { "gap": 2 } } } }"#);
+        write(&z, "ds/themes/template-dark.json", r#"{ "name": "template-dark", "type": "dark", "extends": "palette-dark", "tokens": {} }"#);
+        write(&z, "ds/themes/template-light.json", r#"{ "name": "template-light", "type": "light", "extends": "palette-light", "tokens": {} }"#);
+        write(&t, "t/ds/themes/zeron-dark.json", "{\n\t// Only what it changes.\n\t\"name\": \"zeron-dark\",\n\t\"type\": \"dark\",\n\t\"extends\": \"zgx-dark\",\n\t\"tokens\": { \"zeron\": { \"selected\": { \"flat\": { \"bg\": \"#123456\" } } } }\n}");
+        write(&t, "t/ds/themes/zeron-light.json", "not a theme");
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        let live = t.join(LIVE);
+        let laid = zgx::theme::Theme::from_json(&read(&live, "ds/themes/template-dark.json")).unwrap();
+        assert_eq!(laid.to_json(), zgx::theme::Theme::new("template-dark", zgx::theme::ThemeKind::Dark).extending("palette-dark").with_expr(zgx::theme::token("zeron.selected.flat.bg"), "#123456").unwrap().to_json());
+        assert!(read(&live, "ds/themes/zeron-dark.json").contains("\"gap\": 2"), "Zeron's own file stays");
+        assert_eq!(overlay.laid_as["ds/themes/template-dark.json"], "ds/themes/zeron-dark.json");
+        // Not a theme: left out, Zeron's empty one, said.
+        assert!(read(&live, "ds/themes/template-light.json").contains("\"tokens\": {}"));
+        assert!(overlay.unread_themes.contains("ds/themes/zeron-light.json") && !overlay.from_template.contains("ds/themes/template-light.json"));
+        // And a template's own file at those paths is never laid.
+        assert!(laid_by_zeron("ds/themes/template-dark.json") && laid_by_zeron("DS/Themes/Template-Light.json") && !laid_by_zeron("ds/themes/zeron-dark.json"));
     }
 
     /// A template's file laid across Zeron's (a folder of Zeron's by its

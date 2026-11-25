@@ -1993,6 +1993,7 @@ impl Bridge {
             let overlay = self.overlay.borrow();
             if overlay.template == t.id {
                 errors.extend(overlay.clashing.iter().map(|rel| (rel.clone(), live::CLASHES.to_string())));
+                errors.extend(overlay.unread_themes.iter().map(|rel| (rel.clone(), live::UNREAD_THEME.to_string())));
             }
             drop(overlay);
             let blocked = blocks::blocked(&root, &t.id);

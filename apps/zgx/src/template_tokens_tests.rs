@@ -304,3 +304,114 @@ fn the_menus_tint_stays_the_template_s_as_the_material_and_scheme_change() {
     assert_eq!(p.run("light")["menu.bg"], "#b2b2b2ff");
     assert_eq!(p.run("solid")["menu.bg"], "#a1a1a1ff");
 }
+
+// ── A template's theme files ────────────────────────────────────────────────
+
+/// What the dark scheme shows of two tokens Zeron's theme file sets, the
+/// selected wash (one a palette makes too) and a tab's: on template `id`,
+/// with `library` (the host's list, a palette you chose in it) if given.
+fn theme_seen(t: &Path, id: &str, library: Option<&str>) -> serde_json::Value {
+    const PROBE: &str = r#"
+local ds = require("@ds")
+ds.setup()
+ui.theme.follow_system(false)
+ui.theme.current:set("theme-dark")
+local seen = ui.state("theme_seen", {})
+ui.effect(function()
+	ui.theme.current:get()
+	seen:set({ flat = tostring(ui.theme.get("zeron.selected.flat.bg")), tab = tostring(ui.theme.get("zeron.tab.selected")) })
+end)
+return ui.column { ui.text { "probe" } }
+"#;
+    live::compose(t, id, &Default::default(), false).unwrap();
+    let entry = t.join(live::LIVE).join("theme_probe.luau");
+    std::fs::write(&entry, PROBE).unwrap();
+    let library = library.and_then(zgx_script::Value::from_json);
+    let app = TestApp::new(move |runtime| {
+        let host = ScriptHost::new(runtime, &entry);
+        if let Some(library) = library {
+            host.shared("themes.library", library);
+        }
+        host
+    });
+    app.frames(4);
+    assert!(app.error().is_none(), "{id}: {:?}", app.error());
+    app.host
+        .states()
+        .into_iter()
+        .find(|(n, _)| n.ends_with("theme_seen"))
+        .map_or(serde_json::Value::Null, |(_, v)| serde_json::from_str(&v.to_json()).unwrap_or_default())
+}
+
+/// A template's own palette (its theme.luau), light text on near black.
+const ITS_PALETTE: &str = r##"return {
+	name = "Its own",
+	dark = {
+		id = "its-dark", name = "Its own", kind = "dark",
+		background = "#101010", raised = "#1c1c1c", text = "#f0f0f0", muted = "#a0a0a0", faint = "#606060",
+		accent = "#3366ff", danger = "#ff3333", warning = "#ffaa00", success = "#33cc66",
+		syntax = { "#777777", "#cc66ff", "#66cc66", "#ffaa44", "#44aaff", "#ffcc44", "#66ccff", "#eeeeee", "#999999", "#ff6688", "#ffbb66", "#ff4444" },
+	},
+}"##;
+
+/// A template's theme file naming one token.
+const ONE_TOKEN: &str = r##"{
+	// Only what it changes.
+	"name": "zeron-dark",
+	"type": "dark",
+	"tokens": { "zeron": { "selected": { "flat": { "bg": "#123456" } } } }
+}"##;
+
+/// Zeron's own theme file, the template's own palette, the template's theme
+/// file, a palette you chose, each over the one before: what a template's
+/// file names wins over what its own palette makes of it; a palette you
+/// chose wins over the template; a token the file doesn't name is what's
+/// under it (its palette's, else Zeron's, those added since it was copied
+/// too); with no template, nothing changes.
+#[test]
+fn a_template_s_theme_file_sits_over_its_palette_and_under_yours() {
+    let t = templates("theme-order");
+    let zeron = theme_seen(&t, live::BUILTIN, None);
+    assert_eq!(zeron["tab"], "#ebebeb1a", "{zeron}");
+
+    // Its own palette alone: the palette's wash.
+    let dir = t.join("palette-only");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("zeron-template.json"), r#"{"id":"palette-only","name":"palette-only"}"#).unwrap();
+    std::fs::write(dir.join("theme.luau"), ITS_PALETTE).unwrap();
+    let palette = theme_seen(&t, "palette-only", None);
+    assert_ne!(palette["flat"], zeron["flat"], "its palette makes the wash: {palette}");
+
+    // With its theme file naming the wash: the file wins, the rest Zeron's.
+    let dir = t.join("both");
+    std::fs::create_dir_all(dir.join("ds/themes")).unwrap();
+    std::fs::write(dir.join("zeron-template.json"), r#"{"id":"both","name":"both"}"#).unwrap();
+    std::fs::write(dir.join("theme.luau"), ITS_PALETTE).unwrap();
+    std::fs::write(dir.join("ds/themes/zeron-dark.json"), ONE_TOKEN).unwrap();
+    let both = theme_seen(&t, "both", None);
+    assert_eq!(both["flat"], "#123456ff", "its file over its palette: {both}");
+    assert_eq!(both["tab"], palette["tab"], "what it doesn't name is its palette's, as without the file");
+
+    // A palette you chose: over the template's file.
+    let library = r##"{ "state": "ready", "entries": [], "chosen": { "dark": "yours" }, "list": [
+        { "id": "yours", "name": "Yours", "kind": "dark", "background": "#000000", "raised": "#111111", "text": "#00ff00",
+          "muted": "#00aa00", "faint": "#005500", "accent": "#ff00ff", "danger": "#ff0000", "warning": "#ffff00", "success": "#00ffff",
+          "syntax": ["#777777", "#cc66ff", "#66cc66", "#ffaa44", "#44aaff", "#ffcc44", "#66ccff", "#eeeeee", "#999999", "#ff6688", "#ffbb66", "#ff4444"] } ] }"##;
+    let yours = theme_seen(&t, "both", Some(library));
+    assert_ne!(yours["flat"], "#123456ff", "yours over the template: {yours}");
+    assert_ne!(yours["flat"], palette["flat"]);
+
+    // An old full copy of Zeron's file, missing what was added since.
+    let own = std::fs::read_to_string(ui_dir().join("ds/themes/zeron-dark.json")).unwrap();
+    let line = own.lines().find(|l| l.trim_start().starts_with("\"tab\": {")).unwrap();
+    let old = own.replacen(line, "", 1);
+    assert_ne!(old, own);
+    let dir = t.join("old-copy");
+    std::fs::create_dir_all(dir.join("ds/themes")).unwrap();
+    std::fs::write(dir.join("zeron-template.json"), r#"{"id":"old-copy","name":"old-copy"}"#).unwrap();
+    std::fs::write(dir.join("ds/themes/zeron-dark.json"), old).unwrap();
+    assert_eq!(theme_seen(&t, "old-copy", None)["tab"], zeron["tab"], "what it lacks is Zeron's");
+
+    // No template: as before.
+    assert_eq!(theme_seen(&t, live::BUILTIN, None), zeron);
+}

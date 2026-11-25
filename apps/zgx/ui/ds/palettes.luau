@@ -64,7 +64,7 @@ export type Palette = {
 -- A theme's palettes, one per scheme it has (a template's theme.luau).
 export type Family = { name: string?, dark: Palette?, light: Palette? }
 -- What each scheme wears: a palette, or nil for Zeron's.
-export type Slots = { dark: Palette?, light: Palette? }
+export type Slots = { dark: Palette?, light: Palette?, chosen: { dark: boolean, light: boolean }? }
 
 -- An ink `tokens` moved to keep it legible: its role, the source's colour,
 -- what it wears, and the contrast it was held to.
@@ -467,12 +467,15 @@ M.scheme = { dark = "theme-dark", light = "theme-light" }
 -- else nil, Zeron's. (Read tracked: it follows the host's list.)
 function M.slots(own: Family?): Slots
 	local chosen = M.library():get().chosen or {}
-	local out: { [string]: Palette? } = {}
+	local out: { [string]: any } = { chosen = {} }
 	for _, kind in { "light", "dark" } do
 		local p = M.find(chosen[kind])
 		if p and p.kind ~= kind then
 			p = nil
 		end
+		-- (Whether it's yours: a palette you chose sits over the template's
+		-- own theme file, the template's own palette under it, `wear`.)
+		out.chosen[kind] = p ~= nil
 		if not p and type(own) == "table" and type((own :: any)[kind]) == "table" then
 			p = (own :: any)[kind]
 		end
@@ -502,13 +505,21 @@ local worn: { [string]: string } = {}
 -- wearing Zeron's own takes its terminal's colours from Zeron's palette
 -- (the host's list) once that's there; with no slots (a plugin, lent the
 -- design system) nothing is looked up.
+--
+-- What each wears, each over the one before, a token set later winning:
+-- Zeron's theme file (zeron-*), the template's own palette or Zeron's
+-- (palette-*), the template's own theme file (template-*, ds/themes: what
+-- it names outright beats what its palette makes), then a palette you chose
+-- (theme-*, over the template). One you didn't choose sits in palette-*,
+-- and theme-* adds nothing.
 function M.wear(slots: Slots?): { dark: string, light: string }
 	for _, kind: any in { "dark", "light" } do
 		local p = if slots then (slots :: any)[kind] :: Palette? else nil
 		if slots and p == nil then
 			p = M.find(`zeron-{kind}`)
 		end
-		local said = signature(p)
+		local yours = slots ~= nil and (slots :: any).chosen ~= nil and (slots :: any).chosen[kind] == true
+		local said = `{signature(p)}|{yours}|{slots ~= nil}`
 		if worn[kind] ~= said then
 			worn[kind] = said
 			-- (No tokens at all for Zeron's: an empty table isn't an object.)
@@ -518,12 +529,27 @@ function M.wear(slots: Slots?): { dark: string, light: string }
 				own.kind = kind
 				tokens = M.tokens(own)
 			end
-			ui.theme.register {
-				name = (M.scheme :: any)[kind],
-				type = kind,
-				extends = `zeron-{kind}`,
-				tokens = tokens,
-			}
+			if slots == nil then
+				ui.theme.register {
+					name = (M.scheme :: any)[kind],
+					type = kind,
+					extends = `zeron-{kind}`,
+					tokens = tokens,
+				}
+			else
+				ui.theme.register {
+					name = `palette-{kind}`,
+					type = kind,
+					extends = `zeron-{kind}`,
+					tokens = if yours then nil else tokens,
+				}
+				ui.theme.register {
+					name = (M.scheme :: any)[kind],
+					type = kind,
+					extends = `template-{kind}`,
+					tokens = if yours then tokens else nil,
+				}
+			end
 		end
 	end
 	return { dark = M.scheme.dark, light = M.scheme.light }

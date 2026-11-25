@@ -1,0 +1,11 @@
+{
+	// A template's own theme file for the dark scheme: where Zeron lays a
+	// template's ds/themes/zeron-dark.json, renamed and set over the palette it
+	// wears (palette-dark, ds/palettes.luau), so a token it names wins over
+	// what the palette makes of it and over Zeron's file, and any it doesn't
+	// name stays theirs. With no template, this: nothing.
+	"name": "template-dark",
+	"type": "dark",
+	"extends": "palette-dark",
+	"tokens": {}
+}
