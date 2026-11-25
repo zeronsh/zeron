@@ -4005,7 +4005,7 @@
       "needs_person": "它已经安装。只有你本人能在 Zeron 中更新它。",
       "store_unreachable": "Zeron 暂时无法连接插件商店。请稍后再试。",
       "not_in_store": "插件商店里没有这个插件或这个版本。",
-      "store_mismatch": "收到的内容与插件商店审核过的不一致，所以没有安装。",
+      "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
       "store_error": "无法读取插件商店的回应。请稍后再试。",
       "signed_out": "需要先登录 Zeron。",
       "review": "发布需要在 Zeron 或命令行中对插件当前状态做一次检查。请重新检查。",
@@ -4546,7 +4546,13 @@
       "taken_down": "Zeron 已将这个版本下架，无法安装。",
       "not_in_store": "这个版本已不在模板商店中。",
       "own_words": "它自己的说明",
-      "version": "版本 {version}"
+      "version": "版本 {version}",
+      "instead": "这会用 {to} 替换 {from}，Zeron 已验证该版本。",
+      "instead_older": "这会用较旧的版本 {to} 替换 {from}，Zeron 已验证该版本。",
+      "instead_unknown": "这会用 {to} 替换你现有的版本，Zeron 已验证该版本。",
+      "instead_plain": "这会用 {to} 替换 {from}。",
+      "instead_older_plain": "这会用较旧的版本 {to} 替换 {from}。",
+      "instead_unknown_plain": "这会用 {to} 替换你现有的版本。"
     },
     "store": {
       "search": "搜索模板",
@@ -4620,6 +4626,12 @@
         },
         "missing_readme": "在它的文件夹里写好 README.md：这是模板在商店里的页面。"
       }
+    },
+    "failure": {
+      "not_in_store": "模板商店里没有这个模板或这个版本。",
+      "store_mismatch": "收到的内容与商店记录的不一致，所以没有安装。",
+      "not_verified": "Zeron 尚未验证这个版本，所以不能改为安装它。",
+      "needs_person": "只有你本人能在 Zeron 中从商店安装或更新模板。"
     }
   },
   "themes": {

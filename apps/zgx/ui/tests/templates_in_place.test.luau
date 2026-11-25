@@ -356,3 +356,13 @@ test("a store template running a version the store hasn't verified says so on it
 	expect(app:tree("#template-midnight-2")).never.to_contain("hasn't verified")
 	expect(app:tree("#template-hot-pink")).never.to_contain("hasn't verified")
 end)
+
+test("the store's refusal of a template says it in a template's words", function()
+	local app = open()
+	app:command("failure_not_in_store")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("This template, or this version of it, isn't in the template store.")
+	app:command("failure_other")
+	app:frames(4)
+	expect(app:state("templates_said_failure")).to_be("Something else")
+end)

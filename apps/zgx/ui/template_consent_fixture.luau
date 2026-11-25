@@ -57,6 +57,21 @@ local PACKAGES: { [string]: any } = {
 		pending = "midnight-5", id = "midnight", name = "Midnight", version = "1.0.0-verified", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-5",
 		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false },
 	},
+	instead = {
+		pending = "midnight-6", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-6",
+		from = { kind = "store", replaced = { version = "1.3.0", older = true } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+		update_of = "midnight", instead = true,
+	},
+	instead_withdrawn = {
+		pending = "midnight-6", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-6",
+		from = { kind = "store", replaced = { version = "1.3.0", older = true } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = false },
+		update_of = "midnight", instead = true, store_changed = { unverified = true },
+	},
+	instead_unknown = {
+		pending = "midnight-7", id = "midnight", name = "Midnight", version = "1.4.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-7",
+		from = { kind = "store", replaced = { version = "", older = false } }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true },
+		update_of = "midnight", instead = true,
+	},
 	-- (The longest name the host lets through.)
 	long = {
 		pending = "long-1", id = "midnight", name = string.rep("W", 64), version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "long-1",
@@ -121,7 +136,7 @@ ui.actions {
 
 ui.command { id = "ledger", title = "Show Ledger", run = function() show("ledger") end }
 ui.command { id = "mystery", title = "Show Mystery", run = function() show("mystery") end }
-for _, id in { "store", "token", "link", "worded", "long", "changed", "plain_update", "store_said", "store_verified" } do
+for _, id in { "store", "token", "link", "instead", "instead_withdrawn", "instead_unknown", "worded", "long", "changed", "plain_update", "store_said", "store_verified" } do
 	ui.command { id = id, title = id, run = function() show(id) end }
 end
 for _, name in { "en", "zh-Hans" } do

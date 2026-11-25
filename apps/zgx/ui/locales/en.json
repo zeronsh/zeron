@@ -4005,7 +4005,7 @@
       "needs_person": "It's installed already. Only you can update it, here in Zeron.",
       "store_unreachable": "Zeron can't reach the plugin store right now. Try again in a moment.",
       "not_in_store": "This plugin, or this version of it, isn't in the plugin store.",
-      "store_mismatch": "What came isn't what the plugin store reviewed, so it wasn't installed.",
+      "store_mismatch": "What came isn't what the store's record says, so it wasn't installed.",
       "store_error": "The plugin store's answer couldn't be read. Try again in a moment.",
       "signed_out": "This needs you signed in to Zeron.",
       "review": "Publishing needs a check made in Zeron or its command line for the plugin as it is. Check it again.",
@@ -4546,7 +4546,13 @@
       "taken_down": "Zeron took this version down, so it can't be installed.",
       "not_in_store": "This version isn't in the template store anymore.",
       "own_words": "In its own words",
-      "version": "Version {version}"
+      "version": "Version {version}",
+      "instead": "This replaces {from} with {to}, which Zeron has verified.",
+      "instead_older": "This replaces {from} with {to}, an older version, which Zeron has verified.",
+      "instead_unknown": "This replaces the version you have with {to}, which Zeron has verified.",
+      "instead_plain": "This replaces {from} with {to}.",
+      "instead_older_plain": "This replaces {from} with {to}, an older version.",
+      "instead_unknown_plain": "This replaces the version you have with {to}."
     },
     "store": {
       "search": "Search templates",
@@ -4620,6 +4626,12 @@
         },
         "missing_readme": "Write README.md in its folder: it's the template's page in the store."
       }
+    },
+    "failure": {
+      "not_in_store": "This template, or this version of it, isn't in the template store.",
+      "store_mismatch": "What came isn't what the store's record says, so it wasn't installed.",
+      "not_verified": "Zeron hasn't verified this version, so it can't be taken instead.",
+      "needs_person": "Only you can install or update a template from the store, here in Zeron."
     }
   },
   "themes": {
