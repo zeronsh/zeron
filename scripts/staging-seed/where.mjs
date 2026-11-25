@@ -3,8 +3,14 @@
 // the operator allows by name, in SEED_ALLOWED_EDGES (addresses, separated by
 // commas), and never production's, allowed or not.
 
-/** Production's hosts: its edge, and the site in front of it. */
-const PRODUCTION = new Set(["zeron.sh", "edge.zeron.sh", "www.zeron.sh"]);
+/** Whether `host` may be production's: zeron.sh and every host under it, and
+ * every workers.dev name, but those with "staging" as a word. (A host's last
+ * dot names the same one.) */
+const production = (host) => {
+  const name = host.toLowerCase().replace(/\.+$/, "");
+  const under = ["zeron.sh", "workers.dev"].some((domain) => name === domain || name.endsWith(`.${domain}`));
+  return under && !name.split(/[.-]/).includes("staging");
+};
 
 const originOf = (text) => {
   let url;
@@ -22,8 +28,7 @@ const originOf = (text) => {
 export const whyNotSeeded = (edge, allowed) => {
   const url = edge === undefined ? undefined : originOf(edge);
   if (!url) return "give --edge, an address: its scheme and host alone";
-  // (A host's last dot names the same one.)
-  if (PRODUCTION.has(url.hostname.replace(/\.+$/, ""))) return `${url.hostname} is production: a seed never writes to it`;
+  if (production(url.hostname)) return `${url.hostname} is production: a seed never writes to it`;
   const named = String(allowed ?? "").split(",").map((text) => originOf(text.trim())?.origin);
   if (!named.includes(url.origin)) return `${url.origin} isn't among SEED_ALLOWED_EDGES`;
   return undefined;

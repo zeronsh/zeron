@@ -71,7 +71,8 @@ let edge;
     !refused("https://one.example.com") && !refused("https://one.example.com/") && !refused("http://127.0.0.1:9") &&
       [undefined, "", "nonsense", "http://one.example.com", "https://one.example.com:8443", "https://one.example.com/x", "https://a:b@one.example.com", "https://one.example.com.evil.example", "https://two.example.com", "http://127.0.0.1:8", "ftp://one.example.com"].every((e) => refused(e)) &&
       ["", undefined, ",", "one.example.com", "https://*.example.com"].every((allowed) => refused("https://one.example.com", allowed === undefined ? null : allowed)));
-  check("and never to production's, even allowed", ["https://zeron.sh", "https://edge.zeron.sh", "https://EDGE.zeron.sh", "https://edge.zeron.sh.", "https://www.zeron.sh"].every((e) => refused(e, `${e},https://edge.zeron.sh,https://zeron.sh`)));
+  check("and never to production's, even allowed", ["https://zeron.sh", "https://edge.zeron.sh", "https://EDGE.zeron.sh", "https://edge.zeron.sh.", "https://www.zeron.sh", "https://comet.zeron.sh", "https://edge.comet.zeron.sh", "https://x.any.workers.dev", "https://notstaging.zeron.sh", "https://stagingx.any.workers.dev"].every((e) => refused(e, e)) &&
+      ["https://edge.zeron.sh.example.com", "https://notzeron.sh", "https://x-staging.any.workers.dev"].every((e) => !refused(e, e)));
   const jwt = (iss) => `x.${Buffer.from(JSON.stringify({ iss })).toString("base64url")}.y`;
   check("and a Zeron signed in to another WorkOS", whyNotItsSession(jwt("https://w/client_a"), "client_a") === undefined && [whyNotItsSession(jwt("https://w/client_ab"), "client_a"), whyNotItsSession(jwt("https://w/client_a"), undefined), whyNotItsSession("", "client_a")].every((w) => typeof w === "string"));
 }
