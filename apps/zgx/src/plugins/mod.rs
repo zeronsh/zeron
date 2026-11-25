@@ -831,13 +831,18 @@ pub(crate) async fn lay_down(
         live::Judged::forget(at);
     }
     let at = root.to_path_buf();
-    let laying = off_thread(move || live::compose_from(&at, &id, &source, &failed, whole).map_err(|e| e.to_string()));
+    let laying = off_thread(move || {
+        let (changed, laid_now) = live::compose_from(&at, &id, &source, &failed, whole).map_err(|e| e.to_string())?;
+        let as_laid = live::laid_digest(&at, &laid_now);
+        Ok::<_, String>((changed, laid_now, as_laid))
+    });
     match laying.await {
-        Some(Ok((changed, laid_now))) => {
+        Some(Ok((changed, laid_now, as_laid))) => {
             *overlay.borrow_mut() = laid_now;
             *laid.borrow_mut() = then;
-            // (How what's laid now was judged, with it; and kept, for a launch
-            // that runs it as it is.)
+            // (How what's laid now was judged, with it, and its files as laid;
+            // kept, for a launch that runs it as it is.)
+            let judged = judged.map(|j| live::Judged { laid: as_laid, ..j });
             if let (Some(judged), Some(at)) = (&judged, &record) {
                 let _ = judged.write(at, root);
             }
@@ -890,14 +895,19 @@ pub fn prepare_live() -> PathBuf {
     let stamp = live::LaunchStamp::now(&ui, &root, &id);
     let record = preview::judged_record();
     let recorded = record.as_ref().and_then(|at| live::Judged::read(at, &root)).filter(|j| j.id == id);
-    if stamp.still_laid(&ui, &root) && (id == live::BUILTIN || recorded.is_some()) {
-        gate(recorded.as_ref());
-        LIVE_JUDGED.with(|j| *j.borrow_mut() = recorded);
+    if stamp.still_laid(&ui, &root) {
+        // (And only while the template's files in `.live` are still as they
+        // were laid: one written there since, by anyone, lays it all again.)
         let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
-        LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
-        let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
-        LIVE_LAID.with(|l| *l.borrow_mut() = laid);
-        return root.join(live::LIVE).join("app.luau");
+        let as_laid = recorded.as_ref().is_some_and(|j| live::laid_digest(&root, &overlay) == j.laid);
+        if id == live::BUILTIN || as_laid {
+            gate(recorded.as_ref());
+            LIVE_JUDGED.with(|j| *j.borrow_mut() = recorded);
+            LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
+            let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
+            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
+            return root.join(live::LIVE).join("app.luau");
+        }
     }
     if let Err(error) = live::sync_zeron(&ui, &root) {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
@@ -923,7 +933,7 @@ pub fn prepare_live() -> PathBuf {
     let judged = match &copy {
         Some((at, plain)) => {
             let (official, digest) = preview::judged(&id, at, *plain);
-            Some(live::Judged { id: id.clone(), official, digest })
+            Some(live::Judged { id: id.clone(), official, digest, ..Default::default() })
         }
         None => Some(live::Judged { id: id.clone(), ..Default::default() }),
     };
@@ -934,6 +944,7 @@ pub fn prepare_live() -> PathBuf {
     let source = copy.map_or_else(|| root.join(&id), |(at, _)| at);
     match live::compose_from(&root, &id, &source, &Default::default(), false) {
         Ok((_, overlay)) => {
+            let judged = judged.map(|j| live::Judged { laid: live::laid_digest(&root, &overlay), ..j });
             if let (Some(judged), Some(at)) = (&judged, &record) {
                 let _ = judged.write(at, &root);
             }
@@ -1814,7 +1825,7 @@ impl Bridge {
         let judged = match &copy {
             Some((at, plain)) => {
                 let (at, plain, of) = (at.clone(), *plain, id.clone());
-                off_thread(move || preview::judged(&of, &at, plain)).await.map(|(official, digest)| live::Judged { id: id.clone(), official, digest })
+                off_thread(move || preview::judged(&of, &at, plain)).await.map(|(official, digest)| live::Judged { id: id.clone(), official, digest, ..Default::default() })
             }
             // (Nothing to lay: what was laid, judged then.)
             None if !compose => self.trust.borrow().clone().filter(|j| j.id == id),
