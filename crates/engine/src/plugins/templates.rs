@@ -170,16 +170,19 @@ pub(super) fn template_dir(dir: &Path, id: &str) -> Option<PathBuf> {
     is_real_dir(&path).then_some(path)
 }
 
-/// Every installed template id, unsorted.
+/// Every installed template id, sorted.
 pub(super) fn installed(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries
+    let mut ids: Vec<String> = entries
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|id| template_dir(dir, id).is_some())
-        .collect()
+        .collect();
+    // (Not as the disk happens to list them.)
+    ids.sort();
+    ids
 }
 
 /// The app files under `root`, as relative paths (`/`-separated), sorted:
@@ -454,6 +457,12 @@ fn entry(
         }
     }
     out
+}
+
+/// The row of template `id`, as the store's pages say it.
+pub(super) fn installed_row(dir: &Path, id: &str) -> Value {
+    let zeron: Manifest = zeron_dir(dir).map(|zeron| read_json(&zeron.join(MANIFEST))).unwrap_or_default();
+    entry(dir, id, &dir.join(id), &active(dir), &zeron.zeron_version.unwrap_or_default())
 }
 
 /// `ListTemplates`: `{dir, active, templates: [..]}`, Zeron's first, then by

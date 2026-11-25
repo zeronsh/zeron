@@ -164,6 +164,14 @@ impl Package {
     }
 }
 
+/// Held while a package is put where a template is, from reading what's
+/// there: one allowed as another's updated never lands over what it wasn't
+/// allowed over. (File work alone: nothing waits on the network under it.)
+fn changing() -> std::sync::MutexGuard<'static, ()> {
+    static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// `ExportTemplate`: template `id` as a signed package at `out` (a
 /// `.zeron-template` file outside the templates folder; replaced if there).
 /// `{id, path, files, key}`.
@@ -509,6 +517,7 @@ pub fn import(dir: &Path, path: &Path, author_of: impl Fn(&str) -> Author) -> Re
 /// A package read and verified (from a file, or a link: `source`), as
 /// `import` does with it: yours installs, anyone else's waits.
 pub fn import_package(dir: &Path, package: Package, from: &str, source: Source, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
+    let _held = changing();
     super::template_blocks::refuse_package(dir, &package.content_hash, None)?;
     let author = package.author(&author_of);
     if author == Author::You {
@@ -538,12 +547,13 @@ fn valid_pending(name: &str) -> bool {
 /// Keeps the package (as read: it's checked again when allowed) and what
 /// to show of it, under `.pending/`.
 fn stage(dir: &Path, package: &Package, from: &str, source: &Source) -> Result<String, String> {
-    stage_as(dir, package, from, source, None)
+    stage_as(dir, package, from, source, None, false)
 }
 
 /// `stage`, as an update of installed template `update_of` when it is one
 /// (allowed, it replaces that template in place: `decide`).
-fn stage_as(dir: &Path, package: &Package, from: &str, source: &Source, update_of: Option<&str>) -> Result<String, String> {
+/// (`instead`: though it's older: `stage_from_store`).
+fn stage_as(dir: &Path, package: &Package, from: &str, source: &Source, update_of: Option<&str>, instead: bool) -> Result<String, String> {
     let pending_dir = dir.join(PENDING);
     std::fs::create_dir_all(&pending_dir).map_err(|e| format!("Couldn't keep it for you to allow: {e}"))?;
     let stamp = super::now_secs();
@@ -563,6 +573,9 @@ fn stage_as(dir: &Path, package: &Package, from: &str, source: &Source, update_o
     about["origin"] = json!(source);
     if let Some(id) = update_of {
         about["update_of"] = json!(id);
+    }
+    if instead {
+        about["instead"] = json!(true);
     }
     templates::write_atomic(&pending_dir, &format!("{name}.json"), &signing::pretty(&about))?;
     Ok(name)
@@ -611,6 +624,7 @@ fn came_from(value: &Value) -> Option<Source> {
 /// `source` with its words bounded, to be shown.
 fn bounded(source: &Source) -> Source {
     let mut source = source.clone();
+    source.kind = listing::shown(&source.kind, 16);
     for (text, max) in [(&mut source.url, MAX_SHOWN_PATH), (&mut source.git_ref, MAX_SHOWN_PATH)] {
         if let Some(text) = text {
             *text = listing::shown(text, max);
@@ -622,6 +636,12 @@ fn bounded(source: &Source) -> Source {
         store.publisher_id = listing::shown(&store.publisher_id, MAX_SHOWN_PUBLISHER);
         if let Some(other) = &mut store.verified_alternative {
             other.version = listing::shown(&other.version, version::MAX_LEN);
+            other.notes = other.notes.chars().take(listing::MAX_NOTES_BYTES).collect();
+            // (A template asks for nothing.)
+            (other.added, other.removed) = (Vec::new(), Vec::new());
+        }
+        if let Some(replaced) = &mut store.replaced {
+            replaced.version = listing::shown(&replaced.version, version::MAX_LEN);
         }
     }
     source
@@ -629,9 +649,14 @@ fn bounded(source: &Source) -> Source {
 
 /// One waiting package, as [`pending`] lists it.
 fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
+    waiting_of(dir, name, about, package::read(&dir.join(PENDING).join(format!("{name}.{EXTENSION}")), &WORDS).ok()?)
+}
+
+/// [`waiting`], its package's bytes read.
+fn waiting_of(dir: &Path, name: &str, about: &Value, raw: Vec<u8>) -> Option<Value> {
     let source = came_from(&about["origin"]);
     let store = source.as_ref().and_then(Source::store);
-    let package = read_waiting(&dir.join(PENDING).join(format!("{name}.{EXTENSION}")), about, store).ok().filter(|p| about["key"] == json!(p.key))?;
+    let package = read_waiting(raw, about, store).ok().filter(|p| about["key"] == json!(p.key))?;
     let mut out = package.about();
     out["pending"] = json!(name);
     out["digest"] = json!(package.digest());
@@ -670,6 +695,10 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
         if edited(&folder) == Some(true) {
             out["replaces_edits"] = json!(true);
         }
+        // (An older, verified one over what's here, by the person's choice.)
+        if about["instead"] == true {
+            out["instead"] = json!(true);
+        }
     } else {
         // (Of its id, from anywhere: it comes in beside them.)
         let others: Vec<Value> = templates::installed(dir)
@@ -694,6 +723,17 @@ fn waiting(dir: &Path, name: &str, about: &Value) -> Option<Value> {
 /// A record's publisher, as it's shown.
 pub fn shown_publisher(store: &install::StoreSource) -> String {
     listing::shown(&store.publisher, MAX_SHOWN_PUBLISHER)
+}
+
+/// Each template here from the store: its folder, and its record.
+pub fn from_store(dir: &Path) -> Vec<(String, install::StoreSource)> {
+    templates::installed(dir)
+        .into_iter()
+        .filter_map(|id| {
+            let store = came_from(&imported(&dir.join(&id))?["source"])?.store?;
+            Some((id, store))
+        })
+        .collect()
 }
 
 /// The most of a path or a link, and of a publisher's name, that's shown.
@@ -861,6 +901,8 @@ fn pending_paths(dir: &Path, pending: &str) -> Result<(PathBuf, PathBuf), String
 /// A waiting package from the store: the record it was fetched by, and what
 /// it is.
 pub struct FromStore {
+    /// The folder it's an update of, if it's one.
+    pub update_of: Option<String>,
     pub store: install::StoreSource,
     pub version: String,
     pub hash: String,
@@ -874,8 +916,111 @@ pub fn waiting_from_store(dir: &Path, pending: &str) -> Result<Option<FromStore>
     let Ok((about_path, package_path)) = pending_paths(dir, pending) else { return Ok(None) };
     let about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let Some(store) = came_from(&about["origin"]).and_then(|s| s.store) else { return Ok(None) };
-    let package = read_waiting(&package_path, &about, Some(&store))?;
-    Ok(Some(FromStore { version: package.version(), hash: package.hash, content_hash: package.content_hash, store }))
+    let package = read_waiting(package::read(&package_path, &WORDS)?, &about, Some(&store))?;
+    let update_of = about["update_of"].as_str().map(str::to_owned);
+    Ok(Some(FromStore { update_of, version: package.version(), hash: package.hash, content_hash: package.content_hash, store }))
+}
+
+/// A package the store served (`source`: the record it was fetched by), to
+/// wait for you: never installed here, whosever it is. The one that's waiting
+/// already, when it's that very package of that record's. Over an earlier
+/// version of it that's here (from the store, under whatever folder's name),
+/// as an update of that one; beside anything else of its id. As [`pending`]
+/// lists it. `at`: which one, when it's for one of them (an update's
+/// alternative).
+/// `instead`: the verified version the person chose over an unverified one
+/// (its sheet's "instead"), which may be older than that one.
+pub fn stage_from_store(dir: &Path, package: &Package, source: Source, at: Option<&str>, instead: bool) -> Result<Value, String> {
+    let _held = changing();
+    stage_held(dir, package, source, at, instead)
+}
+
+/// [`stage_from_store`], [`changing`] held.
+fn stage_held(dir: &Path, package: &Package, mut source: Source, at: Option<&str>, instead: bool) -> Result<Value, String> {
+    let store = source.store().cloned().ok_or(NOT_CHECKED)?;
+    let identity = super::template_blocks::Identity { id: store.id.clone(), version: package.version(), hash: store.hash.clone() };
+    super::template_blocks::refuse_package(dir, &package.content_hash, Some(&identity))?;
+    package.compatible()?;
+    let place = place_of(dir, &store.id, at);
+    let version = package.version();
+    let mut older = false;
+    if let Some(place) = &place {
+        if !install::newer_by_precedence(&version, &place.version) {
+            older = instead && store.verified && place.takes_instead(&version);
+            if !older {
+                return Err(install::not_newer(&version, &place.version));
+            }
+        }
+        if let Some(store) = source.store.as_mut() {
+            store.replaced = Some(install::ReplacedVersion { version: place.version.clone(), verified: place.verified });
+        }
+    }
+    let update_of = place.as_ref().map(|place| place.folder.clone());
+    // (The very same: of one record, over one version of one folder, chosen so.)
+    let waiting_already = pending(dir).into_iter().find(|item| {
+        item["hash"] == package.hash.as_str()
+            && item["store"]["id"] == store.id.as_str()
+            && item["update_of"].as_str() == update_of.as_deref()
+            && item["from"]["replaced"]["version"].as_str() == place.as_ref().map(|place| place.version.as_str())
+            && (item["instead"] == true) == older
+    });
+    let name = match waiting_already.as_ref().and_then(|item| item["pending"].as_str()) {
+        Some(name) => {
+            keep_record(dir, name, source.store().ok_or(NOT_CHECKED)?)?;
+            name.to_owned()
+        }
+        None => stage_as(dir, package, install::STORE, &source, update_of.as_deref(), older)?,
+    };
+    let mut out = pending(dir).into_iter().find(|item| item["pending"] == name.as_str()).ok_or("Couldn't keep it for you to allow")?;
+    out["needs_consent"] = json!(true);
+    Ok(out)
+}
+
+/// Where a store template goes over an earlier version of it here.
+pub struct Place {
+    pub folder: String,
+    pub version: String,
+    pub verified: bool,
+}
+
+impl Place {
+    /// Whether a verified `version` may go over what's here though it isn't
+    /// newer, by the person's own choice: over an unverified one, another.
+    pub fn takes_instead(&self, version: &str) -> bool {
+        !self.verified && install::newer_by_precedence(&self.version, version)
+    }
+}
+
+/// The folder store template `id` is in here (`at`: that one, if it's it):
+/// the one of its id before a copy of it.
+pub fn place_of(dir: &Path, id: &str, at: Option<&str>) -> Option<Place> {
+    let here = installed_from_store(dir, at).into_iter().filter(|t| t.store.id == id);
+    here.min_by_key(|t| t.id != id).map(|t| Place { version: t.version, verified: t.store.verified, folder: t.id })
+}
+
+/// The waiting package `pending`, dropped.
+pub fn drop_waiting(dir: &Path, pending: &str) {
+    if let Ok((about, package)) = pending_paths(dir, pending) {
+        let _ = std::fs::remove_file(package);
+        let _ = std::fs::remove_file(about);
+    }
+}
+
+/// What waits and can't be allowed (its package, its record or its file
+/// beside it isn't what it was), read and found so, dropped: it isn't listed,
+/// so nothing else would.
+pub fn drop_unusable(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join(PENDING)) else { return };
+    for name in entries.flatten().filter_map(|e| e.file_name().into_string().ok()?.strip_suffix(".json").map(str::to_owned)) {
+        let Ok((about, package)) = pending_paths(dir, &name) else { continue };
+        // (Couldn't be read just now: kept, for the next time.)
+        let (Some(about), Ok(raw)) = (templates::read_regular(&about), package::read(&package, &WORDS)) else { continue };
+        let about: Value = serde_json::from_slice(&about).unwrap_or_default();
+        if about["pending"].as_str() != Some(name.as_str()) || waiting_of(dir, &name, &about, raw).is_none() {
+            tracing::info!(pending = %name, "templates: what waited can't be allowed any more; dropped");
+            drop_waiting(dir, &name);
+        }
+    }
 }
 
 /// The waiting store package `pending`'s record as the store has it now
@@ -884,7 +1029,7 @@ pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Res
     let (about_path, _) = pending_paths(dir, pending)?;
     let mut about: Value = templates::read_regular(&about_path).and_then(|b| serde_json::from_slice(&b).ok()).ok_or("What waits can't be read")?;
     let mut source = came_from(&about["origin"]).ok_or("What waits can't be read")?;
-    let Some(store) = source.store.as_mut() else { return Ok(()) };
+    let Some(store) = source.store.as_mut().filter(|s| same_item(s, now)) else { return Ok(()) };
     let was = store.clone();
     take_record(store, now);
     if *store == was {
@@ -892,6 +1037,12 @@ pub fn keep_record(dir: &Path, pending: &str, now: &install::StoreSource) -> Res
     }
     about["origin"] = json!(source);
     templates::write_atomic(&dir.join(PENDING), &format!("{pending}.json"), &signing::pretty(&about))
+}
+
+/// Whether two records are of one version: its id, its contents and its
+/// signer, which the store never changes.
+fn same_item(a: &install::StoreSource, b: &install::StoreSource) -> bool {
+    a.id == b.id && a.hash == b.hash && a.key == b.key
 }
 
 /// What a store's record says now that it may have said otherwise before.
@@ -912,6 +1063,7 @@ pub const NOT_CHECKED: &str = "Zeron couldn't check this with the store. Try aga
 /// installed. `now`: for one from the store, its record as the store has it
 /// now; none, or another's, isn't installed.
 pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&install::StoreSource>, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
+    let _held = changing();
     let (about_path, package_path) = pending_paths(dir, pending)?;
     let forget = || {
         let _ = std::fs::remove_file(&package_path);
@@ -925,12 +1077,14 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&i
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let mut source = came_from(&about["origin"]);
-    if let Some(store) = source.as_mut().and_then(|s| s.store.as_mut()) {
-        let now = now.filter(|n| n.id == store.id && n.hash == store.hash && n.key == store.key).ok_or(NOT_CHECKED)?;
-        take_record(store, now);
+    match (source.as_mut().and_then(|s| s.store.as_mut()), now) {
+        (None, None) => {}
+        (Some(store), Some(now)) if same_item(store, now) => take_record(store, now),
+        // (Not the store's as it was checked, or not checked as the store's.)
+        _ => return Err(NOT_CHECKED.into()),
     }
     let store = source.as_ref().and_then(Source::store).cloned();
-    let package = match read_waiting(&package_path, &about, store.as_ref()) {
+    let package = match package::read(&package_path, &WORDS).and_then(|raw| read_waiting(raw, &about, store.as_ref())) {
         Ok(package) => package,
         Err(error) => {
             forget();
@@ -965,17 +1119,35 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&i
             return Err("The new version is signed by someone else, so it won't be installed".into());
         }
         let was = installed["version"].as_str().unwrap_or("");
-        if !install::newer(&package.version(), was) {
-            return Err(install::not_newer(&package.version(), was));
+        let version = package.version();
+        let fits = match (was_from.as_ref().and_then(Source::store), &store) {
+            // (The verified version the person chose instead, over the very
+            // one its window says it replaces.)
+            (Some(before), Some(now)) => {
+                let place = Place { folder: of.to_owned(), version: was.to_owned(), verified: before.verified };
+                let instead = about["instead"] == true && now.verified && now.replaced.as_ref().is_some_and(|r| r.version == was);
+                install::newer_by_precedence(&version, was) || instead && place.takes_instead(&version)
+            }
+            _ => install::newer(&version, was),
+        };
+        if !fits {
+            return Err(install::not_newer(&version, was));
         }
         if let Some(source) = &mut source {
-            source.version = package.version();
+            source.version = version;
             source.installed_at = super::now_secs();
         }
         replace(dir, of, &folder, &package, &author, source.as_ref())?;
         forget();
         forget_found(dir, of);
         return Ok(json!({ "installed": of, "updated": of, "name": package.about()["name"], "author": author, "digest": package.digest() }));
+    }
+    // (Asked for twice before either was allowed: the other's here by now,
+    // and this one's an update of it, or older.)
+    if let Some(store) = &store
+        && place_of(dir, &store.id, None).is_some()
+    {
+        return Err("It's been installed from the store since this one waited. Ask for it again to update it.".into());
     }
     let id = install(dir, &package, &author, source.as_ref())?;
     forget();
@@ -985,9 +1157,9 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, now: Option<&i
 /// A waiting package, read and verified again: one the store served
 /// (`store`: the record it was fetched by) as its record says, unsigned only
 /// when that names no signer, and the very contents it vouched for.
-fn read_waiting(path: &Path, about: &Value, store: Option<&install::StoreSource>) -> Result<Package, String> {
-    let Some(store) = store else { return read(path) };
-    let package = parse_from_store(package::read(path, &WORDS)?, store.key.is_some())?;
+fn read_waiting(raw: Vec<u8>, about: &Value, store: Option<&install::StoreSource>) -> Result<Package, String> {
+    let Some(store) = store else { return parse(raw) };
+    let package = parse_from_store(raw, store.key.is_some())?;
     if package.content_hash != store.hash || package.key != store.key || about["id"].as_str() != Some(store.id.as_str()) || package.id() != store.id {
         return Err("What waited isn't what the store's record says, so it wasn't installed. Install it from the store again.".into());
     }
@@ -1203,6 +1375,10 @@ pub fn checkable(dir: &Path) -> Vec<(String, String, String, String, Source)> {
             let folder = templates::template_dir(dir, &id)?;
             let imported = imported(&folder)?;
             let source: Source = serde_json::from_value(imported["source"].clone()).ok()?;
+            // (The store's are asked about there alone: `Plugins::check_store_templates`.)
+            if source.kind == install::STORE {
+                return None;
+            }
             let name = templates::name(&folder, &id);
             Some((
                 id,
@@ -1222,8 +1398,13 @@ pub fn checkable(dir: &Path) -> Vec<(String, String, String, String, Source)> {
 /// the one installed, the same package as was found. `{updated, name,
 /// version, from}`.
 pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
+    let _held = changing();
     let folder = templates::template_dir(dir, id).ok_or_else(|| format!("There's no template {id}"))?;
     let imported = imported(&folder).ok_or("It wasn't installed from a package, so it has nothing to update from")?;
+    // (The store's is, by its record as it is now: `update_from_store`.)
+    if imported["source"]["kind"] == install::STORE {
+        return Err(NOT_CHECKED.into());
+    }
     let hash = imported["hash"].as_str().unwrap_or("");
     let found = found(dir, id, hash).ok_or("There's no update for it right now; check again")?;
     if let Some(refused) = found.refused {
@@ -1246,8 +1427,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
     // its listing files) is a new template to allow: it waits for you in
     // Zeron's own consent window, as someone else's does, and replaces this
     // one only once you allow it there (`decide`).
-    let store = serde_json::from_value::<Source>(imported["source"].clone()).is_ok_and(|s| s.kind == install::STORE);
-    if asks(&folder, &package, store) {
+    if asks(&folder, &package, false) {
         let shown = source.clone().unwrap_or_else(|| Source {
             kind: "file".into(),
             url: None,
@@ -1259,7 +1439,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
             store: None,
         });
         let from = shown.url.clone().unwrap_or_default();
-        let pending = stage_as(dir, &package, &from, &shown, Some(id))?;
+        let pending = stage_as(dir, &package, &from, &shown, Some(id), false)?;
         let mut out = package.about();
         out["pending"] = json!(pending);
         out["update_of"] = json!(id);
@@ -1280,6 +1460,90 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
         "version": package.text("version"),
         "from": imported["version"],
     }))
+}
+
+/// A store template here, as the update check asks about it.
+pub struct Installed {
+    /// Its folder.
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    /// The package it was installed from (`imported.hash`).
+    pub hash: String,
+    pub store: install::StoreSource,
+}
+
+/// Each store template here (`only`: in that folder).
+pub fn installed_from_store(dir: &Path, only: Option<&str>) -> Vec<Installed> {
+    from_store(dir)
+        .into_iter()
+        .filter(|(id, _)| only.is_none_or(|only| only == id))
+        .filter_map(|(id, store)| {
+            let folder = dir.join(&id);
+            let record = imported(&folder)?;
+            let name = templates::name(&folder, &id);
+            Some(Installed { name, version: record["version"].as_str()?.to_owned(), hash: record["hash"].as_str()?.to_owned(), store, id })
+        })
+        .collect()
+}
+
+/// The package kept as store template `id`'s update, read and checked again:
+/// the one that was found, as its record says it.
+pub fn kept_from_store(dir: &Path, id: &str, found: &Found) -> Result<Package, String> {
+    let store = found.source.as_ref().and_then(Source::store).ok_or(NOT_CHECKED)?;
+    let package = parse_from_store(package::read(&found_package_path(dir, id), &WORDS)?, store.key.is_some())?;
+    if package.hash != found.hash || package.content_hash != store.hash || package.key != store.key || package.id() != store.id {
+        return Err("The update changed since it was found; check again".into());
+    }
+    Ok(package)
+}
+
+/// `UpdateTemplate` for store template `id`: the update found for it, by the
+/// store's record of it as it is now (`now`). It waits for you (the item, as
+/// [`pending`] lists it) but for one that's verified, by the same publisher,
+/// over the store's version unedited, and changes its listing files alone:
+/// that's installed in its place.
+/// `alternative`: the verified version its sheet can offer instead.
+pub fn update_from_store(dir: &Path, id: &str, now: &install::StoreSource, alternative: Option<install::Alternative>) -> Result<Value, String> {
+    let _held = changing();
+    let folder = templates::template_dir(dir, id).ok_or_else(|| format!("There's no template {id}"))?;
+    let record = imported(&folder).ok_or(NOT_CHECKED)?;
+    let was = came_from(&record["source"]).and_then(|s| s.store).ok_or(NOT_CHECKED)?;
+    let found = found(dir, id, record["hash"].as_str().unwrap_or("")).ok_or("There's no update for it right now; check again")?;
+    if let Some(refused) = found.refused {
+        return Err(refused);
+    }
+    let package = kept_from_store(dir, id, &found)?;
+    let mut source = found.source.ok_or(NOT_CHECKED)?;
+    let store = source.store.as_mut().filter(|s| same_item(s, now) && s.id == was.id).ok_or(NOT_CHECKED)?;
+    take_record(store, now);
+    let before = record["version"].as_str().unwrap_or("").to_owned();
+    store.replaced = Some(install::ReplacedVersion { version: before.clone(), verified: was.verified });
+    // (As its sheet offers it, when it isn't verified.)
+    store.verified_alternative = alternative.filter(|_| !now.verified);
+    source.version = package.version();
+    source.installed_at = super::now_secs();
+    let asks = !now.verified || now.publisher_id != was.publisher_id || edited(&folder) != Some(false) || asks(&folder, &package, true);
+    if asks {
+        return stage_held(dir, &package, source, Some(id), false);
+    }
+    let identity = super::template_blocks::Identity { id: now.id.clone(), version: package.version(), hash: now.hash.clone() };
+    super::template_blocks::refuse_package(dir, &package.content_hash, Some(&identity))?;
+    package.compatible()?;
+    if !install::newer_by_precedence(&package.version(), &before) {
+        return Err(install::not_newer(&package.version(), &before));
+    }
+    replace(dir, id, &folder, &package, &super::scan::store_author(now), Some(&source))?;
+    forget_found(dir, id);
+    Ok(json!({ "updated": id, "name": package.about()["name"], "version": package.about()["version"], "from": before }))
+}
+
+/// The update found for the template in folder `id`, as it's shown.
+pub fn shown_update(dir: &Path, id: &str, hash: &str) -> Option<Value> {
+    let found = found(dir, id, hash)?;
+    let mut shown = found.shown();
+    shown["version"] = json!(listing::shown(&found.version, version::MAX_LEN));
+    Some(shown)
 }
 
 /// Whether an update to `package` waits for you. One from the store
@@ -1444,6 +1708,20 @@ mod tests {
         for other in [None, Some(record(&"0".repeat(64), "midnight")), Some(record(&hash, "other")), Some(install::StoreSource { key: Some("k".into()), ..now.clone() })] {
             assert_eq!(decide(&d, &pending, true, &shown, other.as_ref(), nobody).unwrap_err(), NOT_CHECKED);
         }
+        // What its record says now is kept of it, and of no other.
+        let kept = |id: &str| serde_json::from_slice::<Value>(&std::fs::read(d.join(PENDING).join(format!("{id}.json"))).unwrap()).unwrap()["origin"]["store"]["publisher_id"].clone();
+        keep_record(&d, &pending, &install::StoreSource { hash: "0".repeat(64), ..now.clone() }).unwrap();
+        assert_eq!(kept(&pending), "pub_old");
+        keep_record(&d, &pending, &now).unwrap();
+        assert_eq!(kept(&pending), json!(now.publisher_id));
+        // One that isn't the store's any more isn't installed by its record.
+        let about = d.join(PENDING).join(format!("{pending}.json"));
+        let was = std::fs::read_to_string(&about).unwrap();
+        let mut forged: Value = serde_json::from_str(&was).unwrap();
+        forged["origin"] = json!({ "kind": "file", "version": "1.0.0", "installed_at": 0 });
+        write(&about, &forged.to_string());
+        assert_eq!(decide(&d, &pending, true, &shown, Some(&now), nobody).unwrap_err(), NOT_CHECKED);
+        write(&about, &was);
         let done = decide(&d, &pending, true, &shown, Some(&now), nobody).unwrap();
         assert_eq!((done["installed"].as_str(), done["author"]["username"].as_str()), (Some("midnight"), Some("ada")), "{done}");
         // (What's been taken down is kept from before it: it isn't blocked.)
@@ -1561,17 +1839,31 @@ mod tests {
             let folder = other.join("midnight");
             let mut record = imported(&folder).unwrap();
             if store {
-                record["source"] = json!({ "kind": "store", "version": "1.0.0", "installed_at": 0, "store": { "id": "midnight", "publisher": "ada", "hash": "h" } });
+                // (By its record of the very package, verified.)
+                let was = read(&out).unwrap();
+                record["source"] = json!(store_source(&was.content_hash, ADA, true));
+                record["source"]["store"]["key"] = json!(alice.public());
+                super::super::template_blocks::begin(&other).unwrap();
                 std::fs::write(folder.join(IMPORTED), record.to_string()).unwrap();
             }
             let hash = record["hash"].as_str().unwrap().to_owned();
-            write(&d.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Renamed","description":"Dark.","version":"1.1.0","zeron_version":"0.9.0"}"#);
+            write(&d.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Renamed","description":"Dark.","version":"1.1.0","zeron_version":"0.0.1"}"#);
             export(&d, "midnight", &out, &alice).unwrap();
             let newer = read(&out).unwrap();
-            let source: Source = serde_json::from_value(record["source"].clone()).unwrap();
+            let mut source: Source = serde_json::from_value(record["source"].clone()).unwrap();
+            if let Some(store) = source.store.as_mut() {
+                store.hash = newer.content_hash.clone();
+            }
+            let now = source.store.clone();
             let found = compare(&other, "midnight", &alice.public(), &hash, &newer, source).unwrap();
             keep_found(&other, "midnight", &found, Some(&newer)).unwrap();
-            let done = update(&other, "midnight", author_as(&alice)).unwrap();
+            let done = match &now {
+                Some(now) => {
+                    assert_eq!(update(&other, "midnight", author_as(&alice)).unwrap_err(), NOT_CHECKED, "never the file's way");
+                    update_from_store(&other, "midnight", now, None).unwrap()
+                }
+                None => update(&other, "midnight", author_as(&alice)).unwrap(),
+            };
             assert_eq!(done["needs_consent"].as_bool(), store.then_some(true), "{store}: {done}");
         }
     }
@@ -1885,7 +2177,7 @@ mod tests {
         hashed().get_mut(&t).unwrap().get_mut("app.luau").unwrap().1 = "0".repeat(64);
         assert_eq!((edited_for_row(&t), edited(&t)), (Some(true), Some(false)));
         let next = from_the_store("1.1.0");
-        stage_as(&d, &next, "store", &store_source(&next.content_hash, ADA, true), Some("midnight")).unwrap();
+        stage_as(&d, &next, "store", &store_source(&next.content_hash, ADA, true), Some("midnight"), false).unwrap();
         hashed().get_mut(&t).unwrap().get_mut("app.luau").unwrap().1 = "0".repeat(64);
         assert!(pending(&d)[0].get("replaces_edits").is_none(), "{:?}", pending(&d));
         hashed().remove(&t);
@@ -1960,7 +2252,7 @@ mod tests {
         let beside = one();
         assert_eq!(beside["also_installed"], json!([{ "id": "midnight", "from": { "kind": "store", "id": "midnight", "publisher": "ada", "verified": true, "verified_at": 7 } }]), "{beside}");
         std::fs::remove_dir_all(d.join(PENDING)).unwrap();
-        stage_as(&d, &again, "store", &source, Some("midnight")).unwrap();
+        stage_as(&d, &again, "store", &source, Some("midnight"), false).unwrap();
         let update = one();
         assert_eq!((&update["update_of"], &update["new_owner"], update.get("replaces_edits"), update.get("also_installed")), (&json!("midnight"), &json!(true), None, None));
         write(&d.join("midnight/app.luau"), "mine");
@@ -1974,6 +2266,140 @@ mod tests {
         let pending_package = std::fs::read_dir(d.join(PENDING)).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == EXTENSION)).unwrap().path();
         write(&pending_package, "nope");
         assert!(pending(&d).is_empty());
+    }
+
+    /// Each guard alone: an update's record and its kept package, one taken
+    /// down here, and an older version staged or decided without the person's
+    /// choice of it.
+    #[test]
+    fn plugins_template_packages_each_guard_of_the_store_s_updates_holds_alone() {
+        let d = dir("guards").join("templates");
+        std::fs::create_dir_all(d.join(templates::ZERON_DIR)).unwrap();
+        write(&d.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        let of = |version: &str, readme: &str| {
+            let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "Dark.", "version": version, "zeron_version": "0.0.1" });
+            let files = BTreeMap::from([("app.luau".to_owned(), b"x".to_vec()), ("README.md".to_owned(), readme.as_bytes().to_vec())]);
+            parse_from_store(pack(&manifest, &files, None).unwrap(), false).unwrap()
+        };
+        let (was, next) = (of("1.0.0", "# One"), of("1.1.0", "# Two"));
+        super::install(&d, &was, &Author::unknown("x"), Some(&store_source(&was.content_hash, ADA, true))).unwrap();
+        let folder = d.join("midnight");
+        let hash = imported(&folder).unwrap()["hash"].as_str().unwrap().to_owned();
+        let found = Found { from: hash, version: "1.1.0".into(), hash: next.hash.clone(), source: Some(store_source(&next.content_hash, ADA, true)), ..Found::default() };
+        keep_found(&d, "midnight", &found, Some(&next)).unwrap();
+        let now = store_source(&next.content_hash, ADA, true).store.unwrap();
+        let untouched = || imported(&folder).unwrap()["version"] == "1.0.0";
+        for other in [install::StoreSource { hash: "0".repeat(64), ..now.clone() }, install::StoreSource { id: "other".into(), ..now.clone() }, install::StoreSource { key: Some("k".into()), ..now.clone() }] {
+            assert_eq!(update_from_store(&d, "midnight", &other, None).unwrap_err(), NOT_CHECKED);
+        }
+        // The package kept isn't the one found.
+        let kept = std::fs::read(found_package_path(&d, "midnight")).unwrap();
+        write(&found_package_path(&d, "midnight"), std::str::from_utf8(&of("1.1.0", "# Other").raw).unwrap());
+        assert!(update_from_store(&d, "midnight", &now, None).unwrap_err().contains("changed since it was found"));
+        std::fs::write(found_package_path(&d, "midnight"), &kept).unwrap();
+        // Taken down here.
+        use super::super::template_blocks::{self, Block, Change};
+        let block = Block { id: "midnight".into(), version: "1.1.0".into(), hash: None, reason: "Bad.".into(), at: super::super::now_secs() };
+        template_blocks::apply(&d, vec![Change::TakenDown(block)], super::super::now_secs()).unwrap();
+        assert!(update_from_store(&d, "midnight", &now, None).unwrap_err().starts_with("taken_down: "));
+        template_blocks::apply(&d, vec![Change::Restored("midnight".into(), "1.1.0".into())], super::super::now_secs()).unwrap();
+        assert!(untouched() && pending(&d).is_empty());
+        assert_eq!(update_from_store(&d, "midnight", &now, None).unwrap()["updated"], "midnight");
+        // Over an unverified one now: an older one that isn't verified, though
+        // it was chosen; a verified one that wasn't.
+        let mut record = imported(&folder).unwrap();
+        record["source"]["store"]["verified"] = json!(false);
+        write(&folder.join(IMPORTED), &record.to_string());
+        let stage = |verified: bool, instead: bool| stage_from_store(&d, &was, store_source(&was.content_hash, ADA, verified), Some("midnight"), instead);
+        assert!(stage(false, true).unwrap_err().starts_with("not_newer: "));
+        assert!(stage(true, false).unwrap_err().starts_with("not_newer: "));
+        let mut source = store_source(&was.content_hash, ADA, true);
+        source.store.as_mut().unwrap().replaced = Some(install::ReplacedVersion { version: "1.1.0".into(), verified: false });
+        let unchosen = stage_as(&d, &was, "store", &source, Some("midnight"), false).unwrap();
+        let record = store_source(&was.content_hash, ADA, true).store;
+        let allow = |name: &str| decide(&d, name, true, &was.hash, record.as_ref(), |_| Author::unknown("x"));
+        assert!(allow(&unchosen).unwrap_err().starts_with("not_newer: "));
+        let chosen = stage(true, true).unwrap();
+        // What's here is another version by now: asked for again, it's another
+        // item, saying so.
+        let was_there = imported(&folder).unwrap();
+        let mut record_then = was_there.clone();
+        record_then["version"] = json!("1.0.5");
+        write(&folder.join(IMPORTED), &record_then.to_string());
+        let again = stage(true, true).unwrap();
+        assert_eq!((again["pending"] != chosen["pending"], &again["from"]["replaced"]["version"]), (true, &json!("1.0.5")), "{again}");
+        write(&folder.join(IMPORTED), &was_there.to_string());
+        assert_eq!(allow(chosen["pending"].as_str().unwrap()).unwrap()["updated"], "midnight");
+    }
+
+    /// What's put in a template's place waits for whatever else is being: a
+    /// verified older one chosen over what's here never lands over one just
+    /// updated, whichever is first.
+    #[test]
+    fn plugins_template_packages_are_put_in_place_one_at_a_time() {
+        let d = dir("one-at-a-time").join("templates");
+        std::fs::create_dir_all(d.join(templates::ZERON_DIR)).unwrap();
+        write(&d.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        for _ in 0..10 {
+            let _ = std::fs::remove_dir_all(d.join("midnight"));
+            let _ = std::fs::remove_dir_all(d.join(PENDING));
+            let _ = std::fs::remove_file(d.join(super::super::template_blocks::FILE));
+            let (old, now, next) = (from_the_store("1.0.0"), from_the_store("1.1.0"), from_the_store("1.2.0"));
+            super::install(&d, &now, &Author::unknown("x"), Some(&store_source(&now.content_hash, ADA, false))).unwrap();
+            let older = stage_from_store(&d, &old, store_source(&old.content_hash, ADA, true), Some("midnight"), true).unwrap();
+            let newer = stage_from_store(&d, &next, store_source(&next.content_hash, ADA, false), Some("midnight"), false).unwrap();
+            let allow = |item: &Value, package: &Package, verified: bool| {
+                let record = store_source(&package.content_hash, ADA, verified).store;
+                decide(&d, item["pending"].as_str().unwrap(), true, &package.hash, record.as_ref(), |_| Author::unknown("x"))
+            };
+            let (first, second) = std::thread::scope(|s| {
+                let a = s.spawn(|| allow(&older, &old, true));
+                let b = s.spawn(|| allow(&newer, &next, false));
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            // (The newer one fits over either; the older only over what it named.)
+            assert!(second.is_ok(), "{second:?}");
+            assert_eq!(imported(&d.join("midnight")).unwrap()["version"], "1.2.0", "{first:?}");
+        }
+        let held = changing();
+        let (d2, next) = (d.clone(), from_the_store("1.3.0"));
+        let waits = std::thread::spawn(move || stage_from_store(&d2, &next, store_source(&next.content_hash, ADA, false), None, false).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!waits.is_finished());
+        drop(held);
+        assert!(waits.join().unwrap());
+    }
+
+    /// What waits and can't be allowed is dropped; what can be, what's being
+    /// looked at and what isn't a waiting package stay.
+    #[test]
+    fn plugins_template_packages_drop_what_cannot_be_allowed() {
+        let d = dir("unusable").join("templates");
+        let package = from_the_store("1.0.0");
+        let source = store_source(&package.content_hash, ADA, true);
+        let stage = || stage_as(&d, &package, "store", &source, None, false).unwrap();
+        let (good, bad_package, bad_record, bad_update, named) = (stage(), stage(), stage(), stage(), stage());
+        let at = |name: &str, ext: &str| d.join(PENDING).join(format!("{name}.{ext}"));
+        write(&at(&bad_package, EXTENSION), "nope");
+        let forge = |name: &str, member: &str, value: Value| {
+            let mut v: Value = serde_json::from_slice(&std::fs::read(at(name, "json")).unwrap()).unwrap();
+            v[member] = value;
+            write(&at(name, "json"), &v.to_string());
+        };
+        forge(&bad_record, "origin", json!(store_source(&"0".repeat(64), ADA, true)));
+        forge(&bad_update, "update_of", json!("../x"));
+        forge(&named, "pending", json!("other-1"));
+        write(&at("half-1", "json"), &json!({ "pending": "half-1" }).to_string());
+        write(&d.join(PENDING).join("notes.txt"), "mine");
+        drop_unusable(&d);
+        let left = |name: &str| (at(name, "json").exists(), at(name, EXTENSION).exists());
+        assert_eq!(left(&good), (true, true));
+        for name in [&bad_package, &bad_record, &bad_update, &named] {
+            assert_eq!(left(name), (false, false), "{name}");
+        }
+        assert!(at("half-1", "json").exists() && d.join(PENDING).join("notes.txt").exists());
+        assert_eq!(pending(&d).len(), 1);
+        drop_unusable(&d.join("none"));
     }
 
     /// What's shown of a package is bounded, wherever it came from; what's

@@ -350,12 +350,13 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: IMPORT_TEMPLATE,
-            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once (using it still runs as a preview until the person keeps it). Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
+            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates), or bring one from Zeron's store (`store`: its id there; only a version Zeron verified, and it always waits for the person). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once (using it still runs as a preview until the person keeps it). Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "The .zeron-template file's full path." },
-                    "url": { "type": "string", "description": "Or a link: a .zeron-template file's, or a GitHub repository or release (e.g. owner/repo) with one." }
+                    "url": { "type": "string", "description": "Or a link: a .zeron-template file's, or a GitHub repository or release (e.g. owner/repo) with one." },
+                    "store": { "type": "string", "description": "Or its id in Zeron's store." }
                 }
             }),
         },
@@ -368,6 +369,8 @@ struct PackageArgs {
     path: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    store: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -586,11 +589,12 @@ impl Tools {
             // path of an agent's choosing is the person's, and refused.
             (methods::EXPORT_TEMPLATE, json!({ "id": id }))
         } else {
-            let path = args.path.filter(|p| !p.trim().is_empty());
-            match (path, args.url.filter(|u| !u.trim().is_empty())) {
-                (Some(path), None) => (methods::IMPORT_TEMPLATE, json!({ "path": path })),
-                (None, Some(url)) => (methods::IMPORT_TEMPLATE, json!({ "url": url })),
-                _ => return Err("Say what to import: `path`, a .zeron-template file, or `url`, a link to one.".into()),
+            let given = |text: Option<String>| text.filter(|t| !t.trim().is_empty());
+            match (given(args.path), given(args.url), given(args.store)) {
+                (Some(path), None, None) => (methods::IMPORT_TEMPLATE, json!({ "path": path })),
+                (None, Some(url), None) => (methods::IMPORT_TEMPLATE, json!({ "url": url })),
+                (None, None, Some(store)) => (methods::IMPORT_TEMPLATE, json!({ "store": store })),
+                _ => return Err("Say what to import, one of them: `path`, a .zeron-template file, `url`, a link to one, or `store`, its id in Zeron's store.".into()),
             }
         };
         let mut reply = self.zeron.call_rpc(method, params).await.map_err(plain)?;

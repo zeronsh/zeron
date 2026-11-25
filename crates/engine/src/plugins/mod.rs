@@ -176,6 +176,7 @@ pub fn handles(method: &str) -> bool {
             | methods::DECIDE_TEMPLATE
             | methods::CHECK_TEMPLATE_UPDATES
             | methods::UPDATE_TEMPLATE
+            | methods::INSTALL_VERIFIED_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
@@ -1388,7 +1389,7 @@ impl Plugins {
             // Which store updates this device stages: for every plugin, and
             // each one set otherwise.
             let updates = serde_json::json!({
-                "device": state.store_updates.unwrap_or(status::DEFAULT_UPDATES).word(),
+                "device": state.device_updates().word(),
                 "plugins": state.store_updates_for.iter().map(|(id, prefer)| (id.clone(), serde_json::json!(prefer.word()))).collect::<serde_json::Map<_, _>>(),
             });
             (notices, updates)
@@ -1546,7 +1547,19 @@ impl Plugins {
             return reply;
         };
         let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+        let state = lock(&self.inner.state).clone();
         for entry in list.iter_mut() {
+            // What this device chose of a store template, by the store's id.
+            if entry["imported"]["source"]["kind"] == install::STORE
+                && let Some(id) = entry["imported"]["source"]["id"].as_str().map(str::to_owned)
+            {
+                if let Some(prefer) = state.template_updates_for.get(&id) {
+                    entry["prefer"] = serde_json::json!(prefer.word());
+                }
+                if state.template_prerelease.contains(&id) {
+                    entry["prerelease"] = serde_json::json!(true);
+                }
+            }
             // (The store's record says whose one from it is.)
             if let Some(key) = entry["imported"]["key"].as_str().map(str::to_owned)
                 && entry["imported"]["source"]["kind"] != install::STORE
@@ -1555,11 +1568,9 @@ impl Plugins {
             }
             // A newer version found where it came from.
             if let (Some(id), Some(hash)) = (entry["id"].as_str(), entry["imported"]["hash"].as_str())
-                && let Some(found) = template_packages::found(&dir, id, hash)
+                && let Some(update) = template_packages::shown_update(&dir, id, hash)
             {
-                let version = listing::shown(&found.version, version::MAX_LEN);
-                entry["update"] = found.shown();
-                entry["update"]["version"] = serde_json::json!(version);
+                entry["update"] = update;
             }
         }
         let pending: Vec<serde_json::Value> = template_packages::pending(&dir)
@@ -1574,6 +1585,7 @@ impl Plugins {
             })
             .collect();
         reply["pending"] = serde_json::json!(pending);
+        reply["prefs"] = serde_json::json!({ "device": state.device_updates().word() });
         reply
     }
 
@@ -2288,6 +2300,33 @@ impl Plugins {
                 .map_err(failed)?;
                 RpcReply::value(&reply)
             }
+            // From the store: fetched by its record, and it waits.
+            methods::IMPORT_TEMPLATE if params.get("store").is_some_and(|s| !s.is_null()) => {
+                #[derive(serde::Deserialize)]
+                struct StoreParams {
+                    store: String,
+                    #[serde(default)]
+                    version: Option<String>,
+                    #[serde(default)]
+                    path: Option<serde_json::Value>,
+                    #[serde(default)]
+                    url: Option<serde_json::Value>,
+                }
+                let p: StoreParams = parse_params(params)?;
+                if p.path.is_some() || p.url.is_some() {
+                    return Err(failed("Give a template file (`path`), a link (`url`) or a template's id in the store (`store`), one of them"));
+                }
+                RpcReply::value(&self.import_template_from_store(&p.store, p.version.as_deref()).await?)
+            }
+            methods::INSTALL_VERIFIED_TEMPLATE => {
+                #[derive(serde::Deserialize)]
+                struct InsteadParams {
+                    pending: String,
+                    hash: String,
+                }
+                let p: InsteadParams = parse_params(params)?;
+                RpcReply::value(&self.install_verified_template(p.pending.trim(), &p.hash).await?)
+            }
             // From a link: fetched and verified, then imported as a file is.
             methods::IMPORT_TEMPLATE if params.get("url").and_then(|u| u.as_str()).is_some_and(|u| !u.trim().is_empty()) => {
                 if params.get("path").and_then(|p| p.as_str()).is_some_and(|p| !p.trim().is_empty()) {
@@ -2325,6 +2364,9 @@ impl Plugins {
                 }
                 let p: UpdateParams = parse_params(params)?;
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+                if let Some(installed) = self.store_template_at(p.id.trim()).await {
+                    return RpcReply::value(&self.update_store_template(installed).await?);
+                }
                 let this = self.clone();
                 let reply = tokio::task::spawn_blocking(move || {
                     template_packages::update(&dir, p.id.trim(), |key: &str| this.author_of(key))
@@ -2390,6 +2432,7 @@ impl Plugins {
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
                 let this = self.clone();
                 let method = method.to_owned();
+                let counted = now.clone();
                 let reply = tokio::task::spawn_blocking(move || {
                     let path = p.path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from);
                     let author_of = |key: &str| this.author_of(key);
@@ -2430,6 +2473,9 @@ impl Plugins {
                 .await
                 .map_err(|_| failed("Couldn't reach the templates folder"))?
                 .map_err(failed)?;
+                if let Some(store) = counted.filter(|_| reply["installed"].is_string() && reply.get("updated").is_none()) {
+                    self.template_installed(&store);
+                }
                 RpcReply::value(&reply)
             }
             methods::PLUGIN_STATUS => {

@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zeron_engine::plugins::signing::{self, SigningKey};
+use zeron_engine::plugins::store::client::{Caller, Kind, PackageRecord, StoreClient};
 use zeron_engine::plugins::store::deploy_token::DeployToken;
-use zeron_engine::plugins::{install, package};
+use zeron_engine::plugins::{install, package, store, template_packages};
 use zeron_rpc::{RpcClient, methods};
 
 // ── The run ─────────────────────────────────────────────────────────────────
@@ -1024,4 +1025,244 @@ async fn the_plugin_store_end_to_end() {
     drop((laptop, desk, phone, bob_laptop));
     let failures = e.failures.lock().unwrap().clone();
     assert!(failures.is_empty(), "{} check(s) failed:\n{}", failures.len(), failures.join("\n"));
+}
+
+// ── Templates ───────────────────────────────────────────────────────────────
+
+const TEMPLATE: &str = "midnight-e2e";
+/// A still picture of one pixel (the edge reads it whole).
+const PIXEL: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+    0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0x60, 0xf8, 0x5f, 0x0f, 0x00, 0x02, 0x87, 0x01, 0x80, 0xeb, 0x47, 0xba, 0x92, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// Template `id` at `version` in folder `dir`, meeting the store's rules.
+fn template_folder(dir: &Path, id: &str, version: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let manifest = json!({ "id": id, "name": "Midnight", "description": "A dark look.", "version": version, "zeron_version": "0.3.16", "keywords": ["dark"] });
+    std::fs::write(dir.join("zeron-template.json"), manifest.to_string()).unwrap();
+    std::fs::write(dir.join("app.luau"), format!("return \"{version}\"")).unwrap();
+    std::fs::write(dir.join("README.md"), "# Midnight\n\nA dark look.\n").unwrap();
+    std::fs::write(dir.join("CHANGELOG.md"), format!("# Changes\n\n## {version}\n\n- Darker.\n")).unwrap();
+    std::fs::write(dir.join("preview.png"), PIXEL).unwrap();
+}
+
+impl Env {
+    /// `zeron template <args>`, with only what a CI job has.
+    fn template_cli(&self, args: &[&str], token: &str) -> Output {
+        let home = self.work.join("ci-templates");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut command = self.command(&home, &home.join("data"));
+        command.env("ZERON_IPC_PORT", free_port().to_string()).env("ZERON_DEPLOY_TOKEN", token).arg("template").args(args).output().unwrap()
+    }
+
+    /// `body` sent as the person signed in on `device`.
+    async fn post_as(&self, device: &Device, path: &str, body: Vec<u8>) -> (u16, Value) {
+        let token = self.bearer(device).await;
+        let res = self.http.post(format!("{}{path}", self.edge)).bearer_auth(token).header("content-type", "application/json").body(body).send().await.unwrap();
+        (res.status().as_u16(), res.json().await.unwrap_or_default())
+    }
+}
+
+/// `version` of the template, fetched from the store and waiting on `device`
+/// as an install from it leaves it (until the device installs one itself).
+async fn template_waits(e: &Env, device: &Device, version: &str) -> Result<(String, String), String> {
+    let client = StoreClient::new(&e.edge).of(Kind::Template);
+    let (_, record) = client.version(TEMPLATE, version, &Caller::Anonymous).await?;
+    let (_, detail) = client.plugin(TEMPLATE, &Caller::Anonymous).await?;
+    let named = PackageRecord { hash: record.hash, sha256: record.sha256, bytes: record.bytes, key: record.key };
+    let raw = client.package(TEMPLATE, version, &Caller::Anonymous, named.bytes).await?;
+    let (package, source) = store::verify_template(raw.clone(), TEMPLATE, version, &named, &detail.author, record.verified)?;
+    let at = device.data.join("templates/.pending");
+    std::fs::create_dir_all(&at).unwrap();
+    let name = format!("{TEMPLATE}-{}", version.replace('.', ""));
+    std::fs::write(at.join(format!("{name}.zeron-template")), raw).unwrap();
+    let origin = json!({ "kind": "store", "version": version, "installed_at": 0, "store": source });
+    std::fs::write(at.join(format!("{name}.json")), json!({ "pending": name, "id": TEMPLATE, "key": package.key, "at": 1, "source": "store", "origin": origin }).to_string()).unwrap();
+    Ok((name, package.hash))
+}
+
+async fn template_row(device: &Device, id: &str) -> Value {
+    let list = device.call(methods::LIST_TEMPLATES, json!({})).await.unwrap();
+    list["templates"].as_array().unwrap().iter().find(|t| t["id"] == id).cloned().unwrap_or(Value::Null)
+}
+
+async fn template_waiting(device: &Device) -> Value {
+    device.call(methods::LIST_TEMPLATES, json!({})).await.unwrap()["pending"][0].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by scripts/plugin-store-e2e/run.sh, against a local edge"]
+async fn the_template_store_end_to_end() {
+    let Some(e) = env() else { panic!("E2E_EDGE_JSON, E2E_ZERON_BIN and E2E_WORK_DIR: run scripts/plugin-store-e2e/run.sh") };
+    let staff = e.web_sign_in("user_admin").await;
+    let grant = e.http.post(format!("{}/admin/roles/grant", e.edge)).bearer_auth(&e.admin_token).json(&json!({ "userId": "user_admin", "role": "admin", "by": "e2e" })).send().await.unwrap();
+    e.must("20", "the operator grants admin", grant.status().is_success(), grant.status());
+    let staff = if staff.csrf.is_empty() { e.web_sign_in("user_admin").await } else { staff };
+    let store = StoreClient::new(&e.edge).of(Kind::Template);
+
+    // ── 21: a template's first version, signed by a device ──
+    let desk = e.device("tess-desk").await;
+    e.sign_in(&desk, "user_tess").await;
+    e.claim_username(&desk, "tess-e2e").await;
+    let folder = e.work.join("templates").join(TEMPLATE);
+    template_folder(&folder, TEMPLATE, "1.0.0");
+    let (manifest, files) = template_packages::contents(&folder, TEMPLATE).unwrap();
+    let key = signing::load_key(&desk.data).expect("the desk's signing key");
+    let signed = template_packages::pack(&manifest, &files, Some(&key)).unwrap();
+    let versions = format!("/store/v1/templates/{TEMPLATE}/versions");
+    let (status, answer) = e.post_as(&desk, &versions, signed.clone()).await;
+    e.must("21", "the author publishes a template signed by the device's key: listed at once, not verified", status == 201 && answer["status"] == "listed" && answer["verified"] == false, format!("{status} {answer}"));
+    let (status, answer) = e.post_as(&desk, &versions, signed.clone()).await;
+    e.check("21", "the same package again is answered as it was", status == 201 && answer["version"] == "1.0.0", format!("{status} {answer}"));
+    let mut other = files.clone();
+    other.insert("app.luau".into(), b"return 'other'".to_vec());
+    let (status, answer) = e.post_as(&desk, &versions, template_packages::pack(&manifest, &other, Some(&key)).unwrap()).await;
+    e.check("21", "its version with other contents is refused", status == 409 && answer["error"] == "version_exists", format!("{status} {answer}"));
+    let (status, answer) = e.post_as(&desk, "/store/v1/templates/other-e2e/versions", signed.clone()).await;
+    e.check("21", "and under another id", status == 400, format!("{status} {answer}"));
+    let as_plugin = store_package(&key, TEMPLATE, "1.1.0", json!({}), &[]);
+    let (status, answer) = e.post_as(&desk, &format!("/store/v1/plugins/{TEMPLATE}/versions"), as_plugin).await;
+    e.check("21", "a plugin isn't published under its id (wrong_kind)", status == 409 && answer["error"] == "wrong_kind", format!("{status} {answer}"));
+    for (what, extra, word) in [
+        ("a file no template replaces", ("screens/plugins/x.luau", b"x".to_vec()), "protected_file"),
+        ("a Windows short name", ("ds/TOKENS~1.LUA", b"x".to_vec()), "protected_file"),
+        ("an invisible character in a name", ("ds/a\u{200b}.luau", b"x".to_vec()), "bad_package"),
+        ("code called a picture", ("screenshots/x.png", b"return {}".to_vec()), "bad_listing"),
+        ("code under screenshots/", ("screenshots/x.luau", b"return {}".to_vec()), "bad_listing"),
+    ] {
+        let mut files = files.clone();
+        files.insert(extra.0.to_owned(), extra.1);
+        let mut manifest = manifest.clone();
+        manifest["version"] = json!("1.0.1");
+        let raw = template_packages::pack(&manifest, &files, Some(&key)).unwrap();
+        let (status, answer) = e.post_as(&desk, &versions, raw).await;
+        e.check("21", &format!("{what} is refused: {word}"), status == 400 && answer["error"] == word, format!("{status} {answer}"));
+    }
+
+    // ── 22: read, and never as a plugin ──
+    let (page, detail) = store.plugin(TEMPLATE, &Caller::Anonymous).await.unwrap_or_default();
+    e.must("22", "its page: a template, by its author, with no permissions", page["kind"] == "template" && detail.author.username.as_deref() == Some("tess-e2e") && page.get("permissions").is_none() && page["engines"]["zeron"] == ">=0.3.16", &page);
+    let ids = |page: &Value| -> Vec<String> { page["items"].as_array().into_iter().flatten().filter_map(|i| i["id"].as_str().map(str::to_owned)).collect() };
+    let (_, templates) = e.get("/store/v1/templates", None).await;
+    let (_, plugins) = e.get("/store/v1/plugins?limit=50", None).await;
+    e.check("22", "templates list it, plugins don't", ids(&templates).contains(&TEMPLATE.to_owned()) && !ids(&plugins).contains(&TEMPLATE.to_owned()), format!("{templates} / {plugins}"));
+    let (status, _) = e.get(&format!("/store/v1/plugins/{TEMPLATE}"), None).await;
+    e.check("22", "there's no plugin by its id", status == 404, status);
+    let (_, record) = store.version(TEMPLATE, "1.0.0", &Caller::Anonymous).await.unwrap();
+    let parsed = template_packages::parse(signed).unwrap();
+    e.check("22", "its record names the contents and the signer that were sent", record.hash == parsed.content_hash && record.key == parsed.key, format!("{record:?}"));
+    let preview = store.file(TEMPLATE, "1.0.0", "preview.png", &Caller::Anonymous, 1 << 20).await;
+    e.check("22", "its preview is served as it is", preview.as_deref() == Ok(PIXEL), preview.map(|b| b.len().to_string()).unwrap_or_else(|e| e));
+
+    // ── 23: a deploy token publishes the next ──
+    let secret = deploy_token_on(&e, &desk, "user_tess", json!({ "plugins": [TEMPLATE] }), "Templates CI").await;
+    template_folder(&folder, TEMPLATE, "1.1.0");
+    let out = e.template_cli(&["publish", &folder.display().to_string()], &secret);
+    let said = text(&out);
+    e.must("23", "the CLI publishes 1.1.0 with only ZERON_DEPLOY_TOKEN", out.status.success() && said.contains(&format!("/templates/{TEMPLATE}")), &said);
+    e.check("23", "and never says the token", !said.contains(&secret[12..]), "");
+    let (_, record) = store.version(TEMPLATE, "1.1.0", &Caller::Anonymous).await.unwrap();
+    e.check("23", "its record names no signer", record.key.is_none() && !record.verified, format!("{record:?}"));
+    let first = e.work.join("templates/never-e2e");
+    template_folder(&first, "never-e2e", "1.0.0");
+    let out = e.template_cli(&["publish", &first.display().to_string()], &secret);
+    e.check("23", "a template's first version is never a token's (exit 3)", out.status.code() == Some(3) && text(&out).contains("token_not_allowed"), text(&out));
+    let mine = e.get("/store/v1/me/templates", Some(&e.bearer(&desk).await)).await.1;
+    let via: Vec<&str> = mine["templates"][0]["versions"].as_array().into_iter().flatten().filter_map(|v| v["via"].as_str()).collect();
+    e.check("23", "my templates: one by a token, one by a device", mine["templates"][0]["id"] == TEMPLATE && via.contains(&"deploy_token") && via.contains(&"device"), &mine);
+
+    // ── 24: allowed on another device, by its record as it is ──
+    let phone = e.device("uma-phone").await;
+    e.sign_in(&phone, "user_uma").await;
+    e.claim_username(&phone, "uma-e2e").await;
+    let templates = phone.data.join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.3.20"}"#).unwrap();
+    std::fs::write(templates.join(".zeron/app.luau"), "return 1").unwrap();
+    let (name, hash) = template_waits(&e, &phone, "1.1.0").await.unwrap();
+    let waiting = template_waiting(&phone).await;
+    let drawn = &waiting["store"];
+    e.must("24", "it waits, by its author, not verified, with no key", drawn["publisher"] == "tess-e2e" && drawn["verified"] == false && waiting["key"].is_null() && waiting["digest"].as_str().is_some_and(|d| d.len() == 64), &waiting);
+    let shown = |verified: bool| json!({ "verified": verified, "publisher": drawn["publisher"], "publisher_id": drawn["publisher_id"], "version": "1.1.0" });
+    let review = |shown: Value| phone.call(methods::REVIEW_TEMPLATE, json!({ "pending": name, "hash": hash, "shown": shown }));
+    let decide = |review: Value| phone.call(methods::DECIDE_TEMPLATE, json!({ "pending": name, "allow": true, "hash": hash, "review": review["review"] }));
+    let changed = review(shown(true)).await;
+    e.check("24", "drawn verified, the store says it isn't: changed, and no review", changed.as_ref().is_ok_and(|c| c["changed"]["verified"] == false && c.get("review").is_none()), format!("{changed:?}"));
+    let good = review(shown(false)).await.unwrap();
+    let (status, body) = e.admin(&staff, &format!("versions/{TEMPLATE}/1.1.0/verify"), json!({})).await;
+    e.must("24", "staff verify it meanwhile", status == 200, &body);
+    let changed = decide(good).await;
+    e.check("24", "allowed as not verified: changed, nothing installed", changed.as_ref().is_ok_and(|c| c["changed"]["verified"] == true && c["changed"]["verified_at"].is_i64()) && !templates.join(TEMPLATE).exists(), format!("{changed:?}"));
+    let done = match review(shown(true)).await {
+        Ok(good) => decide(good).await,
+        Err(error) => Err(error),
+    };
+    e.must("24", "allowed as it is: installed", done.as_ref().is_ok_and(|d| d["installed"] == TEMPLATE && d["digest"] == waiting["digest"]), format!("{done:?}"));
+    let row = template_row(&phone, TEMPLATE).await;
+    e.check("24", "its row: the store's, verified, by its author, not edited", row["imported"]["source"]["verified"] == true && row["imported"]["author"]["username"] == "tess-e2e" && row.get("edited").is_none(), &row);
+    phone.call(methods::CREATE_TEMPLATE, json!({ "id": "mine", "from": TEMPLATE })).await.unwrap();
+
+    // ── 25: the update ask ──
+    let checked = phone.call(methods::CHECK_PLUGIN_UPDATES, json!({})).await.unwrap();
+    let list: Value = serde_json::from_slice(&std::fs::read(templates.join(".blocked.json")).unwrap()).unwrap();
+    e.check("25", "the device asks about it, and nothing is down", checked["errors"] == json!([]) && list["blocks"] == json!([]), format!("{checked} / {list}"));
+    template_folder(&folder, TEMPLATE, "1.2.0");
+    let out = e.template_cli(&["publish", &folder.display().to_string()], &secret);
+    e.must("25", "1.2.0 is published", out.status.success(), text(&out));
+    let installed = json!({ "id": TEMPLATE, "version": "1.1.0", "hash": record_hash(&store, "1.1.0").await });
+    let ask = |plugins: Value, templates: Value| json!({ "zeron": "0.3.20", "plugins": plugins, "templates": templates }).to_string().into_bytes();
+    let (status, answer) = e.post_as(&phone, "/store/v1/updates", ask(json!([]), json!([installed]))).await;
+    let offer = &answer["template_updates"][0];
+    e.check("25", "asked as a template, it's offered beside the plugins' own", status == 200 && offer["id"] == TEMPLATE && offer["version"] == "1.2.0" && offer["kind"] == "template" && offer["verified"] == false && answer["updates"] == json!([]), format!("{status} {answer}"));
+    let (status, answer) = e.post_as(&phone, "/store/v1/updates", ask(json!([installed]), json!([]))).await;
+    e.check("25", "asked as a plugin, it's one the store hasn't got", status == 200 && answer["updates"] == json!([]) && answer["template_updates"] == json!([]) && answer["blocked"] == json!([]), format!("{status} {answer}"));
+    let (status, answer) = e.post_as(&phone, "/store/v1/updates", ask(json!([]), json!([{ "id": TEMPLATE, "version": "x".repeat(33), "hash": "h" }]))).await;
+    e.check("25", "an item that isn't one is unknown, the request answered", status == 200, format!("{status} {answer}"));
+
+    // ── 26: taken down, it and its copy are blocked by the feed ──
+    let again = template_waits(&e, &phone, "1.1.0").await.unwrap();
+    let (status, body) = e.admin(&staff, &format!("plugins/{TEMPLATE}/versions/1.1.0/take-down"), json!({ "reason": "As a plugin." })).await;
+    e.check("26", "it isn't a plugin for staff either", status == 404, format!("{status} {body}"));
+    let (_, before) = e.get("/store/v1/takedowns", None).await;
+    let (status, body) = e.admin(&staff, &format!("templates/{TEMPLATE}/versions/1.1.0/take-down"), json!({ "reason": "It read your chats." })).await;
+    e.must("26", "staff take 1.1.0 down", status == 200, &body);
+    let blocked = wait_for("the template to be blocked", async || template_row(&phone, TEMPLATE).await["status"] == "blocked").await;
+    let (row, copy) = (template_row(&phone, TEMPLATE).await, template_row(&phone, "mine").await);
+    e.check("26", "the feed blocks it, saying why", blocked && row["blocked"]["id"] == TEMPLATE && row["blocked"]["version"] == "1.1.0" && row["blocked"]["reason"] == "It read your chats.", &row);
+    e.check("26", "and the copy made of it", copy["status"] == "blocked" && copy["blocked"]["via"] == "lineage", &copy);
+    // (As a device asks: a page further back may be one kept for a while.)
+    let (_, feed) = e.get(&format!("/store/v1/takedowns?after={}", before["head"].as_u64().unwrap_or(0)), None).await;
+    let event = feed["events"].as_array().into_iter().flatten().find(|v| v["id"] == TEMPLATE).cloned().unwrap_or_default();
+    e.check("26", "its event is a template's, with the contents", event["item_kind"] == "template" && event["kind"] == "take_down" && event["hash"].as_str().is_some_and(|h| h.len() == 64), &event);
+    for (method, params) in [
+        (methods::USE_TEMPLATE, json!({ "id": TEMPLATE })),
+        (methods::USE_TEMPLATE, json!({ "id": "mine" })),
+        (methods::CREATE_TEMPLATE, json!({ "id": "another", "from": "mine" })),
+        (methods::EXPORT_TEMPLATE, json!({ "id": TEMPLATE })),
+    ] {
+        let refused = phone.call(method, params.clone()).await;
+        e.check("26", &format!("{method} {params} is refused: taken_down"), refused.as_ref().is_err_and(|e| e.contains("taken_down: ")), format!("{refused:?}"));
+    }
+    let refused = phone.call(methods::REVIEW_TEMPLATE, json!({ "pending": again.0, "hash": again.1, "shown": shown(true) })).await;
+    e.check("26", "one that waits isn't allowed", refused.as_ref().is_err_and(|e| e.contains("taken_down: ")), format!("{refused:?}"));
+    let file: Value = serde_json::from_slice(&std::fs::read(templates.join(".blocked.json")).unwrap()).unwrap();
+    e.check("26", "the list on disk says it", file["blocks"].as_array().is_some_and(|b| b.iter().any(|b| b["id"] == TEMPLATE && b["version"] == "1.1.0")), &file);
+    std::fs::write(templates.join(".blocked.json"), "nope").unwrap();
+    let repaired = wait_for("the list to be read again", async || std::fs::read_to_string(templates.join(".blocked.json")).is_ok_and(|t| t.contains(TEMPLATE))).await;
+    e.check("26", "the list broken, the store's whole answer makes it again, still blocked", repaired && template_row(&phone, TEMPLATE).await["blocked"]["id"] == TEMPLATE, template_row(&phone, TEMPLATE).await);
+    let (status, body) = e.admin(&staff, &format!("templates/{TEMPLATE}/versions/1.1.0/restore"), json!({ "reason": "A mistake." })).await;
+    e.must("26", "staff restore it", status == 200, &body);
+    let back = wait_for("the block to lift", async || template_row(&phone, TEMPLATE).await["status"] != "blocked" && template_row(&phone, "mine").await["status"] != "blocked").await;
+    e.check("26", "the restore lifts it and the copy", back, template_row(&phone, "mine").await);
+
+    drop((desk, phone));
+    let failures = e.failures.lock().unwrap().clone();
+    assert!(failures.is_empty(), "{} check(s) failed:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The content hash the store's record of the template's `version` names.
+async fn record_hash(store: &StoreClient, version: &str) -> String {
+    store.version(TEMPLATE, version, &Caller::Anonymous).await.map(|(_, r)| r.hash).unwrap_or_default()
 }
