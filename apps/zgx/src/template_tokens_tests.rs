@@ -160,6 +160,22 @@ fn an_old_template_s_tokens_keep_what_zeron_added_since_and_what_it_names_wins()
     assert_eq!(Probe::of(&t, live::BUILTIN).seen(), zeron);
 }
 
+/// A template that starts from Zeron's own file as it is now (which runs
+/// the template's tokens at its end): laid as the template's, it runs once,
+/// not itself again, and what it names wins.
+#[test]
+fn a_template_s_copy_of_zeron_s_tokens_runs_once() {
+    let t = templates("copy");
+    let zeron = Probe::of(&t, live::BUILTIN).seen();
+    let own = std::fs::read_to_string(ui_dir().join("ds/tokens.luau")).unwrap();
+    let copy = own.replacen("tight = 6,", "tight = 7,", 1);
+    assert_ne!(copy, own);
+    template(&t, "copy", &copy);
+    let seen = Probe::of(&t, "copy").seen();
+    assert_eq!(seen["zeron.space.tight"], "7", "{seen}");
+    zeron_s_but(&seen, &zeron, &["zeron.space.tight"], "a copy of Zeron's own");
+}
+
 /// What the guide tells authors to write: only the tokens they change.
 #[test]
 fn a_template_naming_one_token_has_zeron_s_for_every_other() {
