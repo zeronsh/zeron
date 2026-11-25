@@ -2000,7 +2000,14 @@ impl Bridge {
                 let stood = live::file_stamp(&approvals);
                 if self.forgotten.borrow().get(&t.id) != Some(&stood) {
                     preview::forget_at(&approvals, &t.id);
-                    self.forgotten.borrow_mut().insert(t.id.clone(), live::file_stamp(&approvals));
+                    // (Kept only if it took, and as it stood before the read
+                    // that shows it: one written since moves it.)
+                    let after = live::file_stamp(&approvals);
+                    if !preview::allowed_at(&approvals).contains(&t.id) {
+                        self.forgotten.borrow_mut().insert(t.id.clone(), after);
+                    } else {
+                        self.forgotten.borrow_mut().remove(&t.id);
+                    }
                 }
             }
             here.push(row_here(&t, blocked.as_ref()));
