@@ -1878,6 +1878,328 @@
       }
     ]
   },
+  "file_names": [
+    {
+      "fold": "zeron-~1.jso",
+      "fold_path": "zeron-~1.jso",
+      "path": "ZERON-~1.JSO",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "screens/templa~1/page.luau",
+      "fold_path": "screens/templa~1/page.luau",
+      "path": "screens/TEMPLA~1/page.luau",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "luaurc~1",
+      "fold_path": "luaurc~1",
+      "path": "LUAURC~1",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/a~1b.luau",
+      "fold_path": "ui/a~1b.luau",
+      "path": "ui/a~1b.luau",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/a~b.luau",
+      "fold_path": "ui/a~b.luau",
+      "path": "ui/a~b.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/a~١.luau",
+      "fold_path": "ui/a~١.luau",
+      "path": "ui/a~١.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "screenshots/chat~1.png",
+      "fold_path": "screenshots/chat~1.png",
+      "path": "screenshots/CHAT~1.PNG",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "screens/tem‍plates/page.luau",
+      "fold_path": "screens/tem‍plates/page.luau",
+      "path": "screens/tem‍plates/page.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/﻿badge.luau",
+      "fold_path": "ui/﻿badge.luau",
+      "path": "ui/﻿badge.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/bad­ge.luau",
+      "fold_path": "ui/bad­ge.luau",
+      "path": "ui/bad­ge.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/ㅤ.luau",
+      "fold_path": "ui/ㅤ.luau",
+      "path": "ui/ㅤ.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/a︀.luau",
+      "fold_path": "ui/a︀.luau",
+      "path": "ui/a︀.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/a󠁁.luau",
+      "fold_path": "ui/a󠁁.luau",
+      "path": "ui/a󠁁.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "ui/❤.png",
+      "fold_path": "ui/❤.png",
+      "path": "ui/❤️.png",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/❤.png",
+      "fold_path": "ui/❤.png",
+      "path": "ui/❤.png",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/é.luau",
+      "fold_path": "ui/é.luau",
+      "path": "ui/e︎́.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/é.luau",
+      "fold_path": "ui/é.luau",
+      "path": "ui/é.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "screens/plugins/page.luau",
+      "fold_path": "screens/plugins/page.luau",
+      "path": "screens/plu️gins/page.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": ".luaurc",
+      "fold_path": ".luaurc",
+      "path": "︎.luaurc",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "init.luau",
+      "fold_path": "init.luau",
+      "path": "init.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "ui/badge.luau",
+      "fold_path": "ui/badge.luau",
+      "path": "ui/Badge.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "~1",
+      "fold_path": "~1",
+      "path": "~1",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a~",
+      "fold_path": "a~",
+      "path": "a~",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "~",
+      "fold_path": "~",
+      "path": "~",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a~~1",
+      "fold_path": "a~~1",
+      "path": "a~~1",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a~/1.luau",
+      "fold_path": "a~/1.luau",
+      "path": "a~/1.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "x~9/y",
+      "fold_path": "x~9/y",
+      "path": "x~9/y",
+      "short_name": true,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "é.luau",
+      "fold_path": "é.luau",
+      "path": "é.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "é.luau",
+      "fold_path": "é.luau",
+      "path": "é.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "screens/plugins/x.luau",
+      "fold_path": "screens/plugins/x.luau",
+      "path": "ſcreens/plugins/x.luau",
+      "short_name": false,
+      "template_protected": true,
+      "unseen": false
+    },
+    {
+      "fold": "k.luau",
+      "fold_path": "k.luau",
+      "path": "K.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a/b",
+      "fold_path": "a/b",
+      "path": "a./b",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a/b",
+      "fold_path": "a/b",
+      "path": "a️./b",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a/b",
+      "fold_path": "a/b",
+      "path": "a.️/b",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "a",
+      "fold_path": "a",
+      "path": "️/a",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "👨‍💻.png",
+      "fold_path": "👨‍💻.png",
+      "path": "👨‍💻.png",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "设置.luau",
+      "fold_path": "设置.luau",
+      "path": "设置.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    },
+    {
+      "fold": "᠎.luau",
+      "fold_path": "᠎.luau",
+      "path": "᠎.luau",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "󠿿",
+      "fold_path": "󠿿",
+      "path": "󠿿",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": true
+    },
+    {
+      "fold": "󡀀",
+      "fold_path": "󡀀",
+      "path": "󡀀",
+      "short_name": false,
+      "template_protected": false,
+      "unseen": false
+    }
+  ],
   "format": "zeron-plugin-package-vectors:v1",
   "listing": [
     {
@@ -3223,6 +3545,78 @@
           "shots/board.png"
         ]
       },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"plugins\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "an id the site's pages use: plugins",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"templates\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "an id the site's pages use: templates",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"feed-reader\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "an id with a site word in it is anyone's",
       "problems": [],
@@ -3639,6 +4033,644 @@
           "rule": "missing_readme"
         }
       ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "ZERON-~1.JSO": "cmV0dXJuIHt9",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a short name of its manifest's",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ZERON-~1.JSO",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "screens/TEMPLA~1/page.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a short name of Zeron's templates page",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screens/TEMPLA~1/page.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "LUAURC~1": "cmV0dXJuIHt9",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a short name of .luaurc",
+      "problems": [
+        {
+          "field": "files",
+          "path": "LUAURC~1",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~1b.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a ~ and a digit inside a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a~1b.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~b.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a ~ and no digit right after",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~١.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a ~ and a digit that isn't ASCII",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "screenshots/CHAT~1.PNG": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a short name under screenshots/",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screenshots/CHAT~1.PNG",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "screens/tem‍plates/page.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a zero-width joiner in a folder's name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screens/tem‍plates/page.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/﻿badge.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a byte order mark in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/﻿badge.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/bad­ge.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a soft hyphen in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/bad­ge.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/ㅤ.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a Hangul filler in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/ㅤ.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a︀.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a variation selector that isn't an emoji's",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a︀.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a󠁁.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a tag character in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a󠁁.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/❤️.png": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: an emoji's selector in a name",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/❤.png": "cmV0dXJuIHt9",
+        "ui/❤️.png": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: two names an emoji's selector tells apart",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/❤️.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/e︎́.luau": "cmV0dXJuIHt9",
+        "ui/é.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a selector between a letter and its accent",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/é.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "screens/plu️gins/page.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a protected folder with an emoji's selector",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "︎.luaurc": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "names: a dot file with an emoji's selector before it",
+      "problems": [],
       "warnings": []
     },
     {
@@ -29479,6 +30511,200 @@
       }
     },
     {
+      "name": "names: a short name of its manifest's",
+      "package_b64": "eyJmaWxlcyI6eyJaRVJPTi1+MS5KU08iOiJlQT09IiwiaW5pdC5sdWF1IjoiY21WMGRYSnVJREU9IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IlpFUk9OLX4xLkpTTyI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6ImFsbWF4MUE4U2d0WjBSdlJkanA2SnNjd0dGSGlxdjhkY3BDaG1yRjVOSGt1ODhORV85NGNFNTlQM0lOREdpYklUdVJWZFhyWHNYb0NqYks3R0FMeEJ3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a short name of Zeron's templates page",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJzY3JlZW5zL1RFTVBMQX4xL3BhZ2UubHVhdSI6ImVBPT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInNjcmVlbnMvVEVNUExBfjEvcGFnZS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJYS1o5eGI2dnoyT1h1bEZ0Q19LcVUxbEtNbUxXQzBsVkVzWkwxRGFHWEoyZndpdjI2aVAteGVLSm0zcWJZZlk4RG1zejZxWGdQbXp2RnpoWFpiZVhCQSJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a short name of .luaurc",
+      "package_b64": "eyJmaWxlcyI6eyJMVUFVUkN+MSI6ImVBPT0iLCJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiTFVBVVJDfjEiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJmcXZWaGJzQVZSMldqU1NuMmpaWkZ0b0dMTW9HRl9YRzBiaXhUbXoxVUkzTGhDdXZ4dnRGSFhRTmdZb2k1aVV1YzdfeWMxc2JTRXNyYUs2T0oySEJBdyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a ~ and a digit inside a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9hfjFiLmx1YXUiOiJlQT09IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9hfjFiLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IlBKODBjSm5pYmhGNnVwVU5kWHZYVzY4ZWdVSUkxNGozWkc1eWR2Q013LWVxaUVlVHRGTkdRLXVyZWhudFlkQjhvbnFDN2l0UTI0QjlWQVJ6dUd5ZEF3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a ~ and no digit right after",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9hfmIubHVhdSI6ImVBPT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2F+Yi5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJUSUttc1Nad3J6VU5EYWpQWE1VbTBqOWtfWGVUQTlyc0dDSVFjZFk0MldVdXcxMXpyMU8zOVZOSnVBaFY4TUU4UzgxUVp5T0FjeG5MQnRzVWwyRUJCdyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "files": 3,
+        "hash": "ff3ec6c4355348aa5ed1a3e55246cca4cbc5175fe9e34cbc174f9a2763e6f072",
+        "id": "focus",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "ui/a~b.luau",
+          "ui/badge.luau"
+        ],
+        "sha256": "4a7d9134cc13d93a040a36d5676bb04f1fb946862fb5528f5f5e7755e657a024",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "names: a ~ and a digit that isn't ASCII",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9hftmhLmx1YXUiOiJlQT09IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9hftmhLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6ImplckE2VUV0Rk5tNGNHazhycGdoUVFuSjZOVWE4MnRLWk1SXzZpWkNNNTU0Z2x6NHdEWlRQUnEzWTBjVkJ6QVZwU3licEx3bEhLSzJjYUMyaENxWEFBIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "files": 3,
+        "hash": "562dfb6dd48a1b69cbfcc9dc6bd562dc3070a33aeda6fa29b5921f7d33f8727a",
+        "id": "focus",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "ui/a~١.luau",
+          "ui/badge.luau"
+        ],
+        "sha256": "709c785fde71a6807c738a95e1a0281747d0e5d8935337f2a17c7281f90b004d",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "names: a short name under screenshots/",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJzY3JlZW5zaG90cy9DSEFUfjEuUE5HIjoiZUE9PSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwic2NyZWVuc2hvdHMvQ0hBVH4xLlBORyI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiRHB5S3MtcDRQVGQybUVCVHl1akNGQUxybGZlN2I5SS1YejdhSV9qaTlWMng4OGR0c0pjdUVTTERiUkF0WXJ1azNISjJJOVV5OXJaOUQ4bEtaWHZFQ1EifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a zero-width joiner in a folder's name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJzY3JlZW5zL3RlbeKAjXBsYXRlcy9wYWdlLmx1YXUiOiJlQT09IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJzY3JlZW5zL3RlbeKAjXBsYXRlcy9wYWdlLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InFxdTg0OVRkSnBraGtROW1KaGhNWUdiamdnR1FuQkxFdzAtY0pWdEpyazg2eXNVeUotUTdjX1NQb3lMUzFjU0NIQWhsVjBlRWpXUjlHVEpsbkUtYkRRIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a byte order mark in a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkv77u/YmFkZ2UubHVhdSI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJ1aS/vu79iYWRnZS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoieDRDTEZJcFJPQ3hRY2E4RFdfcU9jVWVnczNkN3BacDBuSkdyRjJjNWFuOXdiVWZ2S2NOUi1xT0JNeG1EUzBrV1l6MF9IdVlqMFdHTTdLNXdxdm1YRHcifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a soft hyphen in a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkvYmFkwq1nZS5sdWF1IjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInVpL2JhZMKtZ2UubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IjdPSE5kSEIxNzlqRUVvdWpuR2dGQVlhajYtYTVEblFWVzNhcXdUUjZEMW00QnFoME96cXdaZFZ1LVk2TE5KVlpfNnQ5S0xrZUlwRDBjbDhmeVViUkFRIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a Hangul filler in a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkv44WkLmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1IiwidWkv44WkLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJhMkhCd2RzdDc0VGV4X25lVFVrNHR0SklkSER4emktR0wxd05SVGdlUnktV2xzb2dtVmR1dEUxZG1UbVdMeFNMV05SbVJOV0VqVHRhb0RkXzRrWWNBQSJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a variation selector that isn't an emoji's",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9h77iALmx1YXUiOiJlQT09IiwidWkvYmFkZ2UubHVhdSI6ImNtVjBkWEp1SUh0OSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9h77iALmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6ImJNQXBzYVFzQndJQTY0R29iRVRNNnhOZTlmcmw3TVNFLUpYZVRvZXA5RmJTNHZDc05Fb19XeGozNlA0WGdhNFlWaEJFV21qVW5mVUpSakNOTmNsTkFRIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a tag character in a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9h86CBgS5sdWF1IjoiZUE9PSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYfOggYEubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoibWhSNWdNNHRjTlVpQzY0alU0VXV2S0plcmgzb2VxTTg5c0lScHV0OXJMZzFJQ0hXM21uY1Mwc2hpVHdlWk5EakdNNlRhNUJLZzV2anNsNXdONFZoQWcifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: an emoji's selector in a name",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkv4p2k77iPLnBuZyI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJ1aS/inaTvuI8ucG5nIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiQXRnT3FNbW9mVTJjcnduRGN6UnlvUzYxbjlnOHRKLTVLb1hTTmpvaDRseVRDQ0N2SWdWc3hsSUVtLXk2T24zRHVRRlYzQklQSHY0bWxoQWJUR3FsQncifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "files": 3,
+        "hash": "4bc0696ee20e003af81e939530c9a476c0d48df16f8a73a9775fca8d491bd59c",
+        "id": "focus",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "ui/badge.luau",
+          "ui/❤️.png"
+        ],
+        "sha256": "da3a82a743d555c6bc3970cb52789e6ec6784ac6b1ccc275df05cd48610675f2",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "names: two names an emoji's selector tells apart",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkv4p2kLnBuZyI6ImVBPT0iLCJ1aS/inaTvuI8ucG5nIjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEiLCJtYW5pZmVzdCI6eyJlbnRyeSI6ImluaXQubHVhdSIsImlkIjoiZm9jdXMiLCJuYW1lIjoiRm9jdXMiLCJwZXJtaXNzaW9ucyI6WyJ1aS5hZGQiXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7ImluaXQubHVhdSI6IjQ4NmQ5YWZmYjYwZGJiMDA2M2IwM2Q4ZTIzYTZjY2Y2MzY0Y2UyMDNkYzNhOWY1NmYyMGU3NTBlYjQxZWNhZGUiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInVpL+KdpC5wbmciOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwidWkv4p2k77iPLnBuZyI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6Ik94ZHY1SHY1bjFKRE5wTC0yZHNaZ1kxcjNzTE94VE1adjdMWVEydnhxeFdiMmpqS0x3WkFrR0Z5WDk0bmEwbWUwV0pJeUZISU15VTNFd0NtSzdic0FRIn0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a selector between a letter and its accent",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5IiwidWkvZe+4jsyBLmx1YXUiOiJlQT09IiwidWkvw6kubHVhdSI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJ1aS9l77iOzIEubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS/DqS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoicC1FRGtJNEdIMUpYVG5TSVFlRWRyWGg1bzJWWWhOaVFyX3o2OThXZXZVckJXZ3QzLUFXVmhvNU90V0VxY3ZZS0g0OHYtR2dGNFhnRjZxc0JINnZDQmcifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a protected folder with an emoji's selector",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJzY3JlZW5zL3Bsde+4j2dpbnMvcGFnZS5sdWF1IjoiZUE9PSIsInVpL2JhZGdlLmx1YXUiOiJjbVYwZFhKdUlIdDkifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwic2NyZWVucy9wbHXvuI9naW5zL3BhZ2UubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS9iYWRnZS5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiWWdqR1FDV256VjBIRmtIOS1ZalZQVER6QkhKQkRvS2ZJZGRJZG5KQlpiSTdLSDlKTXVpSDRzSml2X2xzX0RkWjAtZ1RNYlJETTc4WWp0YVlNaXB1Q0EifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "files": 3,
+        "hash": "25f69eed109163a1c58370f653049cdd6826aa85ff66833379826d898b415293",
+        "id": "focus",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "screens/plu️gins/page.luau",
+          "ui/badge.luau"
+        ],
+        "sha256": "3be81c99b11cf2456c139e44a2ec08dd1630e7c64d3ddc2eefcf792c512e1182",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "names: a dot file with an emoji's selector before it",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwi77iOLmx1YXVyYyI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tcGx1Z2luOnYxIiwibWFuaWZlc3QiOnsiZW50cnkiOiJpbml0Lmx1YXUiLCJpZCI6ImZvY3VzIiwibmFtZSI6IkZvY3VzIiwicGVybWlzc2lvbnMiOlsidWkuYWRkIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiI0ODZkOWFmZmI2MGRiYjAwNjNiMDNkOGUyM2E2Y2NmNjM2NGNlMjAzZGMzYTlmNTZmMjBlNzUwZWI0MWVjYWRlIiwidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCLvuI4ubHVhdXJjIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoic1N5aGtEdkxoVnFyb3p4bzRRU2V3b0tZVktQbjFKMkI4T1JaNHlDU01uY3FKX00xYXRic005dUdtc3BLdDdmY1dHUTRSZXg1RjdvSmxtTjdHV1JxQlEifSwidmVyc2lvbiI6IjEuMC4wIn19",
+      "result": {
+        "files": 3,
+        "hash": "dd19084eb2d5f5da95cfcc62928c6711348bd3100f78fe91c71f4278300461e7",
+        "id": "focus",
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "ui/badge.luau",
+          "︎.luaurc"
+        ],
+        "sha256": "c4eb4a46d716325ea5b81fde3c2e1f29271d24f696f4c18de5de9a2d4ff68a5f",
+        "version": "1.0.0"
+      }
+    },
+    {
       "name": "its entry file is missing",
       "package_b64": "eyJmaWxlcyI6eyJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsidWkvYmFkZ2UubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InQyUFNFODhzNU5XZlV6YV9sNktBNjhsLTFnQUpIOHZWaHpueGRqeHhBMHVMSHlPbVpHWnZDZ2J1MEVlcnhJcVVyeWJ4alZKemkyRTBMY3FFLUlvSkR3In0sInZlcnNpb24iOiIxLjAuMCJ9fQ==",
       "result": {
@@ -36352,6 +37578,613 @@
       }
     }
   ],
+  "template_blocks": [
+    {
+      "folders": {
+        "copy": {
+          "blocked": null,
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": null,
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "nothing is down"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "one is: its record, and a copy of it"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": null,
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"reason\":\"It read your chats.\",\"version\":\"2.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "another is: only what can't be told"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": null,
+      "name": "no list, with one from the store here: lost"
+    },
+    {
+      "folders": {
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        }
+      },
+      "list": null,
+      "name": "no list, and nothing from the store here"
+    },
+    {
+      "folders": {
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": null,
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": null,
+      "name": "no list, and only a record that can't be read"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        }
+      },
+      "list": null,
+      "name": "no list, and a copy alone"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "nope",
+      "name": "a list that isn't JSON"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "",
+      "name": "an empty list file"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",",
+      "name": "a list cut short"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[],\"format\":\"zeron-template-blocks:v2\"}",
+      "name": "a list of another format"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"id\":\"dusk\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "a list with an entry that isn't one"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":0,\"id\":\"midnight\",\"reason\":\"\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "an entry with no hash"
+    },
+    {
+      "folders": {
+        "copy": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "filed": {
+          "blocked": null,
+          "imported": "{\"key\":\"k\",\"source\":{\"installed_at\":0,\"kind\":\"file\",\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "mine": {
+          "blocked": null,
+          "imported": null,
+          "lineage": null
+        },
+        "odd": {
+          "blocked": "unchecked",
+          "imported": "nope",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":0,\"id\":\"midnight\",\"more\":1,\"reason\":\"\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\",\"more\":1}",
+      "name": "an entry with a member more"
+    },
+    {
+      "folders": {
+        "midnight": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "midnight-2": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "by its record, never its folder's name"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0+build.2\"},\"version\":\"1.0.0+build.2\"}",
+          "lineage": null
+        },
+        "b": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.1\"},\"version\":\"1.0.1\"}",
+          "lineage": null
+        },
+        "c": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0-rc.1\"},\"version\":\"1.0.0-rc.1\"}",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "build metadata is no part of a version"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0\"},\"version\":\"1.0\"}",
+          "lineage": null
+        },
+        "b": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "a version that isn't one is as it's written"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"version\":\"1.0.0\"},{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        },
+        "b": {
+          "blocked": null,
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"version\":\"1.0.0\"}]"
+        },
+        "c": {
+          "blocked": {
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"version\":\"1.0.0\"}]"
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "a copy of a copy, and of two"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"dusk\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": "{}"
+        },
+        "b": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"id\":\"midnight\"}]"
+        },
+        "c": {
+          "blocked": null,
+          "imported": null,
+          "lineage": "[]"
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "the record can be read and the lineage can't"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": "unchecked",
+          "imported": "[]",
+          "lineage": null
+        },
+        "b": {
+          "blocked": null,
+          "imported": "{}",
+          "lineage": null
+        },
+        "c": {
+          "blocked": null,
+          "imported": "{\"source\":null}",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "a record that's no object, or says no source"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "b": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "c": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":null,\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "d": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":null}",
+          "lineage": null
+        },
+        "e": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":1,\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "f": {
+          "blocked": null,
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"somewhere\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "a record that says the store, and not what"
+    },
+    {
+      "folders": {
+        "a": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"Midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "b": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "c": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"1.0.0\"}",
+          "lineage": null
+        },
+        "d": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"\"}",
+          "lineage": null
+        },
+        "e": {
+          "blocked": "unchecked",
+          "imported": "{\"key\":null,\"source\":{\"installed_at\":0,\"kind\":\"store\",\"store\":{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"publisher\":\"ada\",\"publisher_id\":\"pub_0123456789abcdef0123456789abcdef\"},\"version\":\"1.0.0\"},\"version\":\"111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"}",
+          "lineage": null
+        },
+        "f": {
+          "blocked": "unchecked",
+          "imported": null,
+          "lineage": "[{\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"Not An Id\",\"version\":\"1.0.0\"}]"
+        }
+      },
+      "list": "{\"blocks\":[{\"at\":1800000000,\"hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"id\":\"midnight\",\"reason\":\"It read your chats.\",\"version\":\"1.0.0\"}],\"format\":\"zeron-template-blocks:v1\"}",
+      "name": "an identity the store wouldn't take"
+    }
+  ],
   "template_content_hash": [
     {
       "files": {
@@ -37092,6 +38925,780 @@
         "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
         "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
         "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/x.png": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "code called a picture, not listed",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screenshots/x.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/x.jpg": "R0lGODlh"
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "a GIF called a picture, not listed",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screenshots/x.jpg",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "code called a picture, listed",
+      "problems": [
+        {
+          "field": "screenshots",
+          "path": "screenshots/chat.png",
+          "rule": "bad_listing"
+        },
+        {
+          "field": "files",
+          "path": "screenshots/chat.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/x.png": "/9j/4EpGSUY="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "a JPEG called a PNG is a picture",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "ZERON-~1.JSO": "iVBORw0KGgoAAAANSUhEUg==",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a short name of its manifest's",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ZERON-~1.JSO",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/TEMPLA~1/page.luau": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a short name of Zeron's templates page",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screens/TEMPLA~1/page.luau",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "LUAURC~1": "iVBORw0KGgoAAAANSUhEUg==",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a short name of .luaurc",
+      "problems": [
+        {
+          "field": "files",
+          "path": "LUAURC~1",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~1b.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a ~ and a digit inside a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a~1b.luau",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~b.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a ~ and no digit right after",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a~١.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a ~ and a digit that isn't ASCII",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/CHAT~1.PNG": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a short name under screenshots/",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screenshots/CHAT~1.PNG",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screens/tem‍plates/page.luau": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a zero-width joiner in a folder's name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screens/tem‍plates/page.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/﻿badge.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a byte order mark in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/﻿badge.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/bad­ge.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a soft hyphen in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/bad­ge.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/ㅤ.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a Hangul filler in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/ㅤ.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a︀.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a variation selector that isn't an emoji's",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a︀.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/a󠁁.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a tag character in a name",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/a󠁁.luau",
+          "rule": "bad_package"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/❤️.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: an emoji's selector in a name",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/❤.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/❤️.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: two names an emoji's selector tells apart",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/❤️.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/e︎́.luau": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/é.luau": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a selector between a letter and its accent",
+      "problems": [
+        {
+          "field": "files",
+          "path": "ui/é.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/plu️gins/page.luau": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a protected folder with an emoji's selector",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screens/plu️gins/page.luau",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "︎.luaurc": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "names: a dot file with an emoji's selector before it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "︎.luaurc",
+          "rule": "protected_file"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
         "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
       },
       "listing": {
@@ -37359,6 +39966,76 @@
       },
       "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"all\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
       "name": "an id the store site keeps",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"plugins\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "an id the store site keeps: plugins",
+      "problems": [
+        {
+          "field": "id",
+          "path": null,
+          "rule": "id_reserved"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"templates\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "an id the store site keeps: templates",
       "problems": [
         {
           "field": "id",
@@ -38616,6 +41293,389 @@
       }
     },
     {
+      "name": "names: a short name of its manifest's",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsIlpFUk9OLX4xLkpTTyI6ImVBPT0iLCJhcHAubHVhdSI6ImNtVjBkWEp1SUhKbGNYVnBjbVVvSnk0dmMyTnlaV1Z1Y3k5emFHVnNiQzl3WVdkbEp5az0iLCJkcy90b2tlbnMubHVhdSI6ImNtVjBkWEp1SUhzZ1ltY2dQU0FuSXpBd01DY2dmUT09IiwicHJldmlldy5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6ImNtVjBkWEp1SUh0OSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiaVZCT1J3MEtHZ29BQUFBTlNVaEVVZz09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiWkVST04tfjEuSlNPIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoibmJ4SGlnMEtIdWl0WktaamNVb1F1MmkwUTdGVUtDZmhvN2gxdmY2OEpvckRpdkVlTmpUd2V3VnJRVWNUM2RFRkJkUC14dG00aVdsZUF6Nms4dnNBRFEifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "files": 7,
+        "hash": "b67db76dc4bc78cec2ced1487fe4d645c66a3ec6c82a7d02d4b771911f9a0a79",
+        "id": "midnight",
+        "ignored": [
+          "ZERON-~1.JSO"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "ad81c25cd82218a6d56959ef264e50ff3c27d8ed14ce2ab560b0c8cfe567d7e9",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a short name of Zeron's templates page",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvVEVNUExBfjEvcGFnZS5sdWF1IjoiZUE9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0ifSwiZm9ybWF0IjoiemVyb24tdGVtcGxhdGU6djEiLCJtYW5pZmVzdCI6eyJkZXNjcmlwdGlvbiI6IkEgZGFyayBpbnRlcmZhY2Ugd2l0aCB0aGUgc2lkZWJhciBvbiB0aGUgcmlnaHQuIiwiaG9tZXBhZ2UiOiJodHRwczovL2V4YW1wbGUuY29tL21pZG5pZ2h0IiwiaWQiOiJtaWRuaWdodCIsImtleXdvcmRzIjpbImRhcmsiLCJzaWRlYmFyIl0sImxpY2Vuc2UiOiJNSVQiLCJuYW1lIjoiTWlkbmlnaHQiLCJyZXBvc2l0b3J5IjoiaHR0cHM6Ly9naXRodWIuY29tL2V4YW1wbGUvbWlkbmlnaHQiLCJzY3JlZW5zaG90cyI6WyJzY3JlZW5zaG90cy9jaGF0LnBuZyJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiQ0hBTkdFTE9HLm1kIjoiMTQwZDUxM2NjZDJmMTcwYjUxZGFjNGZiMDU0ZTY5NmNkM2E2NmY0ZDRlNGE5MGQyOGE0YjkyNWYzYjMxYjVjMCIsIlJFQURNRS5tZCI6ImNmNDRiYjVmNjA4YTdiNWYzMWY0MjVhYWMxNGVlYjU2MDJlY2MxMzkzZWI1NTZjZjE4MzdlZjZlOTI2YTViZjAiLCJhcHAubHVhdSI6Ijc5ZjMxNDU2ZjA0YjA1MGFmMzljZmVkNjFlZTE3Y2JjMGFiZjdmYTUzMTc1NzUxZDVjMzU5YjJiMDc1ZGVlNTkiLCJkcy90b2tlbnMubHVhdSI6IjRjYjgwMzIyNzMwNzc1NTBhYWJhYWY0MTczNmI2NGU1NmRhOTk1MThkNTY3NGYyYzlmOThkNmY2YTdhNmRiZmMiLCJwcmV2aWV3LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJzY3JlZW5zL1RFTVBMQX4xL3BhZ2UubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6Im5ET0QxbGFaTElCb2xnS3RtUmtyWlYtTEhIWDNXMmFjVjFMMVJuX3RTT2d0REV1eS1kMzZxdUZvdEY0S3phbzNvaHpJNUJLMUltMVFYWjdTQ2I3eERBIn0sInZlcnNpb24iOiIxLjIuMCIsInplcm9uX3ZlcnNpb24iOiIwLjMuMTYifX0=",
+      "result": {
+        "files": 7,
+        "hash": "40ec8efb474b09f96ad90d607fad6b023853182c1e5b0e9d442f1386ed90ca34",
+        "id": "midnight",
+        "ignored": [
+          "screens/TEMPLA~1/page.luau"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "70dfd82f8e01d5d6e97fcb48e312a51c924d1205c04d29ec7b9f2a5b53528e22",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a short name of .luaurc",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiTFVBVVJDfjEiOiJlQT09IiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0ifSwiZm9ybWF0IjoiemVyb24tdGVtcGxhdGU6djEiLCJtYW5pZmVzdCI6eyJkZXNjcmlwdGlvbiI6IkEgZGFyayBpbnRlcmZhY2Ugd2l0aCB0aGUgc2lkZWJhciBvbiB0aGUgcmlnaHQuIiwiaG9tZXBhZ2UiOiJodHRwczovL2V4YW1wbGUuY29tL21pZG5pZ2h0IiwiaWQiOiJtaWRuaWdodCIsImtleXdvcmRzIjpbImRhcmsiLCJzaWRlYmFyIl0sImxpY2Vuc2UiOiJNSVQiLCJuYW1lIjoiTWlkbmlnaHQiLCJyZXBvc2l0b3J5IjoiaHR0cHM6Ly9naXRodWIuY29tL2V4YW1wbGUvbWlkbmlnaHQiLCJzY3JlZW5zaG90cyI6WyJzY3JlZW5zaG90cy9jaGF0LnBuZyJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiQ0hBTkdFTE9HLm1kIjoiMTQwZDUxM2NjZDJmMTcwYjUxZGFjNGZiMDU0ZTY5NmNkM2E2NmY0ZDRlNGE5MGQyOGE0YjkyNWYzYjMxYjVjMCIsIkxVQVVSQ34xIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsIlJFQURNRS5tZCI6ImNmNDRiYjVmNjA4YTdiNWYzMWY0MjVhYWMxNGVlYjU2MDJlY2MxMzkzZWI1NTZjZjE4MzdlZjZlOTI2YTViZjAiLCJhcHAubHVhdSI6Ijc5ZjMxNDU2ZjA0YjA1MGFmMzljZmVkNjFlZTE3Y2JjMGFiZjdmYTUzMTc1NzUxZDVjMzU5YjJiMDc1ZGVlNTkiLCJkcy90b2tlbnMubHVhdSI6IjRjYjgwMzIyNzMwNzc1NTBhYWJhYWY0MTczNmI2NGU1NmRhOTk1MThkNTY3NGYyYzlmOThkNmY2YTdhNmRiZmMiLCJwcmV2aWV3LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6Im1jeW1fMWhXdXljN3pCODdxdzREemdDeG1HWklHQkxTaXJSQnhndVEwUjh5ckhOaUtnVXFVRTY0ZnEwQXlwb0hSUXJxYjJRdEZSc2VDQTBjTF8tZkFBIn0sInZlcnNpb24iOiIxLjIuMCIsInplcm9uX3ZlcnNpb24iOiIwLjMuMTYifX0=",
+      "result": {
+        "files": 7,
+        "hash": "801f6c566fc759680cfa05ea201571453786b0c29dc89cf94d2266852cb0ca8a",
+        "id": "midnight",
+        "ignored": [
+          "LUAURC~1"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "bac616f9b3d5b1b831dea5caa6b157bacb71e68b844d283f91ec1d61318bb40a",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a ~ and a digit inside a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9hfjFiLmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4IiwidWkvYX4xYi5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiQWhyNGo0aTJQM1pDY0dvVzNjMTF6TUc4NHQtVkRiSmFFN3dZOFhqZ3lIWjRPVkdCMkdtN2h4em5NbmJITUg2TTBmRTV1Z05UbXJIUV94SWQ0TTZsQXcifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "files": 7,
+        "hash": "1345b75062969725a94ec00fb98a1dc7df9914d413e163e863830cf72eb752db",
+        "id": "midnight",
+        "ignored": [
+          "ui/a~1b.luau"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "e75bbc3a5ebee13bd9577638fe4789f999725eab40094bc66da35a592d53855d",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a ~ and no digit right after",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9hfmIubHVhdSI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tdGVtcGxhdGU6djEiLCJtYW5pZmVzdCI6eyJkZXNjcmlwdGlvbiI6IkEgZGFyayBpbnRlcmZhY2Ugd2l0aCB0aGUgc2lkZWJhciBvbiB0aGUgcmlnaHQuIiwiaG9tZXBhZ2UiOiJodHRwczovL2V4YW1wbGUuY29tL21pZG5pZ2h0IiwiaWQiOiJtaWRuaWdodCIsImtleXdvcmRzIjpbImRhcmsiLCJzaWRlYmFyIl0sImxpY2Vuc2UiOiJNSVQiLCJuYW1lIjoiTWlkbmlnaHQiLCJyZXBvc2l0b3J5IjoiaHR0cHM6Ly9naXRodWIuY29tL2V4YW1wbGUvbWlkbmlnaHQiLCJzY3JlZW5zaG90cyI6WyJzY3JlZW5zaG90cy9jaGF0LnBuZyJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiQ0hBTkdFTE9HLm1kIjoiMTQwZDUxM2NjZDJmMTcwYjUxZGFjNGZiMDU0ZTY5NmNkM2E2NmY0ZDRlNGE5MGQyOGE0YjkyNWYzYjMxYjVjMCIsIlJFQURNRS5tZCI6ImNmNDRiYjVmNjA4YTdiNWYzMWY0MjVhYWMxNGVlYjU2MDJlY2MxMzkzZWI1NTZjZjE4MzdlZjZlOTI2YTViZjAiLCJhcHAubHVhdSI6Ijc5ZjMxNDU2ZjA0YjA1MGFmMzljZmVkNjFlZTE3Y2JjMGFiZjdmYTUzMTc1NzUxZDVjMzU5YjJiMDc1ZGVlNTkiLCJkcy90b2tlbnMubHVhdSI6IjRjYjgwMzIyNzMwNzc1NTBhYWJhYWY0MTczNmI2NGU1NmRhOTk1MThkNTY3NGYyYzlmOThkNmY2YTdhNmRiZmMiLCJwcmV2aWV3LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJ1aS9hfmIubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IlJzRXlDNXlTUUdsZ2NpX05VSGo4Y0V5TnhSNGR5S0xESVZ4OU5YeHhsaXZfaXFvcGZzQlotY2pxY1RWLWxIYWtCNzhXOVZqN3AxQXVOTHBhRnJQY0RRIn0sInZlcnNpb24iOiIxLjIuMCIsInplcm9uX3ZlcnNpb24iOiIwLjMuMTYifX0=",
+      "result": {
+        "files": 8,
+        "hash": "05fa3da778f96c01f930c680d3443b9cd8b130540eaf816ab75ef335d62836a8",
+        "id": "midnight",
+        "ignored": [],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png",
+          "ui/a~b.luau"
+        ],
+        "sha256": "70c2fd9b0916540d3e3d2547dd6014acafbbed75f6f6dcad0c5e5b6447fdc598",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a ~ and a digit that isn't ASCII",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9hftmhLmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4IiwidWkvYX7ZoS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoibnpETkhLSFpOSnhiME9hWEFCVm9SaDVHdVFMMW5nb1ZnZ2hvNDAwbUtZX1poeWplcU9iX1BIV1NuckUyc2NzQ1BlLU5FRF93MTZ5dkJEZWUwazVxQ3cifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "files": 8,
+        "hash": "d9c140299ac9bd4793158285f45eec6255f72388e5bc0b9c56bd0783453fa161",
+        "id": "midnight",
+        "ignored": [],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png",
+          "ui/a~١.luau"
+        ],
+        "sha256": "d5b12d1f848f7d65afe0666f30f82ecfe7675507ddde7d1282752c3cdda7f3ed",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a short name under screenshots/",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvQ0hBVH4xLlBORyI6ImVBPT0iLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL0NIQVR+MS5QTkciOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJyZnkxeFhVTldqRmlKZUtoT3pTRDB6VnY0OEtkbGU2cVMwdGtoLXlGdTB0eFBzR0hpSzgyNzVhQy1abmVWcFZxUTFJdVQ5SXh0eHZGdzVfc0pKYTlEQSJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "files": 7,
+        "hash": "4dd1a2348d15d860d3d47caf20eb033e5dffe1fe29c4d04397531747ed33242f",
+        "id": "midnight",
+        "ignored": [
+          "screenshots/CHAT~1.PNG"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "a89e6a88d105f1afb5457ccf8ea317cf285984c5a7c7ac1b79651594964ca69a",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a zero-width joiner in a folder's name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVucy90ZW3igI1wbGF0ZXMvcGFnZS5sdWF1IjoiZUE9PSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiaVZCT1J3MEtHZ29BQUFBTlNVaEVVZz09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVucy90ZW3igI1wbGF0ZXMvcGFnZS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiWDBkOXVJQThYempYOGNWdGM3MUZaOGMwWXlSMHRTYXpZbXBubkFCZDhKQU9QMHkybWFPWUNnRWFZdWNlZERHRUtvZ2txLU0wM1pENndIeUhiZWFUREEifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a byte order mark in a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS/vu79iYWRnZS5sdWF1IjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInVpL++7v2JhZGdlLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJROVYwN2Z6aEJTTzVRT0htc0M3a09mQVA2NjYwbVVnQ0IzeUlEREZ4R3NXeXh4WXRJckFxdWRlZ193dnJxYVFSaE1LdmhJdWJQZlVFWVIzdDF5RHpCdyJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a soft hyphen in a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9iYWTCrWdlLmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4IiwidWkvYmFkwq1nZS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiS0lFMlRjZVVUTmNuVkN2dk03UzZtWlpGWU9oa3M3b3Z4UVU1eEptY2F6LVF1M2RIekV4QWhzUndNOExyMGZFYmpVOW5LdWNVaEctQjEtcU9zYkNMREEifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a Hangul filler in a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS/jhaQubHVhdSI6ImVBPT0ifSwiZm9ybWF0IjoiemVyb24tdGVtcGxhdGU6djEiLCJtYW5pZmVzdCI6eyJkZXNjcmlwdGlvbiI6IkEgZGFyayBpbnRlcmZhY2Ugd2l0aCB0aGUgc2lkZWJhciBvbiB0aGUgcmlnaHQuIiwiaG9tZXBhZ2UiOiJodHRwczovL2V4YW1wbGUuY29tL21pZG5pZ2h0IiwiaWQiOiJtaWRuaWdodCIsImtleXdvcmRzIjpbImRhcmsiLCJzaWRlYmFyIl0sImxpY2Vuc2UiOiJNSVQiLCJuYW1lIjoiTWlkbmlnaHQiLCJyZXBvc2l0b3J5IjoiaHR0cHM6Ly9naXRodWIuY29tL2V4YW1wbGUvbWlkbmlnaHQiLCJzY3JlZW5zaG90cyI6WyJzY3JlZW5zaG90cy9jaGF0LnBuZyJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiQ0hBTkdFTE9HLm1kIjoiMTQwZDUxM2NjZDJmMTcwYjUxZGFjNGZiMDU0ZTY5NmNkM2E2NmY0ZDRlNGE5MGQyOGE0YjkyNWYzYjMxYjVjMCIsIlJFQURNRS5tZCI6ImNmNDRiYjVmNjA4YTdiNWYzMWY0MjVhYWMxNGVlYjU2MDJlY2MxMzkzZWI1NTZjZjE4MzdlZjZlOTI2YTViZjAiLCJhcHAubHVhdSI6Ijc5ZjMxNDU2ZjA0YjA1MGFmMzljZmVkNjFlZTE3Y2JjMGFiZjdmYTUzMTc1NzUxZDVjMzU5YjJiMDc1ZGVlNTkiLCJkcy90b2tlbnMubHVhdSI6IjRjYjgwMzIyNzMwNzc1NTBhYWJhYWY0MTczNmI2NGU1NmRhOTk1MThkNTY3NGYyYzlmOThkNmY2YTdhNmRiZmMiLCJwcmV2aWV3LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6IjdkZjhmMGNkOWUxY2QwYjIwNGE3NjA3ODM2NzFjMGNjY2E0YTMyNThkYzdjNTFmNTllOWUyMjk1YzZjMjUzMTUiLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6IjAyYTNlMjk4ZjE1MzNmNjI1NThjNThlNGM3MGVkY2FiOWFmNWE1MGQ2MmQ5MjVmZDUzOTA5NDIwMjBmYjBmYjgiLCJ1aS/jhaQubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6InMyUE0tMFo3NW5jUGFtS3Z2WWpKY0hGSXZpTnJNYlE3aHJvYV9uWmR0REVkaEN6WFIxQkJVakh2bFNDYXhuSVNPWlhuLVBkc1FUSk1QVW1hZWIwX0FRIn0sInZlcnNpb24iOiIxLjIuMCIsInplcm9uX3ZlcnNpb24iOiIwLjMuMTYifX0=",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a variation selector that isn't an emoji's",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9h77iALmx1YXUiOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4IiwidWkvYe+4gC5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoiREp2VW5kSmFsVnpCcEkzUUgwRVlkSWw1Z3BkT2QxZVo0VXZEZF9nSUpHTXB5WFJaSHpCRnFYcXBmaXcweG0yXzM3MklGUlk2U1pEZDFjX2VhbjZaQ0EifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a tag character in a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9h86CBgS5sdWF1IjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInVpL2HzoIGBLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJhU2JlYVp2aHZ6bTlFczhndGJXNXBBRTVCTGZwRmtYVUlQd29TUzh2Q1BGQUFkWG9uTWtHcFl0NnkwNnNqVWNNRS1QRzd0TWZtZ1k4VTZUNy14eUhCZyJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "error": "bad_file",
+        "ok": false
+      },
+      "store_result": {
+        "error": "bad_file",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: an emoji's selector in a name",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS/inaTvuI8ucG5nIjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInVpL+KdpO+4jy5wbmciOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJyUlY0ZmZaWlZHMnlxaGNYZ3o4TzlSbmJwYzIwZ2RBcktGVEtaaFY1TE9CS1JUS281bEpHdWJHSVJsWVRiQlpjNTMxOGVITTI2MTZBekg4Rkw5N1VCQSJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "files": 8,
+        "hash": "07b0f1b2fd1ac72ec8468eecf3d3f7417abcc50646288febc13a4a06204fde3a",
+        "id": "midnight",
+        "ignored": [],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png",
+          "ui/❤️.png"
+        ],
+        "sha256": "d3cbdf31c673bdb6bb75d381aaec2afac80906408bf36929714900d09cb19e5d",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: two names an emoji's selector tells apart",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS/inaQucG5nIjoiZUE9PSIsInVpL+KdpO+4jy5wbmciOiJlQT09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7IkNIQU5HRUxPRy5tZCI6IjE0MGQ1MTNjY2QyZjE3MGI1MWRhYzRmYjA1NGU2OTZjZDNhNjZmNGQ0ZTRhOTBkMjhhNGI5MjVmM2IzMWI1YzAiLCJSRUFETUUubWQiOiJjZjQ0YmI1ZjYwOGE3YjVmMzFmNDI1YWFjMTRlZWI1NjAyZWNjMTM5M2ViNTU2Y2YxODM3ZWY2ZTkyNmE1YmYwIiwiYXBwLmx1YXUiOiI3OWYzMTQ1NmYwNGIwNTBhZjM5Y2ZlZDYxZWUxN2NiYzBhYmY3ZmE1MzE3NTc1MWQ1YzM1OWIyYjA3NWRlZTU5IiwiZHMvdG9rZW5zLmx1YXUiOiI0Y2I4MDMyMjczMDc3NTUwYWFiYWFmNDE3MzZiNjRlNTZkYTk5NTE4ZDU2NzRmMmM5Zjk4ZDZmNmE3YTZkYmZjIiwicHJldmlldy5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4IiwidWkv4p2kLnBuZyI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJ1aS/inaTvuI8ucG5nIjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoic1Y2aTNMWGdJNFVUOTRlVUF6dVR4dkd4Ukl0M2QzOFdYTFFRa1hvTVVXT3ZKd0dFZ3JZTDc0SEZ2RktlOGhSeE1hcUVQSGt0amJ5TGUzTU02dFc5RHcifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      },
+      "store_result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a selector between a letter and its accent",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJ1aS9l77iOzIEubHVhdSI6ImVBPT0iLCJ1aS/DqS5sdWF1IjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInVpL2XvuI7MgS5sdWF1IjoiMmQ3MTE2NDJiNzI2YjA0NDAxNjI3Y2E5ZmJhYzMyZjVjODUzMGZiMTkwM2NjNGRiMDIyNTg3MTc5MjFhNDg4MSIsInVpL8OpLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJLTGdkR2o0cWNwdFhESElQdW4yNkM2TTNMUml4TG50TkhCblBONkpWWjh0Y2VqelRtNllKeWg0bkpVS0d4eW9BNjhYTFQ3eWpjRW9oZExUeWxWcWNEdyJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "error": "paths_collide",
+        "ok": false
+      },
+      "store_result": {
+        "error": "paths_collide",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a protected folder with an emoji's selector",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvcGx177iPZ2lucy9wYWdlLmx1YXUiOiJlQT09Iiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiJjbVYwZFhKdUlIdDkiLCJzY3JlZW5zaG90cy9jaGF0LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvcGx177iPZ2lucy9wYWdlLmx1YXUiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIiwic2NyZWVucy9zaGVsbC9zaWRlYmFyLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiIwMmEzZTI5OGYxNTMzZjYyNTU4YzU4ZTRjNzBlZGNhYjlhZjVhNTBkNjJkOTI1ZmQ1MzkwOTQyMDIwZmIwZmI4In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJFNk5sY0F5YW5HN2NhMm9MRm9EZ2gzdWVLdnhsSEtSaVZldk9oUzR2RWd1aXE2X2tXeHJMTXJWZUk4WDYyYzZHdWJRWURDYkVyZUNFWnJ2cVlmaThBUSJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "files": 7,
+        "hash": "a7f146a08d40dc235cfeb43bf5334f3b4a841e360ae614941330d8d174552d06",
+        "id": "midnight",
+        "ignored": [
+          "screens/plu️gins/page.luau"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "b19bf41257eab54fbd09ded050f178ba5126e35707c6fb9abdc8e2ce7bc337b6",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "names: a dot file with an emoji's selector before it",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCLvuI4ubHVhdXJjIjoiZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsIu+4ji5sdWF1cmMiOiIyZDcxMTY0MmI3MjZiMDQ0MDE2MjdjYTlmYmFjMzJmNWM4NTMwZmIxOTAzY2M0ZGIwMjI1ODcxNzkyMWE0ODgxIn0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJub25OdE04dm1UMkJZdDd4VGVVSUVtTVpwbGdXZDlZTDFiREV1NnZDWFVqbzZwc29WQXQ3RGQ5Z09YY1hzNGhEbkYxUFp5UjRoTXNUeUIyZTBveHFCUSJ9LCJ2ZXJzaW9uIjoiMS4yLjAiLCJ6ZXJvbl92ZXJzaW9uIjoiMC4zLjE2In19",
+      "result": {
+        "files": 7,
+        "hash": "54f3457ec4eed37481fc15bcd9f5e94a5ad3fe0b03aa38617d5460ea304208cb",
+        "id": "midnight",
+        "ignored": [
+          "︎.luaurc"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "c221c3511b835f75dbfa8d7be55862703795049b7fcddc3c5f0266da5b812ffb",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
       "name": "a path out of the folder",
       "package_b64": "eyJmaWxlcyI6eyIuLi9ldmlsLmx1YXUiOiJlQT09IiwiQ0hBTkdFTE9HLm1kIjoiSXlCRGFHRnVaMlZ6Q2dvakl5QXhMakl1TUFvS0xTQlVhR1VnYzJsa1pXSmhjaUJ0YjNabGN5QnlhV2RvZEM0SyIsIlJFQURNRS5tZCI6Ikl5Qk5hV1J1YVdkb2RBb0tRU0JrWVhKcklHbHVkR1Z5Wm1GalpTND0iLCJhcHAubHVhdSI6ImNtVjBkWEp1SUhKbGNYVnBjbVVvSnk0dmMyTnlaV1Z1Y3k5emFHVnNiQzl3WVdkbEp5az0iLCJkcy90b2tlbnMubHVhdSI6ImNtVjBkWEp1SUhzZ1ltY2dQU0FuSXpBd01DY2dmUT09IiwicHJldmlldy5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJzY3JlZW5zL3NoZWxsL3NpZGViYXIubHVhdSI6ImNtVjBkWEp1SUh0OSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiaVZCT1J3MEtHZ29BQUFBTlNVaEVVZz09In0sImZvcm1hdCI6Inplcm9uLXRlbXBsYXRlOnYxIiwibWFuaWZlc3QiOnsiZGVzY3JpcHRpb24iOiJBIGRhcmsgaW50ZXJmYWNlIHdpdGggdGhlIHNpZGViYXIgb24gdGhlIHJpZ2h0LiIsImhvbWVwYWdlIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9taWRuaWdodCIsImlkIjoibWlkbmlnaHQiLCJrZXl3b3JkcyI6WyJkYXJrIiwic2lkZWJhciJdLCJsaWNlbnNlIjoiTUlUIiwibmFtZSI6Ik1pZG5pZ2h0IiwicmVwb3NpdG9yeSI6Imh0dHBzOi8vZ2l0aHViLmNvbS9leGFtcGxlL21pZG5pZ2h0Iiwic2NyZWVuc2hvdHMiOlsic2NyZWVuc2hvdHMvY2hhdC5wbmciXSwic2lnbmF0dXJlIjp7ImZpbGVzIjp7Ii4uL2V2aWwubHVhdSI6IjJkNzExNjQyYjcyNmIwNDQwMTYyN2NhOWZiYWMzMmY1Yzg1MzBmYjE5MDNjYzRkYjAyMjU4NzE3OTIxYTQ4ODEiLCJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCJ9LCJrZXkiOiJpb2pqM1hRSjhaWDlVdHN0UExwZGNzcG5DYjhkbEJJYjgzU0lBYlFQYjF3Iiwic2lnIjoid3ZQbXBQVEphV21lN2ZUQzFjaTJ1N3I5YlBFakFxNUJETFQ4Vy1OemVCclBWa0RSS1pQWkU4U091SGp4ZjFhallhN1V4NmNEVkVtRWRNWDNwVTJoRFEifSwidmVyc2lvbiI6IjEuMi4wIiwiemVyb25fdmVyc2lvbiI6IjAuMy4xNiJ9fQ==",
       "result": {
@@ -38801,5 +41861,363 @@
         "ok": false
       }
     }
-  ]
+  ],
+  "update_ask": {
+    "items": [
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "1.0.0"
+        },
+        "sent": true
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "a1",
+          "version": "1.0.0-rc.1+build.2"
+        },
+        "sent": true
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": "1"
+        },
+        "sent": true
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "sent": true
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        },
+        "sent": true
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": ""
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "a",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "Midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "-midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "mid_night",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD",
+          "id": "midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "id": "midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0",
+          "id": "midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      },
+      {
+        "item": {
+          "hash": "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+          "id": "midnight",
+          "version": "1.0.0"
+        },
+        "sent": false
+      }
+    ],
+    "requests": [
+      {
+        "items": [],
+        "most": 2,
+        "name": "nothing",
+        "requests": []
+      },
+      {
+        "items": [
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.1.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.2.0"
+          }
+        ],
+        "most": 200,
+        "name": "three versions of one id",
+        "requests": [
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.0.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.1.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.2.0"
+            }
+          ]
+        ]
+      },
+      {
+        "items": [
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t0",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t1",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t2",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t3",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t4",
+            "version": "1.0.0"
+          }
+        ],
+        "most": 2,
+        "name": "five ids, two at a time",
+        "requests": [
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t0",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t1",
+              "version": "1.0.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t2",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t3",
+              "version": "1.0.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t4",
+              "version": "1.0.0"
+            }
+          ]
+        ]
+      },
+      {
+        "items": [
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.1.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "midnight",
+            "version": "1.2.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t0",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t1",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t2",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t3",
+            "version": "1.0.0"
+          },
+          {
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "id": "t4",
+            "version": "1.0.0"
+          }
+        ],
+        "most": 4,
+        "name": "both",
+        "requests": [
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t0",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t1",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t2",
+              "version": "1.0.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.1.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t3",
+              "version": "1.0.0"
+            },
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "t4",
+              "version": "1.0.0"
+            }
+          ],
+          [
+            {
+              "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "id": "midnight",
+              "version": "1.2.0"
+            }
+          ]
+        ]
+      }
+    ]
+  }
 }

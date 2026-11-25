@@ -75,7 +75,7 @@ impl Identity {
     /// content hash. Anything else isn't what a store template is (a
     /// `.lineage.json` is a file anyone may write), and is never sent: the
     /// store refuses the whole request for one.
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         templates::valid_id(&self.id)
             && (1..=MAX_VERSION).contains(&self.version.len())
             && self.hash.len() == 64

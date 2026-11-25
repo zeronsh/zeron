@@ -85,9 +85,9 @@ pub const CATEGORIES: &[(&str, &str)] = &[
 /// Ids nobody publishes: Zeron's own plugins'.
 pub const BUILTIN_IDS: &[&str] = &["git", "github", "parallax-scenes"];
 
-/// The store site's own pages beside plugin pages (`/plugins/<id>`): a
-/// plugin with one of these ids would be shadowed there, so the store never
-/// lists one. Zeron runs a plugin with one of these ids as any other (one
+/// The store site's own pages beside plugin pages (`/plugins/<id>`) and
+/// templates', and the two prefixes' own names: an item with one of these ids
+/// would be shadowed there, so the store never lists one. Zeron runs a plugin with one of these ids as any other (one
 /// made before they were kept still loads); only publishing is refused.
 /// (Some are usernames the edge keeps too; they're kept here all the same,
 /// so the site's pages never rest on another list.)
@@ -95,7 +95,7 @@ pub const SITE_IDS: &[&str] = &[
     "all", "new", "search", "browse", "discover", "featured", "popular", "updated", "category", "categories",
     "keyword", "keywords", "tags", "publishing", "publish", "guide", "docs", "help", "about", "account", "admin",
     "api", "install", "me", "settings", "report", "reports", "review", "queue", "audit", "terms", "privacy",
-    "sitemap", "feed", "static", "assets",
+    "sitemap", "feed", "static", "assets", "plugins", "templates",
 ];
 
 /// The stable words a problem is reported by.
@@ -1143,6 +1143,8 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
             ));
         } else if template_stray_screenshot(rel) {
             problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG: {TEMPLATE_SCREENSHOTS}/ holds its pictures alone")));
+        } else if rel.starts_with(TEMPLATE_SCREENSHOTS) && template_listing_file(rel) && !is_screenshot(&files[rel]) {
+            problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG picture, whatever its name says")));
         }
     }
     check_clashes(files, &[super::templates::MANIFEST, super::template_packages::IMPORTED], &mut problems);
@@ -1258,9 +1260,11 @@ pub(crate) mod tests {
     fn the_site_s_pages_are_never_a_listed_plugin_s_id_but_still_run() {
         let (base, files) = listed();
         for id in SITE_IDS {
-            // Each a valid id Zeron runs and nothing else already kept.
-            assert_eq!(manifest::check_id(id), Ok(()), "{id} still runs");
-            assert!(!BUILTIN_IDS.contains(id) && !id.starts_with("zeron") && !manifest::RESERVED_IDS.contains(id), "{id}");
+            // Each a valid id Zeron runs and nothing else already kept (but
+            // `templates`, which no plugin ever had; a template could).
+            assert_eq!(manifest::check_id(id).is_ok(), *id != "templates", "{id} still runs");
+            assert!(super::super::templates::valid_id(id), "{id}");
+            assert!(!BUILTIN_IDS.contains(id) && !id.starts_with("zeron") && (*id == "templates" || !manifest::RESERVED_IDS.contains(id)), "{id}");
             let mut m = base.clone();
             m["id"] = serde_json::json!(id);
             assert_eq!(rules(&m, &files), vec![(rule::ID_RESERVED, Some("id"))], "{id}");
