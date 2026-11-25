@@ -84,6 +84,11 @@ test("what's missing is said in a template's words, and nothing can be sent", fu
 			expect(tree).to_contain("A template has no “categories”.")
 			expect(tree).to_contain("This file is Zeron's own")
 			expect(tree).to_contain("app.luau")
+			-- (One sentence a cause: the engine's where Zeron's is of another.)
+			expect(tree).to_contain("APP~1.LUA is a short name")
+			expect(tree).to_contain("Its id isn't one the store takes")
+			expect(tree).to_contain("It holds a file Zeron doesn't write for a template")
+			expect(tree).to_contain("A file there isn't a picture")
 		else
 			expect(tree).to_contain("模板没有“categories”")
 			expect(tree).to_contain("preview.png")

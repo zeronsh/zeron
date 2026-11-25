@@ -223,6 +223,10 @@ store.prepare = function(id: string): any
 					{ rule = "bad_listing", field = "categories", words = "categories" },
 					{ rule = "protected_file", path = "app.luau", words = "protected" },
 					{ rule = "missing_readme", words = "no README.md" },
+					{ rule = "protected_file", path = "screens/APP~1.LUA", words = "APP~1.LUA is a short name" },
+					{ rule = "bad_package", field = "id", words = "Its id isn't one the store takes" },
+					{ rule = "bad_package", path = "screens/nul", words = "a device name" },
+					{ rule = "bad_listing", field = "files", path = "screenshots/a.txt", words = "A file there isn't a picture" },
 				}
 				else {},
 			warnings = {},

@@ -198,6 +198,12 @@ function C.make(kind: kinds.Kind, browse: any)
 
 	local function fix_of(p: any): string
 		local rule, field = p.rule, p.field
+		-- (A rule of more than one cause: a short name is no file of Zeron's,
+		-- and a package's id no file at all. The engine's words, then.)
+		local other = (rule == "protected_file" and type(p.path) == "string" and string.find(p.path, "~%d") ~= nil) or (rule == "bad_package" and (field == "id" or type(p.path) ~= "string"))
+		if other and type(p.words) == "string" and p.words ~= "" then
+			return string.sub(p.words, 1, 400)
+		end
 		local caused = if rule == "bad_listing" then M.cause_words(p) else nil
 		if caused then
 			return caused
