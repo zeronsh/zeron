@@ -133,6 +133,7 @@ impl Rig {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: vec![],
             worktree: None,
             resume: None,

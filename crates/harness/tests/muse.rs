@@ -47,6 +47,7 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         access: AccessMode::Supervised,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         attachments: vec![],
         worktree: None,

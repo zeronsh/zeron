@@ -84,6 +84,8 @@ export type Session = {
 	-- A crew thread: the orchestrator that started it (its name, and its hue
 	-- for the dot after the title, as its row in Orchestrators wears).
 	crew: Crew?,
+	-- An archived one's project, by its id (the rest are under theirs).
+	project: string?,
 }
 export type Crew = { name: string, hue: number? }
 export type PullRequest = { number: number, state: ("open" | "merged" | "closed" | "draft")?, title: string? }
@@ -264,6 +266,9 @@ export type Props = {
 	-- Archived sessions (the most recently moved first), for the Archived
 	-- shelf when `details.archived` is on; a row's Unarchive.
 	archived: Live<{ Session }>?,
+	-- Every project a session may be of, listed now or not: an archived
+	-- one's, for its row to show (its `project`).
+	known: Live<{ Project }>?,
 	on_unarchive: ((id: string) -> ())?,
 	-- A session renamed in its row (Zeron's inline rename): which one is
 	-- being renamed (a double click on its row starts it; the caller may
@@ -285,6 +290,15 @@ export type Props = {
 	-- A session's context menu (a secondary click on its row): its entries
 	-- (ds/context_menu's), nil for none.
 	menu: ((id: string) -> { ContextMenu.Entry }?)?,
+	-- Sessions picked out together, by id: a ⇧-click picks every one the list
+	-- shows from the session open (or where the picking began) through the
+	-- one clicked, and opens nothing. A plain click opens its session and
+	-- lets them all go. Only sessions the list shows are ever in it (one
+	-- folded away, filtered out or archived leaves it).
+	marked: State<{ [string]: boolean }>?,
+	-- The context menu of several of them, opened on any one: by their ids,
+	-- in the list's order.
+	menu_many: ((ids: { string }) -> { ContextMenu.Entry }?)?,
 	-- A project group's menu, on its header (Rename…, Remove…), by its id.
 	project_menu: ((id: string) -> { ContextMenu.Entry }?)?,
 }
@@ -364,6 +378,34 @@ end
 
 -- A small icon button in a row's corner (shown under the pointer).
 local corner = SessionRow.corner_button
+
+-- (Two sessions' tables saying the same, a few levels down: one handed
+-- back as a new table, the whole list written again, keeps the one held.)
+local function same_row(a: any, b: any, depth: number): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+		return false
+	end
+	for k, v in a do
+		if not same_row(v, b[k], depth - 1) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- (The longest any of its motions runs, delay and all, in ms.)
+local MOTION_MAX = 5000
+-- How much of the window the view menu leaves clear (its top past the title
+-- bar's line, its foot off the window's), and its least before it scrolls.
+local VIEW_MENU_CLEAR, VIEW_MENU_MIN = 56, 240
 
 return ui.component(function(props: Props): Node
 	local compact = props.compact
@@ -460,6 +502,39 @@ return ui.component(function(props: Props): Node
 		end
 	end)
 	local selected = props.selected
+	-- The sessions picked out together (⇧-clicked), where the caller keeps
+	-- them.
+	local marked = props.marked
+	local function is_marked(id: string): boolean
+		return marked ~= nil and marked:get()[id] == true
+	end
+	local function any_marked(): boolean
+		return marked ~= nil and next(marked:get()) ~= nil
+	end
+	local function unmark_all()
+		if marked and next(marked:peek()) ~= nil then
+			marked:set({})
+		end
+	end
+	-- What can be picked, in the order the list shows it; and where the
+	-- picking began, the end every ⇧-click keeps.
+	local pickable: { string } = {}
+	local anchor: string? = nil
+	local function mark_through(id: string)
+		local to = table.find(pickable, id)
+		if not marked or not to then
+			return
+		end
+		local from = if next(marked:peek()) ~= nil then anchor else selected:peek()
+		-- (Not in the list, a new chat's or one folded away: from here.)
+		local at = (if from then table.find(pickable, from) else nil) or to
+		anchor = pickable[at]
+		local through: { [string]: boolean } = {}
+		for i = math.min(at, to), math.max(at, to) do
+			through[pickable[i]] = true
+		end
+		marked:set(through)
+	end
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
 		return motion.tween(ui.computed(f), how)
@@ -539,6 +614,8 @@ return ui.component(function(props: Props): Node
 		-- (Each project by its id, sessions or not: its tile as it is now.)
 		by_project: { [string]: Project },
 		by_id: { [string]: Session },
+		-- (The archived ones, apart: no place lists them but their shelf.)
+		archived: { [string]: Session },
 		pinned_ids: { string },
 		everything: { Session },
 		devices: { string },
@@ -547,7 +624,13 @@ return ui.component(function(props: Props): Node
 	local index = ui.computed(function(): Index
 		local projects = follow(props.projects, {} :: { Project })
 		local here: string? = follow(props.here, nil :: string?)
-		local out: Index = { projects = projects, project_of = {}, by_project = {}, by_id = {}, pinned_ids = {}, everything = {}, devices = {}, here = here }
+		local out: Index = { projects = projects, project_of = {}, by_project = {}, by_id = {}, archived = {}, pinned_ids = {}, everything = {}, devices = {}, here = here }
+		for _, p in follow(props.known, {} :: { Project }) do
+			out.by_project[p.id] = p
+		end
+		for _, s in follow(props.archived, {} :: { Session }) do
+			out.archived[s.id] = s
+		end
 		for _, p in projects do
 			out.by_project[p.id] = p
 			for _, s in p.sessions do
@@ -580,7 +663,9 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local function project_of(id: string): Project?
-		return index:get().project_of[id]
+		local all = index:get()
+		local stored = all.archived[id]
+		return all.project_of[id] or (if stored and stored.project then all.by_project[stored.project] else nil)
 	end
 	-- A project's tile as it is now (its picture chosen again): its hue,
 	-- artwork and emoji, each followed in place by the tile that shows it.
@@ -867,8 +952,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- button): its wash stops short of it.
 		less: number?,
 		selected: (() -> boolean)?,
+		-- Open, but not what's selected (others are picked out): the quiet wash.
+		current: (() -> boolean)?,
 		hovered: State<boolean>?,
-		on_click: (() -> ())?,
+		on_click: ((e: ClickEvent) -> ())?,
 		-- (What plugins place by, and what's under them: ids, never records.)
 		class: string?,
 		provide: { [string]: any }?,
@@ -998,6 +1085,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				selected = function(): boolean
 					return is_selected ~= nil and is_selected()
 				end,
+				current = r.current,
 
 				on_click = r.on_click,
 				on_hover = function(inside: boolean)
@@ -1061,31 +1149,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Through a computed of its own: the row's bindings wake when its
 	-- session's table changes, not whenever any session's does. A caller
 	-- that keeps a session's table while it's the same keeps them asleep.)
-	-- (Two sessions' tables saying the same, a few levels down: one handed
-	-- back as a new table, the whole list written again, keeps the one held.)
-	local function same_row(a: any, b: any, depth: number): boolean
-		if rawequal(a, b) then
-			return true
-		end
-		if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
-			return false
-		end
-		for k, v in a do
-			if not same_row(v, b[k], depth - 1) then
-				return false
-			end
-		end
-		for k in b do
-			if a[k] == nil then
-				return false
-			end
-		end
-		return true
-	end
 	local function now_of(s: Session): () -> Session
 		local last = s
 		local row = ui.computed(function(): Session
-			local cur = index:get().by_id[s.id]
+			local all = index:get()
+			local cur = all.by_id[s.id] or all.archived[s.id]
 			if cur and not same_row(cur, last, 4) then
 				last = cur
 				-- (Counted: tests/whole_list's "one status, one row".)
@@ -1161,7 +1229,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- trunk ending at it.)
 	-- (In the sidebar's list, `list_now` and `tree_of` follow the row as it
 	-- moves between lists, the row staying itself.)
-	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
+	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, by_now: (() -> Organize)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
 	-- A row under its group's header (`tree_of`: its tree as it stands;
 	-- nil, out of any): a branch off the group's trunk (ds/session_row).
 	local function on_tree(body: Node, now_tree: () -> Tree?): Node
@@ -1236,15 +1304,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 
 	local function session_row(s: Session, by: Organize, place: Place?): Node
 		local in_flyout = place ~= nil and place.wide == true
-		-- (On the Archived shelf: Unarchive under the pointer, no drag.)
-		local shelved = place ~= nil and place.list == "archived"
+		-- Where it stands now: whether on the Archived shelf (Unarchive under
+		-- the pointer, no drag), and how its list is grouped. A row moved to
+		-- another list (archived, brought back, dragged) keeps its node.
+		local list_now = if place then place.list_now else nil
+		local list_by = if place then place.by_now else nil
+		local on_shelf = ui.computed(function(): boolean
+			return (if list_now then list_now() elseif place then place.list else nil) == "archived"
+		end)
+		local by_here = ui.computed(function(): Organize
+			return if list_by then list_by() else by
+		end)
 		local on_pick = if place then place.on_pick else nil
 		local hovered = ui.use_state(false)
 		-- Its jump (1–9) while ⌘ is held alone and it's among the first nine
 		-- shown; nil otherwise (a flyout's and the shelf's rows have none).
-		local jumpable = not in_flyout and not shelved
 		local function jump(): number?
-			if not jumpable or not hinting() then
+			if in_flyout or not hinting() or on_shelf:get() then
 				return nil
 			end
 			return slots:get()[s.id]
@@ -1270,21 +1346,29 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- The session as it stands: what the row shows of it follows it.
 		local cur = now_of(s)
 		local function second_line(): boolean
-			return not compact:get() and detail(cur(), by) ~= ""
+			return not compact:get() and detail(cur(), by_here:get()) ~= ""
 		end
 		-- Regular's second line: where it runs, and on what (its branch's
 		-- glyph leading while the branch shows).
 		local second = SessionRow.second_line(function(): string
-			return detail(cur(), by)
+			return detail(cur(), by_here:get())
 		end, function(): boolean
 			return details.branch:get() and cur().branch ~= nil
 		end, second_line, fades)
-		local function strong(): boolean
-			return active(s) or selected:get() == s.id
+		-- Whether it's open, and whether it can be picked out with others (in
+		-- the list itself, off the shelf) and is.
+		local function is_open(): boolean
+			return selected:get() == s.id
 		end
-		-- Its project's icon beside its title, where its group isn't its
-		-- project.
-		local p = project_of(s.id)
+		local function markable(): boolean
+			return marked ~= nil and not in_flyout and not on_shelf:get()
+		end
+		local function picked(): boolean
+			return markable() and is_marked(s.id)
+		end
+		local function strong(): boolean
+			return active(s) or is_open() or picked()
+		end
 		-- Its title, or (renamed in its row) a field over it: the title
 		-- selected, ↩ or leaving it keeps a changed name, Esc keeps the old.
 		local function editing(): boolean
@@ -1355,19 +1439,37 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return cur().title
 			end, strong, nil)
 		)
-		if p and not SessionRow.groups_by(by, "project") then
-			title = ui.row {
-				grow = 1,
-				min_w = 0,
-				gap = "$zeron.space.tight",
-				items = "center",
-				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
+		-- Its project's tile beside its title, while its list isn't grouped by
+		-- project (made again only for another project).
+		local function tiled(): string?
+			if not details.project_icon:get() or SessionRow.groups_by(by_here:get(), "project") then
+				return nil
+			end
+			local p = project_of(s.id)
+			return if p then p.id else nil
+		end
+		title = ui.row {
+			grow = 1,
+			min_w = 0,
+			gap = "$zeron.space.tight",
+			items = "center",
+			ui.show(function(): boolean
+				return tiled() ~= nil
+			end, function(): Node
+				return ui.presence(tiled, function(_: string): Node
+					local p = project_of(s.id)
+					if not p then
+						return ui.div {}
+					end
+					if p.icon then
+						return Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 }
+					end
 					local hue, src, emoji = look(p)
 					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16, project = p.id }
-				end)() }),
-				title,
-			}
-		end
+				end, { shrink = 0, y = OPTICAL })
+			end),
+			title,
+		}
 		-- `.session-title`: the row's title, what plugins place beside (a
 		-- badge after it stays in the row, outside the title's fade).
 		-- A crew thread: its orchestrator's dot after the title (named on
@@ -1404,7 +1506,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					card_hide(true)
 					-- (Once the click is over, as Zeron's starts on the second
 					-- click: nothing of the press left to take focus back.)
-					if e.clicks == 2 and props.on_rename then
+					-- (⇧ held, it's picked out, however many clicks.)
+					if e.clicks == 2 and not e.shift and props.on_rename then
 						ui.after(0, function()
 							session_renaming:set(s.id)
 						end)
@@ -1414,7 +1517,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return cur().title
 			end,
 			h = function(): number
-				return session_h(cur(), by)
+				return session_h(cur(), by_here:get())
 			end,
 			indent = if place and place.tree_of
 				then function(): number
@@ -1447,26 +1550,44 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						cur = cur,
 						hovered = hovered,
 						jump = jump,
-						action = if shelved
-							then corner("ds.sidebar.unarchive", "inbox", function()
-								if props.on_unarchive then
-									props.on_unarchive(s.id)
-								end
-							end)
-							else corner("ds.sidebar.archive", "archive-minimalistic", function()
-								if props.on_archive then
-									props.on_archive(s.id)
-								end
-							end),
+						action = ui.show(
+							function(): boolean
+								return on_shelf:get()
+							end,
+							function(): Node
+								return corner("ds.sidebar.unarchive", "inbox", function()
+									if props.on_unarchive then
+										props.on_unarchive(s.id)
+									end
+								end)
+							end,
+							function(): Node
+								return corner("ds.sidebar.archive", "archive-minimalistic", function()
+									if props.on_archive then
+										props.on_archive(s.id)
+									end
+								end)
+							end
+						),
 					}
 				),
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },
 			},
+			-- (Some picked out: they're what's selected, the one open quieter.)
 			selected = function(): boolean
-				return selected:get() == s.id
+				if markable() and any_marked() then
+					return picked()
+				end
+				return is_open()
 			end,
-			on_click = function()
+			current = if marked and not in_flyout then is_open else nil,
+			on_click = function(e: ClickEvent)
+				if markable() and e.shift then
+					mark_through(s.id)
+					return
+				end
+				unmark_all()
 				selected:set(s.id)
 				if on_pick then
 					on_pick()
@@ -1475,13 +1596,31 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}
 		-- Its menu, on a secondary click (the app's entries).
 		if props.menu then
-			local menu = props.menu
+			local menu, menu_many = props.menu, props.menu_many
 			body = ContextMenu {
 				label = locale.t("ds.sidebar.session_actions"),
 				ring = "$radius.md",
 				w_full = true,
 				shrink = 0,
 				items = function()
+					-- (On one of several picked out, theirs. On any other, its
+					-- own, and they're let go: what it acts on is what's lit.)
+					if markable() and marked and menu_many then
+						local all = marked:peek()
+						if all[s.id] then
+							local ids: { string } = {}
+							for _, id in pickable do
+								if all[id] then
+									table.insert(ids, id)
+								end
+							end
+							if #ids > 1 then
+								return menu_many(ids)
+							end
+						else
+							unmark_all()
+						end
+					end
 					return menu(s.id)
 				end,
 				body,
@@ -1510,7 +1649,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local d = drag:get()
 			return d ~= nil and d.id == s.id
 		end
-		local list_now = (place :: Place).list_now
 		return ui.div {
 			w_full = true,
 			shrink = 0,
@@ -1522,17 +1660,17 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			on_drag = function(): any
 				-- (Archived: it stays on its shelf.)
-				if shelved then
+				if on_shelf:peek() then
 					return nil
 				end
 				local from = if list_now then list_now() else list :: string
-				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by) + list_gap() })
+				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by_here:peek()) + list_gap() })
 				return { session = s.id }
 			end,
 			drag_preview = function()
 				local card: ContainerProps = {
 					w = room_now() - PAD * 2,
-					h = session_h(cur(), by),
+					h = session_h(cur(), by_here:peek()),
 					items = "start",
 					rounded = "$radius.md",
 					ui.div {
@@ -2514,8 +2652,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		return { from = v, to = v, at = 0, dur = 0, delay = 0 }
 	end
 	local moving: { Anim } = {}
-	-- (The longest any of its motions runs, delay and all, in ms.)
-	local MOTION_MAX = 5000
 	local ticking: any = nil
 	-- Each frame: what has arrived is done (its `on_done` run); with nothing
 	-- left moving, the clock stops.
@@ -4000,6 +4136,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 			local ids: { string } = {}
 			local shown: { string } = {}
+			local picks: { string } = {}
 			for _, it in s.items do
 				-- (One leaving is gone already, for the keys.)
 				if it.kind == "session" and not it.leaving then
@@ -4011,6 +4148,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end
 					if open then
 						table.insert(shown, id)
+						-- (The Archived shelf's aren't picked.)
+						if it.list ~= "archived" then
+							table.insert(picks, id)
+						end
 					end
 				end
 			end
@@ -4028,8 +4169,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 			end
 			put(order, ids)
+			pickable = picks
 			if props.order then
 				put(props.order, shown)
+			end
+			-- (Those picked out and no longer shown are let go.)
+			local picked = if marked then marked:peek() else {}
+			if marked and next(picked) ~= nil then
+				local kept: { [string]: boolean } = {}
+				for _, id in picks do
+					kept[id] = picked[id]
+				end
+				for id in picked do
+					if not kept[id] then
+						marked:set(kept)
+						break
+					end
+				end
 			end
 			-- (Their jumps: the first nine shown, as ⌘1–9 go.)
 			local jumps: { [string]: number } = {}
@@ -4359,6 +4515,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 					list_now = function(): string
 						local now = item_of(key)
 						return if now and now.list then now.list else it.list :: string
+					end,
+					by_now = function(): Organize
+						local now = item_of(key)
+						return if now and now.by then now.by :: Organize else it.by :: Organize
 					end,
 					at = at,
 					-- Its trunk while it sits in a group that draws one.
@@ -4953,23 +5113,20 @@ fn layer(input:LayerInput)->vec4<f32> {
 	}
 	-- A menu a row of its opens in its place, under the "…" (`view_more`'s
 	-- `menu`): the entries it's given, read once as it opens.
-	local more_entries: { ContextMenu.Entry }? = nil
-	local more_open: ((x: number, y: number) -> boolean)? = nil
-	local trigger_at: Element? = nil
+	-- (Its entries, its opener and where the trigger is: one table, so the
+	-- component stays under Luau's 200 locals.)
+	local more: { entries: { ContextMenu.Entry }?, open: ((x: number, y: number) -> boolean)?, at: Element? } = {}
 	local function open_more(entries: { ContextMenu.Entry })
 		view_open:set(false)
-		more_entries = entries
+		more.entries = entries
 		ui.after(0, function()
-			local el = trigger_at
-			if more_open and el and el.x and el.y then
-				(more_open :: any)(el.x, el.y + (el.height or 0) + 4)
+			local el = more.at
+			if more.open and el and el.x and el.y then
+				(more.open :: any)(el.x, el.y + (el.height or 0) + 4)
 			end
 		end)
 	end
 	local view_more: { Node } = {}
-	-- How much of the window it leaves clear (its top past the title bar's
-	-- line, its foot off the window's), and its least before it scrolls.
-	local VIEW_MENU_CLEAR, VIEW_MENU_MIN = 56, 240
 	-- Its rows' height, as last laid out (kept between openings, so it
 	-- opens at its size).
 	local rows_h = ui.use_state(0)
@@ -5504,17 +5661,17 @@ fn layer(input:LayerInput)->vec4<f32> {
 			ContextMenu {
 				label = locale.t("ds.sidebar.view.options"),
 				hook = function(open_at)
-					more_open = open_at
+					more.open = open_at
 				end,
 				items = function(): { ContextMenu.Entry }?
-					local e = more_entries
-					more_entries = nil
+					local e = more.entries
+					more.entries = nil
 					return e
 				end,
 				ui.div {
 					id = "sidebar-view-more",
 					on_visible = function(_v: boolean, el: Element)
-						trigger_at = el
+						more.at = el
 					end,
 					view_menu,
 				},

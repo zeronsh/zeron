@@ -89,6 +89,10 @@ pub mod methods {
     /// (`{supported, enabled}`; set with `{harness, enabled}`).
     pub const GET_CODE_MODE: &str = "GetCodeMode";
     pub const SET_CODE_MODE: &str = "SetCodeMode";
+    /// Settings → Providers: which agents run with only Zeron's MCP servers
+    /// (their own hidden), and the choice per agent.
+    pub const GET_ZERON_MCP_ONLY: &str = "GetZeronMcpOnly";
+    pub const SET_ZERON_MCP_ONLY: &str = "SetZeronMcpOnly";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -760,6 +764,23 @@ pub mod methods {
     /// shown as the engine's own are, under the same Settings, at most a few
     /// a minute for each `source`; clicking it opens `session`.
     pub const POST_NOTIFICATION: &str = "PostNotification";
+
+    // ── Managed MCP servers ──────────────────────────────────────────────────
+    pub const WATCH_MCP_SERVERS: &str = "WatchMcpServers";
+    pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
+    pub const UPSERT_MCP_SERVER: &str = "UpsertMcpServer";
+    pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
+    pub const DELETE_MCP_SERVER: &str = "DeleteMcpServer";
+    pub const START_MCP_AUTH: &str = "StartMcpAuth";
+    /// An agent asks for a change to the MCP servers; it waits for the
+    /// person (`ResolveMcpRequest`, this device's app alone).
+    pub const REQUEST_MCP_CHANGE: &str = "RequestMcpChange";
+    pub const GET_MCP_REQUEST: &str = "GetMcpRequest";
+    pub const RESOLVE_MCP_REQUEST: &str = "ResolveMcpRequest";
+    pub const POLL_MCP_AUTH: &str = "PollMcpAuth";
+    pub const CANCEL_MCP_AUTH: &str = "CancelMcpAuth";
+    pub const DISCONNECT_MCP_AUTH: &str = "DisconnectMcpAuth";
+    pub const REFRESH_MCP_SERVERS: &str = "RefreshMcpServers";
 }
 
 /// Methods answered only over this device's own local IPC, never to a peer
@@ -824,6 +845,19 @@ pub fn local_only(method: &str) -> bool {
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH
             | methods::CLOUD_SESSION_SET_REACH
+            // Managed MCP server mutations and OAuth flows carry secrets or
+            // drive loopback auth callbacks: never cross the peer relay.
+            | methods::UPSERT_MCP_SERVER
+            | methods::SET_MCP_SERVER_ENABLED
+            | methods::DELETE_MCP_SERVER
+            | methods::START_MCP_AUTH
+            | methods::POLL_MCP_AUTH
+            | methods::CANCEL_MCP_AUTH
+            | methods::DISCONNECT_MCP_AUTH
+            // What an agent asks for is this device's to answer, here.
+            | methods::REQUEST_MCP_CHANGE
+            | methods::GET_MCP_REQUEST
+            | methods::RESOLVE_MCP_REQUEST
     )
 }
 
@@ -935,6 +969,12 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::DELETE_TEMPLATE
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
+            // MCP servers: reading them (no secret is in the list), and
+            // asking for a change, which waits for the person (only this
+            // device's app answers it: `ResolveMcpRequest` isn't here).
+            | methods::LIST_MCP_SERVERS
+            | methods::REQUEST_MCP_CHANGE
+            | methods::GET_MCP_REQUEST
             // Themes: data only (no consent: a theme can't run anything),
             // read, made, changed, deleted (yours only) and worn. Not the
             // window's watch.
@@ -1144,6 +1184,38 @@ mod tests {
             assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
             assert!(!agent_allowed(method), "{method}");
         }
+    }
+
+    #[test]
+    fn managed_mcp_server_mutations_and_auth_are_local_only_and_never_agent_allowed() {
+        for method in [
+            methods::UPSERT_MCP_SERVER,
+            methods::SET_MCP_SERVER_ENABLED,
+            methods::DELETE_MCP_SERVER,
+            methods::START_MCP_AUTH,
+            methods::POLL_MCP_AUTH,
+            methods::CANCEL_MCP_AUTH,
+            methods::DISCONNECT_MCP_AUTH,
+        ] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+        for method in [methods::WATCH_MCP_SERVERS, methods::REFRESH_MCP_SERVERS] {
+            assert!(!local_only(method), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+        // An agent reads the (secret-free) list, and asks; the person answers,
+        // in this device's app alone.
+        assert!(!local_only(methods::LIST_MCP_SERVERS));
+        assert!(agent_allowed(methods::LIST_MCP_SERVERS));
+        for method in [methods::REQUEST_MCP_CHANGE, methods::GET_MCP_REQUEST] {
+            assert!(local_only(method), "{method}");
+            assert!(agent_allowed(method), "{method}");
+        }
+        assert!(local_only(methods::RESOLVE_MCP_REQUEST));
+        assert!(peer_refused(methods::RESOLVE_MCP_REQUEST, &serde_json::Value::Null));
+        assert!(!agent_allowed(methods::RESOLVE_MCP_REQUEST));
     }
 
     #[test]

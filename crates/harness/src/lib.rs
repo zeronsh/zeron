@@ -1040,6 +1040,16 @@ pub fn supports_code_mode(id: HarnessId) -> bool {
     matches!(id, HarnessId::Codex | HarnessId::Muse)
 }
 
+/// Whether a harness can run with only the MCP servers Zeron hands it
+/// (`RunRequest::zeron_mcp_only`), its own hidden for the run without
+/// touching its user's files: Codex (`features.apps` off and each of its
+/// config's servers disabled, per thread), Claude Code
+/// (`--strict-mcp-config`), Pi (`--no-mcp`, 1.0.4 on). Others either have
+/// no per-run switch or only one that costs more than MCP servers.
+pub fn supports_zeron_mcp_only(id: HarnessId) -> bool {
+    matches!(id, HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Pi)
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::child_path_entries;

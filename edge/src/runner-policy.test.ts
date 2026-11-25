@@ -33,6 +33,13 @@ const REFUSED: [string, string][] = [
   ["POST", "/vault/o/accounts/claude/active"],
   ["DELETE", "/vault/o/accounts/codex/a1"],
   ["GET", "/vault/o/accounts/codex/a1/usage"],
+  // Vault connections: admin writes and single-item reads are refused for runners.
+  ["PUT", "/vault/o/connections/mcp:linear"],
+  ["PATCH", "/vault/o/connections/mcp:linear"],
+  ["DELETE", "/vault/o/connections/mcp:linear"],
+  ["POST", "/vault/o/connections/mcp:linear/disconnect"],
+  ["GET", "/vault/o/connections/mcp:linear"],
+  ["POST", "/vault/o/connections"],
   // Another device's room: never as its host, nor its sidecars.
   ["GET", "/device/laptop-1/ws?role=host"],
   ["GET", "/device/laptop-1/ws?role=HOST"],
@@ -71,6 +78,10 @@ describe("runner policy", () => {
     for (const [method, path] of [
       ["POST", "/vault/o/grant"],
       ["POST", "/vault/o/grants"],
+      ["GET", "/vault/o/connections"],
+      ["GET", "/vault/o/connections?kind=mcp"],
+      ["POST", "/vault/o/connections/grant"],
+      ["POST", "/vault/o/connections/grants"],
       ["GET", "/device/cloud-1/ws?role=host"],
       ["GET", "/device/cloud-1/ws?role=client"],
       ["POST", "/device/cloud-1/nudge"],

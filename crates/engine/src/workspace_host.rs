@@ -937,6 +937,18 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_sessions())?)
     }
 
+    /// How the person runs `harness` on Cloud (Settings → Providers, Cloud):
+    /// the account's choices, which every Cloud machine follows.
+    pub fn cloud_agent_choices(&self, harness: HarnessId) -> zeron_doc::CloudAgentChoices {
+        self.read(|doc| doc.cloud_agent_choices(harness.as_str()))
+    }
+
+    /// Make one of `harness`'s choices on Cloud, for every Cloud machine (a
+    /// person's device's to make: the room refuses a Cloud runner's).
+    pub fn set_cloud_agent_choice(&self, harness: HarnessId, choice: zeron_doc::CloudAgentChoice, on: bool) {
+        self.mutate(|doc| doc.set_cloud_agent_choice(harness.as_str(), choice, on));
+    }
+
     pub fn change_sidebar_pin(
         &self,
         change: &zeron_proto::SidebarPinChange,

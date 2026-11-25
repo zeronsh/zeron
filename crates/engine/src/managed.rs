@@ -405,6 +405,7 @@ impl Engine {
         crate::update_trial::boot(&config.data_dir)?;
         let lock = acquire_lock(&config.data_dir).await?;
         desktop_notify::enable();
+        crate::sessions::expect_ipc_port(true);
 
         let mut engine = deferred::DeferredEngine::prepare(&config).await?;
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();

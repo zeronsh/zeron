@@ -24,6 +24,7 @@ use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_fo
 
 mod orchestration;
 mod commands;
+mod mcp_servers;
 mod plugins;
 mod themes;
 #[cfg(test)]
@@ -332,6 +333,7 @@ fn catalog() -> Vec<ToolDef> {
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools.extend(commands::catalog());
+    tools.extend(mcp_servers::catalog());
     tools
 }
 
@@ -959,6 +961,9 @@ impl Tools {
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
+            }
+            tool if mcp_servers::NAMES.contains(&tool) => {
+                return self.mcp_servers(tool, args).await;
             }
             plugin if is_plugin_tool_name(plugin) => {
                 return self.call_plugin_tool(plugin, args).await;
@@ -2078,6 +2083,7 @@ impl Tools {
                     access: config.as_ref().map(|c| c.access).unwrap_or_default(),
                     plan: config.as_ref().is_some_and(|c| c.plan),
                     code_mode: false,
+                    zeron_mcp_only: false,
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,

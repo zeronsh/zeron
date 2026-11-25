@@ -6,7 +6,9 @@ use serde_json::{Value, json};
 use zeron_cli::{PluginCommand, TemplateCommand};
 use zeron_rpc::methods;
 
-async fn connect(
+/// The running engine's local connection, as this person (`zeron mcp …`
+/// shares it).
+pub(crate) async fn connect(
     ipc_port: u16,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<zeron_rpc::RpcClient> {

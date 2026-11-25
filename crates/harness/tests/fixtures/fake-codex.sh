@@ -46,6 +46,11 @@ if has "$line" '"method":"config/read"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"mcp_servers\":{\"test\":{\"enabled\":true}}}}}"
   read -r line || exit 1
 fi
+if has "$line" '"method":"plugin/installed"'; then
+  # No plugins, so none of their MCP servers to switch off.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"marketplaces\":[]}}"
+  read -r line || exit 1
+fi
 thread_line="$line"
 if has "$line" 'crash-on-thread-start'; then
   # The app-server dies under thread/start: the run must report why.

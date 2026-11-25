@@ -13,13 +13,19 @@
  * dependency-free, so no vault code enters this bundle.
  */
 import {
+  CONNECTION_ID_RE,
   LEGACY_VAULT_PROVIDERS,
   VAULT_PROVIDERS,
+  type ConnectionGrantManyRequest,
+  type ConnectionGrantRequest,
   type EnrollDeviceRequest,
   type GrantManyRequest,
   type GrantRequest,
+  type PutConnectionRequest,
   type PutCredentialRequest,
+  type UpdateConnectionRequest,
   type VaultCaller,
+  type VaultConnectionKind,
   type VaultProviderId,
   type VaultResult,
   type VaultStatusView
@@ -33,6 +39,7 @@ const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const KEY_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_AUTHORIZED_DEVICES = 64;
+const MAX_CONNECTION_BATCH = 100;
 
 const bad = (message: string): Response => json({ error: "bad_request", message }, 400);
 
@@ -45,6 +52,22 @@ const deviceList = (value: unknown): string[] | undefined =>
   value.every((d) => typeof d === "string" && ID_RE.test(d))
     ? (value as string[])
     : undefined;
+
+const connectionDeviceList = (value: unknown): string[] | undefined =>
+  Array.isArray(value) &&
+  value.length <= MAX_AUTHORIZED_DEVICES &&
+  value.every((d) => typeof d === "string" && (d === "*" || ID_RE.test(d)))
+    ? (value as string[])
+    : undefined;
+
+const decodeConnectionId = (raw: string): string | undefined => {
+  try {
+    const decoded = decodeURIComponent(raw);
+    return CONNECTION_ID_RE.test(decoded) ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -80,9 +103,17 @@ export const understoodProviders = (request: Request): ReadonlySet<string> => {
 };
 
 /** A status as `understood` can read it. Statuses are what every vault call
- * that changes something answers, so all of them pass through here. */
+ * that changes something answers, so all of them pass through here. Only
+ * `VaultStatusView` (`available: true` + `devices` + `connections`) is filtered,
+ * leaving `VaultConnectionsView` untouched. */
 const forClient = <T>(result: VaultResult<T>, understood: ReadonlySet<string>): VaultResult<T> => {
-  if (!result.ok || !isObject(result.value) || !Array.isArray((result.value as { connections?: unknown }).connections)) {
+  if (
+    !result.ok ||
+    !isObject(result.value) ||
+    result.value.available !== true ||
+    !Array.isArray(result.value.devices) ||
+    !Array.isArray(result.value.connections)
+  ) {
     return result;
   }
   const status = result.value as unknown as VaultStatusView;
@@ -337,6 +368,148 @@ export const handleVaultRoute = async (
       const flowId = rest[2]!;
       if (!ID_RE.test(flowId)) return bad("Bad flowId.");
       return call(() => vault.githubDevicePoll(caller, flowId));
+    }
+  }
+
+  // /vault/{orgId}/connections — remote MCP & plugin connections.
+  if (rest[0] === "connections") {
+    // GET /vault/{orgId}/connections[?kind=mcp|plugin] (user or runner)
+    if (rest.length === 1 && method === "GET") {
+      const rawKind = url.searchParams.get("kind");
+      if (rawKind !== null && rawKind !== "mcp" && rawKind !== "plugin") {
+        return bad("kind must be mcp or plugin.");
+      }
+      const kind: VaultConnectionKind | undefined = rawKind ?? undefined;
+      return call(() => vault.listConnections(caller, kind));
+    }
+
+    // POST /vault/{orgId}/connections/grant (user or runner)
+    if (rest.length === 2 && rest[1] === "grant" && method === "POST") {
+      const b = await body();
+      if (b instanceof Response) return b;
+      const { id, deviceId, ts, sig, forceRefresh } = b;
+      if (typeof id !== "string" || !CONNECTION_ID_RE.test(id)) return bad("Bad connection id.");
+      if (typeof deviceId !== "string" || !ID_RE.test(deviceId)) return bad("Bad deviceId.");
+      if (typeof ts !== "number" || !Number.isSafeInteger(ts)) return bad("Bad ts.");
+      if (typeof sig !== "string" || !KEY_RE.test(sig)) return bad("Bad sig.");
+      if (forceRefresh !== undefined && typeof forceRefresh !== "boolean") return bad("Bad forceRefresh.");
+      if (auth.kind === "runner" && deviceId !== auth.deviceId) {
+        return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
+      }
+      const req: ConnectionGrantRequest = {
+        id,
+        deviceId,
+        ts,
+        sig,
+        ...(forceRefresh !== undefined ? { forceRefresh } : {})
+      };
+      return call(() => vault.grantConnection(caller, req));
+    }
+
+    // POST /vault/{orgId}/connections/grants (user or runner)
+    if (rest.length === 2 && rest[1] === "grants" && method === "POST") {
+      const b = await body();
+      if (b instanceof Response) return b;
+      const { ids, deviceId, ts, sig } = b;
+      if (
+        !Array.isArray(ids) ||
+        ids.length === 0 ||
+        ids.length > MAX_CONNECTION_BATCH ||
+        !ids.every((item) => typeof item === "string" && CONNECTION_ID_RE.test(item))
+      ) {
+        return bad("Expected ids: a non-empty list of connection ids.");
+      }
+      if (typeof deviceId !== "string" || !ID_RE.test(deviceId)) return bad("Bad deviceId.");
+      if (typeof ts !== "number" || !Number.isSafeInteger(ts)) return bad("Bad ts.");
+      if (typeof sig !== "string" || !KEY_RE.test(sig)) return bad("Bad sig.");
+      if (auth.kind === "runner" && deviceId !== auth.deviceId) {
+        return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
+      }
+      const req: ConnectionGrantManyRequest = { ids: ids as string[], deviceId, ts, sig };
+      return call(() => vault.grantConnections(caller, req));
+    }
+
+    // /vault/{orgId}/connections/{id}[/disconnect] (users only; runners blocked by runner-policy)
+    const id = rest[1] !== undefined ? decodeConnectionId(rest[1]) : undefined;
+    if (rest.length === 2 && (method === "PUT" || method === "PATCH" || method === "DELETE")) {
+      if (!id) return bad("Bad connection id.");
+      if (method === "PUT") {
+        const b = await body();
+        if (b instanceof Response) return b;
+        if (typeof b.name !== "string" || typeof b.url !== "string") {
+          return bad("Expected {name, url, authKind, ...}.");
+        }
+        if (b.authKind !== "none" && b.authKind !== "headers" && b.authKind !== "oauth") {
+          return bad("authKind must be none, headers, or oauth.");
+        }
+        if (b.transport !== undefined && b.transport !== "http" && b.transport !== "sse") {
+          return bad("transport must be http or sse.");
+        }
+        if (b.enabled !== undefined && typeof b.enabled !== "boolean") return bad("enabled must be a boolean.");
+        if (b.preset !== undefined && typeof b.preset !== "string") return bad("preset must be a string.");
+        if (b.accountLabel !== undefined && typeof b.accountLabel !== "string") {
+          return bad("accountLabel must be a string.");
+        }
+        if (b.material !== undefined && !isObject(b.material)) return bad("material must be an object.");
+        let authorizedDevices: string[] | undefined;
+        if (b.authorizedDevices !== undefined) {
+          authorizedDevices = connectionDeviceList(b.authorizedDevices);
+          if (!authorizedDevices) return bad("authorizedDevices must be a list of device ids or '*'.");
+        }
+        let scopes: string[] | undefined;
+        if (b.scopes !== undefined) {
+          if (!Array.isArray(b.scopes) || !b.scopes.every((s) => typeof s === "string")) {
+            return bad("scopes must be a list of strings.");
+          }
+          scopes = b.scopes as string[];
+        }
+        const req: PutConnectionRequest = {
+          name: b.name,
+          url: b.url,
+          authKind: b.authKind,
+          ...(b.preset !== undefined ? { preset: b.preset } : {}),
+          ...(b.transport !== undefined ? { transport: b.transport } : {}),
+          ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
+          ...(b.material !== undefined ? { material: b.material as PutConnectionRequest["material"] } : {}),
+          ...(authorizedDevices !== undefined ? { authorizedDevices } : {}),
+          ...(scopes !== undefined ? { scopes } : {}),
+          ...(b.accountLabel !== undefined ? { accountLabel: b.accountLabel } : {})
+        };
+        return call(() => vault.putConnection(caller, id, req));
+      }
+      if (method === "PATCH") {
+        const b = await body();
+        if (b instanceof Response) return b;
+        if (b.name !== undefined && typeof b.name !== "string") return bad("name must be a string.");
+        if (b.url !== undefined && typeof b.url !== "string") return bad("url must be a string.");
+        if (b.transport !== undefined && b.transport !== "http" && b.transport !== "sse") {
+          return bad("transport must be http or sse.");
+        }
+        if (b.enabled !== undefined && typeof b.enabled !== "boolean") return bad("enabled must be a boolean.");
+        if (b.accountLabel !== undefined && b.accountLabel !== null && typeof b.accountLabel !== "string") {
+          return bad("accountLabel must be a string or null.");
+        }
+        let authorizedDevices: string[] | undefined;
+        if (b.authorizedDevices !== undefined) {
+          authorizedDevices = connectionDeviceList(b.authorizedDevices);
+          if (!authorizedDevices) return bad("authorizedDevices must be a list of device ids or '*'.");
+        }
+        const patch: UpdateConnectionRequest = {
+          ...(b.name !== undefined ? { name: b.name } : {}),
+          ...(b.url !== undefined ? { url: b.url } : {}),
+          ...(b.transport !== undefined ? { transport: b.transport } : {}),
+          ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
+          ...(authorizedDevices !== undefined ? { authorizedDevices } : {}),
+          ...(b.accountLabel !== undefined ? { accountLabel: b.accountLabel } : {})
+        };
+        return call(() => vault.updateConnection(caller, id, patch));
+      }
+      return call(() => vault.deleteConnection(caller, id));
+    }
+
+    if (rest.length === 3 && rest[2] === "disconnect" && method === "POST") {
+      if (!id) return bad("Bad connection id.");
+      return call(() => vault.disconnectConnectionAuth(caller, id));
     }
   }
 

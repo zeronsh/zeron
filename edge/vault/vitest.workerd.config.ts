@@ -59,6 +59,9 @@ export default defineConfig(async () => {
       })
     ],
     test: {
+      // (As the edge's tier: a busy runner takes several seconds over tests
+      // that hold many round trips, and the deploy waits on them.)
+      testTimeout: 30_000,
       include: ["test/workerd/**/*.test.ts"]
     }
   };

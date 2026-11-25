@@ -407,6 +407,144 @@ fn a_session_is_renamed_in_its_row() {
     assert!(app.find("role:dialog \"Rename session\"").is_none(), "not the dialog");
 }
 
+/// A click on `target` with ⇧ held.
+fn shift_click(app: &mut TestApp, target: &str) {
+    let b = app.bounds(target);
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let (button, held) = (PointerButton::Primary, Modifiers { shift: true, ..Modifiers::default() });
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, held);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, held);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, held);
+    app.ui.input.forget_clicks();
+    app.frames(10);
+}
+/// A secondary click on `target`, its menu open (`item` in it).
+fn menu_on(app: &mut TestApp, target: &str, item: &str) {
+    let b = app.bounds(target);
+    zgx_script::driver::right_click_at(&mut app.ui, (b.x + b.width / 2., b.y + b.height / 2.));
+    app.wait_until(|app| app.find(item).is_some());
+    app.frames(20);
+}
+/// The fixture's state `name`, as text.
+fn state_text(app: &TestApp, name: &str) -> String {
+    let own = format!("::{name}");
+    app.host
+        .states()
+        .into_iter()
+        .find(|(n, _)| n == name || n.ends_with(&own))
+        .map_or(String::new(), |(_, v)| format!("{v:?}"))
+}
+
+/// A ⇧-click picks out every session shown from the one open (where the
+/// picking began) through the one clicked, and opens nothing; a menu on one
+/// of them is all of theirs, without Rename and Copy; a plain click lets
+/// them go.
+#[test]
+fn shift_clicked_sessions_are_acted_on_together() {
+    const BUILD: &str = "#sidebar >> role:button \"Fix the build\"";
+    const DOCS: &str = "#sidebar >> role:button \"Write the docs\"";
+    const TESTS: &str = "#sidebar >> role:button \"Tidy the tests\"";
+    const RELEASE: &str = "#sidebar >> role:button \"Ship the release\"";
+    const REVIEW: &str = "#sidebar >> role:button \"Answer the review\"";
+    const PIN: &str = "role:menuitem \"Pin\"";
+    const RENAME: &str = "role:menuitem \"Rename\"";
+    // Those picked out, in the order the list starts in.
+    let marks = |app: &TestApp| {
+        let text = state_text(app, "shell_sidebar_marked");
+        ["a1", "a2", "a3", "b1", "b2"].into_iter().filter(|id| text.contains(id)).collect::<Vec<_>>()
+    };
+    let mut app = mount();
+    app.click(RELEASE);
+    app.frames(20);
+    let open = state_text(&app, "shell_selected");
+    assert!(open.contains("b1"), "opened: {open}");
+
+    // From the one open, up across its group's header.
+    shift_click(&mut app, BUILD);
+    assert_eq!(marks(&app), ["a1", "a2", "a3", "b1"], "everything between");
+    // Again: from where it began, nearer, then the other way.
+    shift_click(&mut app, TESTS);
+    assert_eq!(marks(&app), ["a3", "b1"], "nearer, fewer");
+    shift_click(&mut app, REVIEW);
+    assert_eq!(marks(&app), ["b1", "b2"], "the other way");
+    shift_click(&mut app, DOCS);
+    assert_eq!(marks(&app), ["a2", "a3", "b1"]);
+    assert_eq!(state_text(&app, "shell_selected"), open, "nothing opened");
+
+    menu_on(&mut app, TESTS, PIN);
+    assert!(app.find(PIN).is_some(), "their menu:\n{}", app.tree());
+    for single in [RENAME, "role:menuitem \"Copy\""] {
+        assert!(app.find(single).is_none(), "{single} is one session's");
+    }
+    for several in ["role:menuitem \"Move to\"", "role:menuitem \"Archive\"", "role:menuitem \"Delete…\""] {
+        assert!(app.find(several).is_some(), "{several}");
+    }
+    app.click(PIN);
+    app.wait_until(|app| state_text(app, "shell_places").contains("a2"));
+    app.frames(30);
+    let places = state_text(&app, "shell_places");
+    assert!(["a2", "a3", "b1"].iter().all(|id| places.contains(id)) && !places.contains("b2"), "those pinned: {places}");
+
+    // All pinned: their menu unpins them.
+    menu_on(&mut app, DOCS, "role:menuitem \"Unpin\"");
+    app.click("role:menuitem \"Unpin\"");
+    app.wait_until(|app| !state_text(app, "shell_places").contains("a2"));
+    app.frames(30);
+    let places = state_text(&app, "shell_places");
+    assert!(!places.contains("a3") && !places.contains("b1"), "all unpinned: {places}");
+
+    // On another, its own menu; those picked out are let go.
+    menu_on(&mut app, REVIEW, RENAME);
+    assert!(app.find(RENAME).is_some(), "its own menu");
+    assert!(marks(&app).is_empty(), "let go");
+    app.key(zgx::input::Key::Escape);
+    app.frames(30);
+
+    // A plain click, on the one open too, lets them go.
+    shift_click(&mut app, DOCS);
+    assert_eq!(marks(&app), ["a2", "a3", "b1"]);
+    app.click(RELEASE);
+    app.frames(10);
+    assert!(marks(&app).is_empty(), "a plain click lets them go");
+    // As going anywhere else does.
+    shift_click(&mut app, DOCS);
+    assert!(!marks(&app).is_empty());
+    app.click("#sidebar-actions >> role:button \"New chat\"");
+    app.frames(20);
+    assert!(marks(&app).is_empty(), "a new chat lets them go");
+
+    // With none open, from the first one ⇧-clicked; deleting says how many.
+    shift_click(&mut app, TESTS);
+    assert_eq!(marks(&app), ["a3"], "the first alone");
+    shift_click(&mut app, REVIEW);
+    assert_eq!(marks(&app), ["a3", "b1", "b2"]);
+    menu_on(&mut app, TESTS, "role:menuitem \"Delete…\"");
+    app.click("role:menuitem \"Delete…\"");
+    let dialog = "role:dialog \"Delete 3 sessions?\"";
+    assert!(app.wait_until(|app| app.find(dialog).is_some()), "{}", app.tree());
+    app.frames(30);
+    app.click(&format!("{dialog} >> role:button \"Delete\""));
+    assert!(app.wait_until(|app| [TESTS, RELEASE, REVIEW].iter().all(|row| app.find(row).is_none())), "all gone");
+    assert!(app.find(DOCS).is_some(), "the rest stay");
+}
+
+/// What a folded group hides isn't between: only what the list shows is
+/// picked out.
+#[test]
+fn a_shift_click_skips_what_is_folded_away() {
+    let mut app = mount();
+    app.click("#sidebar >> role:button \"Answer the review\"");
+    app.frames(20);
+    // Atlas folded: its working session alone still shows.
+    app.click("#sidebar >> role:button \"Atlas\"");
+    app.frames(60);
+    assert!(app.find("#sidebar >> role:button \"Write the docs\"").is_none(), "folded:\n{}", app.tree());
+    shift_click(&mut app, "#sidebar >> role:button \"Fix the build\"");
+    let marked = state_text(&app, "shell_sidebar_marked");
+    assert!(["a1", "b1", "b2"].iter().all(|id| marked.contains(id)), "{marked}");
+    assert!(!marked.contains("a2") && !marked.contains("a3"), "hidden ones left: {marked}");
+}
+
 /// Where `selector` stands now, if it's laid out and shown: its x, its width.
 fn x_of(app: &mut TestApp, selector: &str) -> Option<(f32, f32)> {
     let target = zgx_script::driver::parse(selector).ok()?;

@@ -66,6 +66,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 access: Default::default(),
                 plan: false,
                 code_mode: false,
+                zeron_mcp_only: false,
                 attachments: Vec::new(),
                 worktree: None,
                 resume: None,

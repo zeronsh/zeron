@@ -53,6 +53,8 @@ pub use orchestration::{
 };
 mod plugin_switches;
 pub use plugin_switches::KIND_PLUGIN_SWITCHES;
+mod cloud_agents;
+pub use cloud_agents::{CloudAgentChoice, CloudAgentChoices, KIND_CLOUD_AGENTS};
 mod repository_looks;
 mod scratchpad;
 pub use scratchpad::{KIND_SCRATCHPAD, KIND_SCRATCHPAD_HISTORY, SCRATCHPAD_ROW, ScratchpadEdit};

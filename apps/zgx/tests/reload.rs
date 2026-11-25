@@ -77,6 +77,13 @@ const CALLS: &[&str] = &[
     "files.search",
     "files.watch",
     "files.write",
+    "mcp.cancel_auth",
+    "mcp.delete",
+    "mcp.disconnect_auth",
+    "mcp.refresh",
+    "mcp.set_enabled",
+    "mcp.start_auth",
+    "mcp.upsert",
     "plugins.new",
     "plugins.remove",
     "plugins.set_off",
@@ -166,6 +173,7 @@ fn fetches(name: &str) -> bool {
                 | "settings.engine"
                 | "about.check"
                 | "account.photo_file"
+                | "mcp.refresh"
         ))
 }
 

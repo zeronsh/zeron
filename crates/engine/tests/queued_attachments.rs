@@ -132,6 +132,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             resume: None,
