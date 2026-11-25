@@ -34,3 +34,13 @@ rust: transcript_scroll_tests::a_synced_chat_scrolled_up_from_its_end_passes_thr
 luau: an @ pick goes out as Zeron's file mention
 luau: Tab and Shift+Tab go through the scopes, each listing its own kind; the arrows move the light within it
 luau: a click on the launcher's blank room keeps it; a click on a row inserts it
+
+# Fails on main: main at e56940314 (0.3.20) fails it the same way, run
+# locally (tests/reload.rs:405, the project editor's icon switch moving its
+# thumb after a reload). Off this list once main's fix comes in.
+tests: a_reload_keeps_the_project_editor_open
+
+# Fails on main: main at 296461969 fails it the same way, and so did this
+# branch at c7b31c7eb before either merge (zgx test ui, the CLI of the zgx rev
+# main pins). Off this list once main's fix comes in.
+luau: long messages open folded, never at their whole height first; a click eases them

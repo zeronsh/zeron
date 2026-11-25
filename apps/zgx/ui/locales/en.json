@@ -2750,7 +2750,7 @@
         "signin": "Not signed in",
         "expired": "Signed out. Sign in again to use it.",
         "client": "Needs an OAuth app to sign in",
-        "this_device": "{line} · This device only",
+        "this_device": "{line}, this device only",
         "command": "Runs {command}",
         "sign_in": "Sign in",
         "needs_attention": "Needs attention",
@@ -2761,7 +2761,7 @@
         "agent_name_tip": "The name your agents use for this account",
         "account_actions": "{name} actions",
         "server_actions": "{name} actions",
-        "where_accounts": "{where} · {n} accounts",
+        "where_accounts": "{where}, {n} accounts",
         "add_account": "Add account"
       },
       "connect": {
@@ -2855,7 +2855,7 @@
         "couldnt_switch": "Couldn't change {name}"
       },
       "account": {
-        "full_name": "{name} · {account}",
+        "full_name": "{name} ({account})",
         "title": "Add another {name} account",
         "body": "Sign in with another account in your browser. Your agents can use all of them, each by its own name.",
         "new_key": "API key or token for the new account",

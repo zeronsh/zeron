@@ -2785,7 +2785,7 @@
         "signin": "未登录",
         "expired": "已退出登录。请重新登录后使用。",
         "client": "需要 OAuth 应用才能登录",
-        "this_device": "{line} · 仅限此设备",
+        "this_device": "{line}，仅限此设备",
         "command": "运行 {command}",
         "sign_in": "登录",
         "needs_attention": "需要处理",
@@ -2796,7 +2796,7 @@
         "agent_name_tip": "你的智能体对此账号使用的名称",
         "account_actions": "{name} 操作",
         "server_actions": "{name} 操作",
-        "where_accounts": "{where} · {n} 个账号",
+        "where_accounts": "{where}，{n} 个账号",
         "add_account": "添加账号"
       },
       "connect": {
@@ -2890,7 +2890,7 @@
         "couldnt_switch": "无法更改 {name}"
       },
       "account": {
-        "full_name": "{name} · {account}",
+        "full_name": "{name}（{account}）",
         "title": "添加另一个 {name} 账号",
         "body": "在浏览器中用另一个账号登录。你的智能体可以使用所有账号，每个账号都有自己的名称。",
         "new_key": "新账号的 API 密钥或令牌",
