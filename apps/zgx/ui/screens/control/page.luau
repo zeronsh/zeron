@@ -1810,20 +1810,10 @@ local MapTab = ui.component(function(): Node
 		items = "center",
 		px = "$space.6",
 		pt = "$space.2",
-		-- (Its foot clear of Capture's bar at rest, and of Needs you
-		-- floating at the page's right where it reaches over the Map: the hub
-		-- switch and names in that corner never under it.)
+		-- (Its foot clear of Capture's bar at rest. Needs you and the
+		-- history float over it: opened or shut, the Map never moves.)
 		pb = function(): any
-			local room = M.float_rest_h:get() + FLOAT_FOOT
-			local needs = M.needs_room:get()
-			if needs > room then
-				local w = M.page_w:get()
-				local map_right = w / 2 + math.min(math.max(0, w - 48), MAX_W) / 2
-				if map_right > w - FLOAT_SIDE - NEEDS_W then
-					room = needs
-				end
-			end
-			return ui.raw(room + FLOAT_CLEAR, "clear of Capture's bar at rest, and Needs you, measured")
+			return ui.raw(M.float_rest_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar at rest, measured")
 		end,
 		ui.column {
 			id = "control-map-frame",
@@ -1890,11 +1880,10 @@ local NotesTab = ui.component(function(props: { width: State<number> }): Node
 	return scrolled {
 		id = "control-notes-scroll",
 		place = M.place,
-		-- (Its end scrolls clear of Capture's bar, and of Needs you floating
-		-- over its right-hand column.)
+		-- (Its end scrolls clear of Capture's bar. Needs you and the history
+		-- float over it, and never move it.)
 		pb = function(): any
-			local room = math.max(M.float_h:get() + FLOAT_FOOT, M.needs_room:get())
-			return ui.raw(room + FLOAT_CLEAR, "what floats at its foot, measured")
+			return ui.raw(M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar, measured")
 		end,
 		ui.presence(function(): string
 			if M.scratchpad_open:get() then
@@ -1970,11 +1959,10 @@ local BoardTab = ui.component(function(): Node
 	return scrolled {
 		id = "control-board-scroll",
 		place = M.board_place,
-		-- (Its last cards scroll clear of the floating composer, and of
-		-- Needs you floating over its right-hand columns.)
+		-- (Its last cards scroll clear of the floating composer. The history
+		-- floats over it, and never moves it.)
 		pb = function(): any
-			local room = math.max(M.float_h:get() + FLOAT_FOOT, M.needs_room:get())
-			return ui.raw(math.max(32, room + FLOAT_CLEAR), "what floats at its foot, measured")
+			return ui.raw(math.max(32, M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR), "clear of Capture's bar, measured")
 		end,
 		ui.column {
 			id = "control-board-tab",
@@ -2017,17 +2005,10 @@ local ChatTab = ui.component(function(): Node
 						chat = id,
 						title = locale.s("control.tabs.chat"),
 						data = {
-							-- (Clear of the floating composer, and of Needs you
-							-- where the page is narrow enough for it to reach
-							-- the transcript.)
+							-- (Clear of the floating composer. Needs you and the
+							-- history float over it, and never move it.)
 							foot = function(): number
-								local room = M.float_h:get() + FLOAT_FOOT
-								local w = M.page_w:get()
-								local half = prefs.conversation_width:get() / 2 + 24
-								if w > 0 and w / 2 + half > w - NEEDS_W - FLOAT_SIDE then
-									room = math.max(room, M.needs_room:get())
-								end
-								return room + FLOAT_CLEAR
+								return M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR
 							end,
 							live = M.live("chat"),
 						},
@@ -2482,6 +2463,26 @@ M.Page = ui.component(function(): Node
 		h_full = true,
 		min_h = 0,
 		relative = true,
+		-- Capture's history, opened from its pill: over the tabs, above the
+		-- pill and Capture's bar; the tabs never give it room. (First in the
+		-- tree and raised over what follows: laid after the tabs, the
+		-- receipts' hover cards never open in it.)
+		ui.presence(function(): string?
+			return if M.history_panel:get() and float_shown:get() then "history" else nil
+		end, function(): Node
+			return HistoryPanel { w = history_w }
+		end, {
+			absolute = true,
+			z = 10,
+			left = FLOAT_SIDE,
+			bottom = function(): number
+				local over_pill = history_bottom() + HISTORY_PILL_H + 8
+				local over_bar = M.float_h:get() + FLOAT_FOOT + 8
+				return math.max(over_pill, over_bar)
+			end,
+			enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+		}),
 		-- The head (the tabs in it), over every tab.
 		ui.column {
 			w_full = true,
@@ -2498,43 +2499,10 @@ M.Page = ui.component(function(): Node
 			end,
 			ui.column { w_full = true, max_w = MAX_W, head() },
 		},
-		-- The tabs, and Capture's history under them (opened from its bar,
-		-- over it, the tab giving it room). (Reversed: the history first in
-		-- the tree, as the page's layers would otherwise take the pointer
-		-- from its hover cards, and shown last.)
 		ui.column {
 			w_full = true,
 			grow = 1,
 			min_h = 0,
-			direction = "column_reverse",
-			ui.presence(function(): string?
-				return if M.history_panel:get() and float_shown:get() then "history" else nil
-			end, function(): Node
-				return ui.row {
-					w_full = true,
-					pl = FLOAT_SIDE,
-					HistoryPanel { w = history_w },
-				}
-			end, {
-				w_full = true,
-				shrink = 0,
-				-- (Room only while it shows: the wrapper stays, and its room
-				-- the composer's height, the tabs would give it up as the
-				-- composer grows.)
-				pt = function(): any
-					return if M.history_panel:get() then "$space.2" else 0
-				end,
-				pb = function(): any
-					if not M.history_panel:get() then
-						return 0
-					end
-					local over_pill = history_bottom() + HISTORY_PILL_H + 8
-					local over_bar = M.float_h:get() + FLOAT_FOOT + 8
-					return ui.raw(math.max(over_pill, over_bar), "over its pill and Capture's bar")
-				end,
-				enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
-				exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
-			}),
 			-- The tabs: each built the first time it's shown (or in the
 			-- background, once the page has settled) and kept, hidden while
 			-- another shows: going back to one is showing it.
@@ -2611,6 +2579,8 @@ M.Page = ui.component(function(): Node
 			return NeedsFloat { bottom = needs_bottom }
 		end, {
 			absolute = true,
+			-- (Over Capture's history where the page is too narrow for both.)
+			z = 11,
 			right = FLOAT_SIDE,
 			bottom = needs_bottom,
 			pointer_events = "none",
