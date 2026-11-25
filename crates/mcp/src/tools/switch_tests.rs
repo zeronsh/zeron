@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::Tools;
 use crate::zeron::{Origin, Zeron};
 
-/// The tools upstream main (b289003b7) lists for an agent in a chat whose
+/// The tools upstream main (85f5221da) lists for an agent in a chat whose
 /// runtime doesn't wake it on background work (`Tools::list`; its
 /// `catalog()`, `plugins::catalog()`, `themes::catalog()`,
 /// `commands::catalog()`), in order.
@@ -56,6 +56,8 @@ const MAIN_IN_CHAT: &[&str] = &[
     "command_output",
     "stop_command",
     "list_commands",
+    "list_mcp_servers",
+    "request_mcp_change",
 ];
 
 fn tools(orchestration: bool) -> Tools {

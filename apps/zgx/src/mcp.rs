@@ -796,7 +796,7 @@ mod tests {
         assert!(!texts.iter().any(|t| t == "Zeron Vault"), "storage banner is back: {texts:?}");
         // Linear is added (one card, two accounts), so it's not offered again.
         assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
-        assert!(texts.iter().any(|t| t == "mcp.linear.app · 2 accounts"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "mcp.linear.app, 2 accounts"), "{texts:?}");
 
         // Each account its own row in Linear's card, with what agents call it.
         assert!(texts.iter().any(|t| t == "linear_work"), "missing agent name: {texts:?}");
@@ -804,7 +804,7 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Add account"), "missing Add account: {texts:?}");
 
         // An account's ⋯: renaming it, in a dialog of its own.
-        app.click("#settings-page >> role:button \"Linear · Work actions\"");
+        app.click("#settings-page >> role:button \"Linear (Work) actions\"");
         app.frames(20);
         assert_eq!(app.error(), None);
         app.click("role:button \"Rename…\"");
