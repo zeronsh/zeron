@@ -19,9 +19,10 @@ import {
   listingOfTemplate
 } from "./listing";
 import { idProblem, readManifest } from "./manifest";
-import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage, verifyTemplate } from "./package";
+import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, protectedPath, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
-import { plainPath } from "./paths";
+import { fold, foldPath, plainPath, shortName, unseenName } from "./paths";
+import { parseList } from "./update-ask";
 import { crc32, deployTokenHash, parseDeployToken, readAllKinds, readScopeIds, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
@@ -260,6 +261,25 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
       }
     }
   }, 60_000);
+
+  it("file names that could be another's", () => {
+    expect(v.file_names.length).toBeGreaterThan(0);
+    for (const c of v.file_names) {
+      expect({
+        path: c.path, fold: fold(c.path), fold_path: foldPath(c.path), short_name: shortName(c.path),
+        unseen: unseenName(c.path), template_protected: protectedPath(c.path)
+      }, JSON.stringify(c.path)).toEqual(c);
+    }
+  });
+
+  it("what a device asks about: every item it sends is one the store takes", () => {
+    expect(v.update_ask.items.some((c: any) => c.sent)).toBe(true);
+    for (const c of v.update_ask.items) {
+      if (!c.sent) continue;
+      for (const kind of ["plugin", "template"] as const) expect(parseList(kind, [c.item]), JSON.stringify(c.item)).toHaveLength(1);
+    }
+    for (const r of v.update_ask.requests) for (const list of r.requests) expect(parseList("template", list), r.name).toHaveLength(list.length);
+  });
 
   it("paths", () => {
     for (const c of v.paths) expect(plainPath(c.path), JSON.stringify(c.path)).toBe(c.ok);

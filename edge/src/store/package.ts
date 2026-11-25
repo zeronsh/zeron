@@ -12,7 +12,8 @@
  *    (scan.ts); `format`; `manifest` an object; `files` an object of at
  *    most 2,000.
  * 2. Each file, in path order: a plain path (paths.ts), not the manifest
- *    file, its data strict standard base64 (padded, canonical). Their total
+ *    file, nor a name that could be another's (a Windows short name, a
+ *    character drawn as nothing), its data strict standard base64 (padded, canonical). Their total
  *    at most 50 MB.
  * 3. The signature (`manifest.signature = {key, files, sig}`): `files` must
  *    equal every file's sha256, `sig` an ed25519 signature by `key` over
@@ -29,7 +30,7 @@
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest, rustTrim } from "./manifest";
 import { LIMITS, STORE_DATA } from "./data";
-import { SOURCE_FILE, firstCollision, fold, pathProblem, plainPath } from "./paths";
+import { SOURCE_FILE, firstCollision, fold, pathProblem, plainPath, shortName, unseenName } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
 export const FORMAT: string = STORE_DATA.package_format;
@@ -110,8 +111,8 @@ export interface VerifiedTemplate extends VerifiedContents {
   readonly id: string;
   readonly version: string;
   /** Files it carries that a device leaves out when it installs: what no
-   * template may replace, a manifest of its own, and anything but pictures
-   * under `screenshots/`. */
+   * template may replace (nor a Windows short name, which may be one), a
+   * manifest of its own, and anything but pictures under `screenshots/`. */
   readonly ignored: readonly string[];
 }
 
@@ -393,8 +394,8 @@ interface PackageKind {
   readonly keeps: (rel: string) => boolean;
 }
 
-const PLUGIN_PACKAGE: PackageKind = { format: FORMAT, prefix: PAYLOAD_PREFIX, keeps: (rel) => plainPath(rel) && rel !== MANIFEST_FILE };
-const TEMPLATE_PACKAGE: PackageKind = { format: TEMPLATE_FORMAT, prefix: TEMPLATE_PAYLOAD_PREFIX, keeps: insideTemplate };
+const PLUGIN_PACKAGE: PackageKind = { format: FORMAT, prefix: PAYLOAD_PREFIX, keeps: (rel) => plainPath(rel) && rel !== MANIFEST_FILE && !shortName(rel) && !unseenName(rel) };
+const TEMPLATE_PACKAGE: PackageKind = { format: TEMPLATE_FORMAT, prefix: TEMPLATE_PAYLOAD_PREFIX, keeps: (rel) => insideTemplate(rel) && !unseenName(rel) };
 
 /** A package read and verified (package.rs `parse`), before its kind's own
  * rules. */
@@ -509,7 +510,7 @@ export const verifyTemplate = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYT
   };
   const id = text("id");
   if (!validTemplateId(id) || id === ZERON_ID) refuse("bad_id", JSON.stringify(id.slice(0, 80)));
-  const ignored = [...contents.files.keys()].filter((rel) => protectedPath(rel) || rel === TEMPLATE_MANIFEST_FILE || strayScreenshot(rel));
+  const ignored = [...contents.files.keys()].filter((rel) => protectedPath(rel) || shortName(rel) || rel === TEMPLATE_MANIFEST_FILE || strayScreenshot(rel));
   const left = new Set(ignored);
   const kept = [...contents.files.keys()].filter((rel) => !left.has(rel));
   const collision = firstCollision(kept, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE]);

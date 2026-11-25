@@ -12,7 +12,7 @@ import { openCache } from "../../src/store/cache";
 import { fileStateKey, packageStateKey } from "../../src/store/serve";
 import { UNUSED_ID_DAYS, releaseRows, releaseUnusedIds } from "../../src/store/release";
 import { stockOf } from "../../src/store/stock";
-import { MAX_UPDATE_ITEMS } from "../../src/store/updates";
+import { MAX_UPDATE_ITEMS } from "../../src/store/update-ask";
 import { PNG, adminCall, author, call, deployToken, listed, listedTemplate, makePackage, makeTemplate, newSigner, publish, publishTemplate, publishedTemplate, randomLetters, tokenPublish, tokenPublishTemplate, uniqueId } from "./store-helpers";
 
 const json = async <T = Record<string, any>>(res: Response) => (await res.json()) as T;
@@ -270,6 +270,12 @@ describe("templates: what's refused", () => {
     // Nothing but pictures under screenshots/, however its folder is spelt.
     for (const stray of ["screenshots/x.luau", "Screenshots/x.luau"]) {
       expect(await problems({ files: { [stray]: "return {}" } }), stray).toEqual([400, "bad_listing", "files", stray]);
+    }
+    // Nor a file only named as one; a Windows short name of one of Zeron's
+    // own; a protected folder spelt with an emoji's selector.
+    expect(await problems({ files: { "screenshots/unlisted.png": "return {}" } })).toEqual([400, "bad_listing", "files", "screenshots/unlisted.png"]);
+    for (const path of ["screens/TEMPLA~1/page.luau", "screens/plu\ufe0fgins/page.luau"]) {
+      expect(await problems({ files: { [path]: "return {}" } }), path).toEqual([400, "protected_file", "files", path]);
     }
     // An allow list: no other member.
     for (const member of ["author", "x-future"]) {

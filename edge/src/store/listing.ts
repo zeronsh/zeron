@@ -17,7 +17,7 @@ import { MAX_BYTES, MAX_FILES, TEMPLATE_MANIFEST_FILE, TEMPLATE_SCREENSHOTS, ins
 import { LIMITS, STORE_DATA } from "./data";
 import { asWritten, firstUnseen, keywordClaim, markClaim, problemWord } from "./mark";
 import type { Kind } from "./kind";
-import { foldPath, plainPath } from "./paths";
+import { foldPath, plainPath, shortName, unseenName } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
 /** The fixed list (contract amendment 4), with the words shown for each. */
@@ -520,6 +520,12 @@ export const checkListing = (
   // Amendment 31's rules, after the engine's own.
   checkChangelogSize(files, problems);
   checkManifestSize(raw, problems);
+  // A name that could be another of its files' (a device refuses the package
+  // as it reads it).
+  for (const rel of [...files.keys()].sort(byCodePoint)) {
+    if (shortName(rel)) problems.push(problem("bad_package", "files", `"${rel}" could be a Windows short name of another file (a ~ with a digit after it): rename it`, rel));
+    else if (unseenName(rel)) problems.push(problem("bad_package", "files", `"${rel}" has a control or invisible character in its name: rename it`, rel));
+  }
   checkClashes(files, [MANIFEST_FILE], problems);
   return { problems, warnings };
 };
@@ -588,11 +594,15 @@ export const checkTemplate = (
   checkManifestSize(raw, problems);
   // Its files: each one Zeron writes, none of those no template replaces.
   for (const rel of [...files.keys()].sort(byCodePoint)) {
-    if (!insideTemplate(rel)) problems.push(problem("bad_package", "files", `It has a file Zeron won't write: "${rel}"`, rel));
+    if (!insideTemplate(rel) || unseenName(rel)) problems.push(problem("bad_package", "files", `It has a file Zeron won't write: "${rel}"`, rel));
     else if (protectedPath(rel)) {
       problems.push(problem("protected_file", "files", `"${rel}" is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out`, rel));
+    } else if (shortName(rel)) {
+      problems.push(problem("protected_file", "files", `"${rel}" could be a Windows short name of one of Zeron's own files (a ~ with a digit after it): rename it`, rel));
     } else if (strayScreenshot(rel)) {
       problems.push(problem("bad_listing", "files", `"${rel}" isn't a PNG or JPEG: ${TEMPLATE_SCREENSHOTS}/ holds its pictures alone`, rel));
+    } else if (rel.startsWith(`${TEMPLATE_SCREENSHOTS}/`) && !isScreenshot(files.get(rel)!)) {
+      problems.push(problem("bad_listing", "files", `"${rel}" isn't a PNG or JPEG picture, whatever its name says`, rel));
     }
   }
   checkClashes(files, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE], problems);
