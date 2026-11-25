@@ -245,12 +245,24 @@ fn settle_folders(to: &Path, dir: &Path, folders: &BTreeMap<String, &str>, modul
     let mut changed = 0;
     let Ok(entries) = std::fs::read_dir(dir) else { return Ok(0) };
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) || entry.file_name().to_string_lossy().starts_with('.') {
+        let Ok(kind) = entry.file_type() else { continue };
+        if entry.file_name().to_string_lossy().starts_with('.') || !(kind.is_dir() || kind.is_symlink()) {
             continue;
         }
         let path = entry.path();
         let Ok(rel) = path.strip_prefix(to) else { continue };
         let rel = rel_path(rel);
+        // A link: zgx follows it, so one by a module's name stands for that
+        // module as a folder would. Moved aside (the link, never what it's
+        // to); any other left. (One at a wanted file's path is replaced as
+        // that file is laid.)
+        if kind.is_symlink() {
+            if modules.contains(&zeron_plugin_guard::path::fold(&rel)) {
+                set_aside(to, &path, &rel, "a link")?;
+                changed += 1;
+            }
+            continue;
+        }
         changed += settle_folders(to, &path, folders, modules)?;
         // (Wanted: by its name, or under another spelling of one that is
         // the same folder where the disk folds names.)
@@ -260,23 +272,30 @@ fn settle_folders(to: &Path, dir: &Path, folders: &BTreeMap<String, &str>, modul
         if std::fs::remove_dir(&path).is_ok() {
             changed += 1;
         } else if modules.contains(&zeron_plugin_guard::path::fold(&rel)) {
-            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let mut aside = to.join(SET_ASIDE).join(secs.to_string()).join(&rel);
-            for n in 1.. {
-                if !aside.exists() {
-                    break;
-                }
-                aside = to.join(SET_ASIDE).join(format!("{secs}-{n}")).join(&rel);
-            }
-            if let Some(parent) = aside.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::rename(&path, &aside)?;
-            eprintln!("zeron-zgx: {rel}/ stood for the module {rel}.luau and still held files: moved to {}", aside.display());
+            set_aside(to, &path, &rel, "it still held files")?;
             changed += 1;
         }
     }
     Ok(changed)
+}
+
+/// `path` (`rel` in `to`), which stood for the module `rel.luau`, moved
+/// whole to [`SET_ASIDE`] and said in the log (`why`).
+fn set_aside(to: &Path, path: &Path, rel: &str, why: &str) -> std::io::Result<()> {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut aside = to.join(SET_ASIDE).join(secs.to_string()).join(rel);
+    for n in 1.. {
+        if aside.symlink_metadata().is_err() {
+            break;
+        }
+        aside = to.join(SET_ASIDE).join(format!("{secs}-{n}")).join(rel);
+    }
+    if let Some(parent) = aside.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(path, &aside)?;
+    eprintln!("zeron-zgx: {rel} stood for the module {rel}.luau ({why}): moved to {}", aside.display());
+    Ok(())
 }
 
 /// The most threads [`in_parallel`] uses: past this, laying files down
@@ -1342,6 +1361,31 @@ mod tests {
         assert_eq!(read(&live, "screens/shell/sidebar.luau"), "-- zeron sidebar");
         let sidebars = files(&live, |_| true).into_keys().filter(|k| k.eq_ignore_ascii_case("screens/shell/sidebar.luau")).count();
         assert_eq!(sidebars, 1, "one copy, wherever the disk keeps it");
+    }
+
+    /// A link in `.live` by a module's name (to a folder with an
+    /// init.luau, which zgx would follow) is moved aside, the link itself:
+    /// what it's to is never touched; Zeron's file of that name stands. A
+    /// link by no module's name is left.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_stands_for_a_module_is_moved_aside() {
+        let t = setup("link");
+        write(&t.join(ZERON), "ds/tokens_template.luau", "-- zeron's stub");
+        compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        let live = t.join(LIVE);
+        let elsewhere = t.parent().unwrap().join("elsewhere");
+        write(&elsewhere, "init.luau", "-- not this");
+        std::os::unix::fs::symlink(&elsewhere, live.join("ds/tokens_template")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, live.join("notes")).unwrap();
+        compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        assert!(live.join("ds/tokens_template").symlink_metadata().is_err(), "the link is gone from .live");
+        assert_eq!(read(&live, "ds/tokens_template.luau"), "-- zeron's stub");
+        let aside: Vec<PathBuf> = std::fs::read_dir(live.join(SET_ASIDE)).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(aside.len(), 1);
+        assert!(aside[0].join("ds/tokens_template").symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()), "moved, as a link");
+        assert_eq!(read(&elsewhere, "init.luau"), "-- not this", "what it's to is untouched");
+        assert!(live.join("notes").symlink_metadata().is_ok(), "a link by no module's name is left");
     }
 
     /// A template's file laid across Zeron's (a folder of Zeron's by its
