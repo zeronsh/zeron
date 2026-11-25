@@ -802,8 +802,8 @@ pub fn prepare_live() -> PathBuf {
     {
         let id = live::active(&root);
         preview::launch_started(id != live::BUILTIN);
-        preview::set_template_running(id != live::BUILTIN);
-        preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
+        // (Nothing shows yet: what the window first loads is this switch's.)
+        let _ = preview::Switch::begin((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }), id != live::BUILTIN);
     }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
@@ -1699,17 +1699,22 @@ impl Bridge {
         };
         let was = self.laid.borrow().id.clone();
         let name = template_name(root, &id);
-        preview::set_template_running(id != live::BUILTIN);
         // What a preview saved is kept with it, or goes with it; what failed
         // only because it was one is tried again (`Bridge::blame_as`).
+        // (Kept before the reload, so what loads shows it; and again once
+        // the switch settles, with what was held meanwhile.)
         let was_previewing = preview::current();
         let kept = trusted && was_previewing.as_ref().is_some_and(|p| p.id == id);
-        if kept {
-            self.host.keep_held_state();
-        } else if was_previewing.as_ref().is_some_and(|p| trusted || p.id != id) {
-            self.host.drop_held_state();
-        }
-        preview::set((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }));
+        let dropped = !kept && was_previewing.as_ref().is_some_and(|p| trusted || p.id != id);
+        let held_state = |host: &ScriptHost| {
+            if kept {
+                host.keep_held_state();
+            } else if dropped {
+                host.drop_held_state();
+            }
+        };
+        held_state(&self.host);
+        let switch = preview::Switch::begin((!trusted).then(|| preview::Preview { id: id.clone(), name: name.clone() }), id != live::BUILTIN);
         let retry = kept && {
             let files = self.failed_files.borrow_mut().forget_under(&format!("{id}:"));
             let whole = self.broken.borrow().why(&id).is_some();
@@ -1732,22 +1737,37 @@ impl Bridge {
             .await
         };
         let mut changed = 0;
+        let mut was_laid = true;
         match laid.flatten() {
             Some(Ok((n, overlay))) => {
                 changed = n;
                 *self.overlay.borrow_mut() = overlay;
                 *self.laid.borrow_mut() = want;
             }
-            Some(Err(error)) => eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}"),
+            Some(Err(error)) => {
+                was_laid = false;
+                eprintln!("zeron-zgx: the template wasn't laid over Zeron's own: {error}");
+            }
             None => {}
         }
         self.publish_templates();
         self.publish_page();
-        if (kept || (changed > 0 && template))
-            && let Err(error) = self.host.reload()
-        {
-            eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
-            self.blame_as(&error, true);
+        // (A switch from a preview settles only by a reload: what shows may
+        // be the one before still, its last reload failed, though nothing
+        // new is laid.)
+        let mut reload = preview::Reload::NotAsked;
+        if kept || (changed > 0 && template) || (switch.holds() && was_laid) {
+            reload = match self.host.reload() {
+                Ok(()) => preview::Reload::Replaced,
+                Err(error) => {
+                    eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
+                    self.blame_as(&error, true);
+                    preview::Reload::Failed
+                }
+            };
+        }
+        if switch.settled(was_laid, reload) {
+            held_state(&self.host);
         }
         // What failed as a preview, laid down as it is now.
         if retry {

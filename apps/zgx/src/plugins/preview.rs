@@ -166,6 +166,75 @@ pub fn set_template_running(on: bool) {
     TEMPLATE_RUNNING.store(on, Ordering::Relaxed);
 }
 
+/// A switch of what the main window runs (`looked`, and the launch): begun
+/// before the files of what it switches to are laid, settled once they are
+/// and the window has reloaded with them. What the window shows until then
+/// is what ran before, and keeps that one's preview: a preview switched to
+/// from Zeron's own is one from the start; from a preview, to anything (a
+/// kept one, Zeron's own, another preview), the one before stands until the
+/// switch has settled, and stays if it doesn't.
+pub struct Switch {
+    from: Option<Preview>,
+    going: Option<Preview>,
+    template: bool,
+}
+
+impl Switch {
+    /// `going`: the preview switched to, if it's one; `template`: whether
+    /// it's a template other than Zeron's own.
+    pub fn begin(going: Option<Preview>, template: bool) -> Self {
+        let from = current().filter(|now| Some(now) != going.as_ref());
+        if from.is_none() {
+            set(going.clone());
+        }
+        // (A template's terminals are noted while one runs, to close in safe
+        // mode: on at once, off once the switch to Zeron's own has settled.)
+        if template {
+            set_template_running(true);
+        }
+        Self { from, going, template }
+    }
+
+    /// Whether the preview before stands until the window reloads: then
+    /// the window must reload, changed or not, for it to settle.
+    pub fn holds(&self) -> bool {
+        self.from.is_some()
+    }
+
+    /// The files laid (or none to lay), and how the window's reload went:
+    /// what was mounted replaced, or not. A reload not asked settles only a
+    /// switch that holds nothing. Whether it settled.
+    pub fn settled(self, laid: bool, reload: Reload) -> bool {
+        let done = laid
+            && match reload {
+                Reload::Replaced => true,
+                Reload::NotAsked => self.from.is_none(),
+                Reload::Failed => false,
+            };
+        if !done {
+            return false;
+        }
+        if self.from.is_some() {
+            set(self.going);
+        }
+        if !self.template {
+            set_template_running(false);
+        }
+        true
+    }
+}
+
+/// How a switch's reload went (`Switch::settled`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reload {
+    /// The window loaded what was laid: what it ran before is gone.
+    Replaced,
+    /// It failed: what it ran before stays mounted.
+    Failed,
+    /// None was asked.
+    NotAsked,
+}
+
 /// Refused while a template runs as a preview: what the script is told.
 pub fn refuse(action: &str) -> Result<(), String> {
     match current() {
@@ -550,6 +619,167 @@ mod tests {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// The window's app file as a preview has it: a timer that asks for
+    /// `plugin.x.run` on each turn, a window of its own whose timer asks
+    /// too, and a call still out whose answer asks again.
+    const ASKING: &str = r#"ui.every(16, function()
+	ui.invoke("turn", 1)
+	pcall(ui.invoke, "plugin.x.run", 1)
+end)
+local function own()
+	ui.every(16, function()
+		ui.invoke("window_turn", 1)
+		pcall(ui.invoke, "plugin.x.run", 1)
+	end)
+	return ui.text { "its own" }
+end
+ui.window { id = "own", open = ui.state("own_open", true), title = "Own", own() }
+ui.call("slow", 1):after(function()
+	ui.invoke("answered_late", 1)
+	pcall(ui.invoke, "plugin.x.run", 1)
+end)
+return ui.column { ui.text { "asking" } }"#;
+    /// Zeron's own, for these tests: asks nothing.
+    const QUIET: &str = r#"return ui.column { ui.text { "quiet" } }"#;
+    /// One that doesn't load.
+    const BROKEN: &str = "return ui.column {";
+
+    /// A window on `app.luau`, counting what its scripts did.
+    struct Window {
+        app: zgx_script::testing::TestApp,
+        file: PathBuf,
+        counts: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<&'static str, u32>>>,
+        slow: std::rc::Rc<std::cell::RefCell<Vec<zgx::task::LatestSender<()>>>>,
+    }
+
+    impl Window {
+        fn new(name: &str) -> Self {
+            let file = dir(name).join("app.luau");
+            std::fs::write(&file, ASKING).unwrap();
+            let counts: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<&'static str, u32>>> = Default::default();
+            let slow: std::rc::Rc<std::cell::RefCell<Vec<zgx::task::LatestSender<()>>>> = Default::default();
+            let (c, w) = (counts.clone(), slow.clone());
+            let entry = file.clone();
+            let app = zgx_script::testing::TestApp::new(move |runtime| {
+                let host = zgx_script::ScriptHost::new(runtime, &entry);
+                host.guard(guard);
+                for name in ["turn", "window_turn", "answered_late", "plugin.x.run"] {
+                    let c = c.clone();
+                    host.action(name, move |_| *c.borrow_mut().entry(name).or_default() += 1);
+                }
+                let w = w.clone();
+                host.async_action("slow", move |_| {
+                    let (tell, mut heard) = zgx::task::latest::<()>();
+                    w.borrow_mut().push(tell);
+                    async move {
+                        heard.recv().await;
+                        Ok(zgx_script::Value::Nil)
+                    }
+                });
+                host
+            });
+            Self { app, file, counts, slow }
+        }
+
+        fn count(&self, name: &str) -> u32 {
+            self.counts.borrow().get(name).copied().unwrap_or(0)
+        }
+
+        /// A few of its turns: what they asked and had answered.
+        fn run(&self) -> (u32, u32) {
+            let (turns, answered) = (self.count("turn") + self.count("window_turn"), self.count("plugin.x.run"));
+            self.app.frames(6);
+            (self.count("turn") + self.count("window_turn") - turns, self.count("plugin.x.run") - answered)
+        }
+
+        /// `code` laid as its app file and the window reloaded on it.
+        fn reload(&self, code: &str) -> Reload {
+            std::fs::write(&self.file, code).unwrap();
+            match self.app.host.reload() {
+                Ok(()) => Reload::Replaced,
+                Err(_) => Reload::Failed,
+            }
+        }
+    }
+
+    fn named(id: &str) -> Preview {
+        Preview { id: id.into(), name: id.into() }
+    }
+
+    /// Switches from a preview, as `looked` makes each: Revert (Zeron's own,
+    /// chosen in safe mode) and an agent's switch to Zeron's own are the
+    /// same one; a look again (a retry, or one asked while the last laid
+    /// files) begins again from what stands, and reloads whether or not it
+    /// laid anything new.
+    #[test]
+    fn a_template_switch_settles_in_order() {
+        let window = Window::new("switch-order");
+        set(Some(named("a")));
+        let (turns, answered) = window.run();
+        assert!(turns > 0 && answered == 0, "a preview's: {turns} turns, {answered} answered");
+        assert!(window.count("window_turn") > 0 && window.slow.borrow().len() == 1, "its window's timer runs, and its call is out");
+
+        // Revert, its files not laid.
+        let switch = Switch::begin(None, false);
+        assert_eq!(window.run().1, 0, "while the files are laid");
+        assert!(switch.holds());
+        assert!(!switch.settled(false, Reload::NotAsked));
+        assert_eq!(window.run().1, 0);
+
+        // An agent's switch to Zeron's own, its reload failing: what ran
+        // before stays mounted, and runs.
+        let switch = Switch::begin(None, false);
+        let reload = window.reload(BROKEN);
+        assert_eq!(reload, Reload::Failed);
+        assert!(!switch.settled(true, reload));
+        let (turns, answered) = window.run();
+        assert!(turns > 0 && answered == 0, "still mounted: {turns} turns, {answered} answered");
+
+        // A look again that finds nothing new to lay, and asks no reload.
+        let switch = Switch::begin(None, false);
+        assert!(!switch.settled(true, Reload::NotAsked), "a reload not asked settles nothing held");
+        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
+
+        // To another preview: never none between them.
+        let switch = Switch::begin(Some(named("b")), true);
+        assert_eq!((window.run().1, current()), (0, Some(named("a"))));
+        assert!(!switch.settled(true, Reload::Failed));
+        assert_eq!(current(), Some(named("a")));
+
+        // Revert that settles: what ran before is gone, its window's timer
+        // and its call's answer with it.
+        let switch = Switch::begin(None, false);
+        let reload = window.reload(QUIET);
+        assert_eq!(reload, Reload::Replaced);
+        assert!(switch.settled(true, reload));
+        assert_eq!(current(), None);
+        for tell in window.slow.borrow_mut().drain(..) {
+            tell.send(());
+        }
+        assert_eq!(window.run(), (0, 0), "nothing of the preview runs once it's replaced");
+        assert_eq!(window.count("answered_late"), 0, "its call's answer reached nothing");
+
+        // From Zeron's own to a preview: one before anything of it runs.
+        let switch = Switch::begin(Some(named("c")), true);
+        assert!(!switch.holds());
+        let reload = window.reload(ASKING);
+        assert!(switch.settled(true, reload));
+        assert_eq!(current(), Some(named("c")));
+        let (turns, answered) = window.run();
+        assert!(turns > 0 && answered == 0);
+
+        // Kept: the same until it's reloaded.
+        let switch = Switch::begin(None, true);
+        assert_eq!(window.run().1, 0);
+        assert!(!switch.settled(true, Reload::NotAsked));
+        assert_eq!(window.run().1, 0);
+        let switch = Switch::begin(None, true);
+        assert!(switch.settled(true, window.reload(ASKING)));
+        assert_eq!(current(), None);
+        assert!(window.run().1 > 0, "kept, and reloaded");
+        set(None);
     }
 
     /// Every action the app's code refuses to a preview (`refuse("…")`,
