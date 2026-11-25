@@ -1863,8 +1863,11 @@ impl Plugins {
             if feed.reset || after.is_none_or(|a| a > feed.head) {
                 let check = self.check_store(None).await;
                 if check.errors.is_empty() && check.templates_settled {
-                    self.end_marks(&client, &caller).await;
-                    let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
+                    // (A template's mark that couldn't be looked at, or taken
+                    // off: the feed isn't past it.)
+                    if self.end_marks(&client, &caller).await {
+                        let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
+                    }
                 }
                 return;
             }
@@ -2461,8 +2464,9 @@ impl Plugins {
 
     /// After the feed starts over (its events missed): each version
     /// installed here marked verified whose own record, read now, says it
-    /// isn't (taken down and restored meanwhile) loses its mark.
-    async fn end_marks(&self, client: &StoreClient, caller: &Caller) {
+    /// isn't (taken down and restored meanwhile) loses its mark. Whether every
+    /// template's record was read (or is gone), and every mark taken off.
+    async fn end_marks(&self, client: &StoreClient, caller: &Caller) -> bool {
         for c in self.store_candidates(None).iter().filter(|c| c.verified) {
             if let Ok((_, record)) = client.version(&c.id, &c.version, caller).await
                 && !record.verified
@@ -2477,15 +2481,16 @@ impl Plugins {
         let mut marked: Vec<(String, String)> = here.into_iter().filter(|t| t.store.verified).map(|t| (t.store.id, t.version)).collect();
         marked.sort();
         marked.dedup();
-        let mut ended = Vec::new();
+        let (mut ended, mut read) = (Vec::new(), true);
         for (id, version) in marked {
-            if let Ok((_, record)) = client.version(&id, &version, caller).await
-                && !record.verified
-            {
-                ended.push((id, version));
+            match client.version(&id, &version, caller).await {
+                Ok((_, record)) if !record.verified => ended.push((id, version)),
+                Ok(_) => {}
+                Err(error) if install::reason_of(&error) == Some(client::reason::NOT_IN_STORE) => {}
+                Err(_) => read = false,
             }
         }
-        let _ = self.unmark_templates(ended).await;
+        self.unmark_templates(ended).await && read
     }
 
     fn block_one(&self, c: &Candidate, reason: &str) {
