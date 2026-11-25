@@ -150,6 +150,19 @@ for _, scheme in { "light", "dark" } do
 		end,
 	}
 end
+-- (Or as the app wears a scheme: the running template's own theme on it,
+-- as ds/palettes registers it; Zeron's where it has none.)
+for _, scheme in { "light", "dark" } do
+	ui.command {
+		id = `fixture.worn_{scheme}`,
+		title = `Fixture: {scheme}, as worn`,
+		menu = "Fixture",
+		run = function()
+			ui.theme.follow_system(false)
+			ui.theme.current:set(`theme-{scheme}`)
+		end,
+	}
+end
 -- (A headless host draws no WebP: a new chat on no picture.)
 local appearance = require("@app/screens/shell/appearance")
 appearance.wallpaper:set("none")

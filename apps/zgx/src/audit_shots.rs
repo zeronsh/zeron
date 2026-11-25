@@ -51,8 +51,11 @@ enum Step {
     State(String, serde_json::Value),
 }
 
+/// The scripts drawn: `AUDIT_UI` (a copy with a template laid over it, as
+/// `.live` is: its `theme.luau` is worn by ds/tokens as it starts), else this
+/// checkout's.
 fn ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
+    std::env::var_os("AUDIT_UI").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"), PathBuf::from)
 }
 
 fn parse(spec: &str, dark: bool) -> Shot {
