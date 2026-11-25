@@ -31,7 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { call, whyNotTheirs } from "./ipc.mjs";
 import { pictures } from "./pictures.mjs";
 import { TEMPLATES as ALL, files } from "./templates.mjs";
-import { quiet } from "./quiet.mjs";
+import { quiet, quietLibraries } from "./quiet.mjs";
 import { whyNotItsWorkos, whyNotSeeded } from "./where.mjs";
 
 /** Between two writes of one account: the store takes 30 a minute. */
@@ -49,6 +49,7 @@ const flag = (name) => {
 const accounts = JSON.parse(readFileSync(flag("--accounts") ?? usage("give --accounts"), "utf8"));
 const ui = resolve(flag("--ui") ?? usage("give --ui"));
 if (!existsSync(join(ui, "ds/tokens.luau"))) usage(`${ui} isn't Zeron's apps/zgx/ui`);
+quietLibraries();
 const require = createRequire(join(resolve(flag("--playwright") ?? usage("give --playwright")), "package.json"));
 const { chromium } = require("playwright");
 const only = flag("--only")?.split(",").map(Number);

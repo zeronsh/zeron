@@ -10,7 +10,7 @@
 // second run publishes the rest. The catalog is then checked through the
 // store's public routes and each author's own.
 //
-//   node scripts/staging-seed/local.mjs --zeron <path to a zeron build> [--edge-dir edge] [--keep]
+//   node scripts/staging-seed/local.mjs --zeron <path to a zeron build> [--e2e <plugin-store-e2e folder>] [--edge-dir edge] [--keep]
 //
 // Prints `PASS …` / `FAIL …`; exits non-zero on a failure. Leaves nothing
 // running, keeps nothing (a scratch folder for everything; --keep keeps it).
@@ -38,6 +38,7 @@ const flag = (name) => {
   return i < 0 ? undefined : args[i + 1];
 };
 const zeron = resolve(flag("--zeron") ?? (console.error("local: give --zeron <path to a zeron build>"), process.exit(2)));
+const e2e = resolve(flag("--e2e") ?? join(root, "scripts/plugin-store-e2e"));
 const edgeDir = resolve(flag("--edge-dir") ?? join(root, "edge"));
 const keep = args.includes("--keep");
 const work = mkdtempSync(join(tmpdir(), "zeron-seed-local-"));
@@ -80,7 +81,7 @@ try {
   mkdirSync(join(edgeDir, "public"), { recursive: true });
   const bundled = await run("npx", ["wrangler", "deploy", "--dry-run", "--outdir", join(work, "bundle")], { cwd: edgeDir });
   if (bundled.code !== 0) throw new Error(`the edge didn't bundle:\n${bundled.err}`);
-  const { startEdge } = await import(join(root, "scripts/plugin-store-e2e/edge.mjs"));
+  const { startEdge } = await import(join(e2e, "edge.mjs"));
   edge = await startEdge({ edgeDir, bundleDir: join(work, "bundle"), site: false });
   console.log(`== the edge serves ${edge.url}`);
   const WebSocket = createRequire(join(edgeDir, "package.json"))("ws");

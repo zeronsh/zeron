@@ -30,6 +30,7 @@
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest, rustTrim } from "./manifest";
 import { LIMITS, STORE_DATA } from "./data";
+import type { Kind } from "./kind";
 import { SOURCE_FILE, firstCollision, fold, pathProblem, plainPath, shortName, unseenName } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
@@ -55,18 +56,20 @@ export type PackageError =
   | "bad_id"
   | "missing_entry";
 
-export const PACKAGE_WORDS: Record<PackageError, string> = {
-  not_a_package: "That isn't a Zeron plugin",
+/** What a refused package of `kind` is told, by why. */
+const packageWords = (kind: Kind): Record<PackageError, string> => ({
+  not_a_package: `That isn't a Zeron ${kind}`,
   unsigned: "It isn't signed, so there's no telling who made it",
   tampered: "Its files don't match its signature: it was changed after it was signed",
   bad_signature: "Its signature doesn't check out",
-  too_big: "It's too big for a plugin",
+  too_big: `It's too big for a ${kind}`,
   bad_file: "It has a file Zeron won't write",
   paths_collide: "Two of its paths are one file on macOS and Windows",
   bad_manifest: "Its manifest is broken",
   bad_id: "Its id can't be used",
   missing_entry: "Its entry file is missing"
-};
+});
+const PACKAGE_WORDS: Record<Kind, Record<PackageError, string>> = { plugin: packageWords("plugin"), template: packageWords("template") };
 
 export class PackageRefusal extends Error {
   constructor(
@@ -302,8 +305,9 @@ export const checkSignature = async (
   return (await verifyEd25519(keyBytes, message, sigBytes)) ? { valid: key } : { invalid: "bad_signature" };
 };
 
-const refuse = (code: PackageError, detail?: string): never => {
-  throw new PackageRefusal(code, detail ? `${PACKAGE_WORDS[code]}: ${detail}` : PACKAGE_WORDS[code]);
+const refuser = (kind: Kind) => (code: PackageError, detail?: string): never => {
+  const words = PACKAGE_WORDS[kind][code];
+  throw new PackageRefusal(code, detail ? `${words}: ${detail}` : words);
 };
 
 /** Compare as Rust's `String` `Ord` does: bytewise on UTF-8, which for
@@ -389,13 +393,14 @@ const readFiles = (raw: Uint8Array, files: Span): Map<string, Span | null> => {
 /** A kind of package: its format, its signing domain, and which paths it
  * keeps. */
 interface PackageKind {
+  readonly kind: Kind;
   readonly format: string;
   readonly prefix: string;
   readonly keeps: (rel: string) => boolean;
 }
 
-const PLUGIN_PACKAGE: PackageKind = { format: FORMAT, prefix: PAYLOAD_PREFIX, keeps: (rel) => plainPath(rel) && rel !== MANIFEST_FILE && !shortName(rel) && !unseenName(rel) };
-const TEMPLATE_PACKAGE: PackageKind = { format: TEMPLATE_FORMAT, prefix: TEMPLATE_PAYLOAD_PREFIX, keeps: (rel) => insideTemplate(rel) && !unseenName(rel) };
+const PLUGIN_PACKAGE: PackageKind = { kind: "plugin", format: FORMAT, prefix: PAYLOAD_PREFIX, keeps: (rel) => plainPath(rel) && rel !== MANIFEST_FILE && !shortName(rel) && !unseenName(rel) };
+const TEMPLATE_PACKAGE: PackageKind = { kind: "template", format: TEMPLATE_FORMAT, prefix: TEMPLATE_PAYLOAD_PREFIX, keeps: (rel) => insideTemplate(rel) && !unseenName(rel) };
 
 /** A package read and verified (package.rs `parse`), before its kind's own
  * rules. */
@@ -416,6 +421,7 @@ interface Read extends VerifiedContents {
  * decoded from the request's bytes into one buffer.
  */
 const readPackage = async (raw: Uint8Array, kind: PackageKind, maxBytes: number, signed: boolean): Promise<Read> => {
+  const refuse: (code: PackageError, detail?: string) => never = refuser(kind.kind);
   if (raw.length > maxBytes) refuse("too_big");
   let parts: ReturnType<typeof readParts>;
   try {
@@ -484,6 +490,7 @@ const readPackage = async (raw: Uint8Array, kind: PackageKind, maxBytes: number,
 /** The plugin package `raw`, verified as install.rs `parse` verifies it
  * (and the collisions and the manifest's own rules after its signature). */
 export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedPackage> => {
+  const refuse = refuser("plugin");
   const { manifestValue, ...contents } = await readPackage(raw, PLUGIN_PACKAGE, maxBytes, signed);
   // Paths a device would write as one file, or a file where a folder must
   // be (amendment 42): refused as a device refuses them, after the
@@ -503,6 +510,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
  * then two paths of the rest that would be one file. Its other rules are
  * the listing's (listing.ts `checkTemplate`). */
 export const verifyTemplate = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedTemplate> => {
+  const refuse = refuser("template");
   const { manifestValue, ...contents } = await readPackage(raw, TEMPLATE_PACKAGE, maxBytes, signed);
   const text = (key: string): string => {
     const value = manifestValue.get(key);
