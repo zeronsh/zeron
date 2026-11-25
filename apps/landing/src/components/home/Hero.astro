@@ -1,5 +1,4 @@
 ---
-import { RELEASE_NOTES_URL } from "../../data/releases.ts";
 import { SITE } from "../../data/site.ts";
 import SessionWindow from "../app/SessionWindow.astro";
 import GitHubStars from "../site/GitHubStars.astro";
@@ -9,45 +8,27 @@ import Icon from "../ui/Icon.astro";
 
 <section class="hero">
   <div class="wrap">
-    <a class="news rise" href={RELEASE_NOTES_URL}>What’s new in Zeron<span data-release-version hidden></span><Icon name="alt-arrow-right" size={12} /></a>
-    <h1 class="rise" style="--i:1">The agent workspace that can become anything</h1>
-    <p class="lead rise" style="--i:2">
+    <h1 class="rise">The agent workspace that can become anything</h1>
+    <p class="lead rise" style="--i:1">
       Zeron runs Claude Code, Codex, Cursor and your other coding agents on
       your own machines, in one native, open source app.
     </p>
-    <div class="actions rise" style="--i:3">
+    <div class="actions rise" style="--i:2">
       <Button id="hero-download" href="#downloads" size="lg" data-download="long"><span data-download-label>Download</span></Button>
       <a class="star" href={SITE.github}>Star on GitHub <GitHubStars /><Icon name="alt-arrow-right" size={12} /></a>
     </div>
   </div>
   <!-- The app, laid back on the page and running off it. The window is the
        HTML recreation, so it stays sharp at this size and angle. -->
-  <div class="visual rise" style="--i:5">
+  <div class="visual rise" style="--i:4">
     <div class="plane"><SessionWindow walker /></div>
   </div>
 </section>
 
 <style>
   .hero { position: relative; padding-top: clamp(64px, 8vw, 112px); overflow: hidden; }
-  .news {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 30px;
-    padding: 0 10px 0 12px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-2);
-    background: var(--surface);
-    border-radius: 15px;
-    box-shadow: inset 0 0 0 1px var(--border);
-    transition: color 0.12s, background-color 0.12s;
-  }
-  .news:hover { color: var(--text); background: var(--surface-raised); }
-  .news [data-release-version]::before { content: " "; white-space: pre; }
   h1 {
     max-width: 15em;
-    margin-top: 28px;
     font-size: clamp(38px, 5.4vw, 68px);
     font-weight: 560;
     line-height: 1.03;
