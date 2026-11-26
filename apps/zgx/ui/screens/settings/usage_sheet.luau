@@ -12,6 +12,8 @@ local provider_card = require("@ds/provider_card")
 local agents = require("@account/agents")
 local usage_pools = require("@account/usage_pools")
 local cloud = require("@account/cloud")
+local sessions = require("@account/sessions")
+local usage_open = require("@app/screens/settings/usage_open")
 
 local M = {}
 
@@ -666,8 +668,25 @@ local function tokens_view(resource: any, range: State<string>, target: any): No
 	}
 end
 
--- The sheet itself. `open` is owned by the Providers page so the command
--- palette can open the same surface later without another copy of the data.
+
+-- The device a global opening reads: the Providers target when one was
+-- chosen, else this computer.
+local function global_device_name(): string
+	local target = agents.now:get().target or ""
+	if target == "cloud" then
+		return ui.t("settings.providers.cloud"):get()
+	end
+	if target ~= "" then
+		for _, d in sessions.devices:get() do
+			if d.id == target then
+				return if d.here then ui.t("settings.providers.this_mac"):get() else d.name
+			end
+		end
+	end
+	return ui.t("settings.providers.this_mac"):get()
+end
+
+-- The sheet itself.
 function M.sheet(open: State<boolean>, device_name: () -> string): Node
 	-- The device's account rows are the composers' shared cache. Opening the
 	-- sheet watches the same target, so a first open is warm and the app's
@@ -819,6 +838,12 @@ function M.sheet(open: State<boolean>, device_name: () -> string): Node
 			}
 		end),
 	}
+end
+
+-- The one copy mounted by the shell, so Usage opens over the screen the
+-- person is on rather than taking them to Settings first.
+function M.global(): Node
+	return M.sheet(usage_open, global_device_name)
 end
 
 return M

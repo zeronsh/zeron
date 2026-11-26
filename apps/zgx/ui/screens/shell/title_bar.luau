@@ -146,10 +146,7 @@ return function(props: Props): Node
 			h = size,
 			tone = "bar",
 			on_click = function()
-				route.settings("providers")
-				ui.after(0, function()
-					usage_open:set(true)
-				end)
+				usage_open:set(true)
 			end,
 			ds.Icon { name = "fast-tier", size = 16 },
 		},

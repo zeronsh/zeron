@@ -1046,7 +1046,6 @@ function M.view(): Node
 		end, function(v: string): Node
 			return ui.column { w_full = true, items = "center", page_for(v) }
 		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
-		usage_sheet.sheet(usage_open, device_name),
 		settings_dialog(),
 		resets_dialog(),
 		-- (Done: the failed sign-in goes, and the card looks again.)

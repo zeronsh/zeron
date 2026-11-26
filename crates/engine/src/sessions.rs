@@ -2962,7 +2962,7 @@ impl Inner {
 
     /// Write one provider-reported usage event to the engine-owned ledger.
     /// Best effort: analytics must never make the run itself fail.
-    fn record_usage(&self, chat_id: &str, event: &AgentEvent) {
+    fn record_usage(&self, chat_id: &str, event: &AgentEvent, seq: u64) {
         let Some((input, output, cache_read, cache_creation, reasoning, cost, event_model)) =
             Self::usage_leaf(event)
         else {
@@ -2994,6 +2994,7 @@ impl Inner {
             cache_creation_input_tokens: cache_creation,
             reasoning_tokens: reasoning,
             cost_usd: cost,
+            journal_seq: (seq > 0).then_some(seq),
         };
         if let Err(err) = self.usage_ledger.append(&row) {
             tracing::warn!(chat = %chat_id, error = %err, "usage ledger append failed");
@@ -3146,7 +3147,7 @@ impl Inner {
                 0
             }
         };
-        self.record_usage(chat_id, event);
+        self.record_usage(chat_id, event, seq);
         // The journal now closes the turn a Stop marked (see
         // `SessionsEngine::note_user_stop`).
         if matches!(event, AgentEvent::Done { .. }) {

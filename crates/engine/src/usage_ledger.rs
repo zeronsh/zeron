@@ -45,6 +45,10 @@ pub struct UsageRecord {
     pub reasoning_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The journal sequence that produced this row, when it came from a run
+    /// journal. Backfill uses it as the row's idempotency key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_seq: Option<u64>,
 }
 
 impl UsageRecord {
@@ -144,10 +148,69 @@ impl UsageLedger {
             .collect()
     }
 
+    fn backfill_journals(&self) {
+        let Some(profile) = self.path.parent() else { return };
+        let journals = profile.join("journals");
+        let Ok(entries) = std::fs::read_dir(journals) else { return };
+        let mut have = std::collections::HashSet::new();
+        for row in self.rows() {
+            if let Some(seq) = row.journal_seq {
+                have.insert((row.chat_id, seq));
+            }
+        }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") { continue }
+            let chat = path.file_stem().and_then(|x| x.to_str()).unwrap_or_default().to_owned();
+            let at = entry.metadata().and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64).unwrap_or(0);
+            let Ok(file) = std::fs::File::open(&path) else { continue };
+            let mut harness = "unknown".to_owned();
+            let mut model = None::<String>;
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                let seq = v.get("seq").and_then(Value::as_u64).unwrap_or(0);
+                let event = v.get("event").cloned().unwrap_or(Value::Null);
+                fn walk<'a>(event: &'a Value, out: &mut Vec<&'a Value>) {
+                    if event.get("type").and_then(Value::as_str) == Some("usage") { out.push(event) }
+                    if let Some(inner) = event.get("event") { walk(inner, out) }
+                }
+                if event.get("type").and_then(Value::as_str) == Some("sessionStarted") {
+                    if let Some(h) = event.get("harness").and_then(Value::as_str) { harness = h.to_owned() }
+                    if let Some(m) = event.get("model").and_then(Value::as_str) { model = Some(m.to_owned()) }
+                }
+                let mut found = Vec::new();
+                walk(&event, &mut found);
+                for usage in found {
+                    if seq == 0 || have.contains(&(chat.clone(), seq)) { continue }
+                    let number = |key: &str| usage.get(key).and_then(Value::as_u64);
+                    let row = UsageRecord {
+                        at,
+                        device_id: String::new(),
+                        chat_id: chat.clone(),
+                        harness: harness.clone(),
+                        model: usage.get("model").and_then(Value::as_str).map(str::to_owned).or_else(|| model.clone()),
+                        account_key: None,
+                        input_tokens: number("inputTokens").unwrap_or(0),
+                        output_tokens: number("outputTokens").unwrap_or(0),
+                        cache_read_input_tokens: number("cacheReadInputTokens"),
+                        cache_creation_input_tokens: number("cacheCreationInputTokens"),
+                        reasoning_tokens: number("reasoningTokens"),
+                        cost_usd: usage.get("costUsd").and_then(Value::as_f64),
+                        journal_seq: Some(seq),
+                    };
+                    if self.append(&row).is_ok() { have.insert((chat.clone(), seq)); }
+                }
+            }
+        }
+    }
+
     /// Aggregate rows in `[from, to)` (Unix seconds; either end optional).
     /// `bucket_seconds` aligns bucket starts to the Unix epoch; the app's day
     /// ranges are UTC, matching Cloud's usage days.
     pub fn summary(&self, from: Option<i64>, to: Option<i64>, bucket_seconds: i64) -> Value {
+        self.backfill_journals();
         let bucket_seconds = bucket_seconds.max(60);
         let mut totals = Totals::default();
         let mut buckets: BTreeMap<i64, Totals> = BTreeMap::new();
@@ -198,6 +261,8 @@ impl UsageLedger {
                 "complete": false,
                 "missingCost": totals.cost_rows < rows_in_range,
                 "startedCollectingAt": started,
+                "backfilledFromJournals": true,
+                "backfillTimestampsEstimated": true,
             }
         })
     }
@@ -221,6 +286,7 @@ mod tests {
             cache_creation_input_tokens: None,
             reasoning_tokens: None,
             cost_usd: None,
+            journal_seq: None,
         }
     }
 

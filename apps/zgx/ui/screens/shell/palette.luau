@@ -522,10 +522,7 @@ local function root(): { Item }
 		keywords = "limits quota tokens providers accounts usage",
 		verb = locale.s("shell.palette.open"),
 		run = function()
-			route.settings("providers")
-			ui.after(0, function()
-				usage_open:set(true)
-			end)
+			usage_open:set(true)
 		end,
 	})
 	-- Where settings go: each of its pages.
