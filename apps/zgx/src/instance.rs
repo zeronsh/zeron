@@ -31,18 +31,16 @@ pub fn initialize() -> Result<(), Box<dyn Error>> {
             vars.insert(key.to_owned(), value);
         }
     }
-    let instances_root = vars
+    let instances_root = match vars
         .get(INSTANCE_ID)
         .and_then(|_| vars.get(DATA_DIR))
         .and_then(|dir| Path::new(dir).parent())
         .filter(|dir| dir.file_name().is_some_and(|name| name == ".zeron-instances"))
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| {
-            zeron_cli::paths::data_dir()
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(".zeron-instances")
-        });
+    {
+        Some(root) => root,
+        None => instances_root()?,
+    };
 
     let settings = match settings_from(&vars, &instances_root, None)? {
         Some(settings) => settings,
@@ -91,6 +89,22 @@ fn set_env(key: &str, value: &str) {
 
 fn set_path_env(key: &str, value: &Path) {
     unsafe { std::env::set_var(key, value) }
+}
+
+fn instances_root() -> Result<PathBuf, Box<dyn Error>> {
+    #[cfg(windows)]
+    let root = std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join("AppData").join("Local"))
+        })
+        .ok_or("LOCALAPPDATA and USERPROFILE are not set")?;
+    #[cfg(not(windows))]
+    let root = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
+    Ok(root.join(".zeron-instances"))
 }
 
 fn choose_port() -> Result<u16, Box<dyn Error>> {
