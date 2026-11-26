@@ -62,6 +62,10 @@ fn is_internal_diagnostic(message: &str) -> bool {
 const CONTEXT_FULL: &str =
     "The conversation no longer fits the model's context window. Run /compact or start a new chat.";
 
+/// The text of the synthetic message the CLI writes when a turn has nothing
+/// to answer (2.1.332 hides it in its own transcript too).
+const NO_RESPONSE_REQUESTED: &str = "No response requested.";
+
 /// Wording for the `terminal_reason`s that mean the turn failed. Others
 /// (`completed`, the aborts, anything newer) are not failures by themselves.
 fn terminal_reason_text(reason: &str) -> Option<&'static str> {
@@ -1401,9 +1405,12 @@ impl Normalizer {
                 // output of a command it runs locally, such as `/mcp`,
                 // `/model` or `/config`) never streams. Its text is shown
                 // from the frame, or the turn ends with no reply at all. A
-                // synthetic failure carries `error`, shown above instead.
+                // synthetic failure carries `error` or `is_api_error_message`:
+                // the error part above and the turn's end report it. The
+                // CLI's "No response requested." placeholder is no reply.
                 if !std::mem::take(&mut self.streamed_text)
                     && f.error.is_none()
+                    && !f.is_api_error_message
                     && f.message.model.as_deref() == Some("<synthetic>")
                 {
                     let text = f
@@ -1413,7 +1420,7 @@ impl Normalizer {
                         .map(|b| b.text)
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    if !text.is_empty() {
+                    if !text.is_empty() && text.trim() != NO_RESPONSE_REQUESTED {
                         out.push(AgentEvent::TextDelta { text });
                     }
                 }
@@ -1500,6 +1507,9 @@ impl Normalizer {
             Frame::Result(f) => {
                 let error_shown = std::mem::take(&mut self.turn_error_shown);
                 self.retry_noticed = false;
+                // A turn cut off before its assistant frame (an interrupt)
+                // must not hide the next turn's local command reply.
+                self.streamed_text = false;
                 // A result line that would not parse (see `parse_frame`):
                 // its turn still ends, with what little the line told us.
                 if f.unreadable {
@@ -3245,6 +3255,48 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::TextDelta { .. }))
         );
+    }
+
+    /// A turn cut off after streaming text but before its assistant frame
+    /// does not hide the next turn's local command reply.
+    #[test]
+    fn a_cut_off_turn_does_not_hide_the_next_commands_reply() {
+        let mut norm = Normalizer::new();
+        let frame = |raw: &str| crate::claude::wire::parse_frame(raw).unwrap();
+        norm.normalize(
+            frame(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"half"}}}"#),
+            true,
+        );
+        norm.normalize(
+            frame(r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s"}"#),
+            true,
+        );
+        let reply = norm.normalize(
+            frame(r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Set model to Fable"}]}}"#),
+            false,
+        );
+        assert!(reply.contains(&AgentEvent::TextDelta {
+            text: "Set model to Fable".into()
+        }));
+    }
+
+    /// Synthetic messages that are not a command's answer stay unshown: an
+    /// API error the CLI wraps without an `error` code, and the
+    /// "No response requested." placeholder.
+    #[test]
+    fn synthetic_placeholders_and_api_errors_are_not_replies() {
+        for raw in [
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 500 Internal server error"}]},"is_api_error_message":true,"api_error_status":500}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#,
+        ] {
+            let events = normalize_one(raw);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::TextDelta { .. })),
+                "{raw}: {events:?}"
+            );
+        }
     }
 
     /// A synthetic failure is an error part, not a reply as well.

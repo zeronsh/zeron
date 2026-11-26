@@ -173,6 +173,10 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
+    /// The CLI wrote this message around an API error (live stream:
+    /// `is_api_error_message`). Its text is the failure, never a reply.
+    #[serde(default, rename = "isApiErrorMessage", alias = "is_api_error_message")]
+    pub is_api_error_message: bool,
     /// Bookkeeping frame, not a person typing. Image scale notes ride this.
     /// (`isMeta` in a saved transcript; the live stream spells its fields in
     /// snake case.)

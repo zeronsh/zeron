@@ -1364,6 +1364,15 @@ fn turn_request(params: Value) -> Result<(&'static str, Value), HarnessError> {
 
 async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
     let (method, params) = turn_request(params)?;
+    send_turn_request(client, method, params).await
+}
+
+/// Send a request [`turn_request`] built; the started turn's id.
+async fn send_turn_request(
+    client: &RpcClient,
+    method: &str,
+    params: Value,
+) -> Result<String, HarnessError> {
     let started = client.request(method, params).await?;
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
 }
@@ -2810,29 +2819,32 @@ async fn steer_as_new_turn(
     // here, errored with the reason, and the runtime waits for the next
     // one. Failing the delivery instead tore the runtime down with no Done
     // for the message, which the engine still counted as running.
-    if let Err(error) = turn_request(params.clone()) {
-        *done_current = true;
-        let (prev, next) = rotate(assistant_message_id);
-        return send(
-            event_tx,
-            AgentEvent::Steered {
-                assistant_message_id: Some(prev),
-                next_assistant_message_id: Some(next),
-            },
-        )
-        .await
-            && send(
+    let (method, params) = match turn_request(params) {
+        Ok(request) => request,
+        Err(error) => {
+            *done_current = true;
+            let (prev, next) = rotate(assistant_message_id);
+            return send(
                 event_tx,
-                AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(refusal_text(error)),
-                    session_id: thread_id,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
                 },
             )
-            .await;
-    }
-    match start_turn(client, params).await {
+            .await
+                && send(
+                    event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(refusal_text(error)),
+                        session_id: thread_id,
+                    },
+                )
+                .await;
+        }
+    };
+    match send_turn_request(client, method, params).await {
         Ok(id) => {
             router.adopt_started(id);
             *done_current = false;
