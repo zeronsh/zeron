@@ -5163,15 +5163,6 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
     zeron_proto::plan_usage::codex_plan(plan)
 }
 
-/// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
-/// the free tier's window is a 30-day month (2_592_000s), Plus runs a 5-hour
-/// primary (~18_000s) with a weekly secondary (604_800s). A bare "> 1 day =
-/// week" rule mislabeled the monthly window "Week"; thresholds in seconds
-/// leave the middle gaps to the nearest label rather than guessing a plan.
-fn codex_window_label(span_seconds: i64) -> &'static str {
-    zeron_proto::plan_usage::codex_window_label(span_seconds)
-}
-
 /// Compose a target Claude login with the machine's current shared fields.
 ///
 /// `claudeAiOauth` (and any other slot-owned sibling, including
@@ -6815,12 +6806,12 @@ mod tests {
     fn codex_window_labels_track_the_window_span() {
         // Codex free tier: one 30-day window (observed live:
         // limit_window_seconds = 2_592_000) — NOT a week.
-        assert_eq!(codex_window_label(2_592_000), "Month");
+        assert_eq!(zeron_proto::plan_usage::codex_window_label(2_592_000), "Month");
         // Plus: 5-hour primary + weekly secondary.
-        assert_eq!(codex_window_label(18_000), "Session");
-        assert_eq!(codex_window_label(604_800), "Week");
+        assert_eq!(zeron_proto::plan_usage::codex_window_label(18_000), "Session");
+        assert_eq!(zeron_proto::plan_usage::codex_window_label(604_800), "Week");
         // Unknown/absent span falls back to the shortest label.
-        assert_eq!(codex_window_label(0), "Session");
+        assert_eq!(zeron_proto::plan_usage::codex_window_label(0), "Session");
     }
 
     #[test]

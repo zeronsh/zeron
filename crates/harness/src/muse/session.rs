@@ -643,6 +643,11 @@ impl Runner {
                         .or_else(|| usage["inputTokens"].as_u64())
                         .unwrap_or(0),
                     output_tokens: usage["outputTokens"].as_u64().unwrap_or(0),
+                    cache_read_input_tokens: usage["cacheReadInputTokens"].as_u64().filter(|n| *n > 0),
+                    cache_creation_input_tokens: usage["cacheCreationInputTokens"].as_u64().filter(|n| *n > 0),
+                    reasoning_tokens: usage["reasoningTokens"].as_u64().filter(|n| *n > 0),
+                    cost_usd: usage["costUsd"].as_f64().filter(|cost| cost.is_finite() && *cost >= 0.0),
+                    model: usage["model"].as_str().map(str::to_owned),
                 })
                 .await?;
             }

@@ -194,7 +194,7 @@ end
 
 -- Each device's accounts for its composers, by device id ("": this one's),
 -- by agent (only an agent that signs in and reports usage): `{ id, email,
--- plan, active, can_switch, error?, windows = { { label, used } } }`.
+-- plan, active, can_switch, error?, usage_fetched_at?, key?, windows = { { label, used, resets_at? } } }`.
 M.on_device = ui.shared("agents.on_device", {} :: { [string]: { [string]: { any } } })
 
 -- Each per-provider agent's providers Zeron adds to, by provider: `{
@@ -211,6 +211,12 @@ end
 -- Their usage again (the limit on asking the provider applies).
 function M.refresh_device(key: string)
 	pcall(ui.invoke, "agents.refresh_device", key)
+end
+
+-- Token usage the device measured itself, for the Usage sheet's Tokens tab:
+-- a promise of `{ totals, buckets, byHarness, byModel, byAccount, coverage }`.
+function M.usage_summary(key: string, from: number, to: number, bucket: string): any
+	return ui.call("agents.usage_summary", { device = key, from = from, to = to, bucket = bucket })
 end
 
 -- That account in use on the device: a promise, rejecting with why not.

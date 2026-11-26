@@ -510,6 +510,23 @@ local function root(): { Item }
 			host.invoke("app.reload_interface")
 		end,
 	})
+	-- Usage is a surface over Providers rather than a settings page of its
+	-- own: navigate there first, then open the sheet by its shared state.
+	table.insert(out, {
+		id = "g-usage",
+		label = locale.s("shell.palette.usage"),
+		section = locale.s("shell.palette.go_to"),
+		scope = "settings",
+		icon = "fast-tier",
+		keywords = "limits quota tokens providers accounts usage",
+		verb = locale.s("shell.palette.open"),
+		run = function()
+			route.settings("providers")
+			ui.after(0, function()
+				ui.state("settings_usage_open", false):set(true)
+			end)
+		end,
+	})
 	-- Where settings go: each of its pages.
 	for _, id in settings.pages:get() do
 		local page = settings.page(id)

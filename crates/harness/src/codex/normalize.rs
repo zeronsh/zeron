@@ -319,6 +319,11 @@ pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
     Some(AgentEvent::Usage {
         input_tokens: count(&["inputTokens", "input_tokens"]),
         output_tokens: count(&["outputTokens", "output_tokens"]),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        reasoning_tokens: None,
+        cost_usd: None,
+        model: None,
     })
 }
 
@@ -1311,14 +1316,24 @@ mod tests {
             usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 42, "outputTokens": 7}}})),
             Some(AgentEvent::Usage {
                 input_tokens: 42,
-                output_tokens: 7
+                output_tokens: 7,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                reasoning_tokens: None,
+                cost_usd: None,
+                model: None,
             })
         );
         assert_eq!(
             usage_event(&json!({"token_usage": {"last": {"input_tokens": 1, "output_tokens": 2}}})),
             Some(AgentEvent::Usage {
                 input_tokens: 1,
-                output_tokens: 2
+                output_tokens: 2,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                reasoning_tokens: None,
+                cost_usd: None,
+                model: None,
             })
         );
         assert_eq!(usage_event(&json!({})), None);

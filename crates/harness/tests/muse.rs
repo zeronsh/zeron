@@ -220,7 +220,12 @@ async fn a_turn_streams_text_and_usage_then_ends_on_turn_completed() {
         e,
         AgentEvent::Usage {
             input_tokens: 32350,
-            output_tokens: 24
+            output_tokens: 24,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            cost_usd: None,
+            model: None
         }
     )));
     assert!(events.iter().any(|e| matches!(

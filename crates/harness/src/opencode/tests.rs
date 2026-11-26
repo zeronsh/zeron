@@ -737,6 +737,7 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
                     AgentEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        ..
                     } => {
                         usage = Some((input_tokens, output_tokens));
                     }
@@ -4157,4 +4158,43 @@ async fn a_stopped_server_process_fails_the_turn_and_is_torn_down() {
         .success();
     assert!(!alive, "the stopped server {pid} outlived its run");
     drop(steer_tx);
+}
+
+#[test]
+fn turn_usage_combines_distinct_steps_once() {
+    let first = json!({
+        "tokens": { "input": 10, "output": 2, "reasoning": 3, "cache": { "read": 40, "write": 5 } },
+        "cost": 0.01,
+        "modelID": "gpt-5"
+    });
+    let second = json!({
+        "tokens": { "input": 4, "output": 1, "cache": { "read": 6 } },
+        "cost": 0.02,
+        "modelID": "gpt-5"
+    });
+    let mut pending = PendingUsage::new();
+    pending.insert("one".into(), usage_step(&first).unwrap());
+    // A repeated update of the same message replaces its row rather than
+    // counting it again.
+    pending.insert("one".into(), usage_step(&first).unwrap());
+    pending.insert("two".into(), usage_step(&second).unwrap());
+    let Some(AgentEvent::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        reasoning_tokens,
+        cost_usd,
+        model,
+    }) = pending_usage_event(&pending)
+    else {
+        panic!("usage steps made no event");
+    };
+    assert_eq!(input_tokens, 14);
+    assert_eq!(output_tokens, 3);
+    assert_eq!(cache_read_input_tokens, Some(46));
+    assert_eq!(cache_creation_input_tokens, Some(5));
+    assert_eq!(reasoning_tokens, Some(3));
+    assert_eq!(cost_usd, Some(0.03));
+    assert_eq!(model.as_deref(), Some("gpt-5"));
 }

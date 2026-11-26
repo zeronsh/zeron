@@ -222,7 +222,12 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
 
     assert!(events.contains(&AgentEvent::Usage {
         input_tokens: 10,
-        output_tokens: 20
+        output_tokens: 20,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        reasoning_tokens: None,
+        cost_usd: Some(0.01),
+        model: None
     }));
     assert_eq!(
         events.last(),

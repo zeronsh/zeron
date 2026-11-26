@@ -87,13 +87,18 @@ impl Normalizer {
                 let usage = &message["usage"];
                 if usage.is_object() {
                     let n = |key| usage[key].as_u64().unwrap_or(0);
-                    let input = n("input") + n("cacheRead") + n("cacheWrite");
+                    let context_input = n("input") + n("cacheRead") + n("cacheWrite");
                     events.push(AgentEvent::Usage {
-                        input_tokens: input,
+                        input_tokens: n("input"),
                         output_tokens: n("output"),
+                        cache_read_input_tokens: (n("cacheRead") > 0).then_some(n("cacheRead")),
+                        cache_creation_input_tokens: (n("cacheWrite") > 0).then_some(n("cacheWrite")),
+                        reasoning_tokens: (n("reasoning") > 0).then_some(n("reasoning")),
+                        cost_usd: message["cost"].as_f64().filter(|cost| cost.is_finite() && *cost >= 0.0),
+                        model: message["model"].as_str().map(str::to_owned),
                     });
                     events.push(AgentEvent::ContextUsage {
-                        tokens: Some(input + n("output")),
+                        tokens: Some(context_input + n("output")),
                         window: self.window,
                     });
                 }

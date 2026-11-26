@@ -372,6 +372,30 @@ pub fn install(host: &ScriptHost) {
     host.action("agents.watch_device", move |key| a.watch_device(text(&key)));
     let a = agents.clone();
     host.action("agents.refresh_device", move |key| a.load_device(text(&key), true));
+    // Token analytics from the engine-owned usage ledger (Usage sheet's
+    // Tokens tab). Device-addressed like the account rows: Cloud answers for
+    // the turns Cloud machines ran, this computer for its own.
+    host.async_action("agents.usage_summary", move |args| {
+        let device = args.field("device").map(text).filter(|d| !d.is_empty());
+        let from = args.field("from").and_then(|v| v.as_f64()).map(|n| n as i64);
+        let to = args.field("to").and_then(|v| v.as_f64()).map(|n| n as i64);
+        let bucket = args.field("bucket").map(text).unwrap_or_else(|| "day".into());
+        let mut params = json!({ "bucket": bucket });
+        if let Some(from) = from {
+            params["from"] = Json::from(from);
+        }
+        if let Some(to) = to {
+            params["to"] = Json::from(to);
+        }
+        let params = addressed_to(device.as_deref(), params);
+        async move {
+            let summary = engine::get()
+                .call("GetUsageSummary", params)
+                .await
+                .map_err(|error| engine::outcome(&error).to_string())?;
+            Ok(Value::from_json(&summary.to_string()).unwrap_or(Value::Nil))
+        }
+    });
     let a = agents.clone();
     host.async_action("agents.switch_on", move |args| {
         let a = a.clone();
@@ -1949,10 +1973,14 @@ fn device_accounts_value(accounts: &[Json], cloud: bool) -> Value {
             .into_iter()
             .flatten()
             .map(|w| {
-                Value::record([
+                let mut fields = vec![
                     ("label", Value::from(w["label"].as_str().unwrap_or_default())),
                     ("used", Value::from(w["usedFraction"].as_f64().unwrap_or(0.).clamp(0., 1.))),
-                ])
+                ];
+                if let Some(at) = w["resetsAt"].as_str().and_then(epoch_secs) {
+                    fields.push(("resets_at", Value::from(at as f64)));
+                }
+                Value::record(fields)
             })
             .collect();
         let mut fields = vec![
@@ -1972,6 +2000,12 @@ fn device_accounts_value(accounts: &[Json], cloud: bool) -> Value {
         }
         if let Some(error) = account["usageError"].as_str() {
             fields.push(("error", Value::from(error)));
+        }
+        if let Some(at) = account["usageFetchedAt"].as_i64() {
+            fields.push(("usage_fetched_at", Value::from(at as f64 / 1000.)));
+        }
+        if account["authKind"].as_str() == Some("api-key") {
+            fields.push(("key", Value::Bool(true)));
         }
         by.entry(harness).or_default().push(Value::record(fields));
     }
@@ -2145,7 +2179,8 @@ mod tests {
     fn a_device_lists_only_agents_that_sign_in_and_report_usage() {
         let value = device_accounts_value(&[
             json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true,
-                "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4 }] }),
+                "planLabel": "Max", "usageFetchedAt": 1_793_547_900_000i64,
+                "usageWindows": [{ "label": "Week", "usedFraction": 1.4, "resetsAt": "2026-11-01T15:45:00Z" }] }),
             json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
             json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
             json!({ "id": "d", "harness": "acp.someone", "active": true }),
@@ -2157,6 +2192,8 @@ mod tests {
         assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
         let windows = rows[0].field("windows").unwrap().list().to_vec();
         assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(windows[0].field("resets_at").and_then(Value::as_f64), Some(1_793_547_900.0));
+        assert_eq!(rows[0].field("usage_fetched_at").and_then(Value::as_f64), Some(1_793_547_900.0));
         // No usage read yet: its account still shows, no meter.
         let antigravity = value.field("antigravity").expect("antigravity").list().to_vec();
         assert!(antigravity[0].field("windows").unwrap().list().is_empty());

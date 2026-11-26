@@ -1520,6 +1520,18 @@ impl Normalizer {
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
+                    cache_read_input_tokens: (f.usage.cache_read_input_tokens > 0)
+                        .then_some(f.usage.cache_read_input_tokens),
+                    cache_creation_input_tokens: (f.usage.cache_creation_input_tokens > 0)
+                        .then_some(f.usage.cache_creation_input_tokens),
+                    reasoning_tokens: f
+                        .usage
+                        .output_tokens_details
+                        .get("thinking_tokens")
+                        .and_then(Value::as_u64)
+                        .filter(|n| *n > 0),
+                    cost_usd: f.total_cost_usd.filter(|cost| cost.is_finite() && *cost >= 0.0),
+                    model: self.last_model.clone(),
                 };
                 let failure = (f.subtype == "success" && !interrupted && !aborted(&f))
                     .then(|| api_failure(&f))
