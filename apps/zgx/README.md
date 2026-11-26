@@ -132,6 +132,8 @@ It contains the instance `id` and `port`. On Windows, this metadata is under
 The instance keeps its data on disk in its own data directory. This mode gives
 the instance separate Zeron state and a separate engine endpoint. It does not
 run the engine or its agents in an operating-system sandbox.
+On macOS, isolated instances do not send native notifications because macOS
+can deliver a notification click to the regular app.
 
 This is a Cargo workspace of its own (not a member of the root workspace). zgx
 builds against patched crates (`winit`, `wgpu-hal`, `accesskit_*`), and a git
