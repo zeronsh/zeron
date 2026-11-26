@@ -289,6 +289,7 @@ mod tests {
                         output_truncated: false,
                         output_lines: None,
                         review: None,
+                        chats: Vec::new(),
                     },
                     MessagePart::Text {
                         id: "t2".into(),

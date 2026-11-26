@@ -188,16 +188,11 @@ fun InspectorPageContent(model: AppModel, shell: TabletShellState, chatId: Strin
     when (page) {
         is InspectorPage.Companions -> Column(Modifier.fillMaxSize()) {
             val c = rememberCompanions(model, chatId)
-            val title = model.row(chatId)?.let { if (it.parentChatId != null) "Side chat" else it.title } ?: "Session"
+            val title = model.row(chatId)?.let { if (it.parentChatId != null) childHeading(it) else it.title } ?: "Session"
             Row(Modifier.fillMaxWidth().statusBarsPadding().padding(start = 20.dp, end = 12.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val running = c.runningAgents
-                    Text(
-                        if (running > 0) "$running agent${if (running == 1) "" else "s"} working" else "Agents, side chats & terminals",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (running > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    CompanionsSubtitle(c)
                 }
                 TonalCircleButton(sh.zeron.android.design.ZIcons.Close, "Close", onClick = shell::hideInspector, size = 44.dp, container = MaterialTheme.colorScheme.surfaceContainerHighest)
             }

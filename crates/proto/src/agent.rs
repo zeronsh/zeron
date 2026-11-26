@@ -827,6 +827,12 @@ impl McpServer {
             .is_some_and(|value| value == "1")
     }
 
+    /// Set on Zeron's own server where the host runs delegated work in the
+    /// background (Settings → General): `parent` for an agent whose children
+    /// report back by themselves (it works with them alone unless told
+    /// otherwise), `child` for one of those children.
+    pub const ASYNC_DELEGATION_ENV: &'static str = "ZERON_ASYNC_DELEGATION";
+
     /// The chat Zeron's own server speaks for, set when the engine launched
     /// it for a chat's run (its in-chat tools are offered only then).
     pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";
@@ -1204,6 +1210,12 @@ pub struct UserInputQuestion {
     pub note: Option<String>,
 }
 
+/// Whether these questions are an approval (may the agent run this?), which
+/// is the person's to give, rather than something it wants to know.
+pub fn is_approval(questions: &[UserInputQuestion]) -> bool {
+    matches!(questions, [q] if q.options == ["Yes", "No"] && q.header.starts_with("Approve"))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAnswer {
@@ -1390,6 +1402,21 @@ pub enum AgentEvent {
     Subagent {
         parent_tool_use_id: String,
         event: Box<AgentEvent>,
+    },
+    /// One request of the Zeron call now running (`create_chats`,
+    /// `send_message`, …) is chat `chat_id`: Zeron's own MCP server says so
+    /// as it goes, whatever the harness does with the call's result.
+    #[serde(rename_all = "camelCase")]
+    Handed {
+        /// The request's place in the call.
+        index: usize,
+        chat_id: String,
+        /// The title it was created with; none for a message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// A message to a chat already there.
+        #[serde(default)]
+        message: bool,
     },
 }
 

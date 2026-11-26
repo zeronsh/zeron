@@ -99,6 +99,9 @@ const ENGINE_METHODS: &[&str] = &[
     // Which agents run with only Zeron's MCP servers (their own hidden).
     "GetZeronMcpOnly",
     "SetZeronMcpOnly",
+    // Whether this device's agents delegate in the background.
+    "GetAsyncDelegation",
+    "SetAsyncDelegation",
     // "Keep Zeron running after you quit" (src/quit_prompt.rs).
     "GetBackgroundSettings",
     "SetBackgroundSettings",

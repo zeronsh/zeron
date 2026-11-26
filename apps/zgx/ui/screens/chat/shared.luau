@@ -833,8 +833,11 @@ function M.mention_chat(id: string, key: string?)
 end
 
 -- A chat as it's listed now, for what says who sent a message: its title (its
--- short id, untitled) and its agent's mark. Nil for one that isn't listed.
-function M.chat_of(id: string): { title: string, mark: string? }?
+-- short id, untitled), its agent's mark, what it's doing (a status' kind, nil
+-- at rest; "connecting" for one not begun) and what it runs on (`ran_on`). Nil
+-- for one that isn't listed.
+local chat_asks = ui.shared("chat.asks", {} :: { [string]: string })
+function M.chat_of(id: string): { title: string, mark: string?, status: string?, detail: string? }?
 	local now = sessions.now:get()
 	local found: any = nil
 	for _, c in now.chats do
@@ -868,7 +871,19 @@ function M.chat_of(id: string): { title: string, mark: string? }?
 		return nil
 	end
 	local title = string.match(string.gsub(found.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
-	return { title = if title ~= "" then title else string.sub(id, 1, 8), mark = found.agent }
+	local status = found.status
+	if status == "input" and chat_asks:get()[id] == "approval" then
+		status = "approval"
+	elseif status == nil and found.parent ~= nil and (found.updated or 0) <= (found.created or 0) then
+		-- (A child made, whose first turn hasn't been heard of.)
+		status = "connecting"
+	end
+	return {
+		title = if title ~= "" then title else string.sub(id, 1, 8),
+		mark = found.agent,
+		status = status,
+		detail = sessions.ran_on(found),
+	}
 end
 
 -- A chat chip's text as it goes.

@@ -2051,6 +2051,7 @@ impl RegistryDoc {
                 "waiting",
                 serde_json::to_value(session.waiting.as_ref().map(synced_waiting))?,
             ),
+            ("blockedOnWait", json!(session.blocked_on_wait)),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -2302,15 +2303,14 @@ pub const SYNCED_TASK_DESCRIPTION_BYTES: usize = 256;
 fn synced_background_tasks(tasks: &[zeron_proto::BackgroundTask]) -> Vec<zeron_proto::BackgroundTask> {
     tasks
         .iter()
-        .map(|task| zeron_proto::BackgroundTask {
-            id: task.id.clone(),
-            command: op_budget::cut_str(&task.command, SYNCED_TASK_COMMAND_BYTES),
-            description: task
+        .map(|task| {
+            let mut task = task.clone();
+            task.description = task
                 .description
-                .as_deref()
                 .filter(|d| *d != task.command)
-                .map(|d| op_budget::cut_str(d, SYNCED_TASK_DESCRIPTION_BYTES)),
-            started_at: task.started_at,
+                .map(|d| op_budget::cut_str(&d, SYNCED_TASK_DESCRIPTION_BYTES));
+            task.command = op_budget::cut_str(&task.command, SYNCED_TASK_COMMAND_BYTES);
+            task
         })
         .collect()
 }
@@ -2323,18 +2323,11 @@ pub const SYNCED_WAITING_LABEL_BYTES: usize = SYNCED_TASK_COMMAND_BYTES;
 
 /// `waiting` as a session row syncs it: each label cut to its cap.
 fn synced_waiting(waiting: &zeron_proto::SessionWaiting) -> zeron_proto::SessionWaiting {
-    zeron_proto::SessionWaiting {
-        since: waiting.since,
-        on: waiting
-            .on
-            .iter()
-            .map(|on| zeron_proto::WaitingOn {
-                id: on.id.clone(),
-                kind: on.kind,
-                label: op_budget::cut_str(&on.label, SYNCED_WAITING_LABEL_BYTES),
-            })
-            .collect(),
+    let mut waiting = waiting.clone();
+    for on in &mut waiting.on {
+        on.label = op_budget::cut_str(&on.label, SYNCED_WAITING_LABEL_BYTES);
     }
+    waiting
 }
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {

@@ -629,11 +629,27 @@ class AppModel(private val app: Application) {
     /** Every chat's terminals (shells on their hosts). */
     val terminals = TerminalStore(app) { _client.value }
 
-    /** A session's side chats, newest first. */
+    /** A session's side chats, newest first (the chats its agent delegated to are its subagents instead). */
     fun sideChats(chatId: String): List<SessionRow> =
-        _client.value?.childSessions(chatId).orEmpty().filter { !it.archived }
+        sh.zeron.android.ui.sideChatsOf(_client.value?.childSessions(chatId).orEmpty())
 
-    /** The subagents a session's agent spawned (its open transcript). */
+    /** Stop a chat's turn (a delegated subagent's Stop) through its own session, let go after. */
+    fun interruptChat(chatId: String) {
+        val client = _client.value ?: return
+        try {
+            val handle = client.session(chatId) ?: client.openSession(chatId)
+            try {
+                handle.interrupt()
+            } finally {
+                handle.close()
+            }
+        } catch (e: Exception) {
+            Log.w("Zeron", "interrupt failed", e)
+            toast("Couldn't stop it")
+        }
+    }
+
+    /** The subagents a session's agent spawned (its open transcript), then the chats it delegated to. */
     fun sessionSubagents(chatId: String): List<uniffi.zeron_core.SubagentRow> {
         val client = _client.value ?: return emptyList()
         if ("--sub--" in chatId) return emptyList()

@@ -955,6 +955,7 @@ mod tests {
             output_truncated: false,
             output_lines: None,
             review: None,
+            chats: Vec::new(),
             preview_paths: Vec::new(),
         }
     }

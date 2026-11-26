@@ -373,7 +373,30 @@ pub struct TranscriptView {
     watch: Mutex<Option<zeron_client::SnapshotWatch>>,
     /// A subagent's transcript being followed instead.
     subagent: Mutex<Option<crate::client_ffi::companions::SubagentFollow>>,
+    /// The followed session and its client, to read again when the
+    /// workspace changes (`workspace_changed`).
+    followed: Mutex<Option<(Arc<crate::client_ffi::CoreClient>, zeron_client::SessionHandle)>>,
     visuals: Arc<crate::visual::VisualHub>,
+}
+
+/// A session snapshot as layout input, with the workspace as it stands (for
+/// the chats its rows name: agent messages' senders, delegated chats' state).
+fn session_input(snap: &zeron_client::SessionSnapshot, client: &crate::client_ffi::CoreClient) -> TranscriptInput {
+    TranscriptInput {
+        entries: snap.transcript_messages(),
+        pending: snap
+            .pending
+            .iter()
+            .map(|p| PendingUser {
+                id: p.message_id.clone(),
+                text: p.text.clone(),
+            })
+            .collect(),
+        working: snap.working,
+        working_since_ms: snap.working_since_ms,
+        streaming: snap.streaming,
+        workspace: Some(client.client().workspace()),
+    }
 }
 
 /// Feeds a followed subagent's transcript to the layout worker.
@@ -425,6 +448,7 @@ impl TranscriptView {
             shared,
             watch: Mutex::new(None),
             subagent: Mutex::new(None),
+            followed: Mutex::new(None),
             visuals,
         })
     }
@@ -454,25 +478,22 @@ impl TranscriptView {
         // Agent messages' senders, by their live titles (read per snapshot).
         let workspace = client.clone();
         let guard = handle.watch(move |snap| {
-            let input = TranscriptInput {
-                entries: snap.transcript_messages(),
-                pending: snap
-                    .pending
-                    .iter()
-                    .map(|p| PendingUser {
-                        id: p.message_id.clone(),
-                        text: p.text.clone(),
-                    })
-                    .collect(),
-                working: snap.working,
-                working_since_ms: snap.working_since_ms,
-                streaming: snap.streaming,
-                workspace: Some(workspace.client().workspace()),
-            };
-            let _ = tx.lock().unwrap().send(Msg::Input(input));
+            let _ = tx.lock().unwrap().send(Msg::Input(session_input(&snap, &workspace)));
         });
         *self.watch.lock().unwrap() = Some(guard);
+        *self.followed.lock().unwrap() = Some((client, handle));
         true
+    }
+
+    /// The workspace changed (`WorkspaceChanged`): the followed session's
+    /// rows that name other chats read them again. A delegated chat's start
+    /// line says how that chat stands, which changes with the chat, not with
+    /// this session. Rows whose chats didn't change are kept.
+    pub fn workspace_changed(&self) {
+        let Some((client, handle)) = self.followed.lock().unwrap().clone() else {
+            return;
+        };
+        self.send(Msg::Input(session_input(&handle.snapshot(), &client)));
     }
 
     /// Follow a subagent's transcript, read-only: `doc_id` (spawned in
@@ -527,6 +548,7 @@ impl TranscriptView {
 
     pub fn close(&self) {
         self.watch.lock().unwrap().take();
+        self.followed.lock().unwrap().take();
         self.subagent.lock().unwrap().take();
         self.visuals.shutdown();
         self.send(Msg::Shutdown);

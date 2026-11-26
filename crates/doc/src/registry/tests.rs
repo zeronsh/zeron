@@ -313,6 +313,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
         waiting: None,
+        blocked_on_wait: false,
     }
 }
 
@@ -353,6 +354,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
         status: DoneStatus::Interrupted,
         finished_at: now,
+        resumes: false,
     });
     row.terminal_activity = Some(TerminalActivity {
         terminal_id: "pty".into(),
@@ -378,6 +380,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
         status: DoneStatus::Completed,
         finished_at: now,
+        resumes: false,
     });
     host.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
@@ -2626,11 +2629,7 @@ fn a_wait_replicates_and_an_unreadable_one_costs_only_the_wait() {
     let mut row = session("chat", "host", SessionStatus::Idle);
     row.waiting = Some(zeron_proto::SessionWaiting {
         since: ts(3_000),
-        on: vec![zeron_proto::WaitingOn {
-            id: "bn1".into(),
-            kind: zeron_proto::WaitingKind::Agent,
-            label: "Review the diff".into(),
-        }],
+        on: vec![zeron_proto::WaitingOn::runtime("bn1", zeron_proto::WaitingKind::Agent, "Review the diff")],
     });
     host.upsert_session(&row).unwrap();
     let mut server = HashMap::new();
@@ -3339,6 +3338,10 @@ fn a_session_waiting_on_long_commands_queues_only_ops_that_fit_and_coalesces() {
                     id: id.into(),
                     kind: zeron_proto::WaitingKind::Process,
                     label: heredoc.clone(),
+                    child_chat_id: None,
+                    device_id: None,
+                    harness: None,
+                    started_at: None,
                 })
                 .into(),
         });
@@ -3443,6 +3446,10 @@ fn a_short_waiting_label_syncs_as_is() {
             id: "agent-1".into(),
             kind: zeron_proto::WaitingKind::Agent,
             label: "Review the diff".into(),
+            child_chat_id: Some("child-1".into()),
+            device_id: Some("dev-b".into()),
+            harness: None,
+            started_at: Some(ts(3_100)),
         }],
     });
     doc.upsert_session(&row).unwrap();
