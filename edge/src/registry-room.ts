@@ -29,7 +29,7 @@
  * auto-response pair; the one alarm does the bookkeeping flush and, daily,
  * tombstone GC + the R2 backup.
  */
-import { applyOp, validateOp, type Op, type Row } from "./registry-core";
+import { applyOp, validateKindFields, validateShape, type Op, type Row } from "./registry-core";
 import {
   NO_SCOPE,
   chatHost,
@@ -831,13 +831,19 @@ export class RegistryRoom implements DurableObject {
       return { ok: false, code: "bad_push", message: `batch of ${ops.length} ops`, batch, permanent: true };
     }
     for (const op of ops) {
-      const invalid = validateOp(op);
+      const shape = validateShape(op);
+      const invalid = shape ?? validateKindFields(op);
       if (invalid) {
         // Reject the WHOLE batch: batches are transactional (cascade deletes)
         // and a client that builds one bad op is a client bug to surface, not
         // to partially apply. Rejections are attributed per device on /stats.
+        // Only a shape refusal is for good: a field this room doesn't know
+        // yet may pass once a newer one is deployed.
         this.recordPush(device, false);
-        return { ok: false, code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}`, batch, permanent: true };
+        const message = `${op.kind}/${op.id}: ${invalid}`;
+        return shape
+          ? { ok: false, code: "invalid_op", message, batch, permanent: true }
+          : { ok: false, code: "invalid_op", message };
       }
     }
 

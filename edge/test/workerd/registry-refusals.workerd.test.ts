@@ -58,6 +58,16 @@ describe("a refused push names its batch", () => {
     expect(await next.json()).toMatchObject({ batch: "b-next", applied: 1 });
   });
 
+  it("over HTTPS: a field this room doesn't know yet is refused, but not for good", async () => {
+    const op: Op = { kind: "cloudAgents", id: "codex", op: "upsert", hlc: hlc(), set: { fieldFromANewerClient: true } };
+    const refused = await pushHttp("http-unknown-field", "b-new-field", [op]);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({
+      error: "invalid_op",
+      message: "cloudAgents/codex: invalid cloud agent field"
+    });
+  });
+
   it("over HTTPS: a malformed push names no batch and is not marked for good", async () => {
     const refused = await room("http-malformed").fetch("https://registry/push?device=mac", {
       method: "POST",

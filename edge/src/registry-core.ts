@@ -61,7 +61,11 @@ export const MAX_OP_BYTES = 16 * 1024;
 
 /** Structural validation for an op arriving off the wire. Returns an error
  * string or null. Merge assumes validated input. */
-export const validateOp = (op: Op): string | null => {
+export const validateOp = (op: Op): string | null => validateShape(op) ?? validateKindFields(op);
+
+/** The checks every version of the room makes the same way (format and
+ * size): an op they refuse is refused by every later room too. */
+export const validateShape = (op: Op): string | null => {
   if (!KIND_RE.test(op.kind)) return "bad kind";
   if (!ID_RE.test(op.id)) return "bad id";
   if (op.op !== "upsert" && op.op !== "update" && op.op !== "delete") return "bad op";
@@ -83,6 +87,12 @@ export const validateOp = (op: Op): string | null => {
     }
   }
   if (JSON.stringify(op).length > MAX_OP_BYTES) return "op too large";
+  return null;
+};
+
+/** The fields some kinds allow: a newer room may allow more, so an op
+ * refused here may pass once it is deployed. */
+export const validateKindFields = (op: Op): string | null => {
   if (op.kind === "sidebarPins") {
     if (op.op === "delete") return "pins use explicit membership, not row deletion";
     for (const [key, value] of Object.entries(op.set ?? {})) {
