@@ -33,6 +33,7 @@ use super::*;
 
 pub(super) const GROK_USAGE_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 pub(super) const NOUS_PORTAL: &str = "https://portal.nousresearch.com";
+pub(super) const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/console/api/go/status";
 const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/GetUserStatus";
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
@@ -427,6 +428,10 @@ impl AgentAccounts {
                 }),
             };
         }
+        if harness == HarnessId::Opencode && key == "opencode-go" {
+            let api_key = str_field(creds, "key").ok_or(missing)?;
+            return self.opencode_go_usage(&api_key).await;
+        }
         // An API key has no plan to report (and is never sent to a usage
         // endpoint).
         if api_keys::key_entry_secret(harness, creds).is_some() {
@@ -460,6 +465,11 @@ impl AgentAccounts {
                 why: NoCredentials::Unsupported,
             }),
         }
+    }
+
+    async fn opencode_go_usage(&self, api_key: &str) -> Result<UsageSnapshot, ProbeError> {
+        let body = probe_json("opencode-go", "usage", self.inner.http.get(&self.inner.endpoints.opencode_go_usage).bearer_auth(api_key)).await?;
+        opencode_go_usage_snapshot(&body).ok_or_else(|| schema_error("opencode-go", &body))
     }
 
     async fn openai_usage(
@@ -643,6 +653,26 @@ pub(super) fn devin_plan_label(tier: Option<&str>, plan_name: Option<&str>) -> O
             format!("Devin {name}")
         }
     })
+}
+
+/// OpenCode Go's Console status: the subscription and exact 5-hour/week/month meters.
+pub(super) fn opencode_go_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    let plan_label = match str_field(body, "product")?.as_str() {
+        "go" => "OpenCode Go",
+        "go-plus" => "OpenCode Go Plus",
+        "go-teams" => "OpenCode Go Teams",
+        _ => return None,
+    };
+    let meters = body.get("access")?.get("meters")?.as_object()?;
+    let mut windows = Vec::new();
+    for (key, label) in [("fiveHour", "5h"), ("week", "Week"), ("month", "Month")] {
+        let Some(meter) = meters.get(key) else { continue };
+        let (Some(limit), Some(used)) = (meter.get("limitMicroCents").and_then(json_f64), meter.get("usedMicroCents").and_then(json_f64)) else { continue };
+        if limit > 0.0 {
+            windows.push(AgentUsageWindow { label: label.into(), used_fraction: (used / limit).clamp(0.0, 1.0) as f32, resets_at: parse_when(meter.get("resetsAt")) });
+        }
+    }
+    (!windows.is_empty()).then_some(UsageSnapshot { windows, plan_label: Some(plan_label.into()), codex_reset_credits: None })
 }
 
 /// GitHub's `copilot_internal/user`: each metered quota snapshot (premium

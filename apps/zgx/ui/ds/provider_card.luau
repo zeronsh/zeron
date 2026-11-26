@@ -484,12 +484,9 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		description = detail,
 		-- (The face is the address's: a new one only if the address changes.
 		-- An API key has no face: its provider's mark, in the add rows' well.)
-		lead = if row:peek().key == true
-			then M.disc(
-				if KEY_PROVIDERS[row:peek().provider or ""]
-					then Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true }
-					else Icon { name = "keyboard", size = 16 }
-			)
+		lead = if KEY_PROVIDERS[row:peek().provider or ""]
+			then M.disc(Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true })
+			elseif row:peek().key == true then M.disc(Icon { name = "keyboard", size = 16 })
 			else ui.presence(email, function(e: string): Node
 				return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
 			end),
@@ -505,7 +502,8 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 			items = "center",
 			-- (An API key has no plan, so no windows: no meters for it.)
 			ui.show(function(): boolean
-				return row:get().key ~= true
+				local a = row:get()
+				return a.key ~= true or a.provider == "opencode-go"
 			end, ui.column {
 				gap = "$zeron.space.hair",
 				-- (Labels alone where no reset is known, as the shipping app.)

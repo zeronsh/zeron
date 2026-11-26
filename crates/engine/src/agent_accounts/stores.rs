@@ -881,6 +881,29 @@ impl AgentAccounts {
             .collect()
     }
 
+    /// Ephemeral slots for OpenCode Go credentials kept in OpenCode 2.x's
+    /// own database. The secret is selected only for the immediate usage
+    /// probe, never written into zeron's slots, logs or usage cache.
+    pub(super) fn opencode_v2_usage_slots(&self) -> Vec<Slot> {
+        let db = self.inner.config.opencode_auth_file.with_file_name("opencode.db");
+        let Ok(conn) = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) else { return Vec::new() };
+        let Ok(mut statement) = conn.prepare("SELECT id, integration_id, label, value FROM credential WHERE COALESCE(active, 0) != 0 AND integration_id = 'opencode-go'") else { return Vec::new() };
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?.unwrap_or_default(), row.get::<_, String>(3)?)));
+        let Ok(rows) = rows else { return Vec::new() };
+        rows.filter_map(Result::ok).filter_map(|(id, integration_id, label, value)| {
+            let credentials: serde_json::Value = serde_json::from_str(&value).ok()?;
+            str_field(&credentials, "key")?;
+            let account_key = format!("{integration_id}:credential:{id}");
+            let provider = zeron_proto::providers::account_group_label(HarnessId::Opencode, &integration_id);
+            let title = if label.trim().is_empty() { format!("{provider} API key") } else { label };
+            Some(Slot {
+                id: slot_id_for(HarnessId::Opencode, &account_key), harness: HarnessId::Opencode, account_key,
+                profile: SlotProfile { email: title, display_name: None, organization: None, plan: Some(provider), auth_kind: AgentAuthKind::ApiKey },
+                credentials, claude_config: None, saved_at: 0, created_at: None, store_key: Some(integration_id),
+            })
+        }).collect()
+    }
+
     fn grok_auth_file(&self) -> PathBuf {
         self.inner.config.grok_home.join("auth.json")
     }
