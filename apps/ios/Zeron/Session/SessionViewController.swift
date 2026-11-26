@@ -248,6 +248,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         companionTokens = [
             app.observeSession(chatId) { [weak self] in self?.scheduleCompanionSync() },
             app.observe { [weak self] in self?.scheduleCompanionSync() },
+            // The transcript's rows that name other chats (a delegated
+            // chat's start line: Working, Needs you) read them again.
+            app.observeWorkspace { [weak self] in self?.engine.workspaceChanged() },
             app.terminals.observe { [weak self] chat in
                 guard let self, chat == self.chatId else { return }
                 self.scheduleCompanionSync()
@@ -317,7 +320,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         companionsItem.badge = state.askingAgents > 0 ? {
             var badge = UIBarButtonItem.Badge.count(state.askingAgents)
             badge.backgroundColor = Palette.warning
-            badge.foregroundColor = .white
+            // (Dark's amber is a bright yellow: black reads on it.)
+            badge.foregroundColor = Palette.dual(.white, .black)
             return badge
         }() : state.runningAgents > 0 ? {
             var badge = UIBarButtonItem.Badge.count(state.runningAgents)
@@ -367,6 +371,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true
             sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+            #if DEBUG
+            // Screenshots: `-companions-large` opens it at full height.
+            if ProcessInfo.processInfo.arguments.contains("-companions-large") { sheet.selectedDetentIdentifier = .large }
+            #endif
         }
         hub.open = { [weak self, weak nav] vc in
             nav?.dismiss(animated: true)
@@ -519,7 +527,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         func value(_ flag: String) -> String? {
             args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
         }
-        if args.contains("-companions") {
+        if args.contains("-companions") || args.contains("-companions-large") {
             showCompanions(section: nil)
         } else if args.contains("-terminal") {
             let vc = TerminalViewController(app: app, chatId: chatId, tab: nil)

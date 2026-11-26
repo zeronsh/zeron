@@ -5399,6 +5399,14 @@ public protocol TranscriptViewProtocol: AnyObject, Sendable {
      */
     func visual(id: String)  -> VisualSession?
     
+    /**
+     * The workspace changed (`WorkspaceChanged`): the followed session's
+     * rows that name other chats read them again. A delegated chat's start
+     * line says how that chat stands, which changes with the chat, not with
+     * this session. Rows whose chats didn't change are kept.
+     */
+    func workspaceChanged() 
+    
 }
 /**
  * One transcript's layout engine.
@@ -5609,6 +5617,20 @@ open func visual(id: String) -> VisualSession?  {
         FfiConverterString.lower(id),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * The workspace changed (`WorkspaceChanged`): the followed session's
+     * rows that name other chats read them again. A delegated chat's start
+     * line says how that chat stands, which changes with the chat, not with
+     * this session. Rows whose chats didn't change are kept.
+     */
+open func workspaceChanged()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_workspace_changed(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 
@@ -22724,6 +22746,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_visual() != 55147) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_workspace_changed() != 65214) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_orbrenderer_next_frame() != 6064) {
