@@ -763,7 +763,23 @@
       "new_reply": "新回复",
       "display_failed": "无法显示此内容",
       "image_failed": "无法显示这张图片",
-      "visual_failed": "无法显示这个可视化"
+      "visual_failed": "无法显示这个可视化",
+      "delegated": {
+        "stopped": "已停止",
+        "open_chat": "打开 {title}",
+        "delegating": "{n, plural, other {正在委派给 # 个子代理}}",
+        "delegated": "{n, plural, other {已委派给 # 个子代理}}",
+        "starting": "{n, plural, other {正在启动 # 个对话}}",
+        "started": "{n, plural, other {已启动 # 个对话}}",
+        "messaging": "{n, plural, other {正在向 # 个对话发送消息}}",
+        "messaged": "{n, plural, other {已向 # 个对话发送消息}}",
+        "running": "{n, plural, other {# 个运行中}}",
+        "need_you": "{n, plural, other {# 个需要你处理}}",
+        "needs_approval": "需要批准",
+        "asks": "有问题",
+        "failed": "失败",
+        "untitled": "子代理"
+      }
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -1217,6 +1233,11 @@
         "on": "对话会继续进行，其他设备也能访问它们。",
         "off": "退出时，Zeron 会在对话完成后停止。",
         "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
+      },
+      "async_delegation": {
+        "label": "在后台委派",
+        "description": "代理将工作交给任意提供方或设备上的子代理，结束自己的回合，并在有结果时被唤醒。关闭后，代理会逐个等待。对每个对话的下一回合生效。",
+        "terms": "子代理, 编排, 等待, 异步"
       }
     },
     "engine": {
@@ -2944,7 +2965,11 @@
       },
       "stop_waiting": "停止等待",
       "stop_waiting_failed": "无法停止等待",
-      "wake_failed": "无法唤醒此会话"
+      "wake_failed": "无法唤醒此会话",
+      "waiting_more": "{first} 等另外 {n} 个",
+      "waiting_on_chat": "另一个对话",
+      "stop_delegated": "停止子代理",
+      "stop_delegated_failed": "无法停止子代理"
     }
   },
   "onboarding": {
@@ -3308,6 +3333,14 @@
       "setup_summary": "已设置 Cloud 机器",
       "woke_summary": "已唤醒 Cloud 机器",
       "unreachable": "已中断——无法连接到{host}"
+    },
+    "delegates": {
+      "allow": "允许一次",
+      "deny": "拒绝",
+      "answer": "在其对话中回答",
+      "other": "其他",
+      "failed": "无法回复该子代理",
+      "stop_failed": "无法停止该子代理"
     }
   },
   "panel": {

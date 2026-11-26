@@ -117,6 +117,8 @@ pub(super) struct Parked {
     /// Whether it launched with only Zeron's MCP servers (the setting, or
     /// whether any is set up, may change before its run).
     pub(super) zeron_mcp_only: bool,
+    /// How it was told to delegate (a chat not made yet has no parent).
+    pub(super) delegation: zeron_mcp::Delegation,
     /// The projectless folder its launch made, removed if it ends unused
     /// and still empty.
     made_folder: Option<std::path::PathBuf>,
@@ -333,6 +335,7 @@ impl SessionsEngine {
             // Zeron server with a token for this chat alone, the plugins'
             // servers, the chat's origin and the host's credentials.
             let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
+            let delegation = self.inner.delegation(chat_id);
             let (mcp, grant) =
                 match self
                     .inner
@@ -384,6 +387,7 @@ impl SessionsEngine {
                 side_chats_only,
                 code_mode,
                 zeron_mcp_only,
+                delegation,
                 made_folder: made_folder.clone(),
             }))
         };

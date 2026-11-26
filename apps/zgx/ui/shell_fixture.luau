@@ -912,6 +912,43 @@ ui.command {
 		publish()
 	end,
 }
+ui.command {
+	id = "activity_view",
+	title = "The sidebar shows Activity",
+	run = function()
+		local act = require("@app/screens/shell/activity")
+		act.on:set(true)
+	end,
+}
+-- Write the docs delegated, ended its turn and waits: two subagents, one on
+-- another device.
+ui.command {
+	id = "delegate",
+	title = "Write the docs waits on its subagents",
+	run = function()
+		local c = find("a2")
+		c.status = "waiting"
+		c.waiting_since = os.time() - 4 * 60 - 5
+		c.waiting = {
+			{ id = "t1", kind = "chat", label = "Check the code samples", chat = "k1", device = model.devices[#model.devices].id, harness_name = "Codex" },
+			{ id = "t2", kind = "chat", label = "Read the old guide", chat = "k2", device = c.device, harness_name = "Cursor" },
+		}
+		publish()
+	end,
+}
+-- One of them asks to be allowed something (the chat's host says which).
+ui.command {
+	id = "delegate_asks",
+	title = "A subagent of Write the docs asks for approval",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.children = { a2 = {
+			{ id = "k1", parent = "a2", title = "Check the code samples", device = model.devices[#model.devices].id, status = "input", updated = 20, created = 20, child_kind = "subagent", harness_name = "Codex" },
+		} }
+		sessions.now:set(now)
+		ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "approval" })
+	end,
+}
 -- Put to sleep for two hours and a minute (its corner: "3h").
 ui.command {
 	id = "sleep_a3",

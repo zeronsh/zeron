@@ -17,11 +17,23 @@ pub enum SubagentState {
     Failed,
 }
 
-/// One subagent a session's agent spawned.
+/// One subagent of a session: one its agent spawned in its own runtime, or a
+/// chat it delegated to (`chat_id`), on any device and provider, opened,
+/// stopped and answered as any chat is.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SubagentRow {
-    /// The spawn's tool part id.
+    /// The spawn's tool part id; a delegated chat's id.
     pub id: String,
+    /// A delegated chat: its id (open it with `open_session`; it stops and
+    /// answers through its own handle).
+    pub chat_id: Option<String>,
+    /// A delegated chat's device, when it isn't the parent's.
+    pub device_name: Option<String>,
+    /// A delegated chat's wire harness (`codex`), for its mark.
+    pub harness: Option<String>,
+    /// A delegated chat asks the person something (its own handle's
+    /// `open_input`).
+    pub asks: bool,
     /// The child's transcript doc (`None` until the host binds one).
     pub doc_id: Option<String>,
     pub title: String,
@@ -35,7 +47,15 @@ pub struct SubagentRow {
 
 impl From<zc::SubagentInfo> for SubagentRow {
     fn from(s: zc::SubagentInfo) -> Self {
+        let (chat_id, device_name, harness, asks) = match s.origin {
+            zc::SubagentOrigin::Native => (None, None, None, false),
+            zc::SubagentOrigin::Delegated { chat_id, device_name, harness, asks, .. } => (Some(chat_id), device_name, harness, asks),
+        };
         Self {
+            chat_id,
+            device_name,
+            harness,
+            asks,
             id: s.id,
             doc_id: s.doc_id,
             title: s.title,
@@ -54,10 +74,12 @@ impl From<zc::SubagentInfo> for SubagentRow {
 
 #[uniffi::export]
 impl SessionHandle {
-    /// The subagents this session's agent spawned, in transcript order
-    /// (pull after `SessionChanged`).
+    /// This session's subagents: those its agent spawned, in transcript
+    /// order, then the chats it delegated to, oldest first (pull after
+    /// `SessionChanged` or `WorkspaceChanged`).
     pub fn subagents(&self) -> Vec<SubagentRow> {
-        zc::subagents::subagents(&self.inner.snapshot().transcript_messages())
+        self.inner
+            .subagents()
             .into_iter()
             .map(Into::into)
             .collect()

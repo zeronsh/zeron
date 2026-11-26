@@ -1427,7 +1427,7 @@ impl DocHost {
     /// Every background task rides the tracker, raced against the shutdown
     /// token: the loops' own exits stay authoritative in normal operation;
     /// the token is the retirement override.
-    fn spawn_worker(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    pub(crate) fn spawn_worker(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
         let cancel = self.inner.shutdown.clone();
         self.inner.tasks.spawn(async move {
             tokio::select! {
@@ -5317,6 +5317,35 @@ impl DocHost {
         }
     }
 
+    /// Start `chat_id`'s next turn with a wake Zeron wrote
+    /// ([`crate::delegation`]). `false` when a turn is in flight (or nothing
+    /// may start now): it's sent once that's over. Never queued as a row: a
+    /// row is the person's, and a Stop holds theirs back.
+    pub(crate) async fn deliver_wake(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<bool, EngineError> {
+        let Some(_dispatch) = self.dispatch_guard() else {
+            return Ok(false);
+        };
+        let Some(sessions) = self.sessions() else {
+            return Ok(false);
+        };
+        if !self.is_host(chat_id) {
+            return Err(EngineError::Other(format!("this device no longer hosts chat {chat_id}")));
+        }
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        if sessions.turn_in_flight(chat_id) {
+            return Ok(false);
+        }
+        let item = QueuedMessage::new(message_id, text, self.inner.config.device_id.clone());
+        self.dispatch_queued(&handle, &item, QueueSend::NextTurn).await?;
+        Ok(true)
+    }
+
     /// A Stop acts on everything sent before it, in the order the user sent
     /// it. Controls bypass the prompt drain (so a stalled provider stays
     /// stoppable), which let a Stop execute before a send queued ahead of it
@@ -5402,10 +5431,16 @@ impl DocHost {
         handle: &Arc<ChatDocHandle>,
     ) -> Result<bool, EngineError> {
         let _drain = handle.drain_lock.lock().await;
+        // What it delegated stops with it, here and on other devices, whether
+        // its turn runs or ended into waiting on it.
+        let delegated = sessions.stop_delegated(&handle.chat_id);
+        for child in &delegated {
+            crate::delegation::interrupt(self, child);
+        }
         if !sessions.turn_in_flight(&handle.chat_id)
             && !sessions.holds_background_work(&handle.chat_id)
         {
-            return Ok(false);
+            return Ok(!delegated.is_empty());
         }
         handle.queue_frozen_by_recovery.store(false, Ordering::Release);
         handle.queue_paused.store(true, Ordering::Release);

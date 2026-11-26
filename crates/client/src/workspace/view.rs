@@ -101,6 +101,16 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// A child its parent's agent delegated to ([`zeron_proto::ChildKind::Subagent`]).
+    pub delegated: bool,
+    /// What it waits on while [`ChatIndicator::Waiting`], first things first,
+    /// each in a line ("Codex · Mac mini · Fix the parser"): empty when it
+    /// only blocks on another chat mid-turn.
+    pub waiting_on: Vec<String>,
+    /// Since when (ms).
+    pub waiting_since_ms: Option<i64>,
+    /// A subagent it delegated to asks the person for approval or an answer.
+    pub child_asks: bool,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
     /// Asleep until then (ms; the Activity view's Asleep), as
@@ -450,6 +460,10 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.sleep_until_ms.hash(&mut h);
     row.woke_at_ms.hash(&mut h);
     row.waits_on_process.hash(&mut h);
+    row.delegated.hash(&mut h);
+    row.waiting_on.hash(&mut h);
+    row.waiting_since_ms.hash(&mut h);
+    row.child_asks.hash(&mut h);
     h.finish()
 }
 
@@ -460,6 +474,26 @@ struct RowContext<'a> {
     sessions: HashMap<&'a str, &'a Session>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
+    /// Chats a delegated child of which asks the person something.
+    asking_under: HashSet<&'a str>,
+}
+
+/// One thing a chat waits on: a child chat's agent, its device where that's
+/// another one, and its task; anything else by its label.
+fn waiting_line(on: &zeron_proto::WaitingOn, chat: &Chat, rc: &RowContext<'_>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if on.kind == WaitingKind::SubagentChat {
+        parts.extend(on.harness.map(|h| catalog::harness_label(h.as_str())));
+        parts.extend(
+            on.device_id
+                .as_deref()
+                .filter(|device| *device != chat.device_id)
+                .and_then(|device| rc.devices.get(device))
+                .and_then(|device| device_display_name(device)),
+        );
+    }
+    parts.push(zeron_proto::view::single_line(&on.label));
+    parts.join(" · ")
 }
 
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
@@ -467,7 +501,16 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = zeron_proto::view::native_display_status(chat, session, cx.now);
-    let indicator = display_status(chat, session, cx.now);
+    // A delegated child isn't listed: what it asks the person shows on its
+    // parent, unless that is at work (it answers what it can).
+    let child_asks = rc.asking_under.contains(chat.id.as_str());
+    let own = display_status(chat, session, cx.now);
+    let indicator = match own {
+        ChatIndicator::Waiting | ChatIndicator::Completed | ChatIndicator::Idle if child_asks => {
+            ChatIndicator::AwaitingInput
+        }
+        own => own,
+    };
     let (sleep_until_ms, woke_at_ms) = match chat.sleep_state(cx.now) {
         SleepState::Awake => (None, None),
         SleepState::Asleep { until } => (Some(until.timestamp_millis()), None),
@@ -476,6 +519,15 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let waits_on_process = indicator == ChatIndicator::Waiting
         && zeron_proto::view::waiting(session, cx.now)
             .is_some_and(|w| w.on.iter().any(|on| on.kind == WaitingKind::Process));
+    // (Still waiting while a child's ask shows over it.)
+    let waiting = session.filter(|_| own == ChatIndicator::Waiting);
+    let waiting_on = waiting
+        .and_then(|s| zeron_proto::view::waiting(Some(s), cx.now))
+        .map(|w| w.on.iter().map(|on| waiting_line(on, chat, rc)).collect())
+        .unwrap_or_default();
+    let waiting_since_ms = waiting
+        .and_then(|s| s.waiting.as_ref().map(|w| w.since).or(s.started_at))
+        .map(|since| since.timestamp_millis());
     let working_since_ms = match host_indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
@@ -558,6 +610,10 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
+        delegated: chat.child_kind == Some(zeron_proto::ChildKind::Subagent),
+        waiting_on,
+        waiting_since_ms,
+        child_asks,
         room_gen: chat.room_gen.unwrap_or(1),
         sleep_until_ms,
         woke_at_ms,
@@ -600,6 +656,20 @@ pub(crate) fn derive(
             .collect(),
         pinned: pinned_order.iter().map(String::as_str).collect(),
         section_of,
+        asking_under: HashSet::new(),
+    };
+    let rc = RowContext {
+        asking_under: state
+            .chats
+            .iter()
+            .filter(|c| c.child_kind == Some(zeron_proto::ChildKind::Subagent) && !c.archived)
+            .filter(|c| {
+                let session = rc.sessions.get(c.id.as_str()).copied();
+                zeron_proto::view::native_display_status(c, session, cx.now) == ChatIndicator::AwaitingInput
+            })
+            .filter_map(|c| c.parent_chat_id.as_deref())
+            .collect(),
+        ..rc
     };
 
     let rows: HashMap<String, Arc<SessionRow>> = state
@@ -917,5 +987,107 @@ mod tests {
         // Unlisted, but its chats still read what it can do.
         let machine = snapshot.device("cloud-s1").expect("a Cloud machine is still found by id");
         assert_eq!(machine.capabilities, ["cloud-session"]);
+    }
+
+    #[test]
+    fn delegated_chats_join_the_spawns_with_where_and_what_they_run_on() {
+        use crate::subagents::{SubagentOrigin, SubagentState, all_subagents};
+        use zeron_proto::{ChildKind, Session, SessionStatus, SessionWaiting, WaitingKind, WaitingOn};
+        let now = chrono::Utc::now();
+        let chat = |id: &str, device: &str, parent: Option<&str>, kind: Option<ChildKind>| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": device, "title": id, "archived": false,
+                "parentChatId": parent, "childKind": kind, "createdAt": now,
+                "config": { "harness": "codex", "model": "gpt-5", "reasoning": null, "sandbox": "workspace-write" },
+            }))
+            .unwrap()
+        };
+        let session = |id: &str, device: &str, status: SessionStatus, waiting| Session {
+            last_turn_outcome: None,
+            terminal_activity: None,
+            last_completed_turn: None,
+            chat_id: id.into(),
+            device_id: device.into(),
+            status,
+            started_at: Some(now),
+            updated_at: now,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            waiting,
+            blocked_on_wait: false,
+        };
+        let device = |id: &str, name: &str| -> zeron_proto::Device {
+            serde_json::from_value(serde_json::json!({ "id": id, "name": name, "platform": "macos" })).unwrap()
+        };
+        let mut waits_on = WaitingOn::runtime("t1", WaitingKind::SubagentChat, "Fix the parser");
+        waits_on.device_id = Some("mini".into());
+        waits_on.harness = Some(zeron_proto::HarnessId::Codex);
+        let state = WorkspaceState {
+            chats: vec![
+                chat("parent", "mac", None, None),
+                chat("work", "mini", Some("parent"), Some(ChildKind::Subagent)),
+                chat("side", "mac", Some("parent"), Some(ChildKind::Side)),
+            ],
+            devices: vec![device("mac", "MacBook"), device("mini", "Mac mini")],
+            sessions: vec![
+                session(
+                    "parent",
+                    "mac",
+                    SessionStatus::Idle,
+                    Some(SessionWaiting { since: now, on: vec![waits_on] }),
+                ),
+                session("work", "mini", SessionStatus::Working, None),
+            ],
+            spaces: Vec::new(),
+        };
+        let derive = |state: &WorkspaceState| {
+            super::derive(
+                state,
+                None,
+                &DeriveContext {
+                    self_device_id: "phone",
+                    now,
+                    presence: &HashMap::new(),
+                    change_requests: &[],
+                    send_states: &HashMap::new(),
+                    synced: true,
+                    previous: None,
+                },
+            )
+        };
+        let snapshot = derive(&state);
+        let row = snapshot.session("parent").unwrap();
+        assert_eq!(row.indicator, ChatIndicator::Waiting);
+        assert_eq!(row.waiting_on, ["Codex · Mac mini · Fix the parser"]);
+        let listed = all_subagents(&[], "parent", &snapshot);
+        assert_eq!(listed.len(), 1, "the person's side chat isn't one");
+        assert_eq!(listed[0].state, SubagentState::Running);
+        assert_eq!(
+            listed[0].origin,
+            SubagentOrigin::Delegated {
+                chat_id: "work".into(),
+                device_id: "mini".into(),
+                device_name: Some("Mac mini".into()),
+                harness: Some("codex".into()),
+                asks: false,
+            }
+        );
+        // It asks the person: its parent, waiting, says so.
+        let mut state = state;
+        state.sessions[1].status = SessionStatus::AwaitingInput;
+        let snapshot = derive(&state);
+        assert_eq!(snapshot.session("parent").unwrap().indicator, ChatIndicator::AwaitingInput);
+        // At work, it's its own to look at first.
+        state.sessions[0].status = SessionStatus::Working;
+        state.sessions[0].waiting = None;
+        let snapshot = derive(&state);
+        assert_eq!(snapshot.session("parent").unwrap().indicator, ChatIndicator::Working);
+        // Blocked on another chat mid-turn: Waiting, its turn running.
+        state.sessions[0].blocked_on_wait = true;
+        state.sessions[1].status = SessionStatus::Working;
+        let snapshot = derive(&state);
+        let row = snapshot.session("parent").unwrap();
+        assert_eq!(row.indicator, ChatIndicator::Waiting);
+        assert!(row.waiting_on.is_empty() && row.waiting_since_ms.is_some());
     }
 }

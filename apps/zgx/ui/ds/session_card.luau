@@ -5,14 +5,14 @@
 -- no pointer; whoever places it shows and hides it (the sidebar, on a rest).
 --
 --   SessionCard { title = fn, time = fn, device = fn, here = fn,
---                 project = fn, branch = fn, session = id }
+--                 project = fn, waiting = fn, branch = fn, session = id }
 --
 -- Plugins add rows under its details (the GitHub plugin's pull request, as
 -- Zeron's card has it): `zeron.place { at = ".session-card-end", after = … }`,
 -- reading `zeron.need("session")`, the card's session (`session`).
 --
 -- Each prop a value or a function of state: `time` a time (`os.time()`
--- seconds) or text; `device`, `project`, `branch` nil when there's none
+-- seconds) or text; `device`, `project`, `waiting`, `branch` nil when there's none
 -- (the project then reads "No project").
 
 local Glass = require("@self/glass")
@@ -26,6 +26,7 @@ export type Props = {
 	device: string? | () -> string?,
 	here: boolean? | () -> boolean?,
 	project: string? | () -> string?,
+	waiting: string? | () -> string?,
 	branch: string? | () -> string?,
 	-- The session it's of, for what plugins add to it.
 	session: string?,
@@ -86,6 +87,12 @@ return function(props: Props): Node
 				local secs = status.since(t)
 				return if secs < 60 then locale.s("time.just_now") else locale.s("ds.session_card.ago", { when = status.ago(secs) })
 			end),
+			-- Waiting on work that will wake it: on what, and for how long.
+			ui.show(function(): boolean
+				return read(props.waiting) ~= nil
+			end, line("side-chat", function(): string
+				return read(props.waiting) or ""
+			end)),
 			ui.show(function(): boolean
 				return read(props.device) ~= nil
 			end, line(function(): Icon.Name

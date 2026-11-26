@@ -220,6 +220,10 @@ struct RunHandle {
     /// MCP servers are fixed at launch, so a parked session whose setting
     /// has since flipped is replaced before its next turn.
     zeron_mcp_only: bool,
+    /// How it was told to delegate (Settings → General): its tools and what
+    /// they say are fixed at launch, so a parked session whose setting has
+    /// since flipped is replaced before its next turn.
+    delegation: zeron_mcp::Delegation,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -362,6 +366,28 @@ struct Inner {
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
     /// Their leases (open, typed) when a test sets them.
     warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
+    /// What its chats delegated to their children ([`crate::delegation`];
+    /// absent in bare tests), and whether they do so in the background.
+    delegations: OnceLock<crate::delegation::Delegations>,
+    async_delegation: OnceLock<Arc<crate::orchestration::AsyncDelegation>>,
+    /// Ends held back while a chat waits on what it delegated: the marker and
+    /// outcome its turn would have marked, and when it ended. A turn starting
+    /// supersedes one; the last result reaching nobody releases it.
+    held_ends: Mutex<HashMap<String, HeldEnd>>,
+    /// Chats whose turn this engine's stop cut off (or the last one's did)
+    /// and a start picks back up: their rows' outcome says so
+    /// ([`zeron_proto::NativeTurnOutcome::resumes`]).
+    resuming: Mutex<std::collections::HashSet<String>>,
+    /// What each chat's own runtime waits on ([`ParkedWait`]), which its row
+    /// shows together with what it delegated.
+    runtime_waits: Mutex<HashMap<String, zeron_proto::SessionWaiting>>,
+}
+
+/// See [`Inner::held_ends`].
+struct HeldEnd {
+    since: chrono::DateTime<Utc>,
+    completed_turn: Option<String>,
+    outcome: Option<DoneStatus>,
 }
 
 /// How long a runtime parked between turns with nothing pending keeps its
@@ -547,8 +573,80 @@ impl SessionsEngine {
                 mcp_servers: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
+                delegations: OnceLock::new(),
+                async_delegation: OnceLock::new(),
+                held_ends: Mutex::new(HashMap::new()),
+                resuming: Mutex::default(),
+                runtime_waits: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    pub(crate) fn set_delegations(&self, delegations: crate::delegation::Delegations) {
+        let _ = self.inner.delegations.set(delegations);
+    }
+
+    pub fn delegations(&self) -> crate::delegation::Delegations {
+        self.inner
+            .delegations
+            .get()
+            .expect("delegations are set as the engine is assembled")
+            .clone()
+    }
+
+    pub(crate) fn set_async_delegation(&self, setting: Arc<crate::orchestration::AsyncDelegation>) {
+        let _ = self.inner.async_delegation.set(setting);
+    }
+
+    pub fn async_delegation(&self) -> Arc<crate::orchestration::AsyncDelegation> {
+        self.inner
+            .async_delegation
+            .get()
+            .expect("the setting is set as the engine is assembled")
+            .clone()
+    }
+
+    /// Which chat a request of the Zeron call its agent makes became
+    /// ([`AgentEvent::Handed`]), for the call's row to open. False with no
+    /// turn to show it in.
+    pub(crate) fn note_handed(&self, chat_id: &str, handed: AgentEvent) -> bool {
+        self.turn_in_flight(chat_id) && self.inject_event(chat_id, handed)
+    }
+
+    /// What `chat_id` delegated changed: its row shows what it waits on, and
+    /// an end held back is marked once nothing is.
+    pub(crate) fn refresh_delegated(&self, chat_id: &str) {
+        self.inner.refresh_delegated(chat_id);
+    }
+
+    /// The person's Stop: nothing `chat_id` delegated wakes it again, and an
+    /// end held back for it is dropped. The children that still ran, for the
+    /// caller to stop.
+    pub(crate) fn stop_delegated(&self, chat_id: &str) -> Vec<String> {
+        let Some(delegations) = self.inner.delegations.get() else {
+            return Vec::new();
+        };
+        let turn = self
+            .turn_in_flight(chat_id)
+            .then(|| self.inner.doc_host())
+            .flatten()
+            .map(|host| crate::delegation::current_turn(&host, chat_id));
+        let held = delegations.waiting_on(chat_id).is_some();
+        let stopped = delegations.stop_parent(chat_id, turn.as_deref());
+        if held {
+            lock(&self.inner.held_ends).remove(chat_id);
+            if turn.is_none() && !self.turn_in_flight(chat_id) {
+                // Stopped, not finished.
+                self.inner.set_status_with_completion(
+                    chat_id,
+                    SessionStatus::Idle,
+                    false,
+                    None,
+                    Some(DoneStatus::Interrupted),
+                );
+            }
+        }
+        stopped.into_iter().map(|task| task.child_chat_id).collect()
     }
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
@@ -967,7 +1065,12 @@ impl SessionsEngine {
         crate::runner::RunCounts {
             active,
             waiting,
-            background: self.background_count(),
+            background: self.background_count()
+                + self
+                    .inner
+                    .delegations
+                    .get()
+                    .map_or(0, |d| d.parents_expecting(Utc::now())),
         }
     }
 
@@ -1309,6 +1412,7 @@ impl SessionsEngine {
                 h.side_chats_only,
                 h.code_mode,
                 h.zeron_mcp_only,
+                h.delegation,
             )
         });
         if let Some((
@@ -1325,6 +1429,7 @@ impl SessionsEngine {
             side_chats_only,
             code_mode,
             zeron_mcp_only,
+            delegation,
         )) = routed
         {
             if idle {
@@ -1348,6 +1453,7 @@ impl SessionsEngine {
                 || self.native_subagents_changed(chat_id, harness_id, side_chats_only)
                 || self.code_mode_changed(chat_id, harness_id, code_mode)
                 || self.zeron_mcp_only_changed(chat_id, harness_id, zeron_mcp_only)
+                || self.delegation_changed(chat_id, delegation)
             {
                 None
             } else {
@@ -1507,6 +1613,7 @@ impl SessionsEngine {
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
         let code_mode = self.inner.registry.code_mode(harness_id);
         let zeron_mcp_only = self.inner.zeron_mcp_only(harness_id);
+        let delegation = self.inner.delegation(chat_id);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1671,6 +1778,7 @@ impl SessionsEngine {
                 side_chats_only,
                 code_mode,
                 zeron_mcp_only,
+                delegation,
             },
         );
         drop(runs);
@@ -1815,6 +1923,20 @@ impl SessionsEngine {
         }
         tracing::info!(chat = %chat_id, harness = ?harness_id,
             "native subagents switched; replacing the parked session");
+        true
+    }
+
+    /// Whether a session parked between turns was told to delegate otherwise
+    /// than a run would be now (Settings → General). Same guards as
+    /// [`Self::credential_changed`].
+    fn delegation_changed(&self, chat_id: &str, started: zeron_mcp::Delegation) -> bool {
+        if started == self.inner.delegation(chat_id)
+            || self.turn_in_flight(chat_id)
+            || self.holds_background_work(chat_id)
+        {
+            return false;
+        }
+        tracing::info!(chat = %chat_id, "background delegation switched; replacing the parked session");
         true
     }
 
@@ -2490,6 +2612,9 @@ impl SessionsEngine {
                     handle.note_turn_failure(&last.id, &note)?;
                 }
             }
+            if pickup == Pickup::Resume {
+                lock(&self.inner.resuming).insert(chat_id.clone());
+            }
             self.inner.set_status_with_completion(
                 &chat_id,
                 SessionStatus::Idle,
@@ -2580,6 +2705,16 @@ impl SessionsEngine {
                         );
                         if let Err(err) = handle.note_turn_failure(&user_id, &note) {
                             tracing::warn!(chat = %chat_id, error = %err, "noting a failed resume failed");
+                        }
+                        // It's over after all.
+                        if lock(&sessions.inner.resuming).remove(&chat_id) {
+                            sessions.inner.set_status_with_completion(
+                                &chat_id,
+                                SessionStatus::Idle,
+                                false,
+                                None,
+                                Some(DoneStatus::Interrupted),
+                            );
                         }
                     }
                 }
@@ -3105,6 +3240,39 @@ impl Inner {
         outcome: Option<DoneStatus>,
     ) {
         let now = Utc::now();
+        // While it waits on what it delegated, its turn's end isn't its own
+        // (whatever harness ran it): the mark it would leave is held back.
+        // (Looked up first: what changes meanwhile refreshes the row.)
+        let delegated = self.delegated_waits(chat_id);
+        let resumes = {
+            let mut resuming = lock(&self.resuming);
+            if status == SessionStatus::Working {
+                resuming.remove(chat_id);
+            }
+            resuming.contains(chat_id)
+        };
+        let (mut completed_turn, mut outcome) = (completed_turn, outcome);
+        if status == SessionStatus::Idle && delegated.is_some() {
+            let mut held = lock(&self.held_ends);
+            let end = held.entry(chat_id.to_owned()).or_insert_with(|| HeldEnd {
+                since: now,
+                completed_turn: None,
+                outcome: None,
+            });
+            end.completed_turn = completed_turn.take().or(end.completed_turn.take());
+            end.outcome = outcome.take().or(end.outcome.take());
+        } else if let Some(end) = lock(&self.held_ends).remove(chat_id)
+            && status == SessionStatus::Idle
+        {
+            completed_turn = completed_turn.or(end.completed_turn);
+            outcome = outcome.or(end.outcome);
+        }
+        if status != SessionStatus::Idle {
+            lock(&self.runtime_waits).remove(chat_id);
+        }
+        let waiting = (status == SessionStatus::Idle)
+            .then(|| self.compose_waiting(chat_id, delegated))
+            .flatten();
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -3121,6 +3289,7 @@ impl Inner {
                     running_subagents: 0,
                     background_tasks: Vec::new(),
                     waiting: None,
+                    blocked_on_wait: false,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3135,8 +3304,9 @@ impl Inner {
             let was = entry.status;
             // A wait is a parked turn's alone: any turn starting, asking or
             // failing ends it.
-            if status != SessionStatus::Idle {
-                entry.waiting = None;
+            entry.waiting = waiting;
+            if status != SessionStatus::Working || !was_active {
+                entry.blocked_on_wait = false;
             }
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
@@ -3146,11 +3316,13 @@ impl Inner {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
                     finished_at: now,
+                    resumes: resumes && outcome == DoneStatus::Interrupted,
                 });
             } else if status == SessionStatus::Errored {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: DoneStatus::Errored,
                     finished_at: now,
+                    resumes: false,
                 });
             } else if status == SessionStatus::Working && (fresh_start || !was_active) {
                 entry.last_turn_outcome = None;
@@ -3198,15 +3370,117 @@ impl Inner {
     /// no wait), mirrored like [`Self::set_background_tasks`]; the live
     /// heartbeat keeps the row fresh while the wait holds.
     fn set_waiting(&self, chat_id: &str, waiting: Option<zeron_proto::SessionWaiting>) {
+        {
+            let mut waits = lock(&self.runtime_waits);
+            match waiting {
+                Some(waiting) => waits.insert(chat_id.to_owned(), waiting),
+                None => waits.remove(chat_id),
+            };
+        }
+        self.publish_waiting(chat_id);
+    }
+
+    /// What `chat_id` delegated and hasn't been told of, when that holds it.
+    fn delegated_waits(&self, chat_id: &str) -> Option<Vec<zeron_proto::WaitingOn>> {
+        self.delegations.get()?.waiting_on(chat_id)
+    }
+
+    /// What a settled chat waits on: its runtime's background work, then the
+    /// children it delegated to.
+    fn compose_waiting(
+        &self,
+        chat_id: &str,
+        delegated: Option<Vec<zeron_proto::WaitingOn>>,
+    ) -> Option<zeron_proto::SessionWaiting> {
+        let runtime = lock(&self.runtime_waits).get(chat_id).cloned();
+        let Some(delegated) = delegated else {
+            return runtime;
+        };
+        let mut waiting = runtime.unwrap_or_else(|| zeron_proto::SessionWaiting {
+            since: lock(&self.held_ends).get(chat_id).map_or_else(Utc::now, |end| end.since),
+            on: Vec::new(),
+        });
+        waiting.on.extend(delegated);
+        Some(waiting)
+    }
+
+    /// See [`SessionsEngine::refresh_delegated`].
+    fn refresh_delegated(&self, chat_id: &str) {
+        let delegated = self.delegated_waits(chat_id);
+        let row = lock(&self.statuses).get(chat_id).map(|s| (s.status, s.waiting.is_some()));
+        match (row, delegated) {
+            // This engine started into the wait: the chat's row is its own to
+            // refresh from here on, with the marks its last one left.
+            (None, Some(_)) => {
+                if let Some(old) = self
+                    .workspace()
+                    .and_then(|ws| ws.read_sessions().ok())
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s.chat_id == chat_id && s.device_id == self.device_id)
+                {
+                    lock(&self.statuses).insert(
+                        chat_id.to_owned(),
+                        Session {
+                            status: SessionStatus::Idle,
+                            started_at: None,
+                            running_subagents: 0,
+                            background_tasks: Vec::new(),
+                            terminal_activity: None,
+                            waiting: None,
+                            blocked_on_wait: false,
+                            ..old
+                        },
+                    );
+                }
+                self.set_status(chat_id, SessionStatus::Idle, false);
+            }
+            // Nothing more is coming: the end stands.
+            (Some((SessionStatus::Idle, _)), None) if lock(&self.held_ends).contains_key(chat_id) => {
+                self.set_status(chat_id, SessionStatus::Idle, false);
+            }
+            (Some((SessionStatus::Idle, _)), _) => self.publish_waiting(chat_id),
+            _ => {}
+        }
+    }
+
+    /// The turn in flight does nothing but block on another chat (see
+    /// [`Session::blocked_on_wait`]).
+    fn set_blocked_on_wait(&self, chat_id: &str, blocked: bool) {
+        self.change_row(chat_id, |row| {
+            let changed = row.blocked_on_wait != blocked;
+            row.blocked_on_wait = blocked;
+            changed
+        });
+    }
+
+    fn publish_waiting(&self, chat_id: &str) {
+        let waiting = self.compose_waiting(chat_id, self.delegated_waits(chat_id));
+        self.change_row(chat_id, |row| {
+            let waiting = waiting.filter(|_| row.status == SessionStatus::Idle).map(|mut waiting| {
+                // (A wait that only changed what it's on began when it began.)
+                if let Some(old) = &row.waiting {
+                    waiting.since = waiting.since.min(old.since);
+                }
+                waiting
+            });
+            let changed = row.waiting != waiting;
+            row.waiting = waiting;
+            changed
+        });
+    }
+
+    /// Change a status row in place, publishing and mirroring it when
+    /// `change` says it changed.
+    fn change_row(&self, chat_id: &str, change: impl FnOnce(&mut Session) -> bool) {
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
             };
-            if entry.waiting == waiting {
+            if !change(entry) {
                 return;
             }
-            entry.waiting = waiting;
             entry.updated_at = Utc::now();
             let session = entry.clone();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
@@ -3255,6 +3529,23 @@ impl Inner {
                         .flatten()
                         .is_some_and(|chat| chat.parent_chat_id.is_some())
             })
+    }
+
+    /// How a run of `chat_id` is told to delegate (Settings → General).
+    pub(super) fn delegation(&self, chat_id: &str) -> zeron_mcp::Delegation {
+        if !self.async_delegation.get().is_some_and(|setting| setting.enabled())
+            || zeron_proto::voice::is_orchestrator_chat(chat_id)
+        {
+            return zeron_mcp::Delegation::Off;
+        }
+        match self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten()) {
+            Some(chat) if chat.child_kind == Some(zeron_proto::ChildKind::Subagent) => {
+                zeron_mcp::Delegation::Child
+            }
+            // A side chat is the person's conversation, and delegates to no one.
+            Some(chat) if chat.parent_chat_id.is_some() => zeron_mcp::Delegation::Off,
+            _ => zeron_mcp::Delegation::Parent,
+        }
     }
 
     /// [`SessionsEngine::ipc_port_ready`].
@@ -3325,6 +3616,13 @@ impl Inner {
                 "1".to_owned(),
             );
         }
+        let delegation = self.delegation(chat_id);
+        if let Some(value) = delegation.env_value() {
+            env.insert(
+                zeron_proto::McpServer::ASYNC_DELEGATION_ENV.to_owned(),
+                value.to_owned(),
+            );
+        }
         let endpoint = lock(&self.mcp_endpoint).clone();
         if let Some(endpoint) = endpoint {
             let origin = zeron_mcp::Origin {
@@ -3332,6 +3630,7 @@ impl Inner {
                 device_id: Some(self.device_id.clone()),
                 side_chats_only,
                 waits_on_background: waits,
+                delegation,
             };
             match endpoint.grant(origin) {
                 Ok(grant) => {
@@ -3434,7 +3733,8 @@ impl Inner {
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
     fn note_message(&self, chat_id: &str, text: &str) {
-        if text.is_empty() {
+        // (A wake is Zeron's, not a message anyone reads in a preview.)
+        if text.is_empty() || zeron_proto::delegation::wake_notice(text).is_some() {
             return;
         }
         if let Some(ws) = self.workspace() {
@@ -3694,6 +3994,7 @@ impl Inner {
             });
         if cut {
             self.journal.note_shutdown_interrupt(chat_id, now_ms());
+            lock(&self.resuming).insert(chat_id.to_owned());
         }
         cut
     }
@@ -4575,6 +4876,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 output_truncated,
                 output_lines,
                 review,
+                chats,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -4604,6 +4906,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                     reason: r.reason.as_deref().map(|why| cap_review_text(why, 600)),
                     ..r.clone()
                 }),
+                chats: chats.clone(),
             },
             other => other.clone(),
         })
@@ -4850,6 +5153,8 @@ async fn drive_run(
     if let Some(reason) = warm.as_ref().and_then(|taken| {
         if taken.parked.side_chats_only != side_chats_only {
             Some("native subagents switched")
+        } else if taken.parked.delegation != inner.delegation(&chat_id) {
+            Some("background delegation switched")
         } else if taken.parked.code_mode != code_mode {
             Some("code mode switched")
         } else if taken.parked.zeron_mcp_only != zeron_mcp_only {
@@ -4979,6 +5284,10 @@ async fn drive_run(
     let publish_open = |open: &std::collections::HashSet<String>| {
         open_count.store(open.len(), std::sync::atomic::Ordering::Release);
     };
+    // Those of them that only block on another chat (a call's arguments may
+    // come after it opens, so each refresh is read again).
+    let mut open_waits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut blocked_on_wait = false;
     let mut seen_images = std::collections::HashSet::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
@@ -6314,21 +6623,35 @@ async fn drive_run(
                 if open_tools.insert(id.clone()) {
                     publish_open(&open_tools);
                 }
+                if let AgentEvent::ToolCall { call, .. } = &event {
+                    if zeron_proto::delegation::is_blocking_wait(call) {
+                        open_waits.insert(id.clone());
+                    } else {
+                        open_waits.remove(id);
+                    }
+                }
             }
             AgentEvent::ToolResult { id, .. } => {
                 closed_tools.insert(id.clone());
+                open_waits.remove(id);
                 if open_tools.remove(id) {
                     publish_open(&open_tools);
                 }
             }
             AgentEvent::Done { .. } => {
                 closed_tools.clear();
+                open_waits.clear();
                 if !open_tools.is_empty() {
                     open_tools.clear();
                     publish_open(&open_tools);
                 }
             }
             _ => {}
+        }
+        let blocked = !open_waits.is_empty() && open_waits.len() == open_tools.len();
+        if blocked != blocked_on_wait {
+            blocked_on_wait = blocked;
+            inner.set_blocked_on_wait(&chat_id, blocked);
         }
 
         // Startup-crash retry: a run that dies before ever starting (errored
@@ -6845,6 +7168,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
+            blocked_on_wait: false,
         }
     }
 
@@ -8270,11 +8594,7 @@ mod tests {
     }
 
     fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
-        zeron_proto::WaitingOn {
-            id: id.into(),
-            kind: zeron_proto::WaitingKind::Agent,
-            label: format!("agent {id}"),
-        }
+        zeron_proto::WaitingOn::runtime(id, zeron_proto::WaitingKind::Agent, format!("agent {id}"))
     }
 
     fn bg_process(id: &str) -> zeron_proto::BackgroundTask {

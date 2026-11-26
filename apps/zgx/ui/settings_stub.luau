@@ -117,6 +117,7 @@ local invitations = {
 }
 local engine: { [string]: any } = {
 	GetCommitCredit = { enabled = false, cloud = false },
+	GetAsyncDelegation = { enabled = false, chosen = false },
 	GetWorktreeSettings = {
 		settings = { useCustomDirectory = false },
 		defaultDirectory = "~/.zeron/worktrees",
@@ -296,7 +297,9 @@ local answers: { [string]: (arg: any) -> any } = {
 			if m == "SetZeronMcpOnly" or m == "SetCodeMode" or m == "SetNativeSubagents" then
 				log(`settings.engine:{m}:{arg.params.harness}:{arg.params.targetDeviceId or ""}`)
 			end
-			if m == "SetCommitCredit" then
+			if m == "SetAsyncDelegation" then
+				engine[get] = { enabled = arg.params.enabled, chosen = true }
+			elseif m == "SetCommitCredit" then
 				engine[get] = { enabled = arg.params.enabled, cloud = false }
 			elseif m == "SetWorktreeSettings" then
 				local w = table.clone(engine[get])

@@ -51,6 +51,11 @@ pub mod capabilities {
     /// peer link, as they always did.
     pub const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
 
+    /// This device's agents delegate in the background (Settings → General).
+    /// A device set up later follows the account's others by it; advertised
+    /// only while it's on, so not in [`CURRENT`].
+    pub const ASYNC_DELEGATION_V1: &str = "async-delegation-v1";
+
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
         MESSAGE_QUEUE_V1,

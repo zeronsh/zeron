@@ -135,11 +135,13 @@ local GLYPH: { [Kind]: Icon.Name } = {
 -- chevron the tree starts at the reply's own left edge. Rows are a little
 -- tighter than Zeron's 32: a long run of tools reads as one list, not a
 -- column of chips.
-local LOADER = 16
-local TRUNK, BEND, BRANCH_END = LOADER / 2 + 0.5, 6, 20
-local GLYPH_LEFT, GLYPH_SIZE = 24, 16
-local GUTTER = 48
-local ROW, HEADER = 28, 26
+-- (Their numbers: ds/tree_line, whose tree ds/delegation hangs its rows on.)
+local TREE = tree_line.TREE
+local LOADER = TREE.loader
+local TRUNK, BEND, BRANCH_END = TREE.trunk, TREE.bend, TREE.tip
+local GLYPH_LEFT, GLYPH_SIZE = TREE.glyph_left, TREE.glyph
+local GUTTER = TREE.gutter
+local ROW, HEADER = TREE.row, TREE.header
 -- How long the tree takes to open and fold.
 local FOLD = 200
 -- How a row joining the tree arrives.

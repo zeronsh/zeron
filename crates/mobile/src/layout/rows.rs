@@ -340,7 +340,19 @@ impl RowBuilder {
             // Messages this agent sent: each recipient as the workspace lists it.
             let mut h = None::<std::collections::hash_map::DefaultHasher>;
             for part in &entry.parts {
-                let MessagePart::Tool { call, .. } = part else { continue };
+                let MessagePart::Tool { call, chats, .. } = part else { continue };
+                // And the chats it handed work to.
+                if zeron_proto::delegation::delegating(call).is_some() {
+                    let h = h.get_or_insert_with(|| {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        gaps.hash(&mut h);
+                        h
+                    });
+                    for chat in chats {
+                        recipient_chat(chat, workspace).hash(h);
+                        delegated_state(chat, workspace).hash(h);
+                    }
+                }
                 for message in zeron_proto::agent_messages::outgoing_messages(call).into_iter().flatten() {
                     let h = h.get_or_insert_with(|| {
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -400,6 +412,12 @@ impl RowBuilder {
                 .collect::<Vec<_>>()
                 .join("\n");
             let gap = if first { Gap::First } else { Gap::Turn };
+            // Zeron waking it with what its subagents came to: nobody's words,
+            // and nothing to show (the agent goes on, as after a native
+            // subagent's return).
+            if zeron_proto::delegation::wake_notice(&text).is_some() {
+                return rows;
+            }
             rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false, workspace)), gap });
             return rows;
         }
@@ -434,6 +452,29 @@ impl RowBuilder {
                         let gap = gap_for(&rows, false);
                         let row = self.outgoing_row(ctx, &entry.id, &format!("{id}.m{mi}"), message, !*resolved, *is_error, workspace);
                         rows.push(Placed { core: Arc::new(row), gap });
+                    }
+                }
+                MessagePart::Tool { id, call, is_error, resolved, chats, .. }
+                    if let Some((kind, started)) = zeron_proto::delegation::delegating(call) =>
+                {
+                    // Work handed to other chats, the same: a line each.
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    for (mi, one) in started.iter().enumerate() {
+                        let gap = gap_for(&rows, false);
+                        let chat = chats.get(mi).filter(|chat| !chat.is_empty());
+                        let failed = *is_error || (!chats.is_empty() && chat.is_none());
+                        let lead = delegated_lead(kind, failed);
+                        let core = delegated_row_core(
+                            ctx,
+                            &entry.id,
+                            &format!("{id}.d{mi}"),
+                            lead,
+                            chat.or(one.chat.as_ref()),
+                            one,
+                            !*resolved,
+                            workspace,
+                        );
+                        rows.push(Placed { core: Arc::new(core), gap });
                     }
                 }
                 MessagePart::Tool { call, .. } => {
@@ -867,6 +908,71 @@ fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str) -> Ro
     }
 }
 
+fn delegated_lead(kind: zeron_proto::delegation::DelegatingKind, failed: bool) -> &'static str {
+    use zeron_proto::delegation::DelegatingKind;
+    match (kind, failed) {
+        (DelegatingKind::Subagents, false) => "Delegated to",
+        (DelegatingKind::Subagents, true) => "Couldn't delegate to",
+        (DelegatingKind::Chats, false) => "Started",
+        (DelegatingKind::Chats, true) => "Couldn't start",
+        (DelegatingKind::Message, false) => "Message to",
+        (DelegatingKind::Message, true) => "Couldn't message",
+    }
+}
+
+/// A chat work was handed to: its title as the workspace lists it (else as it
+/// was called) and its provider's mark, which opens it.
+#[allow(clippy::too_many_arguments)]
+fn delegated_row_core(
+    ctx: &mut Ctx,
+    entry_id: &str,
+    part: &str,
+    lead: &str,
+    chat: Option<&String>,
+    one: &zeron_proto::delegation::Delegating,
+    pending: bool,
+    workspace: Option<&WorkspaceSnapshot>,
+) -> RowCore {
+    let listed = chat.map(|chat| recipient_chat(chat, workspace));
+    let opens = listed.as_ref().and_then(|(_, _, id)| id.clone());
+    let called = one.title.clone();
+    let (title, harness) = match listed {
+        Some((title, harness, Some(_))) => (title, harness),
+        _ => (called.unwrap_or_else(|| "a subagent".into()), one.harness.clone()),
+    };
+    // How its chat stands, said where it's worth saying (the desktop's word
+    // after a delegated row's name): it's at work, it needs the person, or
+    // it failed. Done says nothing.
+    let note = opens.as_deref().and_then(|id| delegated_state(id, workspace));
+    let copy = match note {
+        Some((word, _)) => format!("{lead} {title} · {word}"),
+        None => format!("{lead} {title}"),
+    };
+    RowCore {
+        key: row_key(&format!("{entry_id}#{part}")),
+        version: next_version(),
+        kind: RowKind::Markdown,
+        entry_id: Arc::from(entry_id),
+        content: Content::Caption {
+            text: chat_caption_with(ctx, lead, &title, harness.as_deref(), opens.as_deref(), note),
+            pending,
+        },
+        copy_text: copy,
+    }
+}
+
+/// A chat work was handed to, as it stands now: a word and its ink, or
+/// nothing once it's done (or isn't listed).
+fn delegated_state(chat: &str, workspace: Option<&WorkspaceSnapshot>) -> Option<(&'static str, ColorRole)> {
+    let row = workspace?.session(chat)?;
+    match row.indicator {
+        zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => Some(("Working", ColorRole::TextTertiary)),
+        zeron_proto::ChatIndicator::AwaitingInput => Some(("Needs you", ColorRole::Warning)),
+        zeron_proto::ChatIndicator::Errored => Some(("Failed", ColorRole::Danger)),
+        zeron_proto::ChatIndicator::Completed | zeron_proto::ChatIndicator::Idle => None,
+    }
+}
+
 /// An agent message's sender as this workspace lists it: its live title
 /// (the header's for an untitled or unlisted chat), its provider, and
 /// whether it is listed (and so opens).
@@ -913,6 +1019,18 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
 /// chats, the chat's provider mark (a chat glyph when unknown) beside its
 /// title, which opens chat `open`.
 fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, open: Option<&str>) -> PText {
+    chat_caption_with(ctx, lead, title, harness, open, None)
+}
+
+/// [`chat_caption`], then ` · {note}` in its own ink (how the chat stands).
+fn chat_caption_with(
+    ctx: &mut Ctx,
+    lead: &str,
+    title: &str,
+    harness: Option<&str>,
+    open: Option<&str>,
+    note: Option<(&str, ColorRole)>,
+) -> PText {
     let (size, lh) = TYPE.small;
     let regular = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
     let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
@@ -920,15 +1038,28 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
     let mark = ctx.typo.px(14.0);
     // The mark rides a zero-width word joiner's padding, with a space on
     // either side, so it sits as far from the title as from the lead.
-    let text = format!("{lead} \u{2060} {title}");
+    let mut text = format!("{lead} \u{2060} {title}");
     let split = lead.len() + 1;
-    let spans = vec![
+    let named = text.len();
+    if let Some((word, _)) = note {
+        text.push_str(" · ");
+        text.push_str(word);
+    }
+    let mut spans = vec![
         zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
-        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
+        zeron_text::Span { range: split..named, style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
     ];
+    if note.is_some() {
+        spans.push(zeron_text::Span { range: named..text.len(), style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None });
+    }
     let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
     // One link (one tap target, one accessibility element): the chat.
-    let paint = |link| super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
+    let paint_in = |color, link| super::markdown::SpanPaint { color, decoration: super::display::Decoration::None, link, chip: false };
+    let paint = |link| paint_in(ColorRole::TextSecondary, link);
+    let mut paints = vec![paint(None), paint(open.map(|_| 0))];
+    if let Some((_, ink)) = note {
+        paints.push(paint_in(ink, None));
+    }
     let p = zeron_text::prepare(
         &ctx.typo.book,
         ctx.cache,
@@ -940,7 +1071,7 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
         p,
         lh,
         base: super::style::baseline(lh, regular),
-        paints: vec![paint(None), paint(open.map(|_| 0))],
+        paints,
         links: open.map(|id| format!("{OPEN_CHAT_SCHEME}://open?id={id}")).into_iter().collect(),
         chip: (0.0, 0.0),
         badges: Vec::new(),

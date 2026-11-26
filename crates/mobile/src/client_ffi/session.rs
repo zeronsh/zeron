@@ -216,6 +216,9 @@ pub struct InputRequest {
     pub entry_id: String,
     pub request_id: String,
     pub questions: Vec<UserInputQuestion>,
+    /// An approval (a command or an edit to allow): answered "Yes" (allow
+    /// once) or "No" (deny) on its one question.
+    pub is_approval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -362,6 +365,7 @@ impl From<&zc::ComposerState> for ComposerState {
             },
             transfer_progress: c.transfer_progress,
             open_input: c.open_input.as_ref().map(|i| InputRequest {
+                is_approval: zeron_proto::is_approval(&i.questions),
                 entry_id: i.entry_id.clone(),
                 request_id: i.request_id.clone(),
                 questions: i

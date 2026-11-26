@@ -215,14 +215,13 @@ impl BackgroundWork {
                         listed
                             .iter()
                             .filter(|t| waits.marked.contains(&t.id))
-                            .map(|t| WaitingOn {
-                                id: t.id.clone(),
-                                kind: WaitingKind::Process,
-                                label: t
+                            .map(|t| {
+                                let label = t
                                     .description
                                     .clone()
                                     .filter(|d| !d.trim().is_empty())
-                                    .unwrap_or_else(|| t.command.clone()),
+                                    .unwrap_or_else(|| t.command.clone());
+                                WaitingOn::runtime(t.id.clone(), WaitingKind::Process, label)
                             }),
                     )
                     .collect()
@@ -448,7 +447,7 @@ mod tests {
     }
 
     fn agent(id: &str) -> WaitingOn {
-        WaitingOn { id: id.into(), kind: WaitingKind::Agent, label: format!("agent {id}") }
+        WaitingOn::runtime(id, WaitingKind::Agent, format!("agent {id}"))
     }
 
     #[test]

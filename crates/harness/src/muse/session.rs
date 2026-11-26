@@ -465,11 +465,7 @@ impl Runner {
         ids.sort();
         self.turn.set_background_agents(
             ids.into_iter()
-                .map(|id| zeron_proto::WaitingOn {
-                    id: id.clone(),
-                    kind: zeron_proto::WaitingKind::Agent,
-                    label: "Subagent".into(),
-                })
+                .map(|id| zeron_proto::WaitingOn::runtime(id.clone(), zeron_proto::WaitingKind::Agent, "Subagent"))
                 .collect(),
         );
     }

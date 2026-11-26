@@ -258,6 +258,7 @@ export type Props = {
 	on_stop_task: ((id: string) -> ())?,
 	on_stop_all: (() -> ())?,
 	on_open_task: ((id: string) -> ())?,
+	on_answer_task: ((task: string, answer: string) -> ())?,
 	tray: State<dock.Tray?>?,
 	-- What to know about the chat (ds/composer_dock's alerts): each in its
 	-- tone's colours, its action, and letting one go.
@@ -2705,6 +2706,7 @@ return ui.component(function(props: Props): Node
 			on_stop_task = props.on_stop_task,
 			on_stop_all = props.on_stop_all,
 			on_open_task = props.on_open_task,
+			on_answer_task = props.on_answer_task,
 			open = props.tray,
 			narrow = narrow,
 			aside = props.aside,

@@ -763,7 +763,23 @@
       "new_reply": "New reply",
       "display_failed": "This couldn't be shown",
       "image_failed": "Couldn't show this image",
-      "visual_failed": "Couldn't show this visual"
+      "visual_failed": "Couldn't show this visual",
+      "delegated": {
+        "stopped": "Stopped",
+        "open_chat": "Open {title}",
+        "delegating": "{n, plural, one {Delegating to a subagent} other {Delegating to # subagents}}",
+        "delegated": "{n, plural, one {Delegated to a subagent} other {Delegated to # subagents}}",
+        "starting": "{n, plural, one {Starting a chat} other {Starting # chats}}",
+        "started": "{n, plural, one {Started a chat} other {Started # chats}}",
+        "messaging": "{n, plural, one {Messaging a chat} other {Messaging # chats}}",
+        "messaged": "{n, plural, one {Messaged a chat} other {Messaged # chats}}",
+        "running": "{n, plural, one {# running} other {# running}}",
+        "need_you": "{n, plural, one {# needs you} other {# need you}}",
+        "needs_approval": "Needs approval",
+        "asks": "Has a question",
+        "failed": "Failed",
+        "untitled": "Subagent"
+      }
     },
     "user_message": {
       "open_named": "Open {name}",
@@ -1217,6 +1233,11 @@
         "on": "Chats keep working, and other devices can reach them.",
         "off": "When you quit, Zeron stops once its chats are done.",
         "terms": "background quit close engine agents running stop memory battery"
+      },
+      "async_delegation": {
+        "label": "Delegate in the background",
+        "description": "Agents hand work to subagents on any provider or device, end their turn, and are woken with the results. Off, they wait for each one. Applies to each chat's next turn.",
+        "terms": "subagents, orchestration, waiting, async"
       }
     },
     "engine": {
@@ -2944,7 +2965,11 @@
       },
       "stop_waiting": "Stop waiting",
       "stop_waiting_failed": "Couldn't stop waiting",
-      "wake_failed": "Couldn't wake this chat"
+      "wake_failed": "Couldn't wake this chat",
+      "waiting_more": "{first} and {n} more",
+      "waiting_on_chat": "Another chat",
+      "stop_delegated": "Stop subagents",
+      "stop_delegated_failed": "Couldn't stop the subagents"
     }
   },
   "onboarding": {
@@ -3308,6 +3333,14 @@
       "setup_summary": "Set up the Cloud machine",
       "woke_summary": "Woke the Cloud machine",
       "unreachable": "Interrupted — can't reach {host}"
+    },
+    "delegates": {
+      "allow": "Allow once",
+      "deny": "Deny",
+      "answer": "Answer in its chat",
+      "other": "Something else",
+      "failed": "Couldn't answer that subagent",
+      "stop_failed": "Couldn't stop that subagent"
     }
   },
   "panel": {

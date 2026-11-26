@@ -588,15 +588,36 @@ fun HarnessTile(row: SessionRow) {
     ) { HarnessMark(row.harness, 24.dp, tint = MaterialTheme.colorScheme.onSurface) }
 }
 
-/** Project monogram + name, then the branch — the desktop sidebar subline. */
+/**
+ * What a waiting chat waits on, in a line (the desktop hover card's): the
+ * first of it ("Codex · Build box · Audit the parser") and how many more.
+ */
+internal fun waitingLine(row: SessionRow): String? = waitingParts(row)?.let { (first, more) -> first + more }
+
+/** [waitingLine] in two: what it waits on first (cut short when it must) and how many more (never cut). */
+internal fun waitingParts(row: SessionRow): Pair<String, String>? {
+    val first = row.waitingOn.firstOrNull() ?: return null
+    val more = row.waitingOn.size - 1
+    return "Waiting on $first" to if (more > 0) " (+$more more)" else ""
+}
+
+/** Project monogram + name, then the branch — the desktop sidebar subline; a waiting chat's says what it waits on. */
 @Composable
 private fun Subline(row: SessionRow) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val waiting = waitingParts(row)
     Row(verticalAlignment = Alignment.CenterVertically) {
         val project = row.project
         if (project != null) {
             ProjectTile(project.name, project.colorIndex.toInt(), 16.dp)
             Spacer(Modifier.width(6.dp))
+        }
+        // (The project's tile still says whose it is.)
+        if (waiting != null) {
+            val (first, more) = waiting
+            Text(first, style = MaterialTheme.typography.bodyMedium, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (more.isNotEmpty()) Text(more, style = MaterialTheme.typography.bodyMedium, color = muted, maxLines = 1, softWrap = false)
+            return@Row
         }
         Text(
             project?.name ?: row.deviceName ?: "No project",

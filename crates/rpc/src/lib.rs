@@ -310,6 +310,27 @@ pub mod methods {
     /// agent said it waits on no longer hold the chat (its background agents
     /// still do). Relay-forwardable, to the chat's host.
     pub const STOP_WAITING: &str = "StopWaiting";
+    /// Delegated work (`zeron_proto::delegation`), kept by the parent's host.
+    /// `{chatId, childChatId, messageId, mode?, completionWake?, title?}` →
+    /// `DelegatedTask`: the parent `chatId` is about to send its child this
+    /// message. An agent's always names its own chat. Local, like
+    /// `AWAIT_BACKGROUND`.
+    pub const REGISTER_DELEGATED_TASK: &str = "RegisterDelegatedTask";
+    /// `{chatId, index, handedChatId, title?, message?}` → `{ok}`: request
+    /// `index` of the Zeron call `chatId`'s agent is making is that chat, for
+    /// its transcript to open. An agent's always names its own chat. Local.
+    pub const NOTE_HANDED: &str = "NoteHanded";
+    /// `{chatId, taskId, action, status?}` → `{ok}`: `cancel` (stops the
+    /// child), `acknowledge` (a tool returned its result), `async` (a wait
+    /// gave up), `discard` (its message wasn't sent). Local.
+    pub const UPDATE_DELEGATED_TASK: &str = "UpdateDelegatedTask";
+    /// `{chatId}` → `[DelegatedTaskView]`, oldest first. Relay-forwardable, to
+    /// the parent's host.
+    pub const LIST_DELEGATED_TASKS: &str = "ListDelegatedTasks";
+    /// → `{enabled, chosen}`; `{enabled}` sets it: whether this device's
+    /// agents delegate in the background. Relay-forwardable.
+    pub const GET_ASYNC_DELEGATION: &str = "GetAsyncDelegation";
+    pub const SET_ASYNC_DELEGATION: &str = "SetAsyncDelegation";
     /// `{chatId, toolId, offset}` → `ToolOutputChunk`: one command's whole
     /// output, from the run journal of the device that ran it, redacted;
     /// relay-forwardable (target the chat's host).
@@ -896,6 +917,11 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // What the calling chat delegated to its children.
+            | methods::REGISTER_DELEGATED_TASK
+            | methods::UPDATE_DELEGATED_TASK
+            | methods::NOTE_HANDED
+            | methods::LIST_DELEGATED_TASKS
             // Commands on any of the person's devices (Zeron MCP's
             // run_command & co.): full access only (the engine's agent gate).
             | methods::RUN_COMMAND

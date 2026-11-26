@@ -205,7 +205,17 @@ function M.subagents(n: number): { Dock.Task }
 			name = `{name} ({i})`
 		end
 		if i <= live then
-			table.insert(running, { id = `sub{i}`, kind = "agent", name = name } :: Dock.Task)
+			local task: Dock.Task = { id = `sub{i}`, kind = "agent", name = name }
+			if i == 1 then
+				-- (One on another device, asking to run a command.)
+				task.detail, task.since, task.stops, task.state = "Codex · Build box", ago(192), true, "approval"
+				task.ask = {
+					id = "ask1",
+					code = "cargo fuzz run parse -- -max_total_time=60",
+					answers = { { id = "deny", label = "Deny" }, { id = "once", label = "Allow once", primary = true } },
+				}
+			end
+			table.insert(running, task)
 		else
 			local failed = i % 7 == 0
 			table.insert(finished, 1, { id = `sub{i}`, kind = "agent", name = name, ended = if failed then "failed" else "done", failed = failed or nil } :: Dock.Task)

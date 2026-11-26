@@ -49,6 +49,8 @@ local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
 local Visual = require("@self/visual")
 local Activity = require("@self/activity")
+local Delegation = require("@self/delegation")
+local tree_line = require("@self/tree_line")
 local status = require("@self/status")
 local Working = require("@self/working")
 local Mark = require("@self/mark")
@@ -65,7 +67,10 @@ export type Message = {
 	id: string,
 	-- A person's, a reply, or the seam where the chat moved to another
 	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- ("wake": Zeron's, not a person's: its subagents came to something, and
+	-- the agent goes on. Nothing of it shows but the working line while its
+	-- turn starts, as a native subagent's return shows nothing.)
+	role: "user" | "assistant" | "switch" | "wake",
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -195,7 +200,7 @@ export type Props = {
 	open_link: ((target: string) -> ())?,
 	-- A chat as it's listed now: its title and agent's mark. Nil for one that
 	-- isn't listed, which a message from it can't open.
-	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name?, status: string?, detail: string? }?)?,
 	-- What pressing `Message from Chat` does: opens that chat beside this one.
 	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
@@ -227,7 +232,7 @@ export type Draft = { id: string, text: string, part: string?, part_text: string
 -- its own blocks, opened.
 export type Block = {
 	id: string,
-	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images",
+	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "delegated",
 	text: string?,
 	-- Pictures an agent showed (`show_image`, a generated image), one after
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
@@ -243,7 +248,13 @@ export type Block = {
 	summary: string?,
 	live: boolean?,
 	blocks: { Block }?,
+	-- Work handed to other chats ("delegated"): how, and to which.
+	what: ("subagents" | "chats" | "message")?,
+	tasks: { Handed }?,
 }
+-- A chat work was handed to: what it was called, its chat once there is one,
+-- its agent, and whether the call is still out, or refused.
+export type Handed = { title: string?, chat: string?, agent: Mark.Name?, pending: boolean?, failed: boolean? }
 
 -- Rows not yet measured: about a short message.
 local ESTIMATE = 96
@@ -265,6 +276,7 @@ local ROW_ESTIMATE: any = {
 	by = "role",
 	cases = {
 		user = { height = 64, text = { field = "text", size = 15, line = 24, most = 520 } },
+		wake = { height = 0 },
 		assistant = {
 			height = 40,
 			has = {
@@ -277,6 +289,7 @@ local ROW_ESTIMATE: any = {
 							tools = { height = 38 },
 							work = { height = 38 },
 							display_failed = { height = 36 },
+							delegated = { height = 82 },
 						},
 						default = { height = 320 },
 					},
@@ -445,6 +458,88 @@ local function seam(m: Message): Node
 			},
 			switch_side(m.to, m.to_mark),
 		},
+	}
+end
+
+-- A chat as it's listed now (the chat page's `chat_of`).
+type Listed = { title: string, mark: Mark.Name?, status: string?, detail: string? }
+type ChatOf = ((id: string) -> Listed?)?
+type OpenChat = ((chat: string, title: string) -> ())?
+
+-- How many of these there are, said: "2 running", "1 needs you".
+local function standing_note(rows: { Delegation.Row }): string?
+	local running, asks = 0, 0
+	for _, r in rows do
+		if r.state == "input" or r.state == "approval" then
+			asks += 1
+		elseif r.state == "working" or r.state == "waiting" or r.state == "connecting" then
+			running += 1
+		end
+	end
+	if asks > 0 then
+		return locale.s("ds.transcript.delegated.need_you", { n = asks })
+	elseif running > 0 then
+		return locale.s("ds.transcript.delegated.running", { n = running })
+	end
+	return nil
+end
+
+-- Work handed to other chats, as the agent hands it over: whom to, each as a
+-- row that says what its chat is doing now and opens it.
+local DELEGATED: { [string]: { string } } = {
+	subagents = { "ds.transcript.delegated.delegating", "ds.transcript.delegated.delegated" },
+	chats = { "ds.transcript.delegated.starting", "ds.transcript.delegated.started" },
+	message = { "ds.transcript.delegated.messaging", "ds.transcript.delegated.messaged" },
+}
+local function handed_state(t: Handed, live: Listed?): Delegation.Standing
+	if t.failed then
+		return "failed"
+	elseif not live then
+		return if t.pending then "connecting" else "gone"
+	end
+	local st = live.status
+	if st == nil or st == "done" then
+		return "done"
+	elseif st == "limited" or st == "plan" or st == "woke" then
+		return "working"
+	end
+	return st :: any
+end
+local function delegated_row(now: () -> Block, chat_of: ChatOf, open: OpenChat): Node
+	local rows = ui.computed(function(): { Delegation.Row }
+		local out: { Delegation.Row } = {}
+		for i, t in now().tasks or {} do
+			local live = if chat_of and t.chat then chat_of(t.chat) else nil
+			table.insert(out, {
+				id = tostring(i),
+				title = (live and live.title) or t.title or locale.s("ds.transcript.delegated.untitled"),
+				agent = (live and live.mark) or t.agent,
+				state = handed_state(t, live),
+				detail = live and live.detail,
+				chat = if live then t.chat else nil,
+			})
+		end
+		return out
+	end)
+	return Delegation.Delegation {
+		key = now().id,
+		hook = "chat.message.delegated",
+		class = "delegated",
+		said = function(): string
+			local b = now()
+			local words = DELEGATED[b.what or "subagents"] or DELEGATED.subagents
+			return locale.s(words[if b.live then 1 else 2], { n = #(b.tasks or {}) })
+		end,
+		-- (While the call is out, its line says that much. A message's chats
+		-- aren't this one's to wait on: nothing to count.)
+		note = function(): string?
+			local b = now()
+			return if b.live or b.what == "message" then nil else standing_note(rows:get())
+		end,
+		rows = function(): { Delegation.Row }
+			return rows:get()
+		end,
+		on_open = open,
 	}
 end
 
@@ -692,6 +787,9 @@ type View = {
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
+	-- A chat work was handed to: as it's listed now, and what opens it.
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name?, status: string?, detail: string? }?)?,
+	open_chat: ((chat: string, title: string) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 }
@@ -797,6 +895,8 @@ local function guess_block(b: Block): number
 		return math.max(24, h - 16)
 	elseif b.kind == "tools" or b.kind == "work" then
 		return if b.live then 26 * math.max(1, #(b.tools or {})) else 26
+	elseif b.kind == "delegated" then
+		return tree_line.TREE.header + tree_line.TREE.row * #(b.tasks or {})
 	end
 	return 240
 end
@@ -856,6 +956,11 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					end
 					else nil,
 			}
+		end
+		if b.kind == "delegated" then
+			return delegated_row(function(): Block
+				return brow:get()
+			end, if view then view.chat_of else nil, if view then view.open_chat else nil)
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
@@ -2518,6 +2623,11 @@ local function Transcript(props: Props): Node
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
 		local function pt(): number
+			-- (A wake takes no room of its own: the reply after it goes on
+			-- from the one before.)
+			if m.role == "wake" then
+				return 0
+			end
 			if mine and index:get() > 1 then
 				local prev = messages:at(index:get() - 1)
 				if prev and prev.role == "switch" then
@@ -2605,6 +2715,11 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "wake" then ui.column {
+						w_full = true,
+						provide = { message = m.id },
+						waiting_line(state, nil, props.turn_state),
+					}
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -2630,7 +2745,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, chat_of = props.chat_of, open_chat = props.open_sender, find = find_for }),
 			},
 		}
 	end

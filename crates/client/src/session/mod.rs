@@ -663,7 +663,8 @@ impl SessionCore {
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
                 // Unreachable, a stop would wait in the doc and could land on a later turn.
-                can_interrupt: (busy || snapshot.streaming) && !degraded,
+                // Waiting on its subagents, a stop ends them (the engine's `stop_parent`).
+                can_interrupt: (busy || host_indicator == ChatIndicator::Waiting || snapshot.streaming) && !degraded,
             },
             queue: st
                 .queue
@@ -1207,6 +1208,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
                     output_truncated: false,
                     output_lines: None,
                     review: None,
+                    chats: Vec::new(),
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),
@@ -1303,6 +1305,16 @@ impl std::fmt::Debug for SessionHandle {
 impl SessionHandle {
     pub fn chat_id(&self) -> &str {
         &self.core.chat_id
+    }
+
+    /// This chat's subagents, whatever they run as: its transcript's spawns,
+    /// then the chats it delegated to ([`crate::subagents::all_subagents`]).
+    pub fn subagents(&self) -> Vec<crate::SubagentInfo> {
+        let entries = self.snapshot().transcript_messages();
+        match self.core.client() {
+            Ok(client) => crate::subagents::all_subagents(&entries, &self.core.chat_id, &client.workspace.snapshot()),
+            Err(_) => crate::subagents::subagents(&entries),
+        }
     }
 
     /// The current transcript (O(1): an `Arc` clone).
