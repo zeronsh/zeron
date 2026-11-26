@@ -141,6 +141,14 @@ zeron.serve("shout", function(args)
 	zeron.emit("shouted", { word = args.word, at = zeron.device.id })
 	return true
 end)
+
+zeron.serve("counter", function(args)
+	local counter = zeron.store("counter", 0)
+	if args.increment then
+		counter:set(counter:get() + args.increment)
+	end
+	return counter:get()
+end)
 "#;
 
 /// Its icon: listed with it, so another device's window can draw it.
@@ -231,6 +239,44 @@ async fn ask_when_up(e: &Engine, device: &str, method: &str, args: Value) -> Val
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_service_storage_is_isolated_by_data_directory() {
+    let dirs = tempfile::tempdir().unwrap();
+    let dir_a = dirs.path().join("a");
+    let dir_b = dirs.path().join("b");
+    let rooms_a = device_rooms().await;
+    let rooms_b = device_rooms().await;
+    let a = engine(&dir_a, "device", &rooms_a);
+    let b = engine(&dir_b, "device", &rooms_b);
+    install(&a, &dir_a, "1.0.0").await;
+    install(&b, &dir_b, "1.0.0").await;
+    allow(&a).await;
+
+    let refused = ask(&b, "", "counter", json!({})).await;
+    assert_eq!(refused["reason"], "not_approved", "{refused}");
+    assert_eq!(
+        ask(&a, "", "counter", json!({ "increment": 7 })).await,
+        json!({ "ok": true, "value": 7 }),
+    );
+    allow(&b).await;
+    assert_eq!(ask(&b, "", "counter", json!({})).await, json!({ "ok": true, "value": 0 }));
+    assert_eq!(
+        ask(&b, "", "counter", json!({ "increment": 12 })).await,
+        json!({ "ok": true, "value": 12 }),
+    );
+
+    a.core.shutdown().await;
+    b.core.shutdown().await;
+    drop((a, b));
+
+    let a = engine(&dir_a, "device", &rooms_a);
+    let b = engine(&dir_b, "device", &rooms_b);
+    assert_eq!(ask(&a, "", "counter", json!({})).await, json!({ "ok": true, "value": 7 }));
+    assert_eq!(ask(&b, "", "counter", json!({})).await, json!({ "ok": true, "value": 12 }));
+    a.core.shutdown().await;
+    b.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

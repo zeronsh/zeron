@@ -247,7 +247,7 @@ pub fn digest(template: &Path) -> String {
 
 /// Where what you kept is recorded: the app's own data folder.
 pub fn approvals_path() -> Option<PathBuf> {
-    zgx_script::app_data_dir(crate::APP_ID).map(|d| d.join("template-trust").join("approvals.json"))
+    zgx_script::app_data_dir(crate::app_id()).map(|d| d.join("template-trust").join("approvals.json"))
 }
 
 fn read_approvals(path: &Path) -> BTreeMap<String, String> {
@@ -301,7 +301,7 @@ pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
 // ── Safe mode ───────────────────────────────────────────────────────────────
 
 fn safe_path() -> Option<PathBuf> {
-    zgx_script::app_data_dir(crate::APP_ID).map(|d| d.join("template-trust").join("safe-mode"))
+    zgx_script::app_data_dir(crate::app_id()).map(|d| d.join("template-trust").join("safe-mode"))
 }
 
 /// Safe mode is on: Zeron's own runs, whatever `.active` says. (Read from
@@ -418,7 +418,7 @@ fn close_template_terminals() {
 // ── Launch crashes ──────────────────────────────────────────────────────────
 
 fn launches_path() -> Option<PathBuf> {
-    zgx_script::app_data_dir(crate::APP_ID).map(|d| d.join("template-trust").join("launches"))
+    zgx_script::app_data_dir(crate::app_id()).map(|d| d.join("template-trust").join("launches"))
 }
 
 /// How many launches in a row with a template laid down never settled.

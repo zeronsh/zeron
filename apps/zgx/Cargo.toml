@@ -31,6 +31,7 @@ beta = []
 layout_probe = []
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
 zgx = { git = "https://github.com/zeronsh/zgx", rev = "b9e744dddf5f05affba571f0c69aa579c34e1e3a" }
 # `mimalloc`: the program's allocator, in place of the system's. It hands
