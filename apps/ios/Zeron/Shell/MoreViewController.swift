@@ -68,10 +68,35 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             case .none: cell.accessories = []
             case let .check(on): cell.accessories = on ? [.checkmark(options: .init(tintColor: Palette.accent))] : []
             case let .dot(online):
-                let dot = UIView(frame: CGRect(x: 0, y: 0, width: 8, height: 8))
-                dot.backgroundColor = online ? Palette.success : Palette.tertiary
-                dot.layer.cornerRadius = 4
-                cell.accessories = [.customView(configuration: .init(customView: dot, placement: .trailing()))]
+                // A status you can read across the room, not a speck at the
+                // edge: the word inside a tinted capsule, dot included.
+                let tone = online ? Palette.success : Palette.tertiary
+                let pill = UIView()
+                pill.backgroundColor = tone.withAlphaComponent(0.13)
+                pill.layer.cornerRadius = 10
+                pill.layer.cornerCurve = .continuous
+                let dot = UIView()
+                dot.backgroundColor = tone
+                dot.layer.cornerRadius = 3
+                let word = UILabel()
+                word.text = online ? "Online" : "Offline"
+                word.font = Fonts.ui(.sansMedium, 11)
+                word.textColor = online ? Palette.success : Palette.secondary
+                for v in [dot, word] as [UIView] {
+                    v.translatesAutoresizingMaskIntoConstraints = false
+                    pill.addSubview(v)
+                }
+                NSLayoutConstraint.activate([
+                    dot.widthAnchor.constraint(equalToConstant: 6),
+                    dot.heightAnchor.constraint(equalToConstant: 6),
+                    dot.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 8),
+                    dot.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+                    word.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
+                    word.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -8),
+                    word.topAnchor.constraint(equalTo: pill.topAnchor, constant: 3.5),
+                    word.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -3.5),
+                ])
+                cell.accessories = [.customView(configuration: .init(customView: pill, placement: .trailing()))]
             case let .toggle(on):
                 let toggle = UISwitch()
                 toggle.isOn = on

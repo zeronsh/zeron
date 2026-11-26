@@ -64,7 +64,9 @@ final class MainTabController: UIViewController, AppRouter {
     private lazy var composeItem: UIBarButtonItem = {
         let item = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in self?.presentNewSession() })
         item.style = .prominent
-        item.tintColor = Palette.text
+        // The one primary action in the shell wears the accent; everything
+        // else on the bar stays quiet.
+        item.tintColor = Palette.accent
         item.accessibilityLabel = "New session"
         item.accessibilityIdentifier = "new-session"
         return item

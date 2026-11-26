@@ -103,10 +103,13 @@ final class CoreSessionSource: SessionSource {
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
         if let model = row?.modelLabel ?? row.flatMap({ defaultModel(for: $0)?.label }) ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
-        }
-        if let r = row?.reasoning, !r.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
+            // One chip for what you're talking to: model and its reasoning
+            // effort together — two separate chips made the row read as
+            // jargon. The tap still opens the picker; effort lives in the
+            // same chip's menu.
+            var title = model
+            if let r = row?.reasoning, !r.isEmpty { title += " · \(reasoningLabel(level: r))" }
+            chips.append(ComposerChip(id: "model", title: title, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -274,9 +277,6 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            // The picker sheet takes the tap (see `modelPicker`).
-            return nil
-        case "effort":
             return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in

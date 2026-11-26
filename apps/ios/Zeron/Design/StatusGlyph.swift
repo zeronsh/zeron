@@ -215,7 +215,7 @@ final class PRBadgeView: UIView {
         icon.tintColor = tone.withAlphaComponent(0.85)
         label.font = Fonts.ui(.monoMedium, size)
         label.textColor = tone.withAlphaComponent(0.85)
-        label.text = "\(number)"
+        label.text = "#\(number)"
         let word = switch state { case .open: "open"; case .merged: "merged"; case .closed: "closed"; case .draft: "draft" }
         accessibilityLabel = "Pull request \(number), \(word)"
         invalidateIntrinsicContentSize()
