@@ -5770,6 +5770,10 @@ async fn drive_run(
     let mut self_scheduled = crate::self_schedule::SelfScheduled::default();
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
+    // Output can confirm a steered prompt before its harness emits the
+    // matching boundary. Count those implicit confirmations so the late
+    // boundary doesn't split the segment again or retire the NEXT steer.
+    let mut implicit_steer_boundaries = 0usize;
     // A parked runtime whose agent reports background work (see
     // `TurnControl::background_live`) is not idle: reaping it killed that
     // work. The reaper re-checks a full idle window later instead.
@@ -6514,7 +6518,38 @@ async fn drive_run(
                     AgentEvent::ToolCall { id, .. }
                         if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
                 ));
-            if self_continued {
+            // A harness that consumed the accepted steer but dropped its
+            // Steered boundary leaves no other evidence of delivery. Its first
+            // substantive output after the park is that boundary's truth: keep
+            // it as the new turn rather than dropping it as tail noise. Without
+            // this the parked gate ate quick replies and the unconfirmed steer
+            // held the chat Working forever.
+            let pending_prompt_output = inner.has_pending_steers(&chat_id, &run_id)
+                && (matches!(&event, AgentEvent::UserMessage { .. })
+                    || matches!(&event, AgentEvent::TextDelta { text } if !text.is_empty())
+                    || matches!(&event, AgentEvent::ReasoningDelta { text } if !text.is_empty())
+                    || matches!(&event, AgentEvent::InputRequested { .. })
+                    || matches!(
+                        &event,
+                        AgentEvent::ToolCall { id, .. }
+                            if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+                    ));
+            if pending_prompt_output {
+                tracing::warn!(
+                    chat = %chat_id,
+                    "parked session output confirms a steer whose boundary never arrived"
+                );
+                idle_since = None;
+                wait = None;
+                inner.set_status(&chat_id, SessionStatus::Working, true);
+                let confirmed = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|h| h.run_id == run_id)
+                    .and_then(|h| lock(&h.routed_steers).pop_front());
+                if confirmed.is_some() {
+                    implicit_steer_boundaries += 1;
+                }
+            } else if self_continued {
                 tracing::info!(
                     chat = %chat_id,
                     "parked session resumed by self-continued agent output"
@@ -6639,6 +6674,9 @@ async fn drive_run(
                 }
             }
             AgentEvent::Done { .. } => {
+                // A boundary not seen by its turn's Done is not coming late:
+                // do not let it consume the next turn's real boundary.
+                implicit_steer_boundaries = 0;
                 closed_tools.clear();
                 open_waits.clear();
                 if !open_tools.is_empty() {
@@ -6771,6 +6809,10 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
+            if implicit_steer_boundaries > 0 {
+                implicit_steer_boundaries -= 1;
+                continue;
+            }
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -8097,6 +8139,220 @@ mod tests {
                 .expect("FeedHarness serves one run per test");
             Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
         }
+    }
+
+    /// FeedHarness with a live steering mailbox. It records each consumed
+    /// steer but deliberately never emits its Steered boundary.
+    struct SteerDroppingFeedHarness {
+        feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+        steers: Arc<Mutex<Vec<SteerMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for SteerDroppingFeedHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Steer-dropping feed"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[zeron_proto::ReasoningLevel::Medium]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            let mut steering = controls.steering;
+            let steers = self.steers.clone();
+            tokio::spawn(async move {
+                while let Some(steer) = steering.recv().await {
+                    steers.lock().unwrap().push(steer);
+                }
+            });
+            let mut feed = self
+                .feed
+                .lock()
+                .unwrap()
+                .take()
+                .expect("SteerDroppingFeedHarness serves one run per test");
+            Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
+        }
+    }
+
+    /// Regression for the cross-harness stuck-Sending wedge: the engine has
+    /// accepted and persisted the user's steer, the prior turn's Done parks
+    /// the runtime, and the harness consumes the prompt but never emits the
+    /// Steered boundary. The reply that follows must not be discarded as
+    /// post-turn noise; it is the evidence that the prompt was delivered.
+    #[tokio::test]
+    async fn output_after_a_dropped_steer_boundary_confirms_the_steers_turn() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let steers = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(SteerDroppingFeedHarness {
+            feed: Mutex::new(Some(rx)),
+            steers: steers.clone(),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-dropped-steer-boundary";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        for event in [started(), text("first answer"), done(DoneStatus::Completed)] {
+            feed.send(event).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.sessions.session_status(chat).map(|s| s.status) != Some(SessionStatus::Idle) {
+            assert!(tokio::time::Instant::now() < deadline, "the first turn parked");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let outcome = core
+            .sessions
+            .steer(chat, "second", Some("u2".into()))
+            .await
+            .unwrap();
+        assert_eq!(outcome, SteerOutcome::Accepted);
+        while steers.lock().unwrap().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "the harness consumed the steer");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // A quick reply lands inside the parked gate's one-second noise
+        // window, exactly where the wedge dropped it. No boundary ever comes.
+        feed.send(text("second answer")).unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let entries = core
+                .doc_host
+                .open(chat)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap();
+            let at_user = entries.iter().position(|e| e.id == "u2");
+            if let Some(at) = at_user
+                && entries[at..].iter().any(|entry| {
+                    entry.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Text { text, .. } if text.contains("second answer"))
+                    })
+                })
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the reply survived the dropped boundary");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.sessions.session_status(chat).map(|s| s.status) != Some(SessionStatus::Idle) {
+            assert!(tokio::time::Instant::now() < deadline, "the steered turn settled");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        core.sessions.shutdown().await;
+    }
+
+    /// The output-confirmed steer's boundary can still arrive late. It must
+    /// not split the answer a second time (nor retire a newer steer): output
+    /// already told the engine which prompt owns this segment.
+    #[tokio::test]
+    async fn a_late_boundary_after_output_confirmation_does_not_split_the_turn() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let steers = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(SteerDroppingFeedHarness {
+            feed: Mutex::new(Some(rx)),
+            steers: steers.clone(),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-late-steer-boundary";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        for event in [started(), text("first answer"), done(DoneStatus::Completed)] {
+            feed.send(event).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.sessions.session_status(chat).map(|s| s.status) != Some(SessionStatus::Idle) {
+            assert!(tokio::time::Instant::now() < deadline, "the first turn parked");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            core.sessions.steer(chat, "second", Some("u2".into())).await.unwrap(),
+            SteerOutcome::Accepted
+        );
+        while steers.lock().unwrap().is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "the harness consumed the steer");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        for event in [
+            text("second answer"),
+            AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: Some("late-entry".into()),
+            },
+            text(" tail"),
+            done(DoneStatus::Completed),
+        ] {
+            feed.send(event).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let entries = core
+                .doc_host
+                .open(chat)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap();
+            if entries.iter().any(|entry| {
+                entry.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Text { text, .. } if text.contains("tail"))
+                })
+            }) {
+                let at_user = entries.iter().position(|entry| entry.id == "u2").unwrap();
+                let assistants: Vec<_> = entries[at_user..]
+                    .iter()
+                    .filter(|entry| entry.role == zeron_doc::MessageRole::Assistant)
+                    .collect();
+                assert_eq!(assistants.len(), 1, "the late boundary must not split the answer");
+                let text: String = assistants[0]
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(text, "second answer tail");
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the answer settled");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        core.sessions.shutdown().await;
     }
 
     // A tagged subagent event that folds to NO parts used to leave its sink

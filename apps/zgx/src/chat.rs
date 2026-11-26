@@ -2688,6 +2688,10 @@ impl View {
                 if let Some(open) = view.open.borrow_mut().as_mut() {
                     open.waiting = item["items"].as_array().cloned().unwrap_or_default();
                 }
+                // The newest prompt's sending line reads this outbox too:
+                // repaint it when a send leaves or enters the waiting set,
+                // not only when the next transcript/status frame happens.
+                view.publish_messages();
                 view.publish_session();
             }
         });
