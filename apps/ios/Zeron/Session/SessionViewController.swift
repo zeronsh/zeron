@@ -16,6 +16,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     /// What's working alongside: subagents, side chats, terminals.
     private let strip = CompanionStrip()
     private var companionsItem: UIBarButtonItem!
+    /// The session's ⋯ menu as its own button (horizontal bars).
+    private var menuItem: UIBarButtonItem!
     private var companionTokens: [AnyObject] = []
     /// Shown beside another session (the inspector holds a side chat): it
     /// isn't the split's current session.
@@ -51,13 +53,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // The title and "project @ device" head the ⋯ menu instead of
         // crowding the bar.
         navigationItem.titleView = UIView()
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
-        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
+        menuItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
+        menuItem.accessibilityIdentifier = "session-menu"
         companionsItem = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in
             self?.showCompanions(section: nil)
         })
         companionsItem.accessibilityLabel = "Agents, side chats and terminals"
         companionsItem.accessibilityIdentifier = "session-companions"
+        // How it reads if the bar runs out of room and folds it into ⋯.
+        companionsItem.menuRepresentation = UIAction(title: "Agents, Side Chats & Terminals", image: UIImage(systemName: "square.stack.3d.up")) { [weak self] _ in
+            self?.showCompanions(section: nil)
+        }
         // The session has its own composer, so the tab bar's voice control
         // steps aside with the accessory; the call stays a tap away up here.
         let voiceBar = VoiceBarItem(app: app, host: self)
@@ -65,20 +71,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // A custom view reads as horizontal-only; on iPhone Duo it joins ⋯ in
         // the vertical bar.
         #if compiler(>=6.4)
-        if #available(iOS 27.1, *) { voiceBar.item.axisBehavior = .verticalPreferred }
-        #endif
-        let menu = navigationItem.rightBarButtonItem!
-        let companions = companionsItem!
-        let syncVoice = { [weak self, weak voiceBar] in
-            guard let self, let voiceBar else { return }
-            let items = voiceBar.visible ? [menu, companions, voiceBar.item] : [menu, companions]
-            if self.navigationItem.rightBarButtonItems?.count != items.count {
-                self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
+        if #available(iOS 27.1, *) {
+            voiceBar.item.axisBehavior = .verticalPreferred
+            // Folding or turning the Duo moves the bar between the edge and the top.
+            registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) { (self: SessionViewController, _) in
+                self.syncBarItems()
             }
         }
-        voiceToken = app.voice.observe(syncVoice)
-        hostsToken = app.observe(syncVoice)
-        syncVoice()
+        #endif
+        voiceToken = app.voice.observe { [weak self] in self?.syncBarItems() }
+        hostsToken = app.observe { [weak self] in self?.syncBarItems() }
+        syncBarItems()
 
         list.frame = view.bounds
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -823,7 +826,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         shown = c
         if c.title != old.title || c.subtitle != old.subtitle || navigationItem.title == nil {
             navigationItem.title = c.title
-            navigationItem.rightBarButtonItem?.menu = sessionMenu(title: c.title, subtitle: c.subtitle)
+            menuItem.menu = sessionMenu(title: c.title, subtitle: c.subtitle)
         }
         list.uploadProgress = c.uploadProgress
         renderEmptyNotice(c.emptyNotice)
@@ -871,39 +874,86 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    /// Whether the bar is the vertical strip at the screen's edge (iPhone Duo).
+    private var onVerticalBar: Bool {
+        #if compiler(>=6.4)
+        if #available(iOS 27.1, *) { return traitCollection.verticalBarEdge != .unspecified }
+        #endif
+        return false
+    }
+
+    /// ⋯, companions and voice (once a host can run it). On the vertical
+    /// bar a short strip (the keyboard up) folds what doesn't fit into a
+    /// system ⋯ of its own, which sat under ours: there the session menu is
+    /// that ⋯'s content instead, so there's one ⋯ and whatever folds into it
+    /// lists by name.
+    private func syncBarItems() {
+        guard let voiceBar else { return }
+        let vertical = onVerticalBar
+        var items: [UIBarButtonItem] = vertical ? [companionsItem] : [menuItem, companionsItem]
+        if voiceBar.visible { items.append(voiceBar.item) }
+        if vertical != (navigationItem.additionalOverflowItems != nil) {
+            navigationItem.additionalOverflowItems = vertical ? UIDeferredMenuElement.uncached { [weak self] done in
+                guard let self else { return done([]) }
+                done(self.sessionMenuItems(header: Self.menuHeader(title: self.shown.title, subtitle: self.shown.subtitle)))
+            } : nil
+        }
+        let current = navigationItem.rightBarButtonItems ?? []
+        guard current.count != items.count || !zip(current, items).allSatisfy({ $0 === $1 }) else { return }
+        navigationItem.setRightBarButtonItems(items, animated: view.window != nil)
+    }
+
     /// Headed by the session's title over "project @ device".
     private func sessionMenu(title: String, subtitle: String) -> UIMenu {
-        // The header wraps: title, then where it runs, on its own line (a
-        // menu's subtitle isn't drawn in the header).
-        let header = subtitle.isEmpty ? title : "\(title)\n\(subtitle)"
-        return UIMenu(title: header, children: [UIDeferredMenuElement.uncached { [weak self] done in
-            guard let self else { return done([]) }
-            let vm = self.app.session(self.chatId)
-            let pinned = vm?.pinned ?? false
-            let isSide = self.parentId != nil
-            let companions = UIMenu(options: .displayInline, children: [
-                UIAction(title: "New Side Chat", image: UIImage(systemName: "bubble.left.and.text.bubble.right")) { _ in
-                    guard let root = isSide ? self.parentId : self.chatId, let id = self.app.createSideChat(parentId: root) else { return }
-                    self.openSideChat(id)
-                },
-                UIAction(title: "Fork Into Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.fork() },
-                UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal() },
-            ])
-            done([
-                companions,
-                UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
-                UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
-                    UIPasteboard.general.string = self.engine.frame().plainText()
-                },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in
-                    self.app.archive(self.chatId)
-                    self.leave()
-                },
-                UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                    self.confirmDelete(app: self.app, self.chatId) { self.leave() }
-                },
-            ])
+        UIMenu(title: Self.menuHeader(title: title, subtitle: subtitle), children: [UIDeferredMenuElement.uncached { [weak self] done in
+            done(self?.sessionMenuItems(header: nil) ?? [])
         }])
+    }
+
+    /// The header wraps: title, then where it runs, on its own line (a
+    /// menu's subtitle isn't drawn in the header).
+    private static func menuHeader(title: String, subtitle: String) -> String {
+        subtitle.isEmpty ? title : "\(title)\n\(subtitle)"
+    }
+
+    /// The menu's actions. With a `header` (the system ⋯ on the vertical
+    /// bar, which lists them directly) it titles the first section, so it
+    /// still heads the menu.
+    private func sessionMenuItems(header: String?) -> [UIMenuElement] {
+        let pinned = app.session(chatId)?.pinned ?? false
+        let isSide = parentId != nil
+        let companions: [UIMenuElement] = [
+            UIAction(title: "New Side Chat", image: UIImage(systemName: "bubble.left.and.text.bubble.right")) { [weak self] _ in
+                guard let self, let root = isSide ? self.parentId : self.chatId, let id = self.app.createSideChat(parentId: root) else { return }
+                self.openSideChat(id)
+            },
+            UIAction(title: "Fork Into Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { [weak self] _ in self?.fork() },
+            UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { [weak self] _ in self?.openTerminal() },
+        ]
+        let session: [UIMenuElement] = [
+            UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { [weak self] _ in
+                guard let self else { return }
+                self.app.setPinned(self.chatId, !pinned)
+            },
+            UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+                guard let self else { return }
+                UIPasteboard.general.string = self.engine.frame().plainText()
+            },
+            UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { [weak self] _ in
+                guard let self else { return }
+                self.app.archive(self.chatId)
+                self.leave()
+            },
+            UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                guard let self else { return }
+                self.confirmDelete(app: self.app, self.chatId) { self.leave() }
+            },
+        ]
+        guard let header else { return [UIMenu(options: .displayInline, children: companions)] + session }
+        return [
+            UIMenu(title: header, options: .displayInline, children: companions),
+            UIMenu(options: .displayInline, children: session),
+        ]
     }
 
     private func fork() {
