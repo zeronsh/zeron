@@ -3,7 +3,6 @@ use super::*;
 use std::{
     sync::mpsc::{self, Receiver, SyncSender},
     thread::JoinHandle,
-    time::Duration,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -15,6 +14,9 @@ struct FakeCapture {
 impl Recording for FakeCapture {
     fn ended(&self) -> bool {
         self.ended.load(Ordering::Acquire)
+    }
+    fn flowing(&self) -> bool {
+        true
     }
     fn finish(self) -> Result<(Vec<f32>, u32)> {
         Ok((vec![0.25; 3200], 16_000))
@@ -44,7 +46,7 @@ impl Fixture {
     ) -> Self {
         let (events_tx, events) = mpsc::sync_channel(4);
         let stop = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Cancel::new();
         let level = Arc::new(AtomicU32::new(0));
         let job = Job {
             dir: Default::default(),
@@ -162,7 +164,7 @@ fn cancel_after_stop_during_load_discards_retained_audio() {
     f.listening();
     f.session.finish();
     f.closed.recv_timeout(WAIT).unwrap();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     assert_eq!(f.release(Ok(())).unwrap(), None);
 }
 
@@ -221,7 +223,7 @@ fn recording_limit_closes_capture_while_model_is_still_loading() {
 fn cancelled_load_keeps_start_and_model_removal_guarded_until_native_work_returns() {
     let f = Fixture::with_admission(None, Some(BusyGuard::acquire().unwrap()));
     f.listening();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     f.closed.recv_timeout(WAIT).unwrap();
     assert!(busy(), "Settings must refuse model removal during loading");
     assert!(Session::start(Default::default(), None).is_err());
@@ -240,7 +242,7 @@ fn stop_before_capture_start_never_opens_the_microphone() {
     let job = Job {
         dir: Default::default(),
         stop: Arc::new(AtomicBool::new(true)),
-        cancel: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
         level: Arc::new(AtomicU32::new(0)),
         device: None,
         events,
@@ -260,7 +262,7 @@ fn cancel_during_device_open_does_not_emit_listening_or_transcribe() {
     let (opening, started) = mpsc::sync_channel(1);
     let mut f = Fixture::new(Some((opened, opening)));
     started.recv_timeout(WAIT).unwrap();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     open.send(()).unwrap();
     f.closed.recv_timeout(WAIT).unwrap();
     assert!(f.session.poll().is_none());
@@ -295,4 +297,495 @@ fn audio_buffer_still_caps_recording_at_sixty_seconds() {
     );
     assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));
+}
+
+/// A microphone fed through the real audio callback, one 10 ms buffer at a
+/// time, from what the test sends it.
+struct Microphone {
+    audio: Arc<Audio>,
+    feed: Option<JoinHandle<()>>,
+}
+impl Microphone {
+    fn open(buffers: Receiver<Vec<f32>>) -> Self {
+        let audio = Arc::new(Audio::with_capacity(16_000 * MAX_SECONDS));
+        let a = audio.clone();
+        let feed = std::thread::spawn(move || {
+            for buffer in buffers {
+                append(&buffer, 1, 16_000, &a);
+            }
+        });
+        Self {
+            audio,
+            feed: Some(feed),
+        }
+    }
+}
+impl Recording for Microphone {
+    fn ended(&self) -> bool {
+        false
+    }
+    fn flowing(&self) -> bool {
+        self.audio.heard.load(Ordering::Acquire)
+    }
+    fn finish(mut self) -> Result<(Vec<f32>, u32)> {
+        self.feed.take().unwrap().join().unwrap();
+        Ok((
+            std::mem::take(&mut *self.audio.samples.lock().unwrap()),
+            16_000,
+        ))
+    }
+}
+
+/// Runs a dictation on a `Microphone`: its events, what reaches the model.
+fn dictate(
+    buffers: Receiver<Vec<f32>>,
+) -> (
+    Session,
+    Receiver<(Vec<f32>, u32)>,
+    JoinHandle<Result<Option<String>>>,
+) {
+    let (tx, events) = mpsc::sync_channel(4);
+    let session = Session {
+        stop: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
+        level: Arc::new(AtomicU32::new(0)),
+        events,
+    };
+    let job = Job {
+        dir: Default::default(),
+        stop: session.stop.clone(),
+        cancel: session.cancel.clone(),
+        level: session.level.clone(),
+        device: None,
+        events: tx,
+    };
+    let (heard_tx, heard) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        run_job(
+            &job,
+            || Ok(Microphone::open(buffers)),
+            || {
+                Ok(move |samples, rate| {
+                    heard_tx.send((samples, rate)).unwrap();
+                    Ok(String::new())
+                })
+            },
+        )
+    });
+    (session, heard, worker)
+}
+
+#[test]
+fn speech_from_the_first_instant_is_kept_and_listening_waits_for_it() {
+    // Gaël presses and speaks at once. The microphone opens on digital
+    // silence, then its first real buffer already carries his first word.
+    let speech: Vec<f32> = (0..16_000).map(|i| 0.3 * (i as f32 * 0.05).cos()).collect();
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (mut session, heard, worker) = dictate(buffers);
+    for _ in 0..5 {
+        mic.send(vec![0.0; 160]).unwrap();
+    }
+    // Nothing real yet: "Listening" would ask him to speak into nothing.
+    assert!(
+        session
+            .events
+            .recv_timeout(Duration::from_millis(200))
+            .is_err()
+    );
+    let sent = Instant::now();
+    mic.send(speech[..160].to_vec()).unwrap();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    // Before the silent room's 600 ms would have (some 400 ms from here):
+    // it was the sound that said so. (Wide: a loaded CI runner is slow.)
+    assert!(sent.elapsed() < WARM_UP / 2, "{:?}", sent.elapsed());
+    for buffer in speech[160..].chunks(160) {
+        mic.send(buffer.to_vec()).unwrap();
+    }
+    drop(mic);
+    session.finish();
+    let (samples, rate) = heard.recv_timeout(WAIT).unwrap();
+    assert_eq!(rate, 16_000);
+    // Every sample from the first real one on reaches the model.
+    assert_eq!(samples[800..], speech[..]);
+    assert_eq!(worker.join().unwrap().unwrap().as_deref(), Some(""));
+}
+
+#[test]
+fn a_silent_room_still_says_listening() {
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (session, _heard, worker) = dictate(buffers);
+    let opened = Instant::now();
+    mic.send(vec![0.0; 160]).unwrap();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    let waited = opened.elapsed();
+    assert!(
+        waited >= WARM_UP - Duration::from_millis(50) && waited < WAIT,
+        "{waited:?}"
+    );
+    drop(mic);
+    drop(session);
+    assert_eq!(worker.join().unwrap().unwrap(), None);
+}
+
+/// A model that says when it's loaded and when it's let go.
+struct Weights(SyncSender<&'static str>);
+impl Model for Weights {
+    fn transcribe(&mut self, _: Vec<f32>, _: u32, _: &Cancel) -> Result<String> {
+        Ok("words".into())
+    }
+}
+impl Drop for Weights {
+    fn drop(&mut self) {
+        let _ = self.0.send("released");
+    }
+}
+
+#[test]
+fn the_model_stays_ready_as_long_as_the_setting_says() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(500));
+    let (said, life) = mpsc::sync_channel(8);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &Mutex::new(None),
+                |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: mpsc::sync_channel(1).0,
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| {
+                    said.send("loaded").unwrap();
+                    Ok(Weights(said.clone()))
+                },
+            )
+        })
+    };
+    // A dictation, finished at once.
+    let dictate = || {
+        let (events, heard) = mpsc::sync_channel(4);
+        let job = Job {
+            dir: "models/a".into(),
+            stop: Arc::new(AtomicBool::new(true)),
+            cancel: Cancel::new(),
+            level: Arc::new(AtomicU32::new(0)),
+            device: None,
+            events,
+        };
+        worker.send(Command::Transcribe(job, None)).unwrap();
+        while !matches!(heard.recv_timeout(WAIT).unwrap(), Event::Final(_)) {}
+    };
+    // Kept 500 ms after the dictation, not less, then let go.
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let done = Instant::now();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    let held = done.elapsed();
+    assert!(
+        held >= Duration::from_millis(400) && held < WAIT,
+        "{held:?}"
+    );
+    // Always (while Zeron is open): still there long after.
+    keep.store(ALWAYS, Ordering::Release);
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    assert!(life.recv_timeout(Duration::from_millis(400)).is_err());
+    // Shortened later: let go on the new time, without another dictation.
+    keep.store(50, Ordering::Release);
+    worker.send(Command::Keep).unwrap();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    // Instant: let go as soon as the words are out.
+    keep.store(0, Ordering::Release);
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let done = Instant::now();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    // (Well under the 500 ms kept above; wide for a loaded CI runner.)
+    assert!(
+        done.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        done.elapsed()
+    );
+    drop(worker);
+    serving.join().unwrap();
+}
+
+#[test]
+fn a_slow_first_load_still_yields_the_words_with_no_error() {
+    // A cold model (two seconds to load) while he speaks from the start.
+    let speech: Vec<f32> = (0..8_000).map(|i| 0.3 * (i as f32 * 0.05).cos()).collect();
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (tx, events) = mpsc::sync_channel(8);
+    let mut session = Session {
+        stop: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
+        level: Arc::new(AtomicU32::new(0)),
+        events,
+    };
+    let job = Job {
+        dir: Default::default(),
+        stop: session.stop.clone(),
+        cancel: session.cancel.clone(),
+        level: session.level.clone(),
+        device: None,
+        events: tx.clone(),
+    };
+    let worker = std::thread::spawn(move || {
+        let result = run_job(
+            &job,
+            || Ok(Microphone::open(buffers)),
+            || {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(|samples: Vec<f32>, _| Ok(format!("{} samples", samples.len())))
+            },
+        );
+        if let Ok(Some(text)) = result {
+            let _ = tx.send(Event::Final(text));
+        }
+    });
+    for buffer in speech.chunks(160) {
+        mic.send(buffer.to_vec()).unwrap();
+    }
+    // Listening at once, long before the model is ready.
+    let started = Instant::now();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(mic);
+    session.finish();
+    let mut seen = Vec::new();
+    while let Ok(event) = session.events.recv_timeout(WAIT) {
+        let last = matches!(event, Event::Final(_));
+        seen.push(event);
+        if last {
+            break;
+        }
+    }
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::Failed(_))),
+        "{seen:?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(Event::Final(text)) if text == "8000 samples"),
+        "{seen:?}"
+    );
+    worker.join().unwrap();
+}
+
+/// A model whose decode runs until it's told to stop, as a long one does.
+struct Decoding(SyncSender<&'static str>);
+impl Model for Decoding {
+    fn transcribe(&mut self, _: Vec<f32>, _: u32, cancel: &Cancel) -> Result<String> {
+        let _ = self.0.send("decoding");
+        let started = Instant::now();
+        while !cancel.is_cancelled() && started.elapsed() < WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(String::new())
+    }
+}
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        let _ = self.0.send("released");
+    }
+}
+
+#[test]
+fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(ALWAYS));
+    let running = Arc::new(Mutex::new(None));
+    let (said, life) = mpsc::sync_channel(8);
+    let (closed, _closed) = mpsc::sync_channel(4);
+    // The recording ends at once (a decode follows) or never (still held).
+    let ends = Arc::new(AtomicBool::new(true));
+    let serving = {
+        let (keep, running, ends) = (keep.clone(), running.clone(), ends.clone());
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &running,
+                move |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: closed.clone(),
+                        ended: Arc::new(AtomicBool::new(ends.load(Ordering::Acquire))),
+                    })
+                },
+                |_: &Path| Ok(Decoding(said.clone())),
+            )
+        })
+    };
+    let dictate = || {
+        let (events, _) = mpsc::sync_channel(4);
+        let job = Job {
+            dir: "models/a".into(),
+            stop: Arc::new(AtomicBool::new(false)),
+            cancel: Cancel::new(),
+            level: Arc::new(AtomicU32::new(0)),
+            device: None,
+            events,
+        };
+        worker.send(Command::Transcribe(job, None)).unwrap();
+    };
+    // Mid-decode (kept "Always"): the decode stops, the model is let go,
+    // and release returns once it has, well inside its two seconds.
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
+    let quitting = Instant::now();
+    release(&worker, &running, Duration::from_secs(2));
+    assert_eq!(life.try_recv().unwrap(), "released");
+    assert!(
+        quitting.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        quitting.elapsed()
+    );
+    // Mid-recording (the key still held): the recording ends, nothing is
+    // decoded, the model goes.
+    ends.store(false, Ordering::Release);
+    dictate();
+    // (Loaded beside the recording, then the recording waits.)
+    std::thread::sleep(Duration::from_millis(200));
+    let quitting = Instant::now();
+    release(&worker, &running, Duration::from_secs(2));
+    assert_eq!(life.try_recv().unwrap(), "released");
+    assert!(life.try_recv().is_err(), "nothing decoded");
+    assert!(
+        quitting.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        quitting.elapsed()
+    );
+    drop(worker);
+    serving.join().unwrap();
+}
+
+#[test]
+fn cancelling_a_long_decode_frees_the_worker_at_once() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(ALWAYS));
+    let (said, life) = mpsc::sync_channel(8);
+    let (closed, _closed) = mpsc::sync_channel(4);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &Mutex::new(None),
+                move |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: closed.clone(),
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| Ok(Decoding(said.clone())),
+            )
+        })
+    };
+    // A dictation whose decode would run on (WAIT), as a long one does.
+    let dictate = || {
+        let (events, heard) = mpsc::sync_channel(4);
+        let session = Session {
+            // (Its recording over at once: the microphone says it ended.)
+            stop: Arc::new(AtomicBool::new(false)),
+            cancel: Cancel::new(),
+            level: Arc::new(AtomicU32::new(0)),
+            events: heard,
+        };
+        let job = Job {
+            dir: "models/a".into(),
+            stop: session.stop.clone(),
+            cancel: session.cancel.clone(),
+            level: session.level.clone(),
+            device: None,
+            events,
+        };
+        worker.send(Command::Transcribe(job, None)).unwrap();
+        session
+    };
+    let session = dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
+    // Cancelled (the bar's ×, Escape, another chat): the decode stops, and
+    // the next dictation starts on the worker at once.
+    let cancelled = Instant::now();
+    drop(session);
+    let _next = dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        cancelled.elapsed()
+    );
+    drop(_next);
+    drop(worker);
+    serving.join().unwrap();
+}
+
+#[test]
+fn a_switch_lets_the_loaded_model_go_and_removing_another_keeps_it() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(ALWAYS));
+    let (said, life) = mpsc::sync_channel(8);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &Mutex::new(None),
+                |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: mpsc::sync_channel(4).0,
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| {
+                    said.send("loaded").unwrap();
+                    Ok(Weights(said.clone()))
+                },
+            )
+        })
+    };
+    let (events, heard) = mpsc::sync_channel(4);
+    let job = Job {
+        dir: "models/a".into(),
+        stop: Arc::new(AtomicBool::new(true)),
+        cancel: Cancel::new(),
+        level: Arc::new(AtomicU32::new(0)),
+        device: None,
+        events,
+    };
+    worker.send(Command::Transcribe(job, None)).unwrap();
+    while !matches!(heard.recv_timeout(WAIT).unwrap(), Event::Final(_)) {}
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let unload = |which: Which| {
+        let (done, unloaded) = mpsc::sync_channel(1);
+        worker.send(Command::Unload(done, which)).unwrap();
+        unloaded.recv_timeout(WAIT).unwrap();
+    };
+    // Another model removed, or "a" chosen again: "a" stays (kept Always).
+    unload(Which::Only("models/b".into()));
+    unload(Which::Except("models/a".into()));
+    assert!(life.try_recv().is_err());
+    // "b" chosen: "a" goes at once.
+    unload(Which::Except("models/b".into()));
+    assert_eq!(life.try_recv().unwrap(), "released");
+    drop(worker);
+    serving.join().unwrap();
 }
