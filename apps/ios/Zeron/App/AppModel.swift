@@ -102,6 +102,9 @@ final class AppModel {
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
+    /// Told on every workspace rebuild, changed rows or not (a chat a
+    /// transcript names may not be in any list).
+    private var workspaceObservers: [UUID: () -> Void] = [:]
     private lazy var bridge = ListenerBridge(app: self)
     private var refreshScheduled = false
     private var clock: Timer?
@@ -434,6 +437,13 @@ final class AppModel {
         return Token { [weak self] in self?.observers[id] = nil }
     }
 
+    /// Every workspace rebuild (`WorkspaceChanged`), whatever changed.
+    func observeWorkspace(_ handler: @escaping () -> Void) -> AnyObject {
+        let id = UUID()
+        workspaceObservers[id] = handler
+        return Token { [weak self] in self?.workspaceObservers[id] = nil }
+    }
+
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
         let id = UUID()
         sessionObservers[chatId, default: [:]][id] = handler
@@ -523,6 +533,7 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+        workspaceObservers.values.forEach { $0() }
         sweepIdle(pinsReady: ws.pinsReady)
     }
 
