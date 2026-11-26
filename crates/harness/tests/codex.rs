@@ -2115,6 +2115,57 @@ async fn a_refused_command_between_turns_ends_its_turn_and_keeps_the_runtime() {
     }));
 }
 
+/// `/mcp` and a prompt sent while a turn runs both wait for its end. The
+/// refused command then ends its own turn, and the prompt queued behind it
+/// still runs instead of waiting for a turn end that never comes.
+#[tokio::test]
+async fn a_prompt_queued_behind_a_refused_command_still_runs() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:refused-queue"), controls)
+        .await
+        .unwrap();
+    let send = |prompt: &str| SteerMessage {
+        prompt: prompt.into(),
+        message_id: None,
+        attachments: Vec::new(),
+        config: None,
+    };
+    let mut steer = Some(steer);
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the run never stalls")
+    {
+        let event = event.unwrap();
+        if matches!(&event, AgentEvent::TextDelta { text } if text == "working") {
+            let steer = steer.take().unwrap();
+            steer.send(send("/mcp")).await.unwrap();
+            steer.send(send("queued behind the refusal")).await.unwrap();
+        }
+        events.push(event);
+    }
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { status, error, .. } => Some((*status, error.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 3, "{events:?}");
+    assert_eq!(ends[0].0, DoneStatus::Completed);
+    assert_eq!(ends[1].0, DoneStatus::Errored);
+    let reason = ends[1].1.as_deref().unwrap_or_default();
+    assert!(
+        reason.starts_with("/mcp only works in Codex's own terminal app"),
+        "{reason}"
+    );
+    assert_eq!(ends[2].0, DoneStatus::Completed, "{events:?}");
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "queued ran".into()
+    }));
+}
+
 #[tokio::test]
 async fn native_command_during_a_turn_waits_for_its_boundary() {
     let (controls, steer, _token) = controls("Yes");

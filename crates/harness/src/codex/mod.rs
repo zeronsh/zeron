@@ -2195,7 +2195,11 @@ async fn run_session(session: Session) {
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
                         current_native = false;
-                        if let Some((text, config)) = queued_steers.pop_front() {
+                        // A refused prompt (a command Zeron does not run) ends
+                        // its own turn at once, with no Codex turn to end
+                        // later: the message queued behind it goes now, or it
+                        // would wait for a turn end that never comes.
+                        while let Some((text, config)) = queued_steers.pop_front() {
                             if let Some(next) = config {
                                 live = *next;
                             }
@@ -2212,7 +2216,11 @@ async fn run_session(session: Session) {
                             {
                                 break 'main;
                             }
-                        } else if !steering_open {
+                            if !done_current {
+                                break;
+                            }
+                        }
+                        if done_current && !steering_open {
                             break 'main;
                         }
                     }
