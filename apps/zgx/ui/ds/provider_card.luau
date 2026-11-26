@@ -186,8 +186,8 @@ end
 -- id for the provider: its mark (one set, one ink) and the shape its keys start
 -- with (the field's placeholder).
 local KEY_PROVIDERS: { [string]: { mark: string, shape: string } } = {
-	opencode = { mark = "opencode", shape = "oc-…" },
-	["opencode-go"] = { mark = "opencode", shape = "oc-…" },
+	opencode = { mark = "opencode", shape = "oc_…" },
+	["opencode-go"] = { mark = "opencode", shape = "oc_…" },
 	anthropic = { mark = "provider-anthropic", shape = "sk-ant-…" },
 	openai = { mark = "provider-openai", shape = "sk-…" },
 	["openai-api"] = { mark = "provider-openai", shape = "sk-…" },
@@ -500,7 +500,8 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
-			-- (An API key has no plan, so no windows: no meters for it.)
+			-- (An API key has no plan, so no windows: no meters for it. OpenCode
+			-- Go's key is a subscription login, so its meters do show.)
 			ui.show(function(): boolean
 				local a = row:get()
 				return a.key ~= true or a.provider == "opencode-go"

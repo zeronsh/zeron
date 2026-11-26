@@ -141,7 +141,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         codex_reset_credits: format!("{base}/backend-api/wham/rate-limit-reset-credits"),
         codex_consume_reset: format!("{base}/backend-api/wham/rate-limit-reset-credits/consume"),
         grok_usage: format!("{base}/v1/billing?format=credits"),
-        opencode_go_usage: format!("{base}/console/api/go/status"),
+        opencode_go_status: format!("{base}/console/api/go/status"),
         github_api: base.to_string(),
         github_login: base.to_string(),
         copilot_api: Some(base.to_string()),
