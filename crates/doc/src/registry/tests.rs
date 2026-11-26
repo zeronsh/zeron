@@ -3388,6 +3388,51 @@ fn a_split_op_keeps_its_pieces_in_one_batch() {
     assert!(doc.pending.iter().all(|b| b.ops.len() <= 400));
 }
 
+fn assert_batches_sendable(doc: &RegistryDoc) {
+    for b in &doc.pending {
+        let frame = serde_json::to_vec(&json!({ "t": "push", "batch": b.batch, "ops": b.ops }))
+            .unwrap()
+            .len();
+        assert!(b.ops.len() <= MAX_OPS_PER_BATCH, "{} ops", b.ops.len());
+        assert!(frame < 1_000_000, "{frame} bytes");
+    }
+}
+
+#[test]
+fn a_write_heavier_than_a_frame_is_split_into_batches_that_send() {
+    let ops: Vec<RowOp> = (0..400)
+        .map(|i| raw_op_of_len(&format!("c-{i}"), 12_000))
+        .collect();
+    let ids: Vec<String> = ops.iter().map(|o| o.id.clone()).collect();
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.enqueue_ops(ops);
+    assert!(doc.pending.len() > 1);
+    assert_batches_sendable(&doc);
+    let queued: Vec<String> = doc.pending_ops().map(|o| o.id.clone()).collect();
+    assert_eq!(queued, ids);
+}
+
+#[test]
+fn load_splits_a_queued_batch_too_big_to_send() {
+    let ops: Vec<RowOp> = (0..400)
+        .map(|i| raw_op_of_len(&format!("c-{i}"), 12_000))
+        .collect();
+    let ids: Vec<String> = ops.iter().map(|o| o.id.clone()).collect();
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.pending.push(PendingBatch {
+        batch: "b-old".into(),
+        ops,
+        in_flight: false,
+    });
+    let bytes = doc.to_bytes().unwrap();
+    let (loaded, _) = RegistryDoc::from_saved(&bytes, &[], &[], "dev-a").unwrap();
+    assert!(loaded.pending.len() > 1);
+    assert!(loaded.pending.iter().all(|b| b.batch != "b-old"));
+    assert_batches_sendable(&loaded);
+    let queued: Vec<String> = loaded.pending_ops().map(|o| o.id.clone()).collect();
+    assert_eq!(queued, ids);
+}
+
 #[test]
 fn a_short_waiting_label_syncs_as_is() {
     let mut doc = RegistryDoc::new("dev-a");

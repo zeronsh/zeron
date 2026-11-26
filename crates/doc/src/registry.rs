@@ -373,6 +373,9 @@ pub fn coalesce_ops(a: &RowOp, b: &RowOp) -> Option<RowOp> {
 /// batch) any op whose `JSON.stringify` is longer.
 pub const MAX_OP_BYTES: usize = 16 * 1024;
 
+/// Ops per pushed batch, under the room's cap of 500.
+const MAX_OPS_PER_BATCH: usize = 400;
+
 /// Whether `op` passes the room's size check, measured as the room does
 /// (`JSON.stringify` length in UTF-16 units). Numbers JS might print longer
 /// count at their longest, so this never says "fits" for an op the room
@@ -816,6 +819,7 @@ impl RegistryDoc {
     /// batches → one op per touched row). The host persists the result.
     fn coalesce_loaded(&mut self) {
         self.drop_never_accepted();
+        self.split_oversized_batches();
         let before = self.pending_ops_len();
         if self.coalesce_unsent() > 0 {
             tracing::info!(
@@ -857,6 +861,39 @@ impl RegistryDoc {
         }
         self.pending.retain(|b| !b.ops.is_empty());
         self.touch_ops(&dropped);
+        self.generation += 1;
+    }
+
+    /// Split queued batches too big to send (older builds capped only the op
+    /// count) into ones that fit, in order, each under a fresh id.
+    fn split_oversized_batches(&mut self) {
+        if !self
+            .pending
+            .iter()
+            .any(|b| !b.in_flight && op_budget::batch_too_big(&b.ops, MAX_OPS_PER_BATCH))
+        {
+            return;
+        }
+        for b in std::mem::take(&mut self.pending) {
+            if b.in_flight || !op_budget::batch_too_big(&b.ops, MAX_OPS_PER_BATCH) {
+                self.pending.push(b);
+                continue;
+            }
+            let chunks = op_budget::chunk_groups(op_budget::split_pieces(b.ops), MAX_OPS_PER_BATCH);
+            tracing::warn!(
+                batch = %b.batch,
+                into = chunks.len(),
+                "registry: splitting a queued batch too big to send"
+            );
+            for ops in chunks {
+                let batch = format!("b-{}", self.next_hlc());
+                self.pending.push(PendingBatch {
+                    batch,
+                    ops,
+                    in_flight: false,
+                });
+            }
+        }
         self.generation += 1;
     }
 
@@ -1063,18 +1100,8 @@ impl RegistryDoc {
         // ≥250-chat space minted exactly such a batch. Chunk here so no
         // writer can ever produce one; chunks apply in order, each
         // atomically (only cross-chunk atomicity is given up).
-        const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
-        let mut chunks: Vec<Vec<RowOp>> = vec![Vec::new()];
-        for group in groups {
-            let last = chunks.last_mut().expect("never empty");
-            if !last.is_empty() && last.len() + group.len() > MAX_OPS_PER_BATCH {
-                chunks.push(group);
-            } else {
-                last.extend(group);
-            }
-        }
-        for ops in chunks.into_iter().filter(|c| !c.is_empty()) {
+        for ops in op_budget::chunk_groups(groups, MAX_OPS_PER_BATCH) {
             // Batch ids only need device-lifetime uniqueness; the HLC of a
             // fresh tick provides exactly that without a rng dependency.
             let batch = format!("b-{}", self.next_hlc());

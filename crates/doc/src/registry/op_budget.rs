@@ -81,6 +81,70 @@ pub(super) fn fit_op(op: RowOp) -> Vec<RowOp> {
     pieces
 }
 
+/// The most a batch's ops may weigh, in UTF-8 bytes: under the room's
+/// socket frame cap (1,000,000 UTF-16 units, and the runtime's 1 MiB) and
+/// its HTTPS body cap (2 MB), with room for the push envelope.
+pub(super) const MAX_BATCH_BYTES: usize = 900_000;
+
+/// `groups` laid into batches of at most `max_ops` ops and
+/// [`MAX_BATCH_BYTES`], in order, never splitting a group. An op that fits
+/// the room is at most 3 UTF-8 bytes per unit it measures, so a few ops
+/// (every local write) are not measured.
+pub(super) fn chunk_groups(
+    groups: impl IntoIterator<Item = Vec<RowOp>>,
+    max_ops: usize,
+) -> Vec<Vec<RowOp>> {
+    let groups: Vec<Vec<RowOp>> = groups.into_iter().collect();
+    let ops: usize = groups.iter().map(Vec::len).sum();
+    if ops <= max_ops && ops * (3 * MAX_OP_BYTES + 1) <= MAX_BATCH_BYTES {
+        let all: Vec<RowOp> = groups.into_iter().flatten().collect();
+        return if all.is_empty() {
+            Vec::new()
+        } else {
+            vec![all]
+        };
+    }
+    let mut chunks: Vec<Vec<RowOp>> = Vec::new();
+    let mut bytes = 0;
+    for group in groups {
+        let group_bytes: usize = group.iter().map(|op| serialized_len(op) + 1).sum();
+        match chunks.last_mut() {
+            Some(last)
+                if last.len() + group.len() <= max_ops
+                    && bytes + group_bytes <= MAX_BATCH_BYTES =>
+            {
+                last.extend(group);
+                bytes += group_bytes;
+            }
+            _ => {
+                chunks.push(group);
+                bytes = group_bytes;
+            }
+        }
+    }
+    chunks.retain(|c| !c.is_empty());
+    chunks
+}
+
+/// Whether `ops` is over a batch's op count or [`MAX_BATCH_BYTES`].
+pub(super) fn batch_too_big(ops: &[RowOp], max_ops: usize) -> bool {
+    ops.len() > max_ops
+        || ops.iter().map(|op| serialized_len(op) + 1).sum::<usize>() > MAX_BATCH_BYTES
+}
+
+/// `ops` grouped so the pieces of one split op (consecutive ops on the
+/// same row with the same clock) stay together.
+pub(super) fn split_pieces(ops: Vec<RowOp>) -> Vec<Vec<RowOp>> {
+    let mut groups: Vec<Vec<RowOp>> = Vec::new();
+    for op in ops {
+        match groups.last_mut() {
+            Some(g) if g[0].kind == op.kind && g[0].id == op.id && g[0].hlc == op.hlc => g.push(op),
+            _ => groups.push(vec![op]),
+        }
+    }
+    groups
+}
+
 /// An empty op of `kind` on `op`'s row with `op`'s clock.
 fn piece(op: &RowOp, kind: OpKind) -> RowOp {
     RowOp {
