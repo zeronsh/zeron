@@ -25,6 +25,7 @@ local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
+local usage_open = require("@app/screens/settings/usage_open")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -523,7 +524,7 @@ local function root(): { Item }
 		run = function()
 			route.settings("providers")
 			ui.after(0, function()
-				ui.state("settings_usage_open", false):set(true)
+				usage_open:set(true)
 			end)
 		end,
 	})

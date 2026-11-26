@@ -180,7 +180,7 @@ local nav = { go = go, device = device_name }
 -- The all-providers usage sheet over this page. It follows the same device
 -- choice, so Cloud and another computer are read in place rather than only
 -- this Mac.
-local usage_open = ui.state("settings_usage_open", false)
+local usage_open = require("@app/screens/settings/usage_open")
 
 local function by_id(a: agents.Agent): string
 	return a.id
