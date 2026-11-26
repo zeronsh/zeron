@@ -79,7 +79,7 @@ pub fn initialize() -> Result<(), Box<dyn Error>> {
         std::env::remove_var("ZERON_IPC_TOKEN_FILE");
     }
     let data_dir = shell_quote(data_dir);
-    eprintln!("Isolated Zeron instance. Copy these values into a POSIX shell:\nexport ZERON_ISOLATED=1\nexport ZERON_INSTANCE_ID={}\nexport ZERON_DATA_DIR={}\nexport ZERON_IPC_PORT={}\nexport ZERON_ZGX_ENGINE_DATA={}\nexport ZERON_ZGX_ENGINE_PORT={}", settings.id, data_dir, settings.port, data_dir, settings.port);
+    eprintln!("zeron-zgx: isolated Zeron instance. Copy these values into a POSIX shell:\nexport ZERON_ISOLATED=1\nexport ZERON_INSTANCE_ID={}\nexport ZERON_DATA_DIR={}\nexport ZERON_IPC_PORT={}\nexport ZERON_ZGX_ENGINE_DATA={}\nexport ZERON_ZGX_ENGINE_PORT={}", settings.id, data_dir, settings.port, data_dir, settings.port);
     Ok(())
 }
 
