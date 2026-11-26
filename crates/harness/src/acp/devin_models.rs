@@ -421,6 +421,35 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Group>), HarnessError>
                 }
             }
         }
+        // A bare variant beside effort-bearing ones of its qualifier
+        // ("SWE-2.1" beside "SWE-2.1 Medium"/"SWE-2.1 Low", …) is the
+        // family's default-effort alias of the SAME model, not a model of
+        // its own — and the ACP session never advertises it, so a chat
+        // saved on it wedged in "did not advertise requested model" every
+        // run (CLI 3000.15 repro). Fold it into the qualifier's
+        // effort-bearing group whatever the catalog order: the group then
+        // resolves to whichever member the session does advertise. A
+        // bare-only group (no effort-bearing sibling: a one-variant family,
+        // Claude Opus 4.6's Thinking pair) stays a model of its own.
+        let mut i = 0;
+        while i < family_groups.len() {
+            let bare = family_groups[i]
+                .3
+                .iter()
+                .all(|m| m.effort.is_none() && !m.fast);
+            let target = bare.then(|| {
+                family_groups.iter().position(|g| {
+                    g.0 == family_groups[i].0 && g.3.iter().any(|m| m.effort.is_some() || m.fast)
+                })
+            });
+            match target.flatten() {
+                Some(t) => {
+                    let (_, _, _, members) = family_groups.remove(i);
+                    family_groups[if t > i { t - 1 } else { t }].3.extend(members);
+                }
+                None => i += 1,
+            }
+        }
         for (qualifier, label, description, members) in family_groups {
             let mut reasoning_levels: Vec<ReasoningLevel> =
                 members.iter().filter_map(|m| m.effort).collect();
@@ -549,6 +578,46 @@ mod tests {
         {"family_uid":"adaptive","family_label":"Adaptive","variants":[
             {"model_uid":"adaptive","label":"Adaptive"}]}
     ]}"#;
+
+    #[test]
+    fn bare_default_effort_alias_folds_into_its_effort_group() {
+        // Shapes taken from `devin models list --format json` (CLI 3000.15):
+        // SWE-2.1 lists a bare variant amid its effort variants; the order
+        // is exercised both ways because grouping must not depend on it.
+        let catalog = r#"{"families":[
+            {"family_uid":"swe-2.1","family_label":"SWE-2.1","variants":[
+                {"model_uid":"swe-2-1-medium","label":"SWE-2.1 Medium"},
+                {"model_uid":"swe-2-1","label":"SWE-2.1"},
+                {"model_uid":"swe-2-1-low","label":"SWE-2.1 Low"}]},
+            {"family_uid":"other","family_label":"Other","variants":[
+                {"model_uid":"other","label":"Other"},
+                {"model_uid":"other-medium","label":"Other Medium"},
+                {"model_uid":"other-high","label":"Other High"}]}
+        ]}"#;
+        let (models, groups) = parse_catalog(catalog.as_bytes()).unwrap();
+        // One picker model per family, not a bare duplicate beside each.
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["swe-2-1-medium", "other-medium"]
+        );
+        for group in &groups {
+            assert!(
+                group.members.iter().any(|m| m.effort.is_some()),
+                "no bare-only group survives beside an effort-bearing one"
+            );
+        }
+        assert!(
+            groups[0]
+                .members
+                .iter()
+                .any(|m| m.id == "swe-2-1" && m.effort.is_none()),
+            "the bare alias is a member, so a chat saved on it resolves"
+        );
+        assert!(
+            groups[1].members.iter().any(|m| m.id == "other"),
+            "bare first in catalog order folds just the same"
+        );
+    }
 
     #[test]
     fn groups_effort_and_speed_variants_into_one_picker_model() {
