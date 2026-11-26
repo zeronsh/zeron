@@ -108,7 +108,7 @@ pub(crate) fn attach_advertised_commands(
 fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
     match harness {
         HarnessId::ClaudeCode => &[".agents/skills", ".claude/commands", ".claude/skills"],
-        HarnessId::Cursor => &[
+        HarnessId::Cursor | HarnessId::CursorCloud => &[
             ".claude/skills",
             ".codex/skills",
             ".agents/skills",

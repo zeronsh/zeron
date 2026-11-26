@@ -35,6 +35,7 @@ pub const CLOUD_HARNESSES: &[&str] = &[
     "codex",
     "claude-code",
     "cursor",
+    "cursor-cloud",
     "devin",
     "grok",
     "hermes",

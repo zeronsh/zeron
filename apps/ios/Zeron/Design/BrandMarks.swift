@@ -66,7 +66,7 @@ enum BrandMark {
     static func forHarness(_ harness: String) -> BrandMark {
         switch harness {
         case "codex": return .openai
-        case "cursor": return .cursor
+        case "cursor", "cursor-cloud": return .cursor
         case "devin": return .devin
         case "grok": return .grok
         case "hermes": return .hermes

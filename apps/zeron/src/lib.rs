@@ -61,6 +61,7 @@ pub fn harness_from_env() -> zeron_engine::HarnessId {
         Ok("mock") => zeron_engine::HarnessId::Mock,
         Ok("codex") => zeron_engine::HarnessId::Codex,
         Ok("cursor") => zeron_engine::HarnessId::Cursor,
+        Ok("cursor-cloud") => zeron_engine::HarnessId::CursorCloud,
         Ok("devin") => zeron_engine::HarnessId::Devin,
         Ok("grok") => zeron_engine::HarnessId::Grok,
         Ok("hermes") => zeron_engine::HarnessId::Hermes,

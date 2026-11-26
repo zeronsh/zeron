@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod catalog;
+pub mod cloud;
 mod state;
 
 use async_trait::async_trait;

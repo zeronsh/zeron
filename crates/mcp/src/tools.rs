@@ -38,6 +38,7 @@ const CLOUD_HARNESSES: &[HarnessId] = &[
     HarnessId::ClaudeCode,
     HarnessId::Codex,
     HarnessId::Cursor,
+    HarnessId::CursorCloud,
     HarnessId::Devin,
     HarnessId::Grok,
     HarnessId::Hermes,

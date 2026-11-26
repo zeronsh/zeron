@@ -1788,7 +1788,11 @@ impl CredentialBroker {
         if !self.inner.config.install_missing
             || matches!(
                 harness,
-                HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Cursor | HarnessId::Mock
+                HarnessId::ClaudeCode
+                | HarnessId::Codex
+                | HarnessId::Cursor
+                | HarnessId::CursorCloud
+                | HarnessId::Mock
             )
         {
             return Ok(());

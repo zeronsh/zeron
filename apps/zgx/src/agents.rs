@@ -544,7 +544,7 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
     Some(match id {
         "claude-code" => "claude",
         "codex" => "openai",
-        "cursor" => "cursor",
+        "cursor" | "cursor-cloud" => "cursor",
         "grok" => "grok",
         "devin" => "devin",
         "opencode" => "opencode",

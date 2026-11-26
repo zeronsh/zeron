@@ -59,7 +59,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     match id {
         // A registry agent installs from its registry entry
         // (`crate::acp_registry`), never through a vendor script.
-        Mock | Registry(_) => vec![],
+        Mock | CursorCloud | Registry(_) => vec![],
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
@@ -164,6 +164,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
         Codex => "npm install -g @openai/codex",
         Cursor => "curl https://cursor.com/install -fsS | bash",
+        CursorCloud => return None,
         Opencode => "npm install -g @opencode/cli",
         Pi => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
         Grok => "npm install -g @xai-official/grok",
@@ -181,6 +182,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         ClaudeCode => ("claude", "~/.local/bin"),
         Codex => ("codex", "~/.local/bin or the npm global bin"),
         Cursor => ("cursor-agent", "~/.local/bin or ~/.cursor/bin"),
+        CursorCloud => ("cursor-cloud-api", "Cursor dashboard"),
         Opencode => ("opencode", "~/.opencode/bin or the npm global bin"),
         Pi => ("pi", "the npm global bin"),
         Grok => ("grok", "~/.grok/bin or the npm global bin"),
@@ -200,6 +202,7 @@ pub fn installed(id: HarnessId) -> bool {
         ClaudeCode => crate::ClaudeHarness::new().installed(),
         Codex => crate::CodexHarness::new().installed(),
         Cursor => crate::CursorHarness::new().installed(),
+        CursorCloud => crate::CursorCloudHarness::new().installed(),
         Opencode => crate::OpencodeHarness::new().installed(),
         Pi => crate::PiHarness::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),

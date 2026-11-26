@@ -485,6 +485,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update"]),
             manual_command: "cursor-agent update",
         },
+        HarnessId::CursorCloud => ProviderSpec {
+            version_args: &[],
+            latest: LatestSource::Manual,
+            update_args: None,
+            manual_command: "Cursor Cloud is managed by Cursor",
+        },
         HarnessId::Grok => ProviderSpec {
             version_args: &["version"],
             latest: LatestSource::Command(&["update", "--check"]),

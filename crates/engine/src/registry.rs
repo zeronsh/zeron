@@ -180,6 +180,7 @@ pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[
     HarnessId::Codex,
     HarnessId::ClaudeCode,
     HarnessId::Cursor,
+    HarnessId::CursorCloud,
     HarnessId::Devin,
     HarnessId::Grok,
     HarnessId::Hermes,
@@ -1194,6 +1195,23 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            icon: None,
+            id: HarnessId::CursorCloud,
+            name: "Cursor Cloud".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: true,
+        },
+        Box::new(|| zeron_harness::CursorCloudHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::CursorCloudHarness::new()) as Arc<dyn Harness>)),
+    );
     // Devin over ACP (`devin acp`), same lazy pattern: the static descriptor
     // mirrors AcpHarness::devin() exactly. No steering extension (turn
     // boundaries) and no effort ladder — Devin bakes effort into the
@@ -1464,6 +1482,7 @@ mod tests {
                 HarnessId::ClaudeCode,
                 HarnessId::Codex,
                 HarnessId::Cursor,
+                HarnessId::CursorCloud,
                 HarnessId::Devin,
                 HarnessId::Grok,
                 HarnessId::Hermes,
@@ -1504,6 +1523,11 @@ mod tests {
         assert_eq!(cursor.display_name(), "Cursor");
         assert_eq!(cursor.steering_mode(), SteeringMode::StepBoundary);
         assert!(cursor.reasoning_levels().is_empty());
+        let cursor_cloud = registry.resolve(HarnessId::CursorCloud).unwrap();
+        assert_eq!(cursor_cloud.id(), HarnessId::CursorCloud);
+        assert_eq!(cursor_cloud.display_name(), "Cursor Cloud");
+        assert_eq!(cursor_cloud.steering_mode(), SteeringMode::StepBoundary);
+        assert!(cursor_cloud.reasoning_levels().is_empty());
         let devin = registry.resolve(HarnessId::Devin).unwrap();
         assert_eq!(devin.id(), HarnessId::Devin);
         assert_eq!(devin.display_name(), "Devin");

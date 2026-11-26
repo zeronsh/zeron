@@ -72,6 +72,8 @@ pub enum HarnessId {
     ClaudeCode,
     Codex,
     Cursor,
+    /// Cursor's hosted Cloud Agents API: execution happens on Cursor-managed VMs.
+    CursorCloud,
     /// Cognition's Devin agent, driven over ACP (`devin acp`).
     Devin,
     /// xAI's Grok Build agent, driven over ACP (`grok agent stdio`).
@@ -116,6 +118,7 @@ impl<'de> Deserialize<'de> for HarnessId {
                     "claude-code",
                     "codex",
                     "cursor",
+                    "cursor-cloud",
                     "devin",
                     "grok",
                     "hermes",
@@ -135,10 +138,11 @@ impl<'de> Deserialize<'de> for HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 12] = [
+    pub const ALL: [HarnessId; 13] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
+        HarnessId::CursorCloud,
         HarnessId::Devin,
         HarnessId::Grok,
         HarnessId::Hermes,
@@ -156,6 +160,7 @@ impl HarnessId {
             HarnessId::ClaudeCode => "claude-code",
             HarnessId::Codex => "codex",
             HarnessId::Cursor => "cursor",
+            HarnessId::CursorCloud => "cursor-cloud",
             HarnessId::Devin => "devin",
             HarnessId::Grok => "grok",
             HarnessId::Hermes => "hermes",

@@ -406,7 +406,7 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
     match harness {
         HarnessId::ClaudeCode => CLAUDE_CODE,
         HarnessId::Codex => CODEX,
-        HarnessId::Cursor => CURSOR,
+        HarnessId::Cursor | HarnessId::CursorCloud => CURSOR,
         HarnessId::Devin => DEVIN,
         HarnessId::Grok => GROK,
         HarnessId::Muse => MUSE,
@@ -458,7 +458,7 @@ pub fn cloud_login_vault(
         (HarnessId::Pi | HarnessId::Opencode, Some("github-copilot")) => V::Copilot,
         (HarnessId::Hermes, Some("nous")) => V::Nous,
         (HarnessId::Hermes, Some("xai-oauth")) => V::XaiOauth,
-        (HarnessId::Cursor, _) => V::CursorKey,
+        (HarnessId::Cursor | HarnessId::CursorCloud, _) => V::CursorKey,
         (HarnessId::Devin, _) => V::Devin,
         (HarnessId::Grok, _) => V::Grok,
         (HarnessId::Antigravity, _) => V::Antigravity,

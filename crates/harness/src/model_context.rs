@@ -23,7 +23,9 @@ pub(crate) fn context(
             let root = root("CLAUDE_CONFIG_DIR", home.join(".claude"));
             vec![root.join("settings.json"), root.join(".credentials.json")]
         }
-        HarnessId::Cursor => vec![home.join(".cursor/sdk/auth.json")],
+        HarnessId::Cursor | HarnessId::CursorCloud => {
+            vec![home.join(".cursor/sdk/auth.json")]
+        }
         HarnessId::Fx => vec![
             home.join(".fx/auth.json"),
             home.join(".fx/settings.json"),
@@ -134,7 +136,7 @@ pub(crate) fn context(
         HarnessId::Pi => &["PI_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
-        HarnessId::Cursor => &["CURSOR_"],
+        HarnessId::Cursor | HarnessId::CursorCloud => &["CURSOR_"],
         HarnessId::Fx => &["FX_", "AI_GATEWAY_", "OPENAI_", "ANTHROPIC_"],
         _ => &[],
     };

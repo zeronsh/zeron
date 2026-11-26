@@ -23,7 +23,7 @@ enum class BrandMark(val width: Float, val height: Float, val evenOdd: Boolean, 
     companion object {
         fun forHarness(harness: String?): BrandMark = when (harness) {
             "codex" -> OPENAI
-            "cursor" -> CURSOR
+            "cursor", "cursor-cloud" -> CURSOR
             "devin" -> DEVIN
             "grok" -> GROK
             "hermes" -> HERMES

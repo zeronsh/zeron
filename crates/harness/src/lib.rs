@@ -877,6 +877,7 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
+pub use cursor::cloud::CursorCloudHarness;
 pub use opencode::OpencodeHarness;
 pub use muse::MuseHarness;
 pub use pi::PiHarness;
