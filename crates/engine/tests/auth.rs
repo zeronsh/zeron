@@ -613,7 +613,37 @@ async fn a_session_another_edge_issued_is_left_as_it_is() {
         );
         let kept = std::fs::read_to_string(&session_file).expect("session kept");
         assert_eq!(kept, seeded, "{what}");
+
+        // Signing out here signs this engine out, not the edge that issued it.
+        assert!(auth.others_session_edge().is_some(), "{what}");
+        auth.sign_out();
+        let kept = std::fs::read_to_string(&session_file).expect("session kept on sign-out");
+        assert_eq!(kept, seeded, "{what}: sign-out removed another edge's session");
     }
+}
+
+/// An edge URL or client id with a stray space or newline (as an environment
+/// variable may carry) is the same edge and client: the session says so
+/// without it, and an engine configured either way uses it.
+#[tokio::test]
+async fn a_stray_space_in_the_edge_or_client_sets_no_session_apart() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = workos_config(&format!("{}\n", edge.url()), dir.path());
+    config.workos_client_id = Some(" client_test\n".into());
+    let auth = Auth::new(config);
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state");
+    auth.complete_sign_in(&format!("{state}.code1"))
+        .await
+        .expect("sign in");
+    let kept = kept_session(dir.path());
+    assert_eq!(kept["edgeUrl"], edge.url());
+    assert_eq!(kept["workosClientId"], "client_test");
+
+    let again = Auth::new(workos_config(&edge.url(), dir.path()));
+    assert!(again.loaded_workos_session(), "its own edge uses it");
+    assert_eq!(again.others_session_edge(), None);
 }
 
 /// A sign-in's session says which edge and client issued it, and an engine

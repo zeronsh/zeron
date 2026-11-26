@@ -258,19 +258,27 @@ impl StoredSession {
     /// signed out, and the file stays for the edge it works with. One that
     /// doesn't say is taken as this engine's, as before.
     fn usable_by(&self, edge_url: &str, client: &str) -> bool {
-        let edge = self.edge_url.as_deref().unwrap_or(edge_url);
-        let issuer = self.workos_client_id.as_deref().unwrap_or(client);
-        if edge.trim_end_matches('/') == edge_url.trim_end_matches('/') && issuer == client {
+        if self.issued_by(edge_url, client) {
             return true;
         }
         tracing::warn!(
-            session_edge = %edge,
-            session_client = %issuer,
+            session_edge = self.edge_url.as_deref().unwrap_or(edge_url),
+            session_client = self.workos_client_id.as_deref().unwrap_or(client),
             edge = %edge_url,
-            "auth: the saved session is another edge's; starting signed out and leaving it \
-             as it is (an engine of that edge uses it)"
+            client = %client,
+            "auth: the saved session is another edge's or client's; starting signed out and \
+             leaving it as it is (an engine of that edge and client uses it)"
         );
         false
+    }
+
+    /// `usable_by`, without a word: whether `edge_url` and `client` issued it
+    /// (or it doesn't say).
+    fn issued_by(&self, edge_url: &str, client: &str) -> bool {
+        let edge = self.edge_url.as_deref().unwrap_or(edge_url).trim();
+        let issuer = self.workos_client_id.as_deref().unwrap_or(client).trim();
+        edge.trim_end_matches('/') == edge_url.trim().trim_end_matches('/')
+            && issuer == client.trim()
     }
 }
 
@@ -443,11 +451,16 @@ pub struct Auth {
 
 impl Auth {
     /// Build from config: dev mode unless a WorkOS client id is configured.
-    pub fn new(config: AuthConfig) -> Self {
+    pub fn new(mut config: AuthConfig) -> Self {
+        // A stray space or newline (`ZERON_EDGE_URL="…\n"`) would otherwise
+        // be written into the session and set it apart from its own edge.
+        config.edge_url = config.edge_url.trim().to_owned();
         let workos = config
             .workos_client_id
-            .clone()
-            .filter(|s| !s.trim().is_empty());
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let session_file = config.data_dir.join("session.json");
         let stored: Option<StoredSession> = match &workos {
             Some(client) => std::fs::read_to_string(&session_file)
@@ -589,6 +602,18 @@ impl Auth {
     /// The value stays true even if a later refresh revokes that session.
     pub fn loaded_workos_session(&self) -> bool {
         self.inner.loaded_workos_session
+    }
+
+    /// The edge of the saved session when another edge or WorkOS client
+    /// issued it: this engine neither uses nor removes it.
+    pub fn others_session_edge(&self) -> Option<String> {
+        let client = self.inner.workos.as_deref()?;
+        let raw = std::fs::read_to_string(self.session_file()).ok()?;
+        let session: StoredSession = serde_json::from_str(&raw).ok()?;
+        if session.issued_by(&self.inner.config.edge_url, client) {
+            return None;
+        }
+        Some(session.edge_url.unwrap_or_else(|| self.inner.config.edge_url.clone()))
     }
 
     /// Whether this device keeps its chats local while signed in
@@ -933,7 +958,11 @@ impl Auth {
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
         self.retry_refresh();
-        self.persist::<&StoredSession>(None);
+        // Another edge's session was never this engine's to sign out of: it
+        // stays for the engine of the edge that issued it.
+        if self.others_session_edge().is_none() {
+            self.persist::<&StoredSession>(None);
+        }
         self.inner.state_tx.send_replace(AuthState::SignedOut);
         self.inner
             .token_tx
