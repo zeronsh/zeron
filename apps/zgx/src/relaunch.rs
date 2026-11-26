@@ -74,6 +74,11 @@ pub fn ask(quit: impl FnOnce()) {
     quit();
 }
 
+/// Whether this quit is a relaunch (the app comes straight back).
+pub fn asked() -> bool {
+    ASKED.load(Ordering::SeqCst)
+}
+
 /// Last in `main`, once the app has quit: the new process, if a relaunch
 /// was asked for.
 pub fn after_quit() {

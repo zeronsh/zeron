@@ -16,11 +16,12 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::parts::SubagentStatus;
 use zeron_doc::{MessagePart, SessionMessageEntry, TranscriptUpdate, apply_transcript_frame};
-use zeron_proto::ToolCall;
+use zeron_proto::{ChatIndicator, ToolCall};
 use zeron_rpc::methods;
 
 use crate::client::{Client, ClientInner};
 use crate::error::Result;
+use crate::workspace::WorkspaceSnapshot;
 
 /// A spawn's lifecycle as the parent's transcript tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,9 +31,28 @@ pub enum SubagentState {
     Failed,
 }
 
-/// One subagent spawn on a transcript.
+/// What a subagent is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentOrigin {
+    /// The agent's own runtime's ([`subagents`]).
+    Native,
+    /// A chat the agent delegated to: on any device and provider, opened,
+    /// stopped and answered as any chat is.
+    Delegated {
+        chat_id: String,
+        device_id: String,
+        /// That device's name, when it isn't the parent's own.
+        device_name: Option<String>,
+        harness: Option<String>,
+        /// It asks the person something.
+        asks: bool,
+    },
+}
+
+/// One subagent: a spawn on a transcript, or a chat delegated to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentInfo {
+    pub origin: SubagentOrigin,
     /// The spawn's tool part id (stable across updates).
     pub id: String,
     /// The child's transcript doc, once the host has bound one.
@@ -48,8 +68,51 @@ pub struct SubagentInfo {
     pub tail: Option<String>,
     /// When the spawning message started (epoch ms).
     pub started_at_ms: i64,
-    /// The parent entry holding the spawn.
+    /// The parent entry holding the spawn (empty for a delegated chat).
     pub entry_id: String,
+}
+
+/// A chat's subagents, whatever they run as: its transcript's spawns, then
+/// the chats it delegated to, oldest first.
+pub fn all_subagents(
+    entries: &[Arc<SessionMessageEntry>],
+    parent: &str,
+    workspace: &WorkspaceSnapshot,
+) -> Vec<SubagentInfo> {
+    let mut out = subagents(entries);
+    let home = workspace.session(parent).map(|row| row.device_id.as_str());
+    let mut delegated: Vec<_> = workspace
+        .children(parent)
+        .iter()
+        .filter(|row| row.delegated)
+        .collect();
+    delegated.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms).then_with(|| a.id.cmp(&b.id)));
+    out.extend(delegated.into_iter().map(|row| SubagentInfo {
+        origin: SubagentOrigin::Delegated {
+            chat_id: row.id.clone(),
+            device_id: row.device_id.clone(),
+            device_name: row
+                .device_name
+                .clone()
+                .filter(|_| home != Some(row.device_id.as_str())),
+            harness: row.harness.clone(),
+            asks: row.indicator == ChatIndicator::AwaitingInput,
+        },
+        id: row.id.clone(),
+        doc_id: None,
+        title: row.title.clone(),
+        model: row.model.clone(),
+        kind: row.harness_label.clone(),
+        state: match row.indicator {
+            ChatIndicator::Working | ChatIndicator::Waiting | ChatIndicator::AwaitingInput => SubagentState::Running,
+            ChatIndicator::Errored => SubagentState::Failed,
+            ChatIndicator::Completed | ChatIndicator::Idle => SubagentState::Done,
+        },
+        tail: row.preview.clone(),
+        started_at_ms: row.working_since_ms.unwrap_or(row.created_at_ms),
+        entry_id: String::new(),
+    }));
+    out
 }
 
 /// The spawns on `entries`, in transcript order.
@@ -85,6 +148,7 @@ pub fn subagents(entries: &[Arc<SessionMessageEntry>]) -> Vec<SubagentInfo> {
             };
             let (_, detail) = zeron_proto::view::tool_chip_content(call);
             out.push(SubagentInfo {
+                origin: SubagentOrigin::Native,
                 id: id.clone(),
                 doc_id: subagent_ref.clone(),
                 title: if detail.trim().is_empty() {
@@ -289,6 +353,8 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
+            chats: Vec::new(),
         }
     }
 

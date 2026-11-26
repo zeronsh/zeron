@@ -287,8 +287,12 @@ class CloudStore(private val scope: CoroutineScope, private val client: () -> Co
             Agent("codex", "Codex", "codex", "openai-key", "Sign in with ChatGPT", "OpenAI API key"),
         )
 
-        /** The agents Cloud runs. */
-        val harnesses = agents.map { it.harness }
+        /** The agents Cloud runs: every built-in one (mirrors
+         * `zeron_proto::CLOUD_HARNESSES`). [agents] are the ones signed in to
+         * from this app. */
+        val harnesses = listOf(
+            "claude-code", "codex", "cursor", "devin", "grok", "hermes", "fx", "pi", "opencode", "antigravity", "muse",
+        )
 
         /** Short enough for a snackbar beside its button. */
         const val OUT_OF_CREDITS = "Out of Cloud credits"

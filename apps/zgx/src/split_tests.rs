@@ -25,7 +25,10 @@ const W: f32 = 1400.;
 const H: f32 = 860.;
 
 fn ui() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
+    // Compare an archived interface with the same host and frame clock.
+    std::env::var_os("ZERON_ZGX_TEST_UI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"))
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -1636,7 +1639,9 @@ fn drag_script_of(fixture: &Path, panes_n: usize) -> u64 {
     app.frames(60);
     let calls = app.calls();
     drag_sidebar(&mut app, 120., |_| ());
-    (app.calls() - calls) / 20
+    let per_frame = (app.calls() - calls) / 20;
+    eprintln!("RESIZE-CALLS {panes_n} panes: {per_frame}");
+    per_frame
 }
 
 /// The sidebar's edge dragged, the sidebar's list isn't built again, and
@@ -1794,6 +1799,61 @@ fn v2_s_title_bar_island_shows_over_art_with_the_sidebar_closed() {
     }
     assert!(v2.opacity("#titlebar-island") > 0.99, "v2, closed over a new chat's art: its island");
     assert!(v3.opacity("#titlebar-island") < 0.01, "v3 has its top bar: no island");
+}
+
+/// Switching from v3 (sidebar open, `shell_sidebar_shown` > 0) to v2 must
+/// leave no 5-point card-gap sliver on v2's flush sidebar or on the new-chat
+/// page once the sidebar is closed.
+#[test]
+fn zeron_v2_closed_sidebar_has_no_sliver_on_new_chat() {
+    let root = scratch("v2-sliver");
+    let t = root.join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let live_dir = compose(&t, live::BUILTIN);
+    let storage = root.join("state");
+    let mut app = mount_at(&live_dir.join("shell_fixture.luau"), &storage);
+    // Sidebar open in v3 populates `shell_sidebar_shown` (persisted across reload).
+    assert!(app.bounds("#shell-sidebar").width > 200.);
+
+    // Switch to v2 while on the new-chat page with a wallpaper.
+    compose(&t, "zeron-v2");
+    app.host.reload().expect("v2 didn't load");
+    app.frames(30);
+    assert!(app.host.run_command("fixture.wallpaper"));
+    app.frames(30);
+    // Open in v2: flush against the window's left edge (no 5pt card gap).
+    let drag = app.bounds("#sidebar-drag");
+    assert!(near(drag.x, 0.), "v2's open sidebar must sit flush at x=0: {drag:?}");
+
+    // Close the sidebar on the new-chat page: zero-width sidebar, full-width page and wallpaper.
+    assert!(app.host.run_command("shell.toggle_sidebar"));
+    app.frames(60);
+    let side = app.bounds("#shell-sidebar");
+    let page = app.bounds("#shell-page");
+    let art = app.bounds("#wallpaper-layer");
+    assert!(near(side.width, 0.), "v2's closed sidebar must take 0 width, not a 5pt sliver: {side:?}");
+    assert!(near(page.x, 0.) && near(page.width, W), "v2's new-chat page must fill x=0..{W}: {page:?}");
+    assert!(near(art.x, 0.) && near(art.width, W), "v2's wallpaper must fill x=0..{W}: {art:?}");
+
+    // Resizing the window wider and narrower while collapsed keeps the wallpaper edge-to-edge.
+    for w in [1500., 1100.] {
+        app.ui.scene.borrow_mut().resize(w, H);
+        app.frames(20);
+        let page = app.bounds("#shell-page");
+        let art = app.bounds("#wallpaper-layer");
+        assert!(near(page.x, 0.) && near(page.width, w), "resized to {w}: page {page:?}");
+        assert!(near(art.x, 0.) && near(art.width, w), "resized to {w}: wallpaper {art:?}");
+    }
+
+    // Switching back to v3 keeps the closed sidebar at 0 and restores its 5pt card gap when reopened.
+    compose(&t, live::BUILTIN);
+    app.host.reload().expect("v3 didn't load again");
+    app.frames(30);
+    assert!(near(app.bounds("#shell-sidebar").width, 0.), "v3's closed sidebar stays 0 wide");
+    assert!(app.host.run_command("shell.toggle_sidebar"));
+    app.frames(60);
+    assert!(near(app.bounds("#sidebar-drag").x, 5.), "v3's reopened sidebar card keeps its 5pt gap");
+    assert!(app.error().is_none(), "{:?}", app.error());
 }
 
 /// Frames' work as a column moves, and where it went: p50/p95 (ms), the

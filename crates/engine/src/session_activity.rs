@@ -31,9 +31,8 @@ impl SessionsEngine {
         let task = tokio::spawn(async move {
             // Only checks: a refresh is stored once a heartbeat old, so this
             // bounds terminal leases to a heartbeat plus one tick apart.
-            let mut tick = tokio::time::interval(super::HEARTBEAT_CHECK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await;
+            // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
+            let mut tick = zeron_sync::wake::beat_interval(super::HEARTBEAT_CHECK);
             let mut previous = Vec::<Session>::new();
             loop {
                 let Some(inner) = inner.upgrade() else { break };
@@ -111,6 +110,9 @@ impl SessionsEngine {
                         true
                     }
                 });
+                // Only an active terminal report's lease moves with the
+                // clock (`project`); everything else changes by the watches.
+                let leasing = leases_running(&current);
                 previous = current
                     .into_iter()
                     .filter(|row| !unpublished.contains(&row.chat_id))
@@ -120,7 +122,7 @@ impl SessionsEngine {
                     changed = native.changed() => if changed.is_err() { break },
                     changed = terminals.changed() => if changed.is_err() { break },
                     changed = chats.changed() => if changed.is_err() { break },
-                    _ = tick.tick() => {},
+                    _ = tick.tick(), if leasing => {},
                 }
             }
         });
@@ -160,6 +162,18 @@ impl SessionsEngine {
     }
 }
 
+/// Whether a row holds a lease the clock refreshes: a terminal program
+/// reporting itself active ([`project`] stamps it now, and once a heartbeat
+/// old it is stored again). Without one the projection is a function of the
+/// watches alone, and the loop sleeps until they change.
+fn leases_running(rows: &[Session]) -> bool {
+    rows.iter().any(|row| {
+        row.terminal_activity
+            .as_ref()
+            .is_some_and(|activity| activity.report.state.active())
+    })
+}
+
 fn project(
     device: &str,
     native: &[Session],
@@ -183,6 +197,7 @@ fn project(
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
+            blocked_on_wait: false,
         });
         row.terminal_activity = Some(activity.clone());
         // OSC 7501 has no heartbeat requirement. The PTY owner supplies the
@@ -259,6 +274,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
+            blocked_on_wait: false,
         };
         let activity = TerminalActivity {
             terminal_id: "pty".into(),

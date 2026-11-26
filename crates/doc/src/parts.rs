@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use zeron_proto::{
-    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputAnswer, UserInputQuestion,
+    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolReview, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::constants::MSG_INLINE_MAX;
@@ -321,6 +322,15 @@ pub enum MessagePart {
         /// is read from the host.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_lines: Option<u64>,
+        /// The agent's own reviewer on this call, in Auto: reviewing it, or
+        /// its verdict (approved, denied, timed out) with its risk and why.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<ToolReview>,
+        /// The chats a Zeron `create_chat(s)` or `send_message(s)` started or
+        /// sent to: one per request, in order, empty where one failed (or
+        /// isn't there yet).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chats: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -539,7 +549,52 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
+                    review: None,
+                    chats: Vec::new(),
                 });
+            }
+        }
+        AgentEvent::Handed {
+            index,
+            chat_id,
+            title,
+            message,
+        } => {
+            use zeron_proto::delegation::{DelegatingKind, delegating};
+            // The latest call it can be: still missing that request's chat,
+            // and (created) asking for that title.
+            for p in out.iter_mut().rev() {
+                let MessagePart::Tool { call, chats, .. } = p else { continue };
+                let Some((kind, requests)) = delegating(call) else { continue };
+                let Some(request) = requests.get(*index) else { continue };
+                let fits = (kind == DelegatingKind::Message) == *message
+                    && (*message
+                        || request.title.is_none()
+                        // (A kept title is cut short: `delegation::badge`.)
+                        || title.as_deref().is_some_and(|t| t.starts_with(request.title.as_deref().unwrap_or_default())))
+                    && chats.get(*index).is_none_or(String::is_empty);
+                if fits {
+                    if chats.len() < requests.len() {
+                        chats.resize(requests.len(), String::new());
+                    }
+                    chats[*index] = chat_id.clone();
+                    break;
+                }
+            }
+        }
+        AgentEvent::ToolReviewed { id, review } => {
+            // (A review names a call already shown; one for a call that
+            // isn't, a network check with no call, has nowhere to go.)
+            for p in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: pid,
+                    review: slot,
+                    ..
+                } = p
+                    && pid == id
+                {
+                    *slot = Some(review.clone());
+                }
             }
         }
         AgentEvent::ToolResult {
@@ -565,10 +620,21 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     exit_code: exit_slot,
                     output_truncated,
                     output_lines,
+                    chats,
                     ..
                 } = p
                     && pid == id
                 {
+                    // Which chats it started or sent to is all of a Zeron
+                    // call's result the doc keeps: what a viewer opens. (Said
+                    // as it went, [`AgentEvent::Handed`]; from the result
+                    // where a run's Zeron server was older.)
+                    if chats.is_empty()
+                        && let Some(output) = output.as_deref()
+                        && zeron_proto::delegation::delegating(call).is_some()
+                    {
+                        *chats = zeron_proto::delegation::result_chats(output);
+                    }
                     *e = *is_error;
                     *resolved = true;
                     // Tool OUTPUTS never enter the doc (2026-08-10 product
@@ -802,8 +868,10 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Render-only privacy policy — strip heavy/sensitive tool inputs before a call enters the doc.
 ///
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
-/// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
-/// identifiers the chip names the child by).
+/// a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
+/// identifiers the chip names the child by), and whom a Zeron call delegates
+/// to (see [`zeron_proto::delegation::badge`]: titles, agents and recipients,
+/// never a prompt or a message).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -824,17 +892,17 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| zeron_proto::delegation::badge(call)),
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| zeron_proto::delegation::badge(call)),
         },
         other => other.clone(),
     }
 }
 
-/// The only slice of a tool input allowed into the doc: a subagent spawn's
+/// The slice of a harness's own spawn allowed into the doc: its
 /// [`SUBAGENT_INPUT_KEEP`] keys, so the chip can say WHICH model the child
 /// runs on (`Agent · haiku`) without the reader opening the subagent tab.
 ///
@@ -941,6 +1009,54 @@ pub fn join_continuations(entries: Vec<Vec<MessagePart>>) -> Vec<MessagePart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_folds_onto_its_call_and_a_later_one_replaces_it() {
+        use zeron_proto::ToolReviewStatus;
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "rm -rf x".into(),
+                },
+            },
+        );
+        let review = |status| AgentEvent::ToolReviewed {
+            id: "c1".into(),
+            review: ToolReview {
+                status,
+                risk: Some("high".into()),
+                reason: Some("outside the workspace".into()),
+            },
+        };
+        fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Reviewing));
+        fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Denied));
+        // One for a call that isn't shown changes nothing.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolReviewed {
+                id: "elsewhere".into(),
+                review: ToolReview {
+                    status: ToolReviewStatus::Approved,
+                    risk: None,
+                    reason: None,
+                },
+            },
+        );
+        match &parts[..] {
+            [
+                MessagePart::Tool {
+                    review: Some(r), ..
+                },
+            ] => {
+                assert_eq!(r.status, ToolReviewStatus::Denied);
+                assert_eq!(r.reason.as_deref(), Some("outside the workspace"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     fn text_delta(s: &str) -> AgentEvent {
         AgentEvent::TextDelta { text: s.into() }
@@ -1346,6 +1462,8 @@ mod tests {
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
+                review: None,
+                chats: Vec::new(),
             },
         ];
         let chunks = split_parts(&parts);
@@ -1925,5 +2043,92 @@ mod tests {
         .unwrap();
         assert_eq!(payload.part_id, "t");
         assert_eq!(payload.output.as_deref(), Some("full output"));
+    }
+
+    /// A Zeron call that starts chats keeps whom it starts and which chats
+    /// they are, and nothing it told them.
+    #[test]
+    fn a_delegating_call_keeps_who_and_never_what() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_chats".into(),
+            input: Some(serde_json::json!({ "requests": [
+                { "title": "Audit", "harness": "codex", "prompt": "the secret plan", "cwd": "/home/me" },
+                { "prompt": "only words" },
+            ] })),
+        };
+        let kept = sanitize_tool_call(&call);
+        assert_eq!(sanitize_tool_call(&kept), kept, "idempotent");
+        let json = serde_json::to_string(&kept).unwrap();
+        assert!(json.contains("Audit") && json.contains("codex"), "{json}");
+        assert!(!json.contains("secret") && !json.contains("only words") && !json.contains("/home/me"), "{json}");
+        let sent = sanitize_tool_call(&ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "send_message".into(),
+            input: Some(serde_json::json!({ "chat": "Audit", "text": "the secret plan" })),
+        });
+        let json = serde_json::to_string(&sent).unwrap();
+        assert!(json.contains("Audit") && !json.contains("secret"), "{json}");
+
+        let mut parts = Vec::new();
+        fold_event_into_parts(&mut parts, &AgentEvent::ToolCall { id: "t".into(), call });
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: false,
+                output: Some(
+                    serde_json::json!({ "results": [
+                        { "index": 0, "isError": false, "result": { "chatId": "c1", "taskId": "x" } },
+                        { "index": 1, "isError": true, "error": "no" },
+                    ] })
+                    .to_string(),
+                ),
+                diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
+                exit_code: None,
+            },
+        );
+        let MessagePart::Tool { chats, output, .. } = &parts[0] else { panic!("{parts:?}") };
+        assert_eq!(chats, &["c1", ""]);
+        assert!(output.is_none());
+    }
+
+    /// Zeron's server says which chat each request became, in any order,
+    /// before the call returns.
+    #[test]
+    fn handed_chats_land_on_their_requests() {
+        let call = |tool: &str, input| ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: Some(input),
+        };
+        let mut parts = Vec::new();
+        for (id, call) in [
+            ("one", call("create_chat", serde_json::json!({ "title": "Lone", "prompt": "p" }))),
+            ("two", call("create_chats", serde_json::json!({ "requests": [{ "title": "A" }, { "title": "B" }] }))),
+            ("say", call("send_message", serde_json::json!({ "chat": "A", "text": "t" }))),
+        ] {
+            fold_event_into_parts(&mut parts, &AgentEvent::ToolCall { id: id.into(), call });
+        }
+        for (index, chat, title) in [(1, "cb", "B"), (0, "ca", "A"), (0, "cl", "Lone")] {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Handed { index, chat_id: chat.into(), title: Some(title.into()), message: false },
+            );
+        }
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Handed { index: 0, chat_id: "ca".into(), title: None, message: true },
+        );
+        let chats: Vec<_> = parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { chats, .. } => chats.clone(),
+                _ => panic!("{p:?}"),
+            })
+            .collect();
+        assert_eq!(chats, [vec!["cl".to_owned()], vec!["ca".to_owned(), "cb".to_owned()], vec!["ca".to_owned()]]);
     }
 }

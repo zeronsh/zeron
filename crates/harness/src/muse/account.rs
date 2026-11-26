@@ -141,6 +141,47 @@ pub async fn read(
     Ok(MuseAccount::parse(&state?))
 }
 
+/// What Muse says with no model it may use: a turn's "not logged in: run
+/// /login to add an API key", or a model list with nothing in it.
+pub(super) const NO_MODELS: &str = "Muse returned no models; run `muse` and sign in with /login";
+
+/// Whether Muse's word for a turn is that it has no sign-in, which it also
+/// says when it has one Meta offers no models (`explain_no_models`).
+pub(super) fn says_signed_out(message: &str) -> bool {
+    let message = message.trim_start().to_ascii_lowercase();
+    message.starts_with("not logged in") || message.starts_with("missing meta credentials")
+}
+
+/// `said` (Muse having no model to run) as what it is: with a sign-in Muse
+/// holds, Meta offering that account no Muse models (Meta's model list for
+/// it is empty: no active Muse plan), where "sign in" would send the person
+/// round in circles; else `said`, the way to sign in.
+pub(super) async fn explain_no_models(
+    exe: &std::path::Path,
+    env: &BTreeMap<String, String>,
+    said: &str,
+) -> String {
+    match tokio::time::timeout(Duration::from_secs(10), read(exe, env)).await {
+        Ok(Ok(account)) => no_models_message(&account, said),
+        _ => said.to_owned(),
+    }
+}
+
+fn no_models_message(account: &MuseAccount, said: &str) -> String {
+    if !account.signed_in() {
+        return said.to_owned();
+    }
+    let who = account
+        .label
+        .as_deref()
+        .map(|label| format!(" ({label})"))
+        .unwrap_or_default();
+    format!(
+        "Muse is signed in{who}, but Meta offers that account no Muse models: it has no active \
+         Muse plan. Check the account at dev.meta.ai, or sign in with another Meta account."
+    )
+}
+
 /// The subscription's last-observed usage, when Muse has seen one.
 pub async fn usage(
     exe: &std::path::Path,
@@ -283,6 +324,24 @@ impl Drop for DeviceLogin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_models_with_a_sign_in_says_meta_offers_none() {
+        let signed_in = MuseAccount {
+            state: "accountLogin".into(),
+            label: Some("someone@example.com".into()),
+            avatar_url: None,
+            credential_required: true,
+        };
+        let said = "not logged in: run /login to add an API key";
+        assert!(says_signed_out(said));
+        assert!(says_signed_out("missing meta credentials: run `muse login`"));
+        assert!(!says_signed_out("API error 402: Billing verification failed"));
+        let explained = no_models_message(&signed_in, said);
+        assert!(explained.contains("signed in (someone@example.com)") && explained.contains("no Muse models"), "{explained}");
+        let signed_out = MuseAccount { state: "loggedOut".into(), label: None, ..signed_in };
+        assert_eq!(no_models_message(&signed_out, said), said);
+    }
 
     #[test]
     fn account_and_usage_parse_the_schema_shapes() {

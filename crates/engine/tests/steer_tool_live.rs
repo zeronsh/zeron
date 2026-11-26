@@ -144,6 +144,7 @@ async fn steering_never_aborts_a_running_tool() {
                         env: [("SLOW_MCP_DIR".to_owned(), mcp_dir.display().to_string())]
                             .into_iter()
                             .collect(),
+                        http: None,
                     }),
                     prompt: "Call the slow_wait tool from the `slow` MCP server exactly once and \
                              wait for it, then tell me the secret word it returned."
@@ -157,6 +158,8 @@ async fn steering_never_aborts_a_running_tool() {
                     auto_approve: true,
                     access: Default::default(),
                     plan: false,
+                    code_mode: false,
+                    zeron_mcp_only: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,

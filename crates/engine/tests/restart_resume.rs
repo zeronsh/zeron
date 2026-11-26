@@ -48,6 +48,8 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -446,6 +448,8 @@ struct PersistentHarness {
     id: HarnessId,
     /// Per launch: whether its Zeron server was side-chats-only.
     side_chats_only: Arc<Mutex<Vec<bool>>>,
+    /// Per launch: whether Code Mode was enabled.
+    code_mode: Arc<Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
@@ -480,6 +484,7 @@ impl Harness for PersistentHarness {
                 .as_ref()
                 .is_some_and(|mcp| mcp.side_chats_only()),
         );
+        self.code_mode.lock().unwrap().push(request.code_mode);
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(32);
         let mut steering = controls.steering;
         let harness = self.id;
@@ -549,6 +554,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
         runs_started: runs_started.clone(),
         id: HarnessId::Mock,
         side_chats_only: Default::default(),
+        code_mode: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
@@ -619,6 +625,7 @@ async fn a_switched_credential_replaces_the_parked_session() {
         runs_started: runs_started.clone(),
         id: HarnessId::Mock,
         side_chats_only: Default::default(),
+        code_mode: Default::default(),
     }));
     registry.set_run_environment(Arc::new(SwitchableCredential(credential.clone())));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
@@ -690,6 +697,7 @@ async fn a_credential_decided_while_preparing_keeps_the_parked_session() {
         runs_started: runs_started.clone(),
         id: HarnessId::Mock,
         side_chats_only: Default::default(),
+        code_mode: Default::default(),
     }));
     registry.set_run_environment(Arc::new(DecidedWhilePreparing(Arc::new(Mutex::new(None)))));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
@@ -728,6 +736,7 @@ async fn switched_native_subagents_replace_the_parked_session() {
         runs_started: runs_started.clone(),
         id: HarnessId::ClaudeCode,
         side_chats_only: side_chats_only.clone(),
+        code_mode: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
         .expect("engine core assembles");
@@ -782,6 +791,7 @@ async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
         runs_started: runs_started.clone(),
         id: HarnessId::ClaudeCode,
         side_chats_only: side_chats_only.clone(),
+        code_mode: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
         .expect("engine core assembles");
@@ -823,6 +833,58 @@ async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
     .await;
     assert_eq!(*runs_started.lock().unwrap(), 1, "the warm child serves it");
     assert_eq!(*side_chats_only.lock().unwrap(), [false]);
+    core.shutdown().await;
+}
+
+/// Turning a provider's Code Mode on (Settings → Providers) between turns
+/// replaces the parked child, whose successor receives `code_mode = true`;
+/// an unchanged setting keeps it warm.
+#[tokio::test]
+async fn switched_code_mode_replaces_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let code_mode = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::Codex,
+        side_chats_only: Default::default(),
+        code_mode: code_mode.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::Codex, None)
+        .expect("engine core assembles");
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "same setting: same child");
+
+    registry.set_code_mode(HarnessId::Codex, true).unwrap();
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn after enabling code mode",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "enabling code mode starts a new child"
+    );
+    assert_eq!(*code_mode.lock().unwrap(), [false, true]);
     core.shutdown().await;
 }
 
@@ -1368,6 +1430,8 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         auto_approve: false,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

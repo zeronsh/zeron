@@ -1,5 +1,5 @@
 // Harness brand marks — the exact SVG path data the desktop bundles
-// (crates/ui/assets/icons/{claude,openai,cursor}-mark.svg), rendered natively
+// (assets/icons/{claude,openai,cursor}-mark.svg), rendered natively
 // via a small SVG path-data parser → SwiftUI Path. Marks tint with the
 // foreground style like any glyph; Claude keeps its brand orange (#D97757) at
 // call sites, matching the desktop convention.

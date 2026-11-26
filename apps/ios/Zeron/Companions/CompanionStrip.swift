@@ -8,6 +8,8 @@ final class CompanionStrip: UIView {
     struct State: Equatable {
         var agents = 0
         var runningAgents = 0
+        /// Delegated subagents asking the person something.
+        var askingAgents = 0
         var sideChats = 0
         var terminals = 0
         var liveTerminals = 0
@@ -52,7 +54,9 @@ final class CompanionStrip: UIView {
         guard s != state else { return }
         state = s
         agents.isHidden = s.agents == 0
-        if s.runningAgents > 0 {
+        if s.askingAgents > 0 {
+            agents.configure(glyph: .dot(Palette.warning), symbol: "tool-bot", text: "\(s.askingAgents) need\(s.askingAgents == 1 ? "s" : "") you", label: "\(s.askingAgents) subagent\(s.askingAgents == 1 ? "" : "s") need\(s.askingAgents == 1 ? "s" : "") you", tint: Palette.warning)
+        } else if s.runningAgents > 0 {
             agents.configure(glyph: .spinner, symbol: nil, text: "\(s.runningAgents) working", label: "\(s.runningAgents) subagents working")
         } else {
             agents.configure(glyph: nil, symbol: "tool-bot", text: "\(s.agents)", label: "\(s.agents) subagents")
@@ -113,7 +117,7 @@ final class CompanionChip: UIControl {
     required init?(coder: NSCoder) { fatalError() }
 
     /// `symbol`: a `tool-*` asset or an SF symbol.
-    func configure(glyph kind: StatusGlyph.Kind?, symbol: String?, text: String, label a11y: String) {
+    func configure(glyph kind: StatusGlyph.Kind?, symbol: String?, text: String, label a11y: String, tint: UIColor? = nil) {
         let spinning = kind == .spinner
         glyph.isHidden = !spinning
         if spinning { glyph.kind = .spinner }
@@ -129,7 +133,8 @@ final class CompanionChip: UIControl {
             dot.isHidden = true
         }
         label.text = text
-        label.textColor = spinning ? Palette.text : Palette.secondary
+        label.textColor = tint ?? (spinning ? Palette.text : Palette.secondary)
+        icon.tintColor = tint ?? Palette.secondary
         accessibilityLabel = a11y
     }
 

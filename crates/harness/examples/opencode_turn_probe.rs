@@ -53,6 +53,8 @@ async fn main() {
         auto_approve: !answer_yes,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

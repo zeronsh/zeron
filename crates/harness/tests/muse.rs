@@ -46,6 +46,8 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         // Supervised unless a test says otherwise: it exercises the most.
         access: AccessMode::Supervised,
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -713,4 +715,35 @@ async fn a_title_runs_on_a_read_only_host_and_ends_with_its_turn() {
 #[test]
 fn a_steer_does_not_stop_the_turn() {
     assert!(!MuseHarness::new().steer_stops_tool());
+}
+
+/// Enabling Code Mode passes `-c run.code_mode="additive"` to `muse serve`
+/// and requires a fresh runtime; off, the flag is omitted.
+#[tokio::test]
+async fn code_mode_launches_muse_with_additive_override_and_requires_fresh_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = harness(dir.path());
+    let off = request(dir.path(), "simple", "hi");
+    let mut on = off.clone();
+    on.code_mode = true;
+    assert!(!driver.same_runtime(&off, &on));
+    assert!(!driver.reconfigures_in_place(&off, &on));
+
+    for code_mode in [false, true] {
+        let run_dir = tempfile::tempdir().unwrap();
+        let driver = harness(run_dir.path());
+        let mut req = request(run_dir.path(), "simple", "hi");
+        req.code_mode = code_mode;
+        let (run, ctrl) = controls(vec![]);
+        let mut stream = driver.run(req, run).await.unwrap();
+        let events = turn(&mut stream).await;
+        assert_eq!(done(&events).0, DoneStatus::Completed);
+        ends(stream, ctrl).await;
+        let launch = log(run_dir.path(), "launch.ndjson");
+        let args = launch[0]["args"].as_array().expect("launch args");
+        let has_override = args.windows(2).any(|pair| {
+            pair[0] == "-c" && pair[1] == r#"run.code_mode="additive""#
+        });
+        assert_eq!(has_override, code_mode, "args: {args:?}");
+    }
 }

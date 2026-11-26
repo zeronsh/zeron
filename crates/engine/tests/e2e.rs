@@ -38,6 +38,8 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -1342,6 +1344,8 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
+        chats: Vec::new(),
     }
 }
 
@@ -1615,6 +1619,7 @@ impl Harness for EchoAnswerHarness {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
         tokio::spawn(async move {
             let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                note: None,
                 id: "q1".into(),
                 header: "Pick".into(),
                 question: "Which one?".into(),
@@ -1753,6 +1758,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                 id: "req-dead".into(),
                 request_id: "req-dead".into(),
                 questions: vec![zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -1932,6 +1938,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2125,6 +2132,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // (empty answers) and cancels the token — like a real CLI
                     // being torn down, the stream then ends WITHOUT a Done.
                     let _ = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                        note: None,
                         id: "q1".into(),
                         header: "Pick".into(),
                         question: "Which one?".into(),
@@ -2274,6 +2282,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let question = zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2644,6 +2653,8 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: vec![path],
         resume: None,
         worktree: None,

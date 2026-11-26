@@ -113,6 +113,39 @@ test("a model's options sit under it, above its reasoning, and are picked beside
 	expect(app:error()).to_be(nil)
 end)
 
+-- A model's options are rows of the menu: as wide as the models' rows over
+-- them, so a press anywhere along one opens it, and its choices open beside
+-- the menu. (Each was as wide as its own words, its choices over the menu.)
+test("a model's options are as wide as the menu's rows", function()
+	local app = mount("picker_fixture.luau")
+	app:resize(700, 700)
+	app:set_state("test_picker_model", "fusion")
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	-- Where a row is: its left edge and its width.
+	local function across(row: string): string
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find(row, 1, true) and not line:find(" hidden", 1, true) then
+				local x, w = line:match(" (%d+),%d+ (%d+)x%d+")
+				return `{x} {w}`
+			end
+		end
+		return "none"
+	end
+	local model = across('option "Fusion"')
+	expect(model).never.to_be("none")
+	expect(across('button "Lead"')).to_be(model)
+	expect(across('button "Sidekick"')).to_be(model)
+	-- Its choices open past the menu's edge, not over it.
+	app:click('role:button "Lead"')
+	settle(app)
+	local row_x, row_w = model:match("(%d+) (%d+)")
+	local choices = tonumber(across('listbox "Lead"'):match("^%d+")) or 0
+	expect(choices > (tonumber(row_x) :: number) + (tonumber(row_w) :: number)).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 -- Devin Fusion has no card beside its row: picked, its options are the
 -- tray's rows under it, as any model's are.
 test("Fusion is picked like any model, its options then under it", function()
@@ -233,4 +266,20 @@ test("while its catalog is on its way, the model holds its shape rather than say
 	app:frames(5)
 	expect(app:has('#composer-toolbar >> "Choose…"')).to_be(true)
 	app:set_state("chat.catalog", catalog)
+end)
+
+-- A chat's model its agent's catalog doesn't list (renamed, retired, or a
+-- Cloud agent's list not in yet) keeps its agent: the chip names it beside
+-- that agent's mark, and the panel opens on that agent's tab, not the first
+-- agent's (it opened on Claude's, the chip a bare name).
+test("a model its catalog doesn't list keeps its agent's mark and tab", function()
+	local app = mount("picker_fixture.luau")
+	app:set_state("test_picker_model", "devin/swe-9")
+	settle(app)
+	expect(app:tree():find("Unlisted", 1, true) ~= nil).to_be(true)
+	app:click('role:button "Model"')
+	settle(app)
+	expect(app:tree():find("Search Devin models", 1, true) ~= nil).to_be(true)
+	expect(app:tree():find("Search Claude models", 1, true) ~= nil).to_be(false)
+	expect(app:error()).to_be_nil()
 end)

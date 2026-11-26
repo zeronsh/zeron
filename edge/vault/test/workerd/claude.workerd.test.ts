@@ -42,17 +42,22 @@ describe("claude OAuth login", () => {
   it("grants the stored access token while more than 10 minutes remain", async () => {
     const { userId, caller, device, blob } = await withClaude(60 * MINUTE);
     const upstream = mockUpstream({});
-    expect(value(await vault().grant(caller, await signedGrant(device, userId, "claude")))).toEqual({
+    const grant = value(await vault().grant(caller, await signedGrant(device, userId, "claude")));
+    expect(grant).toEqual({
       provider: "claude",
       accessToken: blob.accessToken,
       expiresAt: blob.expiresAt,
       scopes: blob.scopes,
       subscriptionType: "max",
+      slot: expect.any(String),
       generation: 1
     });
     expect(upstream.calls).toHaveLength(0);
     const status = value(await vault().status(caller));
     expect(status.connections.find((c) => c.provider === "claude")).toMatchObject({ status: "connected", account: "max" });
+    // The grant names the account it comes from: the active one.
+    const accounts = value(await vault().accounts(caller, "claude"));
+    expect(grant.slot).toBe(accounts.find((a) => a.active)?.slot);
   });
 
   it("single-flights the refresh and persists the rotated refresh token", async () => {

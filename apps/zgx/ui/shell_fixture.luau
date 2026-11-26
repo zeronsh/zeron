@@ -595,10 +595,20 @@ end
 -- and the project made arriving a beat after the answer, as the engine
 -- tells the sessions.
 local projects_stub = require("@account/projects") :: any
+-- How long the engine takes to answer (`fixture.slow_folders`: as a real
+-- one listing a big folder, long enough for a page's loading rows to show).
+local answer_ms = 0
+ui.command {
+	id = "fixture.slow_folders",
+	title = "Fixture: an engine slow to list folders",
+	run = function()
+		answer_ms = 600
+	end,
+}
 local function answer(value: any): any
 	return {
 		after = function(_, ok: (any) -> (), fail: ((any) -> ())?)
-			ui.after(0, function()
+			ui.after(answer_ms, function()
 				if type(value) == "table" and value.refused then
 					if fail then
 						fail(value.refused)
@@ -900,6 +910,43 @@ ui.command {
 		c.status = "waiting"
 		c.waiting = { { id = "bn1", kind = "process", label = "cargo test" } }
 		publish()
+	end,
+}
+ui.command {
+	id = "activity_view",
+	title = "The sidebar shows Activity",
+	run = function()
+		local act = require("@app/screens/shell/activity")
+		act.on:set(true)
+	end,
+}
+-- Write the docs delegated, ended its turn and waits: two subagents, one on
+-- another device.
+ui.command {
+	id = "delegate",
+	title = "Write the docs waits on its subagents",
+	run = function()
+		local c = find("a2")
+		c.status = "waiting"
+		c.waiting_since = os.time() - 4 * 60 - 5
+		c.waiting = {
+			{ id = "t1", kind = "chat", label = "Check the code samples", chat = "k1", device = model.devices[#model.devices].id, harness_name = "Codex" },
+			{ id = "t2", kind = "chat", label = "Read the old guide", chat = "k2", device = c.device, harness_name = "Cursor" },
+		}
+		publish()
+	end,
+}
+-- One of them asks to be allowed something (the chat's host says which).
+ui.command {
+	id = "delegate_asks",
+	title = "A subagent of Write the docs asks for approval",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.children = { a2 = {
+			{ id = "k1", parent = "a2", title = "Check the code samples", device = model.devices[#model.devices].id, status = "input", updated = 20, created = 20, child_kind = "subagent", harness_name = "Codex" },
+		} }
+		sessions.now:set(now)
+		ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "approval" })
 	end,
 }
 -- Put to sleep for two hours and a minute (its corner: "3h").
@@ -1430,6 +1477,19 @@ ui.command {
 	title = "Atlas 6 answered",
 	run = function()
 		find("x6").status = nil
+		publish()
+	end,
+}
+-- Atlas taller than the list: fifty more sessions under its three, older
+-- than them, "Atlas 45" working among the last of them (far past the
+-- list's foot, idle ones before it and after).
+ui.command {
+	id = "tall_atlas",
+	title = "Fifty more sessions in Atlas, one near its foot working",
+	run = function()
+		for i = 1, 50 do
+			table.insert(model.chats, { id = `y{i}`, title = `Atlas {i}`, project = "atlas", device = "mac", status = if i == 45 then "working" else nil, updated = NOW - (3 + i) * HOUR, created = NOW - (60 + i) * HOUR, agent = "claude" })
+		end
 		publish()
 	end,
 }

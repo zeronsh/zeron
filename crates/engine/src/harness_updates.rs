@@ -57,6 +57,7 @@ const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("GCM_INTERACTIVE", "never"),
     ("NONINTERACTIVE", "1"),
     ("npm_config_yes", "true"),
+    ("AGY_CLI_DISABLE_AUTO_UPDATE", "1"),
 ];
 /// Between full checks, how often each CLI's binary is looked at (stat only)
 /// for an update made outside zeron — its own auto-updater or the user.
@@ -532,8 +533,9 @@ fn provider(id: HarnessId) -> ProviderSpec {
         HarnessId::Antigravity => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::AntigravityAcp,
-            // Zeron installs a pinned ACP server archive. It has no registered
-            // self-update command; custom binaries remain installer-managed.
+            // Zeron installs and updates the Antigravity ACP server from the
+            // ACP registry (`UpdatePlan::AntigravityArchive`); custom binaries
+            // remain user-managed.
             update_args: None,
             manual_command: "Update the configured Antigravity ACP server",
         },
@@ -543,7 +545,7 @@ fn provider(id: HarnessId) -> ProviderSpec {
             // Only the official launcher can refresh itself (see
             // `is_muse_launcher`); a standalone binary is reinstalled.
             update_args: None,
-            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | sh",
+            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | bash",
         },
         // An agent from the ACP registry: its version is its record's, its
         // latest the registry's, and an update installs the registry's
@@ -1344,7 +1346,10 @@ impl HarnessUpdateCoordinator {
         if let Some(fingerprint) = BinaryFingerprint::of(&executable) {
             lock(&self.inner.checked_binaries).insert(harness, fingerprint);
         }
-        let source = if harness.registry().is_some() {
+        let source = if harness.registry().is_some()
+            || (harness == HarnessId::Antigravity
+                && zeron_harness::acp::is_managed_antigravity_server(&executable))
+        {
             HarnessInstallSource::ManagedByZeron
         } else {
             classify_source(&executable)
@@ -1515,8 +1520,8 @@ impl HarnessUpdateCoordinator {
                 return self.fail_check_with_installed(harness, installed, source, error);
             }
         };
-        // zeron can only install the archive it has pinned and verified; a
-        // newer registry release waits for a zeron update that pins it.
+        // Zeron installs a registry release only when it can verify it (code
+        // signature on macOS/Windows, or a published SHA-256 digest on Linux).
         let can_apply = can_apply
             && (harness != HarnessId::Antigravity
                 || lock(&self.inner.antigravity_release)
@@ -2584,21 +2589,7 @@ impl HarnessUpdateCoordinator {
     }
 
     async fn antigravity_acp_latest(&self) -> Result<String, String> {
-        let response = self
-            .inner
-            .client
-            .get(zeron_harness::acp::ANTIGRAVITY_REGISTRY_URL)
-            .send()
-            .await
-            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?;
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|error| format!("Antigravity ACP release response was invalid: {error}"))?;
-        let release = zeron_harness::acp::antigravity_release(&json)
-            .ok_or("Antigravity ACP release response contained no valid version")?;
+        let release = zeron_harness::acp::fetch_antigravity_release(&self.inner.client).await?;
         let version = release.version.clone();
         *lock(&self.inner.antigravity_release) = Some(release);
         Ok(version)
@@ -4485,6 +4476,10 @@ mod tests {
         assert_eq!(
             installed_version(HarnessId::Antigravity, output),
             Some("1.2.1".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "1.5.15\n"),
+            Some("1.5.15".into())
         );
         assert_eq!(
             installed_version(HarnessId::Antigravity, "agy_acp_server 1.2.3"),

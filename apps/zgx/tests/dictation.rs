@@ -3,12 +3,32 @@ use serde_json::{Value as Json, json};
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 type Heard = Rc<RefCell<Vec<Json>>>;
-/// `dictation.call` as the host answers it, heard and never opening a microphone.
-fn played(host: &ScriptHost, installed: bool) -> Heard {
+const ULTRA: &str = "parakeet-ultra-q8";
+/// Settings → Voice's switch, as saved (prefs.dictation).
+const DICTATION_ON: &str = "screens/settings/prefs.luau::settings_dictation";
+/// The models `status` lists (crates/voice/models.json's), the default first,
+/// each as it is on disk.
+fn models(installed: &Rc<RefCell<Vec<String>>>) -> Json {
+    let here = |id: &str| installed.borrow().iter().any(|i| i == id);
+    json!({
+        "supported": true,
+        "models": [
+            {"id":ULTRA, "name":"Parakeet Ultra", "size":740363168, "memory":1150000000,
+                "installed":here(ULTRA), "present":here(ULTRA), "marks":["nvidia", "moondream"],
+                "languages":vec![""; 25]},
+            {"id":"cohere-transcribe-q5", "name":"Cohere Transcribe", "size":1796963840u64, "memory":2800000000u64,
+                "installed":here("cohere-transcribe-q5"), "present":here("cohere-transcribe-q5"),
+                "slow":true, "marks":["cohere"], "languages":vec![""; 14]},
+        ],
+    })
+}
+/// `dictation.call` as the host answers it, heard and never opening a
+/// microphone; `installed`, the models downloaded (a test adds one as its
+/// download arrives).
+fn played(host: &ScriptHost, installed: Rc<RefCell<Vec<String>>>) -> Heard {
     let heard: Heard = Rc::default();
     let said = heard.clone();
     let shared = host.shared("dictation", Value::from_json(r#"{"phase":"idle"}"#).unwrap());
-    let installed = Rc::new(std::cell::Cell::new(installed));
     host.async_action("dictation.call", move |v: Value| {
         let args: Json = serde_json::from_str(&v.to_json()).unwrap();
         said.borrow_mut().push(args.clone());
@@ -28,14 +48,14 @@ fn played(host: &ScriptHost, installed: bool) -> Heard {
                 Json::Null
             }
             Some("download") => {
-                state(json!({"phase":"downloading", "bytes":201000000, "total":670000000}));
+                state(json!({"phase":"downloading", "bytes":201000000, "total":740363168}));
                 Json::Null
             }
             Some("remove") => {
-                installed.set(false);
+                installed.borrow_mut().retain(|id| args["model"] != id.as_str());
                 Json::Null
             }
-            Some("status") => json!({"installed":installed.get(), "size":670000000}),
+            Some("status") => models(&installed),
             Some("inputs") => json!([{"id":"usb", "name":"USB microphone"}]),
             _ => Json::Null,
         };
@@ -43,13 +63,13 @@ fn played(host: &ScriptHost, installed: bool) -> Heard {
     });
     heard
 }
-fn at(fixture: &str, installed: bool) -> (TestApp, Heard) {
+fn at(fixture: &str, installed: Rc<RefCell<Vec<String>>>) -> (TestApp, Heard) {
     let fixture = fixture.to_string();
     let heard: Rc<RefCell<Option<Heard>>> = Rc::default();
     let keep = heard.clone();
     let mut app = TestApp::new(move |r| {
         let host = ScriptHost::new(r, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui").join(&fixture));
-        *keep.borrow_mut() = Some(played(&host, installed));
+        *keep.borrow_mut() = Some(played(&host, installed.clone()));
         host.action("dictation.guard", |_| {});
         host
     });
@@ -59,14 +79,28 @@ fn at(fixture: &str, installed: bool) -> (TestApp, Heard) {
     let heard = heard.borrow().clone().unwrap();
     (app, heard)
 }
+/// The default model downloaded.
+fn ultra() -> Rc<RefCell<Vec<String>>> {
+    Rc::new(RefCell::new(vec![ULTRA.to_string()]))
+}
 fn app() -> TestApp {
-    let (mut app, _) = at("dictation_fixture.luau", true);
+    let (mut app, _) = at("dictation_fixture.luau", ultra());
     app.click("role:textbox \"Message\"");
     app.frames(2);
     app
 }
 fn ops(heard: &Heard, op: &str) -> usize {
     heard.borrow().iter().filter(|a| a["op"] == op).count()
+}
+/// The last `op` the host was asked for, as asked.
+fn last(heard: &Heard, op: &str) -> Json {
+    heard.borrow().iter().rev().find(|a| a["op"] == op).cloned().unwrap_or_default()
+}
+fn flag(app: &TestApp, key: &str) -> Option<bool> {
+    app.host.states().into_iter().find_map(|(k, v)| match v {
+        Value::Bool(b) if k == key => Some(b),
+        _ => None,
+    })
 }
 fn state(app: &TestApp, key: &str) -> String {
     app.host
@@ -116,12 +150,15 @@ fn dictation_discards_stale_cancelled_and_failed_results() {
         assert_eq!(state(&a, "dictation_draft"), "draft", "{op}");
         assert_eq!(state(&a, "dictation_sent"), "");
     }
+}
+#[test]
+fn dictation_typing_on_while_it_listens_lands_the_words_after_what_was_typed() {
     let mut a = app();
     command(&mut a, "begin");
-    a.type_text("role:textbox \"Message\"", "edited");
+    a.type_text("role:textbox \"Message\"", "edited ");
     a.frames(3);
     command(&mut a, "final");
-    assert_eq!(state(&a, "dictation_draft"), "edited");
+    assert_eq!(state(&a, "dictation_draft"), "edited 你好 🌎");
 }
 #[test]
 fn dictation_send_waits_for_final_and_empty_speech_never_sends() {
@@ -164,22 +201,20 @@ fn dictation_send_button_preserves_the_draft_until_finalization() {
 }
 
 #[test]
-fn dictation_moving_the_selection_or_leaving_the_editor_invalidates_the_session() {
+fn dictation_lands_at_the_caret_moved_meanwhile_and_leaving_the_editor_drops_it() {
     let mut a = app();
     a.type_text("role:textbox \"Message\"", "draft");
     a.frames(3);
     command(&mut a, "begin");
     a.keys("ArrowLeft");
     a.frames(2);
-    a.keys("ArrowRight");
-    a.frames(2);
     command(&mut a, "final");
-    assert_eq!(state(&a, "dictation_draft"), "draft");
+    assert_eq!(state(&a, "dictation_draft"), "draf你好 🌎t");
     command(&mut a, "begin");
     a.click("role:button \"Model\"");
     a.frames(3);
     command(&mut a, "final");
-    assert_eq!(state(&a, "dictation_draft"), "draft");
+    assert_eq!(state(&a, "dictation_draft"), "draf你好 🌎t");
     assert_eq!(state(&a, "dictation_sent"), "");
 }
 
@@ -199,7 +234,7 @@ fn dictation_can_finalize_a_queue_send_while_the_agent_is_running() {
 
 #[test]
 fn dictation_holds_from_the_shortcut_and_a_repeat_starts_nothing() {
-    let (mut a, heard) = at("dictation_fixture.luau", true);
+    let (mut a, heard) = at("dictation_fixture.luau", ultra());
     a.click("role:textbox \"Message\"");
     a.frames(2);
     let mut held = zgx::input::Modifiers::default();
@@ -223,7 +258,7 @@ fn dictation_holds_from_the_shortcut_and_a_repeat_starts_nothing() {
 }
 #[test]
 fn dictation_stops_when_the_microphone_is_released_outside_it() {
-    let (mut a, heard) = at("dictation_fixture.luau", true);
+    let (mut a, heard) = at("dictation_fixture.luau", ultra());
     a.click("role:textbox \"Message\"");
     a.frames(2);
     let b = a.bounds("#dictation-microphone");
@@ -237,31 +272,35 @@ fn dictation_stops_when_the_microphone_is_released_outside_it() {
     assert_eq!(a.error(), None);
 }
 #[test]
-fn voice_page_downloads_on_first_turning_on_and_removes_the_model() {
-    let (mut a, heard) = at("voice_fixture.luau", false);
+fn voice_page_downloads_the_default_model_on_first_turning_on_and_removes_it() {
+    let installed: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (mut a, heard) = at("voice_fixture.luau", installed.clone());
     assert!(a.wait_until(|_| ops(&heard, "status") >= 1));
     a.frames(5);
-    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
-    assert!(!a.tree().contains("Speech model"), "{}", a.tree());
+    assert!(a.tree().contains("downloads a 740 MB speech model"), "{}", a.tree());
+    assert!(a.find("role:button \"Remove\"").is_none(), "{}", a.tree());
     a.click("role:switch \"Dictation\"");
     assert!(a.wait_until(|_| ops(&heard, "download") == 1));
+    assert_eq!(last(&heard, "download")["model"], ULTRA);
     a.frames(5);
-    assert!(a.tree().contains("Downloading · 201 of 670 MB"), "{}", a.tree());
-    // It arrives: on, with the microphone and the model to remove.
+    assert!(a.tree().contains("Downloading · 201 MB of 740 MB"), "{}", a.tree());
+    // It arrives: on, the model in use, and Remove on its row.
+    installed.borrow_mut().push(ULTRA.into());
     a.host.shared("dictation", Value::Nil).set(Value::from_json(r#"{"phase":"ready"}"#).unwrap());
-    a.frames(10);
-    assert_eq!(a.error(), None);
-    assert!(a.tree().contains("Speech model"), "{}", a.tree());
+    assert!(a.wait_until(|a| a.tree().contains("In use")), "{}", a.tree());
+    assert_eq!(flag(&a, DICTATION_ON), Some(true));
     a.click("role:button \"Remove\"");
     assert!(a.wait_until(|_| ops(&heard, "remove") == 1));
+    assert_eq!(last(&heard, "remove")["model"], ULTRA);
     a.frames(10);
-    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
-    assert!(!a.tree().contains("Speech model"), "{}", a.tree());
+    assert!(a.tree().contains("downloads a 740 MB speech model"), "{}", a.tree());
+    assert!(!a.tree().contains("In use"), "{}", a.tree());
+    assert_eq!(flag(&a, DICTATION_ON), Some(false));
     assert_eq!(a.error(), None);
 }
 #[test]
 fn voice_page_turned_off_mid_download_cancels_it() {
-    let (mut a, heard) = at("voice_fixture.luau", false);
+    let (mut a, heard) = at("voice_fixture.luau", Rc::default());
     assert!(a.wait_until(|_| ops(&heard, "status") >= 1));
     a.frames(5);
     a.click("role:switch \"Dictation\"");
@@ -270,7 +309,8 @@ fn voice_page_turned_off_mid_download_cancels_it() {
     a.click("role:switch \"Dictation\"");
     assert!(a.wait_until(|_| ops(&heard, "cancel") == 1));
     a.frames(5);
-    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
+    assert!(a.tree().contains("downloads a 740 MB speech model"), "{}", a.tree());
+    assert_eq!(flag(&a, DICTATION_ON), Some(false));
     assert_eq!(a.error(), None);
 }
 /// The voice bar's waveform while listening, and what a slot costs: scripts
@@ -279,7 +319,7 @@ fn voice_page_turned_off_mid_download_cancels_it() {
 /// being dictated. Prints the numbers (`--nocapture`).
 #[test]
 fn dictation_waveform_follows_levels_with_no_script_between_slots() {
-    let (mut a, _) = at("dictation_fixture.luau", true);
+    let (mut a, _) = at("dictation_fixture.luau", ultra());
     let levels = a.host.shared("dictation_levels", Value::Nil);
     // Not dictating: no track, and frames run no scripts.
     let before = a.calls();

@@ -30,6 +30,7 @@
 local ds = require("@ds")
 local material = require("@ds/material")
 local auth = require("@account/auth")
+local activity = require("@app/screens/shell/activity")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
@@ -127,8 +128,15 @@ return function(): Node
 		local find: any = boundary.load("@app/screens/chat/find")
 		return find ~= nil and find.open ~= nil and (find.open :: any)() == true
 	end
+	-- ⌘N: the new chat, its composer given the keys in the same step (one
+	-- composer, its draft now the new chat's), so a key typed straight after
+	-- is the new chat's, never the one left.
 	runs["shell.new_chat"] = function()
 		route.new_chat()
+		local shared: any = boundary.load("@app/screens/chat/shared")
+		if shared and shared.focus then
+			shared.focus:add(1)
+		end
 	end
 	runs["shell.palette"] = function()
 		view.palette:set(not view.palette:peek())
@@ -606,9 +614,13 @@ return function(): Node
 					return ui.div {}
 				end
 				local function chat(): any
-					for _, c in sessions.now:get().chats do
-						if c.id == id then
-							return c
+					local now = sessions.now:get()
+					-- (An archived one's too, from its shelf.)
+					for _, list in { now.chats, now.archived or {} } do
+						for _, c in list do
+							if c.id == id then
+								return c
+							end
 						end
 					end
 					return nil
@@ -658,6 +670,17 @@ return function(): Node
 							here = function(): boolean
 								local _, here = device()
 								return here
+							end,
+							waiting = function(): string?
+								local c = chat()
+								if not c or c.status ~= "waiting" then
+									return nil
+								end
+								local names: { [string]: string } = {}
+								for _, d in sessions.devices:get() do
+									names[d.id] = d.name
+								end
+								return activity.waiting_on(c, names)
 							end,
 							project = function(): string?
 								local c = chat()

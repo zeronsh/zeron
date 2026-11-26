@@ -146,6 +146,84 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## transcribe.cpp
+
+transcribe.cpp 0.4.2, built into Zeron through `transcribe-cpp-sys` for dictation.
+
+MIT License
+
+Copyright (c) 2026 The transcribe.cpp authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## ggml
+
+ggml, vendored by transcribe.cpp 0.4.2.
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## LobeHub icons
+
+NVIDIA's and Cohere's marks in Settings → Voice, from `@lobehub/icons-static-svg` 1.102.0.
+
+MIT License
+
+Copyright (c) 2023 LobeHub
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## Native browser host
 
 The macOS browser uses [Wry 0.56.0](https://github.com/tauri-apps/wry/tree/wry-v0.56.0)
@@ -160,9 +238,13 @@ Attribution is retained in the pinned Zui dependency’s `NOTICE`.
 
 ## Optional desktop dictation
 
-Parakeet TDT 0.6B v3 model weights are by NVIDIA under CC BY 4.0. The optional download uses Ivan Stupakov's INT8 ONNX conversion, pinned to revision `8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce`, with per-file SHA-256 verification. Original: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3. Conversion: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx. License: https://creativecommons.org/licenses/by/4.0/.
+Parakeet Ultra model weights are by Moondream (post-trained from NVIDIA Parakeet TDT 0.6B v3) under CC BY 4.0. The optional download is handy-computer's Q8_0 GGUF conversion, pinned to revision `a1539be1b849ea7463b88343e5277b373d0c4ea9`, with SHA-256 verification. Original: https://huggingface.co/moondream/parakeet-ultra. Conversion: https://huggingface.co/handy-computer/parakeet-ultra-gguf. License: https://creativecommons.org/licenses/by/4.0/.
 
-Native runtime dependencies: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ort/ort-sys 2.0.0-rc.13 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for exact conversion provenance, changes, runtime/platform limitations and supported languages. Models are not included in the application bundle.
+Cohere Transcribe 03-2026 model weights are by Cohere under the Apache License 2.0. The optional download is handy-computer's Q5_K_M GGUF conversion, pinned to revision `7353b6040bdc1be9e5a3823d99d5fe12afe88264`, with SHA-256 verification. Original: https://huggingface.co/CohereLabs/cohere-transcribe-03-2026. Conversion: https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf. License: https://www.apache.org/licenses/LICENSE-2.0. It comes with a language-ID model: SpeechBrain's ECAPA-TDNN on VoxLingua107 (Apache License 2.0, https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa), in handy-computer's Q8_0 GGUF conversion pinned to revision `e59f0f3847e77723b7d58447ef9456fa0c7e9436` (https://huggingface.co/handy-computer/lang-id-voxlingua107-ecapa-gguf), with SHA-256 verification.
+
+Settings → Voice names each model's makers with their marks (referential use; the marks are their owners' trademarks): NVIDIA's and Cohere's from LobeHub's icon set (`@lobehub/icons-static-svg` 1.102.0, MIT, © LobeHub, https://github.com/lobehub/lobe-icons), and Moondream's traced to vector from its official image (https://moondream.ai/images/moondream_logo_color.png). In `apps/zgx/ui/assets/icons`.
+
+Native runtime dependencies: transcribe.cpp 0.4.2 via transcribe-cpp/transcribe-cpp-sys (MIT), with the ggml, miniz and Silero VAD code it vendors (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for conversion provenance, changes, runtime and supported languages. Models are not included in the application bundle.
 
 ## Bezel thinking orbs
 

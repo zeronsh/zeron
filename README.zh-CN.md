@@ -1,6 +1,6 @@
 # Zeron
 
-在本地管理你的编码 agent（Claude Code、Codex、Cursor、Devin、Grok、Hermes、Pi、Antigravity），也可以打开多设备同步。
+在本地管理你的编码 agent（Claude Code、Codex、Cursor、OpenCode、Devin、Grok、Hermes、Pi、Antigravity、Muse Code、fx），也可以打开多设备同步。
 
 *[English](README.md) | 简体中文 | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
 
@@ -10,11 +10,11 @@
 
 从 [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest) 下载对应平台的最新版本：
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS**（Apple 芯片，macOS 13+）— `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`，解压后运行里面的 `install.sh`
 
-不用账号，也不用联网，会话就存在这台设备上。应用会自动更新。
+不用账号，也不用联网，会话就存在这台设备上。桌面应用基于 [zgx](https://zgx.zeron.sh) 构建（原生 Rust 与支持热重载的 Luau 界面，支持插件、模板和主题），并会自动更新。
 
 ## 无界面运行（CLI）
 
@@ -51,6 +51,6 @@ zeron daemon start
 
 ---
 
-想参与开发，或者好奇它怎么跑起来的？[Ask DeepWiki](https://deepwiki.com/zeronsh/zeron)，也可以看 [ARCHITECTURE.md](ARCHITECTURE.md)。
+想参与开发，或者好奇它怎么跑起来的？[Ask DeepWiki](https://deepwiki.com/zeronsh/zeron)，阅读 [ARCHITECTURE.md](ARCHITECTURE.md)，或查看 [CONTRIBUTORS.md](CONTRIBUTORS.md) 和 [apps/zgx/README.md](apps/zgx/README.md)。
 
 采用 [MIT License](LICENSE)。

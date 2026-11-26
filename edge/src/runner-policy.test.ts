@@ -33,17 +33,19 @@ const REFUSED: [string, string][] = [
   ["POST", "/vault/o/accounts/claude/active"],
   ["DELETE", "/vault/o/accounts/codex/a1"],
   ["GET", "/vault/o/accounts/codex/a1/usage"],
+  // Vault connections: admin writes and single-item reads are refused for runners.
+  ["PUT", "/vault/o/connections/mcp:linear"],
+  ["PATCH", "/vault/o/connections/mcp:linear"],
+  ["DELETE", "/vault/o/connections/mcp:linear"],
+  ["POST", "/vault/o/connections/mcp:linear/disconnect"],
+  ["GET", "/vault/o/connections/mcp:linear"],
+  ["POST", "/vault/o/connections"],
   // Another device's room: never as its host, nor its sidecars.
   ["GET", "/device/laptop-1/ws?role=host"],
   ["GET", "/device/laptop-1/ws?role=HOST"],
   ["GET", "/device/laptop-1/sidecar/repos"],
   ["POST", "/device/laptop-1/sidecar/repos"],
   ["POST", "/device/laptop-1/status"],
-  // A user's computer, even one hosting a delegate's chat: never a client
-  // link or a nudge (its RPC surface is terminals, files, the user's bearer).
-  ["GET", "/device/laptop-1/ws?role=client"],
-  ["GET", "/device/laptop-1/ws"],
-  ["POST", "/device/laptop-1/nudge"],
   // Routes the policy doesn't name are refused.
   ["GET", "/preview/o/other"],
   ["GET", "/something-new/o"],
@@ -72,16 +74,25 @@ describe("runner policy", () => {
     }
   });
 
-  it("allows grants, its own device room, other devices' liveness, and row sync", () => {
+  it("allows grants, its own device room, other devices as a client, chats, and row sync", () => {
     for (const [method, path] of [
       ["POST", "/vault/o/grant"],
+      ["POST", "/vault/o/grants"],
+      ["GET", "/vault/o/connections"],
+      ["GET", "/vault/o/connections?kind=mcp"],
+      ["POST", "/vault/o/connections/grant"],
+      ["POST", "/vault/o/connections/grants"],
       ["GET", "/device/cloud-1/ws?role=host"],
       ["GET", "/device/cloud-1/ws?role=client"],
       ["POST", "/device/cloud-1/nudge"],
       ["POST", "/device/cloud-1/sidecar/repos"],
       ["GET", "/device/laptop-1/status"],
-      // A delegate's machine: a client link and the command nudge, gated per
-      // device by runner-access.ts (runnerDeviceGate).
+      // Any of the person's other devices — a computer or another Cloud
+      // machine: a client link (its chats, terminals, files) and the
+      // command nudge.
+      ["GET", "/device/laptop-1/ws?role=client"],
+      ["GET", "/device/laptop-1/ws"],
+      ["POST", "/device/laptop-1/nudge"],
       ["GET", "/device/cloud-2/ws?role=client"],
       ["GET", "/device/cloud-2/ws"],
       ["POST", "/device/cloud-2/nudge"],
@@ -93,7 +104,7 @@ describe("runner policy", () => {
       ["GET", "/registry/o/ws"],
       ["GET", "/registry/o/rows"],
       ["POST", "/registry/o/push"],
-      // Gated per chat by runner-access.ts, not by path.
+      // Any of the person's chats.
       ["GET", "/chat2/c1/ws"],
       ["PUT", "/blob/c1/p1"],
       ["POST", "/runner/heartbeat"],

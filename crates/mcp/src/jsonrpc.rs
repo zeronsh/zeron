@@ -28,55 +28,44 @@ use crate::tools::Tools;
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL: &str = "2025-06-18";
 
+/// What every agent Zeron launches reads on every request (Claude Code puts
+/// a server's instructions in its context whole, while its tools load only
+/// when searched for), so it says only what the agent needs to reach for a
+/// tool. How to use one is in that tool's own description: chat kinds,
+/// hosts, Cloud and the one-level rule in `create_chat`, the visual API and
+/// its style in `show_visual`.
 const INSTRUCTIONS: &str = "\
-Zeron runs coding agents in chats, each hosted on a device, optionally in a project \
-(a folder on that specific device). These tools operate the local Zeron engine: \
-discover devices/projects/chats, create chats with a chosen harness and \
-model, read transcripts, and send messages between chats.\n\
+Zeron runs coding agents in chats, each on a device and optionally in a project there. \
+These tools find devices, projects, harnesses, models and chats; create chats to delegate \
+work to, on any connected provider (not only your own); and message, wait on, read and \
+answer them, on any of the person's devices. `run_command` runs shell commands on any online \
+device as your own shell tool does here. Chats are named by id, unique id prefix, or exact \
+title; `whoami` gives yours. \
+For parallel work, start every chat before waiting on any: `create_chats` or `send_messages` \
+(or `wait: false`, then `wait_for_turn`).\n\
 \n\
-Chats are referenced by full id, a unique id prefix, or an exact title. Use \
-`whoami` to learn which chat you are speaking from; messages you send are \
-attributed to it and a chat cannot message itself. For request/response \
-with a single chat, `send_message` with `wait: true` returns its reply. \
-For parallel delegation, use `create_chats` with a prompt for each chat or \
-`send_messages` for existing chats. These batch tools launch requests concurrently \
-even if your harness executes tool calls sequentially. Alternatively, launch ALL \
-chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
-Do not wait for one worker before launching the next independent worker. \
-A chat you create from your chat is your subagent by default (`kind: subagent`): \
-it lists under your chat's Subagents and in its transcript's subagent block. Use \
-`kind: side` only for a side conversation the person should treat as their own, \
-and `kind: chat` for a standalone session visible in Sessions (no parent). Omitted \
-kind: subagent with an origin/parent, standalone otherwise. \
-Discover hosts with `list_devices`, then `list_projects {device}`, \
-`list_harnesses {device}` and `list_models {device, harness}`. A project fixes \
-its host; with both project and device it must belong to that device. Use listed \
-ids when names/paths repeat. Without project or device, creation uses the local engine. \
-If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
-\n\
-Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
-those marked `connected` can take work from you whichever provider you run \
-on (a claude-code agent may hand a task to codex, and the reverse). Pass \
-`harness` (and a model from `list_models`) to `create_chat` to choose one. \
-Delegation is one level deep: a chat that has a parent cannot create chats. \
-Pass `cloud: true` to run a child on a Cloud machine of its own (Codex or Claude Code); \
-from a Cloud chat it clones the same repository, and without `cloud` it shares your machine.\n\
-\n\
-When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
-`show_visual` is available, write a Luau visual script and show it with `show_visual` before \
-your final reply. Zeron renders it with its own native interface and enforces its style: \
-content sits directly on the chat with no cards or boxed panels, text uses the interface font \
-and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
-The reader sees the visual above that reply, so don't announce or restate it. To show the \
-reader an image file (a screenshot, a rendered PNG), call `show_image` with its path; don't \
-draw images through `show_visual`.";
+Where `show_visual` is offered and a chart, table, diagram, dashboard, or 3D view would say \
+more than prose, show one with it before your final reply, and don't restate it there. Show \
+an image file with `show_image`.";
 
 /// Appended to [`INSTRUCTIONS`] where the agent is offered
 /// `wait_on_background` ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
+/// (Claude Code also gets the longer note in its system prompt.)
 const WAITS_ON_BACKGROUND: &str = "\n\n\
-Before ending a turn while a background command you started is still running and you'll carry on \
-once it ends (tests, a build), call `wait_on_background` with its task id, so the person sees the \
-chat waiting rather than finished. Not for anything you leave running (a dev server, a watcher).";
+Before ending a turn while background work you'll come back to is still running (tests, a \
+build), call `wait_on_background` with its task id; never for a dev server or a watcher.";
+
+/// How [`INSTRUCTIONS`] says to work in parallel; what takes its place where
+/// the host runs delegated work in the background ([`crate::Delegation`]).
+const PARALLEL: &str = "For parallel work, start every chat before waiting on any: `create_chats` or `send_messages` \
+(or `wait: false`, then `wait_for_turn`).";
+const DELEGATES: &str = "Work you delegate runs in the background: put a whole task in `create_chat`'s (or, for several \
+at once, `create_chats`') `prompt`, carry on, and when there is nothing else to do, end your turn. Your chat reads as \
+waiting and Zeron wakes you with the results in one message; don't wait for them or poll. Work with your own child \
+chats. Start a standalone chat, or act on a chat that isn't your child (`peer: true`), only when the person asks or \
+there is no other way.";
+const DELEGATE: &str = "Another chat delegated this work to you: your final reply goes back to it as your result, by \
+itself, so make that reply complete, and don't message the other chat to report. Ask a question only if you can't go on.";
 
 /// Appended to [`INSTRUCTIONS`] when the host launched the agent without its
 /// own subagent tools ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
@@ -87,13 +76,23 @@ subagent, delegate through Zeron chats instead, with `create_chats` (or `create_
 /// What `initialize` tells the agent: with when to say it waits where it's
 /// offered `wait_on_background`, and the side-chat rule when its host turned
 /// the agent's own subagents off.
-fn instructions(waits: bool, side_chats_only: bool) -> std::borrow::Cow<'static, str> {
-    if !waits && !side_chats_only {
+pub(crate) fn instructions(
+    waits: bool,
+    side_chats_only: bool,
+    delegation: crate::Delegation,
+) -> std::borrow::Cow<'static, str> {
+    let parallel = match delegation {
+        crate::Delegation::Off => PARALLEL,
+        crate::Delegation::Parent => DELEGATES,
+        crate::Delegation::Child => DELEGATE,
+    };
+    if !waits && !side_chats_only && delegation == crate::Delegation::Off {
         return INSTRUCTIONS.into();
     }
     let waits = if waits { WAITS_ON_BACKGROUND } else { "" };
     let side_chats = if side_chats_only { SIDE_CHATS_ONLY } else { "" };
-    format!("{INSTRUCTIONS}{waits}{side_chats}").into()
+    let base = INSTRUCTIONS.replace(PARALLEL, parallel);
+    format!("{base}{waits}{side_chats}").into()
 }
 
 /// How often a call still running reports progress. Clients abort a call
@@ -297,7 +296,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only()),
+                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only(), tools.delegation()),
                 }),
             )
         }
@@ -365,7 +364,7 @@ fn spawn_progress(token: Value, out: mpsc::Sender<String>) -> tokio::task::JoinH
 
 /// `response`, cut down to [`MAX_REPLY_BYTES`] when it is bigger: the
 /// structured copy goes, and the text is truncated with a pointer to paging.
-fn cap_reply(response: Value) -> Value {
+pub(crate) fn cap_reply(response: Value) -> Value {
     if response.to_string().len() <= MAX_REPLY_BYTES {
         return response;
     }
@@ -411,7 +410,7 @@ fn ok_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn error_response(id: Value, code: i64, message: &str) -> Value {
+pub(crate) fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -504,10 +503,19 @@ mod tests {
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
-        assert_eq!(instructions(false, false), INSTRUCTIONS);
-        let side_chats = instructions(false, true);
+        assert_eq!(instructions(false, false, crate::Delegation::Off), INSTRUCTIONS);
+        let side_chats = instructions(false, true, crate::Delegation::Off);
         assert!(side_chats.starts_with(INSTRUCTIONS));
         assert!(side_chats.ends_with("with `create_chats` (or `create_chat`)."));
+    }
+
+    #[test]
+    fn background_delegation_replaces_waiting_with_ending_the_turn() {
+        let parent = instructions(false, false, crate::Delegation::Parent);
+        assert!(!parent.contains(PARALLEL) && parent.contains(DELEGATES));
+        assert!(parent.contains("show_image"), "the rest stands");
+        let child = instructions(true, false, crate::Delegation::Child);
+        assert!(child.contains(DELEGATE) && child.ends_with(WAITS_ON_BACKGROUND));
     }
 
     #[test]
@@ -549,10 +557,10 @@ mod tests {
     #[test]
     fn only_an_agent_offered_wait_on_background_is_told_when_to_use_it() {
         assert!(!INSTRUCTIONS.contains("wait_on_background"));
-        let waits = instructions(true, false);
+        let waits = instructions(true, false, crate::Delegation::Off);
         assert!(waits.starts_with(INSTRUCTIONS));
         assert!(waits.contains("call `wait_on_background`"));
-        let both = instructions(true, true);
+        let both = instructions(true, true, crate::Delegation::Off);
         assert!(both.contains("call `wait_on_background`"));
         assert!(both.ends_with("with `create_chats` (or `create_chat`)."));
     }

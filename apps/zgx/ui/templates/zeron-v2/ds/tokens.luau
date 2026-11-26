@@ -295,7 +295,8 @@ function M.setup()
 				-- one's least tile; how long (as wide as tall, at least) and how
 				-- wide (as tall, at most) before it's cut; a run's tray (its
 				-- inset, so the corner is the picture's plus it, and its tallest
-				-- row); the controls' inset from the corner.
+				-- row); the controls' inset from the corner; a tool's result
+				-- picture's thumbnail (its widest and tallest).
 				picture = {
 					w = 660,
 					h = 420,
@@ -306,6 +307,7 @@ function M.setup()
 					wide = 5,
 					tray = { inset = 4, row = 300 },
 					control = { inset = 6 },
+					thumb = { w = 240, h = 160 },
 				},
 			},
 			-- Reasoning effort, a colour a level, cool to warm as it rises: mid
@@ -455,7 +457,13 @@ function M.setup()
 			-- A diff's counts: what it adds and what it takes away.
 			-- (And a line a comment rests on, lit: its chip pointed at, or a
 			-- range being chosen.)
-			diff = { added = "{success}", removed = "{danger}", comment_wash = "alpha({accent}, 0.14)" },
+			diff = {
+				added = "{success}",
+				removed = "{danger}",
+				comment_wash = "alpha({accent}, 0.14)",
+				-- Sticky file headers share the content plane, not menu glass.
+				sticky = { tint = "alpha({background}, 0.12)", solid = "{popover.bg}", blur = 24 },
+			},
 			-- A dialog or sheet: its panel over the dimmed window (the palette's
 			-- denser glass: a menu's tint would go black on the dim), its
 			-- corner, the dim, and its width at each size.

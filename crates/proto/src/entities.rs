@@ -488,9 +488,11 @@ impl ChatSleep {
 pub enum ChatIndicator {
     Working,
     AwaitingInput,
-    /// Its turn ended, and the agent waits on background work it started (a
-    /// background agent, or a command it said it waits on) that will wake it
-    /// when it ends: not finished, not working, nothing for the person yet.
+    /// It waits on work it started: after its turn ended, on what will wake it
+    /// (a background agent, a command it said it waits on, a child chat it
+    /// delegated to), or mid-turn with nothing else running but a tool call
+    /// blocked on another chat. Not finished, not working, nothing for the
+    /// person yet.
     Waiting,
     Errored,
     /// Finished running (or errored out) but not seen yet on any device.
@@ -523,6 +525,12 @@ pub(crate) fn indicator_from(
             s.status
         }
     }) {
+        // All its turn does is wait for another chat.
+        Some(SessionStatus::Working)
+            if live.is_some_and(|s| s.status == SessionStatus::Working && s.blocked_on_wait) =>
+        {
+            ChatIndicator::Waiting
+        }
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
         Some(SessionStatus::Idle) if live.is_some_and(|s| s.waiting.is_some()) => {
@@ -567,6 +575,10 @@ pub enum SessionStatus {
 pub struct NativeTurnOutcome {
     pub status: crate::DoneStatus,
     pub finished_at: DateTime<Utc>,
+    /// Interrupted by its engine's own stop, which its next start picks back
+    /// up: the turn isn't over, whoever waits for it. Missing on older peers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumes: bool,
 }
 
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
@@ -612,6 +624,11 @@ pub struct Session {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<SessionWaiting>,
+    /// The turn runs, and all it does is block on another chat (Zeron's
+    /// `wait_for_turn`, or a create or send asked to wait): it reads as
+    /// Waiting, while `status` stays `Working`. Missing on older peers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked_on_wait: bool,
 }
 
 /// What a chat's agent waits on after its turn ended.
@@ -635,6 +652,34 @@ pub struct WaitingOn {
     pub kind: WaitingKind,
     /// What it is, as the person would read it: a command, or an agent's task.
     pub label: String,
+    /// The child chat doing it ([`WaitingKind::SubagentChat`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_chat_id: Option<String>,
+    /// The device that child runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// The agent it runs on, so a device that hasn't the child's row yet can
+    /// still name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::HarnessId>,
+    /// When it was handed over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+impl WaitingOn {
+    /// Work of the chat's own runtime.
+    pub fn runtime(id: impl Into<String>, kind: WaitingKind, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            label: label.into(),
+            child_chat_id: None,
+            device_id: None,
+            harness: None,
+            started_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,6 +689,8 @@ pub enum WaitingKind {
     Agent,
     /// A background process the agent said it waits on.
     Process,
+    /// A child chat it delegated to, on any device and provider.
+    SubagentChat,
     /// A kind from a newer peer.
     #[serde(other)]
     Other,
@@ -1794,6 +1841,12 @@ pub enum AgentLoginStatus {
 pub const CURSOR_USAGE_CURSOR: &str = "Cursor";
 pub const CURSOR_USAGE_GROK: &str = "Grok";
 pub const CURSOR_USAGE_OTHER: &str = "Other";
+
+/// The groups Antigravity's usage windows are labelled by ("Gemini Session",
+/// "Claude & GPT Week"): Google limits each group of models on its own, and
+/// the composer shows the group of the selected model.
+pub const ANTIGRAVITY_USAGE_GEMINI: &str = "Gemini";
+pub const ANTIGRAVITY_USAGE_OTHER: &str = "Claude & GPT";
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

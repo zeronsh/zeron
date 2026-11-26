@@ -23,6 +23,7 @@ local prefs = require("@app/screens/settings/prefs")
 local registry = require("@account/registry")
 local add_agent = require("@app/screens/settings/add_agent")
 local sign_in_terminal = require("@app/screens/settings/sign_in_terminal")
+local cloud = require("@account/cloud")
 
 local M = {}
 
@@ -36,6 +37,18 @@ search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.te
 		title = ui.t("settings.providers.native_subagents.label"),
 		section = ui.t("settings.providers.agent_settings"),
 		terms = ui.t("settings.providers.native_subagents.terms"),
+	},
+	{
+		key = "code_mode",
+		title = ui.t("settings.providers.code_mode.label"),
+		section = ui.t("settings.providers.agent_settings"),
+		terms = ui.t("settings.providers.code_mode.terms"),
+	},
+	{
+		key = "zeron_mcp_only",
+		title = ui.t("settings.providers.zeron_mcp_only.label"),
+		section = ui.t("settings.providers.agent_settings"),
+		terms = ui.t("settings.providers.zeron_mcp_only.terms"),
 	},
 	{
 		key = "update_policy",
@@ -108,6 +121,20 @@ local function here(): string?
 	end
 	return nil
 end
+-- Cloud, as one choice after the computers (never its machines): the
+-- accounts every Cloud machine uses, kept by the vault, which the engine
+-- answers for (crates/engine cloud_accounts: Claude Code and Codex, their
+-- logins and API keys). Offered while Cloud is on.
+local CLOUD = "cloud"
+local function on_cloud(): boolean
+	return now().target == CLOUD
+end
+local function cloud_choice(): { any }
+	if cloud.on() or on_cloud() then
+		return { { value = CLOUD, label = ui.t("settings.providers.cloud"):get(), icon = "cloud" } }
+	end
+	return {}
+end
 -- The device shown: the engine's target, else this one.
 local function shown_device(): string?
 	return now().target or here()
@@ -115,6 +142,9 @@ end
 -- (In the locale shown: read where it's drawn.)
 local function device_name(): string
 	local id = shown_device()
+	if id == CLOUD then
+		return ui.t("settings.providers.cloud"):get()
+	end
 	for _, d in computers() do
 		if d.id == id then
 			return if d.here then ui.t("settings.providers.this_mac"):get() else d.name
@@ -124,8 +154,11 @@ local function device_name(): string
 end
 local function choose_device(id: string)
 	agents.target(if id == here() then nil else id)
-	-- (The registry as that device sees it: what it has added, its builds.)
-	registry.load()
+	-- (The registry as that device sees it: what it has added, its builds.
+	-- Cloud runs only Zeron's own.)
+	if id ~= CLOUD then
+		registry.load()
+	end
 end
 
 -- Which of the page's views shows: the agents, the registry ("add"), or
@@ -152,18 +185,80 @@ local function kind(): string
 	if s == "looking" or s == "unavailable" then
 		return s
 	end
-	return "found"
+	-- (Cloud's page is another: its accounts, its keys, nothing to add.)
+	return if now().target == "cloud" then "cloud" else "found"
 end
 
 -- Which agent's settings are open (none: "").
 local open_settings = ui.state("settings_agent_open", "")
+-- The agent its dialog shows: the one opened last, kept while the dialog
+-- leaves, so nothing in it changes (and is all drawn again) as it fades.
+local shown_settings = ui.state("settings_agent_shown", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
+-- An agent setting's call, for the device shown: Cloud's are the
+-- account's, which this device's engine keeps for every Cloud machine.
+local function engine_params(params: { [string]: any }): { [string]: any }
+	local target = now().target
+	if target then
+		params.targetDeviceId = target
+	end
+	return params
+end
+
 local function load_subagents()
-	host.call("settings.engine", { method = "GetNativeSubagents", params = {} }):after(function(v: any)
+	host.call("settings.engine", { method = "GetNativeSubagents", params = engine_params({}) }):after(function(v: any)
 		subagents:set({ switchable = v.switchable or {}, off = v.off or {} })
 	end, function() end)
+end
+
+-- The engine's Code Mode settings: those that support it, and those turned on.
+local code_modes = ui.state("settings_code_modes", nil :: { supported: { string }, enabled: { string } }?)
+local code_modes_device: string? = nil
+
+local function load_code_modes()
+	local requested = shown_device()
+	if requested ~= code_modes_device then
+		code_modes:set(nil)
+	end
+	host.call("settings.engine", { method = "GetCodeMode", params = engine_params({}) }):after(function(v: any)
+		if shown_device() ~= requested then
+			return
+		end
+		code_modes_device = requested
+		code_modes:set({ supported = v.supported or {}, enabled = v.enabled or {} })
+	end, function()
+		if shown_device() == requested then
+			code_modes_device = nil
+			code_modes:set(nil)
+		end
+	end)
+end
+
+-- Which agents run with only Zeron's MCP servers (their own, and their
+-- account's connectors, hidden for the run): those that can, and those the
+-- person turned it on for.
+local zeron_only = ui.state("settings_zeron_mcp_only", nil :: { supported: { string }, on: { string } }?)
+local zeron_only_device: string? = nil
+
+local function load_zeron_only()
+	local requested = shown_device()
+	if requested ~= zeron_only_device then
+		zeron_only:set(nil)
+	end
+	host.call("settings.engine", { method = "GetZeronMcpOnly", params = engine_params({}) }):after(function(v: any)
+		if shown_device() ~= requested then
+			return
+		end
+		zeron_only_device = requested
+		zeron_only:set({ supported = v.supported or {}, on = v.on or {} })
+	end, function()
+		if shown_device() == requested then
+			zeron_only_device = nil
+			zeron_only:set(nil)
+		end
+	end)
 end
 
 -- The Codex account whose banked resets are being chosen from (by its
@@ -223,6 +318,9 @@ local function card(row: State<agents.Agent>): Node
 	-- no accounts, and signs in its own way. (Its updates come as any
 	-- agent's: the engine's update coordinator, the registry its feed.)
 	local from_registry = (first :: any).registry == true
+	-- Cloud's (made for it: the cards are keyed by the device shown): on
+	-- every Cloud machine, its accounts alone managed here.
+	local cloud_card = on_cloud()
 	-- The switch follows the engine; a flip goes to it, and its answer
 	-- comes back in the row.
 	local on = ui.use_state(first.enabled)
@@ -234,7 +332,7 @@ local function card(row: State<agents.Agent>): Node
 			if flipped ~= said then
 				on:set(said)
 			end
-		elseif flipped ~= said then
+		elseif flipped ~= said and not cloud_card then
 			agents.set_enabled(id, flipped)
 		end
 	end)
@@ -250,6 +348,7 @@ local function card(row: State<agents.Agent>): Node
 			return (row:get() :: any).updating == true
 		end,
 		sign_in_only = from_registry,
+		fixed = cloud_card,
 		login_note = function(): string?
 			return (row:get() :: any).login_note
 		end,
@@ -329,13 +428,61 @@ local function card(row: State<agents.Agent>): Node
 			end
 			return nil
 		end,
+		-- (On Cloud too: how each agent runs there, for every Cloud machine.)
 		settings = true,
 		on_settings = function()
 			load_subagents()
+			load_code_modes()
+			load_zeron_only()
+			shown_settings:set(id)
 			open_settings:set(id)
 		end,
 		on_add = function()
 			agents.sign_in(id)
+		end,
+		-- On Cloud: whether it takes a sign-in or a key there, and how it
+		-- signs in where that's its own.
+		can_add = function(): boolean
+			return (row:get() :: any).can_add ~= false
+		end,
+		note = function(): string?
+			return (row:get() :: any).cloud_note
+		end,
+		-- An agent with a login per model provider: its accounts by provider,
+		-- each group adding its own.
+		groups = if first.groups
+			then function()
+				return (row:get().groups or {}) :: any
+			end
+			else nil,
+		login_for = function(): string?
+			return row:get().login_for
+		end,
+		on_add_to = function(provider: string)
+			agents.sign_in_to(id, provider)
+		end,
+		-- API keys: typed on this Mac for this Mac's agents, or for Cloud's
+		-- (kept by its vault, never on this Mac); never for another computer.
+		on_add_key = function(provider: string, key: string, name: string?): any
+			return agents.add_key(id, provider, key, name)
+		end,
+		on_rename = function(acc, name: string): any
+			return agents.rename(id, acc.id, name)
+		end,
+		keys_here = function(): boolean
+			return agents.now:get().target == nil or on_cloud()
+		end,
+		keys_kept = if cloud_card
+			then function(): string
+				return ui.t("settings.providers.cloud_key_kept"):get()
+			end
+			else nil,
+		key_request = function(): string?
+			local agent, provider = string.match(agents.key_request:get(), "^([^:]+):(.+)$")
+			return if agent == id then provider else nil
+		end,
+		key_request_seen = function()
+			agents.key_request:set("")
 		end,
 		on_code = function(code: string)
 			agents.complete(id, code)
@@ -343,7 +490,7 @@ local function card(row: State<agents.Agent>): Node
 		settle = function(next: string)
 			local login = row:peek().login
 			if next == "waiting" then
-				agents.sign_in(id)
+				agents.retry(row:peek())
 			elseif login == "waiting" or login == "code" then
 				agents.cancel(id)
 			else
@@ -352,7 +499,17 @@ local function card(row: State<agents.Agent>): Node
 		end,
 		on_switch = function(acc)
 			if acc.id then
-				agents.switch(id, acc.id)
+				-- (Refused or out of reach: said, never swallowed.)
+				agents.switch(id, acc.id):after(function() end, function(err: any)
+					local message = if type(err) == "table" then err.message else nil
+					toast.show {
+						title = ui.t("settings.providers.couldnt_switch"):get(),
+						body = if message == "offline"
+							then ui.t("settings.providers.cant_reach", { device = device_name() }):get()
+							else message,
+						tone = "danger",
+					}
+				end)
 			end
 		end,
 		on_remove = function(acc)
@@ -381,7 +538,13 @@ local function cards(): Node
 			gap = "$space.4",
 			ui.each(ui.computed(installed), function(_a: agents.Agent, _i: number, row: State<agents.Agent>): Node
 				return card(row)
-			end, { key = by_id }),
+			end, {
+				-- (By the device shown too: a card is made for its device,
+				-- Cloud's unlike a computer's.)
+				key = function(a: agents.Agent): string
+					return `{now().target or ""}|{a.id}`
+				end,
+			}),
 		}
 	)
 end
@@ -458,6 +621,9 @@ local function body(k: string): Node
 			return device_name()
 		end, agents.load)
 	end
+	if k == "cloud" then
+		return ui.column { w_full = true, gap = "$space.6", cards() }
+	end
 	return ui.column { w_full = true, gap = "$space.6", cards(), more() }
 end
 
@@ -483,7 +649,7 @@ local dialog_open = ui.computed(function(): boolean
 	return open_settings:get() ~= ""
 end)
 local function agent(): agents.Agent?
-	local id = open_settings:get()
+	local id = shown_settings:get()
 	for _, a in now().list do
 		if a.id == id then
 			return a
@@ -505,12 +671,15 @@ local function settings_dialog(): Node
 		end
 	end)
 	local native = ui.state("settings_agent_native", true)
+	local code_mode = ui.state("settings_agent_code_mode", false)
 	local policy = ui.state("settings_agent_policy", "notify")
 	ui.effect(function()
 		local a = agent()
 		local s = subagents:get()
+		local c = code_modes:get()
 		if a then
 			native:set(not (s ~= nil and table.find(s.off, a.id) ~= nil))
+			code_mode:set(c ~= nil and table.find(c.enabled, a.id) ~= nil)
 			policy:set((a :: any).update_policy or "notify")
 		end
 	end)
@@ -537,6 +706,23 @@ local function settings_dialog(): Node
 	local function switchable(): boolean
 		local a, s = agent(), subagents:get()
 		return a ~= nil and s ~= nil and table.find(s.switchable, a.id) ~= nil
+	end
+	-- Only Zeron's MCP servers: as the engine says it runs now.
+	local mcp_only = ui.state("settings_agent_mcp_only", false)
+	ui.effect(function()
+		local a = agent()
+		local z = zeron_only:get()
+		if a then
+			mcp_only:set(z ~= nil and table.find(z.on, a.id) ~= nil)
+		end
+	end)
+	local function supports_mcp_only(): boolean
+		local a, z = agent(), zeron_only:get()
+		return a ~= nil and z ~= nil and table.find(z.supported, a.id) ~= nil
+	end
+	local function supports_code_mode(): boolean
+		local a, c = agent(), code_modes:get()
+		return a ~= nil and c ~= nil and table.find(c.supported, a.id) ~= nil
 	end
 	-- One added from the ACP registry (or of your own): it can be removed
 	-- from the device, and has an environment there. One of your own isn't
@@ -611,37 +797,102 @@ local function settings_dialog(): Node
 		open = open,
 		title = ui.t("settings.providers.agent_settings"),
 		body = (function(): string
-			return ui.t("settings.providers.dialog_body", { device = device_name() }):get()
+			return if on_cloud()
+				then ui.t("settings.providers.dialog_body_cloud"):get()
+				else ui.t("settings.providers.dialog_body", { device = device_name() }):get()
 		end) :: any,
 		size = "md",
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
 		ds.Settings.Group {
-			ui.div {
+			ui.column {
 				w_full = true,
-				opacity = function()
-					return if switchable() then 1 else "$zeron.disabled"
-				end,
-				disabled = function()
-					return not switchable()
-				end,
-				ds.Settings.Row {
-					label = ui.t("settings.providers.native_subagents.label"),
-					description = ui.t("settings.providers.native_subagents.description"),
-					control = ds.Switch {
-						value = native,
+				ui.div {
+					w_full = true,
+					opacity = function()
+						return if switchable() then 1 else "$zeron.disabled"
+					end,
+					disabled = function()
+						return not switchable()
+					end,
+					ds.Settings.Row {
 						label = ui.t("settings.providers.native_subagents.label"),
+						description = ui.t("settings.providers.native_subagents.description"),
+						control = ds.Switch {
+							value = native,
+							label = ui.t("settings.providers.native_subagents.label"),
+							on_change = function(on: boolean)
+								local a = agent()
+								if not a then
+									return
+								end
+								host.call("settings.engine", { method = "SetNativeSubagents", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+									if v and v.switchable then
+										subagents:set({ switchable = v.switchable, off = v.off or {} })
+									end
+								end, function()
+									native:set(not on)
+									toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+								end)
+							end,
+						},
+					},
+				},
+				ds.Settings.Later(supports_code_mode, ds.Settings.Row {
+					label = ui.t("settings.providers.code_mode.label"),
+					description = ui.t("settings.providers.code_mode.description"),
+					control = ds.Switch {
+						value = code_mode,
+						label = ui.t("settings.providers.code_mode.label"),
 						on_change = function(on: boolean)
 							local a = agent()
 							if not a then
 								return
 							end
-							host.call("settings.engine", { method = "SetNativeSubagents", params = { harness = a.id, enabled = on } }):after(function(v: any)
-								if v and v.switchable then
-									subagents:set({ switchable = v.switchable, off = v.off or {} })
+							host.call("settings.engine", { method = "SetCodeMode", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+								if v and v.supported then
+									code_modes:set({ supported = v.supported, enabled = v.enabled or {} })
 								end
 							end, function()
-								native:set(not on)
+								code_mode:set(not on)
+								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+							end)
+						end,
+					},
+				}),
+			},
+			-- (Every agent shows it: one that can't hide its own says so.)
+			ui.div {
+				w_full = true,
+				opacity = function()
+					return if supports_mcp_only() then 1 else "$zeron.disabled"
+				end,
+				disabled = function()
+					return not supports_mcp_only()
+				end,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.zeron_mcp_only.label"),
+					description = function(): string
+						local a = agent()
+						local name = if a then a.name else ""
+						return if supports_mcp_only()
+							then ui.t("settings.providers.zeron_mcp_only.description", { name = name }):get()
+							else ui.t("settings.providers.zeron_mcp_only.unavailable", { name = name }):get()
+					end,
+					control = ds.Switch {
+						value = mcp_only,
+						label = ui.t("settings.providers.zeron_mcp_only.label"),
+						on_change = function(on: boolean)
+							local a = agent()
+							if not a then
+								return
+							end
+							host.call("settings.engine", { method = "SetZeronMcpOnly", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+								if v and v.supported then
+									zeron_only:set({ supported = v.supported, on = v.on or {} })
+								end
+							end, function()
+								mcp_only:set(not on)
 								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
 							end)
 						end,
@@ -653,68 +904,73 @@ local function settings_dialog(): Node
 				description = ui.t("settings.providers.skills_dollar.description"),
 				control = ds.Switch { value = dollar, label = ui.t("settings.providers.skills_dollar.label"), on_change = completion("dollar") },
 			},
-			ds.Settings.Row {
-				label = ui.t("settings.providers.skills_separate.label"),
-				description = ui.t("settings.providers.skills_separate.description"),
-				control = ds.Switch { value = separate, label = ui.t("settings.providers.skills_separate.label"), on_change = completion("separate") },
+			-- (The rows under it come and go, each bringing its hairline.)
+			ui.column {
+				w_full = true,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.skills_separate.label"),
+					description = ui.t("settings.providers.skills_separate.description"),
+					control = ds.Switch { value = separate, label = ui.t("settings.providers.skills_separate.label"), on_change = completion("separate") },
+				},
+				-- (Not on Cloud, whose agents Zeron keeps current.)
+				ds.Settings.Later(function()
+					return not own() and not on_cloud()
+				end, ds.Settings.Row {
+					label = ui.t("settings.providers.updates"),
+					description = function()
+						local note = POLICY_NOTE[policy:get()]
+						return if note then ui.t(note):get() else ""
+					end,
+					control = ds.Select {
+						value = policy,
+						name = ui.t("settings.providers.update_policy.label"),
+						size = "sm",
+						w = 148,
+						options = POLICIES,
+						on_change = function(v: string)
+							local a = agent()
+							if a then
+								host.call("agents.set_update_policy", { id = a.id, policy = v }):after(function() end, function()
+									toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+								end)
+							end
+						end,
+					},
+				}),
+				ds.Settings.Later(from_registry, ds.Settings.Row {
+					label = ui.t("settings.providers.add.env.label"),
+					description = function(): string
+						return ui.t("settings.providers.add.env.description", { device = device_name() }):get()
+					end,
+					stacked = true,
+					control = ds.TextArea {
+						value = env,
+						name = ui.t("settings.providers.add.env.label"),
+						placeholder = "OPENAI_API_KEY=sk-…",
+						mono = true,
+						rows = 2,
+						max_rows = 6,
+						w_full = true,
+						error = function(): string?
+							local e = env_error:get()
+							return if e == "" then nil else e
+						end,
+					},
+				}),
+				ds.Settings.Later(from_registry, ds.Settings.Row {
+					label = function(): string
+						return ui.t("settings.providers.add.remove_row", { device = device_name() }):get()
+					end,
+					description = ui.t("settings.providers.add.remove_row_description"),
+					danger = true,
+					control = ds.Button {
+						ui.t("settings.providers.add.remove"),
+						tone = "danger",
+						size = "sm",
+						on_click = remove,
+					},
+				}),
 			},
-			ui.show(function()
-				return not own()
-			end, ds.Settings.Row {
-				label = ui.t("settings.providers.updates"),
-				description = function()
-					local note = POLICY_NOTE[policy:get()]
-					return if note then ui.t(note):get() else ""
-				end,
-				control = ds.Select {
-					value = policy,
-					name = ui.t("settings.providers.update_policy.label"),
-					size = "sm",
-					w = 148,
-					options = POLICIES,
-					on_change = function(v: string)
-						local a = agent()
-						if a then
-							host.call("agents.set_update_policy", { id = a.id, policy = v }):after(function() end, function()
-								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
-							end)
-						end
-					end,
-				},
-			}),
-			ui.show(from_registry, ds.Settings.Row {
-				label = ui.t("settings.providers.add.env.label"),
-				description = function(): string
-					return ui.t("settings.providers.add.env.description", { device = device_name() }):get()
-				end,
-				stacked = true,
-				control = ds.TextArea {
-					value = env,
-					name = ui.t("settings.providers.add.env.label"),
-					placeholder = "OPENAI_API_KEY=sk-…",
-					mono = true,
-					rows = 2,
-					max_rows = 6,
-					w_full = true,
-					error = function(): string?
-						local e = env_error:get()
-						return if e == "" then nil else e
-					end,
-				},
-			}),
-			ui.show(from_registry, ds.Settings.Row {
-				label = function(): string
-					return ui.t("settings.providers.add.remove_row", { device = device_name() }):get()
-				end,
-				description = ui.t("settings.providers.add.remove_row_description"),
-				danger = true,
-				control = ds.Button {
-					ui.t("settings.providers.add.remove"),
-					tone = "danger",
-					size = "sm",
-					on_click = remove,
-				},
-			}),
 		},
 	}
 end
@@ -727,7 +983,7 @@ local function agents_page(): Node
 		-- Agents are per device: which one's (a choice once there's more
 		-- than this one).
 		-- (The same choice as Plugins': screens/settings/devices.)
-		trail = devices_page.picker(shown_device, choose_device),
+		trail = devices_page.picker(shown_device, choose_device, cloud_choice),
 		-- (At the top right, on the title's line, as Plugins' is.)
 		trail_top = true,
 		ui.presence(kind, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
@@ -752,6 +1008,10 @@ function M.view(): Node
 	-- (Once a visit: a hot reload doesn't ask again.) The page opens on the
 	-- agents; the registry is looked at too, for what it has to add.
 	visits.once("providers", function()
+		-- (Whether Cloud is on, for its choice.)
+		if cloud.now:peek().phase == "unknown" then
+			cloud.load()
+		end
 		agents.load()
 		registry.load()
 		if view:peek() ~= "agents" then

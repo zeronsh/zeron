@@ -21,7 +21,9 @@ pub fn allowed_without_asking(access: AccessMode, action: Action) -> bool {
     match access {
         AccessMode::FullAccess => true,
         AccessMode::AutoAcceptEdits => action == Action::Edit,
-        AccessMode::Supervised => false,
+        // The agent's reviewer already let through what it judged safe:
+        // what reaches Zeron is what it escalated, so it's asked.
+        AccessMode::Auto | AccessMode::Supervised => false,
     }
 }
 
@@ -29,6 +31,7 @@ pub fn allowed_without_asking(access: AccessMode, action: Action) -> bool {
 /// `question` says what and ends asking ("… Allow it?").
 pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserInputQuestion {
     UserInputQuestion {
+        note: None,
         id: uuid::Uuid::new_v4().to_string(),
         header: header.into(),
         question: question.into(),

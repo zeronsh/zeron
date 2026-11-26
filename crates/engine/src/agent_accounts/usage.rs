@@ -16,6 +16,10 @@
 //! - **Copilot** (OpenCode / Pi `github-copilot`):
 //!   `api.github.com/copilot_internal/user` — premium-request quota.
 //! - **Nous** (Hermes `nous`): the portal's `/api/oauth/account` credits.
+//! - **Antigravity**: Google Code Assist's `retrieveUserQuotaSummary` on the host it runs on (what
+//!   its `/usage` reads) — each group of models' 5-hour and weekly limits —
+//!   with `loadCodeAssist`'s paid tier as the plan. Google refresh tokens
+//!   don't rotate: every probe takes a fresh access token.
 //!
 //! None of these refresh a per-provider store's tokens: those rotate, and
 //! the agent (or Hermes' pool) owns them — a rejected token reads "switch to
@@ -33,6 +37,39 @@ const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/Get
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
 const DEVIN_CLI_VERSION: &str = "3000.11.3";
+/// The Code Assist host Antigravity runs on, and counts its use at: the
+/// production host answers the same account untouched limits.
+pub(super) const ANTIGRAVITY_API: &str = "https://daily-cloudcode-pa.googleapis.com";
+/// The user agent Antigravity's requests carry: Google answers its limits
+/// only to an Antigravity client ("You do not have a valid license of this
+/// product" to any other); its server sends `antigravity/acp/<version>`.
+const ANTIGRAVITY_USER_AGENT: &str = "antigravity/acp/zeron";
+/// Who Antigravity's server says it is to `loadCodeAssist`.
+fn antigravity_client() -> serde_json::Value {
+    serde_json::json!({ "ideType": "ANTIGRAVITY", "pluginType": "GEMINI" })
+}
+
+/// The Code Assist project `loadCodeAssist` names (a string, or `{id}`).
+fn antigravity_project(assist: &serde_json::Value) -> Option<String> {
+    let project = assist.get("cloudaicompanionProject")?;
+    project
+        .as_str()
+        .or_else(|| project.get("id")?.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// `quota` with `loadCodeAssist`'s tiers beside its groups: the reply
+/// [`zeron_proto::plan_usage::antigravity`] reads (the vault's is the same).
+fn with_tiers(quota: &mut serde_json::Value, assist: &serde_json::Value) {
+    if let Some(quota) = quota.as_object_mut() {
+        for tier in ["paidTier", "currentTier"] {
+            if let Some(value) = assist.get(tier) {
+                quota.insert(tier.into(), value.clone());
+            }
+        }
+    }
+}
 
 impl AgentAccounts {
     pub(super) async fn grok_usage(
@@ -212,6 +249,135 @@ impl AgentAccounts {
         Ok(snapshot)
     }
 
+    /// Antigravity's limits, as its `/usage` reads them:
+    /// - Legacy `acp_token.json` slots (`refresh_token` + `client_id`): refresh
+    ///   via Google's token endpoint as before.
+    /// - Unified CLI `antigravity-oauth-token` slots: reuse the cached (or
+    ///   active disk) `access_token` when fresh, and refresh via an isolated
+    ///   headless `antigravity` probe when expired or rejected with 401
+    ///   (persisting the refreshed token back to the slot).
+    pub(super) async fn antigravity_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
+        let missing = ProbeError::NoCredentials {
+            why: NoCredentials::Missing,
+        };
+        let token = &slot.credentials;
+        if let (Some(refresh_token), Some(client_id)) = (
+            str_field(token, "refresh_token"),
+            str_field(token, "client_id"),
+        ) {
+            let client_secret = str_field(token, "client_secret").unwrap_or_default();
+            let refreshed = probe_json(
+                "antigravity",
+                "refresh",
+                self.inner.http.post(&self.inner.endpoints.google_token).form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token.as_str()),
+                    ("client_id", client_id.as_str()),
+                    ("client_secret", client_secret.as_str()),
+                ]),
+            )
+            .await
+            .map_err(|error| match error {
+                // invalid_grant: the login is dead — "sign in again".
+                ProbeError::Http { status: 400, .. } => ProbeError::Unauthorized { status: 400 },
+                other => other,
+            })?;
+            let access_token = str_field(&refreshed, "access_token")
+                .ok_or_else(|| schema_error("antigravity", &refreshed))?;
+            return self.antigravity_usage_with_token(token, &access_token).await;
+        }
+
+        if !is_unified_antigravity_token(token) {
+            return Err(missing);
+        }
+
+        // If the active live file on disk belongs to this same Google account
+        // and carries a fresher access token (refreshed by a running turn),
+        // prefer it over the slot's snapshot.
+        let mut source = token.clone();
+        if let Some(home) = self.inner.config.antigravity_home.as_deref()
+            && let Some(disk) = read_json(&zeron_harness::acp::antigravity_oauth_token_file(home))
+            && antigravity_refresh_token(&disk) == antigravity_refresh_token(token)
+        {
+            let disk_exp = antigravity_token_expiry(&disk);
+            let slot_exp = antigravity_token_expiry(token);
+            if disk_exp > slot_exp || antigravity_access_token(&source).is_none() {
+                source = disk;
+            }
+        }
+
+        let fresh_enough = antigravity_token_expiry(&source)
+            .is_some_and(|exp| exp > Utc::now() + chrono::TimeDelta::minutes(2));
+        if fresh_enough && let Some(access_token) = antigravity_access_token(&source) {
+            match self.antigravity_usage_with_token(&source, &access_token).await {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(ProbeError::Unauthorized { .. }) => {
+                    // Fall through to refresh once via the unified CLI.
+                }
+                Err(other) => return Err(other),
+            }
+        }
+
+        let Some(acp) = self
+            .acp_harness(HarnessId::Antigravity)
+            .filter(|h| h.uses_unified_antigravity_cli())
+        else {
+            return Err(ProbeError::Unauthorized { status: 401 });
+        };
+        let refreshed_doc = acp
+            .refresh_antigravity_oauth_token(&source)
+            .await
+            .map_err(|err| {
+                tracing::warn!(slot = %slot.id, error = %err, "Antigravity CLI token refresh failed");
+                ProbeError::Unauthorized { status: 401 }
+            })?;
+        let access_token = antigravity_access_token(&refreshed_doc)
+            .ok_or_else(|| schema_error("antigravity", &refreshed_doc))?;
+        let mut updated = slot.clone();
+        updated.credentials = refreshed_doc.clone();
+        updated.saved_at = now_ms();
+        if let Err(err) = self.write_slot(&updated) {
+            tracing::warn!(slot = %slot.id, error = %err, "refreshed Antigravity slot write failed");
+        }
+        self.antigravity_usage_with_token(&refreshed_doc, &access_token)
+            .await
+    }
+
+    async fn antigravity_usage_with_token(
+        &self,
+        token: &serde_json::Value,
+        access_token: &str,
+    ) -> Result<UsageSnapshot, ProbeError> {
+        let api = self.inner.endpoints.antigravity_api.trim_end_matches('/');
+        let assist = probe_json(
+            "antigravity",
+            "tier",
+            self.inner
+                .http
+                .post(format!("{api}/v1internal:loadCodeAssist"))
+                .bearer_auth(access_token)
+                .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+                .json(&serde_json::json!({ "metadata": antigravity_client() })),
+        )
+        .await?;
+        let project = str_field(token, "project_id")
+            .or_else(|| antigravity_project(&assist))
+            .ok_or_else(|| schema_error("antigravity", &assist))?;
+        let mut quota = probe_json(
+            "antigravity",
+            "usage",
+            self.inner
+                .http
+                .post(format!("{api}/v1internal:retrieveUserQuotaSummary"))
+                .bearer_auth(access_token)
+                .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+                .json(&serde_json::json!({ "project": project })),
+        )
+        .await?;
+        with_tiers(&mut quota, &assist);
+        antigravity_usage_snapshot(&quota).ok_or_else(|| schema_error("antigravity", &quota))
+    }
+
     /// A per-provider login (OpenCode / Pi entry, Hermes pool entry): probe
     /// the vendor behind it with its own token.
     pub(super) async fn keyed_usage(
@@ -260,6 +426,13 @@ impl AgentAccounts {
                     why: NoCredentials::Unsupported,
                 }),
             };
+        }
+        // An API key has no plan to report (and is never sent to a usage
+        // endpoint).
+        if api_keys::key_entry_secret(harness, creds).is_some() {
+            return Err(ProbeError::NoCredentials {
+                why: NoCredentials::ApiKey,
+            });
         }
         match upstream_of(harness, key) {
             Some(Upstream::OpenAi) => {
@@ -349,7 +522,9 @@ impl AgentAccounts {
 }
 
 /// Grok's `/billing?format=credits`: the current period, with the Grok Build
-/// product's share of it (the blended `creditUsagePercent` as fallback).
+/// product's share of it (the blended `creditUsagePercent` as fallback). The
+/// reply is protobuf JSON, which leaves out zero values: a period with no
+/// usage carries neither figure, and reads as nothing used.
 pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let config = body.get("config")?;
     let period = config.get("currentPeriod");
@@ -359,11 +534,11 @@ pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         .and_then(|products| {
             products.iter().find_map(|p| {
                 (p.get("product").and_then(|v| v.as_str()) == Some("GrokBuild"))
-                    .then(|| p.get("usagePercent").and_then(|v| v.as_f64()))
-                    .flatten()
+                    .then(|| p.get("usagePercent").and_then(|v| v.as_f64()).unwrap_or(0.0))
             })
         })
-        .or_else(|| config.get("creditUsagePercent").and_then(|v| v.as_f64()))?;
+        .or_else(|| config.get("creditUsagePercent").and_then(|v| v.as_f64()))
+        .or_else(|| (period.is_some() || config.get("billingPeriodEnd").is_some()).then_some(0.0))?;
     let label = match period.and_then(|p| p.get("type")).and_then(|v| v.as_str()) {
         Some("USAGE_PERIOD_TYPE_DAILY") => "Day",
         Some("USAGE_PERIOD_TYPE_WEEKLY") => "Week",

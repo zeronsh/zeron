@@ -206,8 +206,7 @@ function M.Section(props: SectionProps): Node
 end
 
 -- The hairline between a group's rows, from the card's edge to its edge
--- (a row that comes and goes brings its own: `ui.show(on, ui.column {
--- Settings.Rule(), row })`).
+-- (a row that comes and goes brings its own: `Later`).
 function M.Rule(): Node
 	return ui.div {
 		-- (What a test counts a card's hairlines by.)
@@ -218,6 +217,15 @@ function M.Rule(): Node
 		bg = "$zeron.settings.rule",
 		aria_hidden = true,
 	}
+end
+
+-- A row that comes and goes in a card, its own hairline over it, so a card's
+-- rules are between rows that are there and never under the last. In a
+-- column with the row it follows (`ui.column { w_full = true, row,
+-- Settings.Later(on, other) }`), never a Group's own child: a Group rules
+-- between its children whether or not they show.
+function M.Later(on: () -> boolean, row: Node): Node
+	return ui.show(on, ui.column { w_full = true, M.Rule(), row })
 end
 
 -- A card of rows, a hairline between each, running from the card's edge to
@@ -543,7 +551,9 @@ function M.Row(props: RowProps): Node
 	end
 	local row: { [any]: any } = {
 		w_full = true,
-		min_h = "$zeron.settings.row",
+		-- (No `min_h`: a row is its content's height, 42 for one line, as it
+		-- has always drawn; `"$zeron.settings.row"` here, which zgx once
+		-- ignored, would hold it at 52.)
 		px = "$space.4",
 		py = "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",

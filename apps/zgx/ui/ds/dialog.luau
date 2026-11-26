@@ -40,7 +40,9 @@ local M = {}
 -- `keep_open`: the confirm leaves it open (the caller closes it once its
 -- work is done); `busy`, while true, the confirm spins in its label's
 -- place and takes no click (an install on its way).
-export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean?, busy: (() -> boolean)? }
+-- `disabled`, while true, the confirm takes no click and no Enter (nothing
+-- typed yet).
+export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean?, busy: (() -> boolean)?, disabled: (() -> boolean)? }
 export type DialogProps = {
 	open: State<boolean>,
 	title: string | Message | () -> string,
@@ -57,6 +59,10 @@ export type DialogProps = {
 	confirm_text: string?,
 	-- Whether a click outside closes it (not for one that must be answered).
 	dismissable: boolean?,
+	-- While true, nothing closes it — Cancel, Escape, a click outside — as
+	-- what the confirm started can't be taken back (a key being checked
+	-- and kept).
+	hold: (() -> boolean)?,
 	-- What stands in it built as it opens, after its children: choices
 	-- made from the data as it is then (its focus starts on their first).
 	build: (() -> Node)?,
@@ -66,12 +72,29 @@ export type DialogProps = {
 -- How the panel arrives and leaves (Zeron's dialog-in, its 180; leaving, a
 -- little quicker than it came).
 local IN = { duration = 200, ease = "out(3)" }
+-- How far a field's focus ring reaches past it: room kept round a dialog's
+-- scrolling content so the ring shows whole.
+local RING = 3
+-- The room kept between a dialog and the window's top and foot, and the
+-- least its scrolling content shows however short the window.
+local MARGIN, MIN_ROOM = 24, 96
+
+-- The window's height in points, followed (a large one where a host gives
+-- none: a headless test lays a dialog out whole).
+local function window_height(): number
+	local window = (ui :: any).window
+	local size = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, v = pcall(function(): any
+		return if size ~= nil then size:get() else nil
+	end)
+	return if ok and type(v) == "table" and type(v.height) == "number" and v.height > 0 then v.height else 10000
+end
 local OUT = { duration = 130, ease = "in(2)" }
 
 -- The stage: the modal, kept up while the panel leaves. `phase` runs from 0
 -- (gone) to 1 (here) and the caller's panel follows it; `panel` builds it,
 -- and `w`, `h` and `placement` place it; `ref` is the bare panel's.
-local function stage(props: { open: State<boolean>, label: Label, dismissable: boolean, w: any, h: any, placement: any, ref: any?, panel: (phase: State<number>) -> Node }): Node
+local function stage(props: { open: State<boolean>, label: Label, dismissable: boolean, hold: (() -> boolean)?, w: any, h: any, placement: any, ref: any?, panel: (phase: State<number>) -> Node }): Node
 	local open = props.open
 	-- (From where it stands: open across a hot reload, it doesn't arrive
 	-- again.)
@@ -106,6 +129,11 @@ local function stage(props: { open: State<boolean>, label: Label, dismissable: b
 			return shown:get()
 		end,
 		on_close = function()
+			-- (Held while its work is under way: Escape and a click outside
+			-- wait for it.)
+			if props.hold and props.hold() then
+				return
+			end
 			open:set(false)
 		end,
 		label = props.label,
@@ -150,6 +178,10 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 	local danger = props.tone == "danger"
 	local typed = ui.use_state("")
 	local function ready(): boolean
+		local confirm = props.confirm
+		if confirm and confirm.disabled and confirm.disabled() then
+			return false
+		end
 		return props.confirm_text == nil or typed:get() == props.confirm_text
 	end
 	local function go()
@@ -176,8 +208,33 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 		table.insert(children, props.build())
 	end
 	local has_field = #children > 0 or props.confirm_text ~= nil
+	-- Its words, its buttons and what's between them, measured as they lay
+	-- out: what's between them as tall as it is, up to the room the window
+	-- leaves, scrolling past that.
+	local head_h = ui.use_state(64)
+	local foot_h = ui.use_state(36)
+	local content_h = ui.use_state(0)
+	local function measured(state: State<number>): (size: { w: number, h: number }) -> ()
+		return function(size: { w: number, h: number })
+			if math.abs(state:peek() - size.h) > 0.5 then
+				state:set(size.h)
+			end
+		end
+	end
+	local function room(): number
+		local pad = (ui.theme.get("space.5") :: number?) or 20
+		return math.max(MIN_ROOM, window_height() - 2 * MARGIN - 4 * pad - head_h:get() - foot_h:get())
+	end
+	local function content_height(): number?
+		local h = content_h:get()
+		-- (Unmeasured yet: as tall as it is.)
+		return if h > 0 then math.min(h, room()) else nil
+	end
 	return ui.column(panel {
 		w_full = true,
+		-- (Its words and its buttons keep their height; what's between them
+		-- gives way and scrolls in a window too short for all of it.)
+		min_h = 0,
 		p = "$space.5",
 		gap = "$space.5",
 		opacity = function()
@@ -197,7 +254,9 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			return false
 		end,
 		ui.column {
+			on_resize = measured(head_h),
 			gap = "$zeron.space.tight",
+			shrink = 0,
 			if props.icon
 				then ui.div { pb = "$zeron.space.tight", color = "$text.secondary", Icon { name = props.icon, size = 20 } }
 				else nil,
@@ -206,7 +265,28 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				then ui.text { props.body, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
 				else nil,
 		},
-		if #children > 0 then ui.column { gap = "$space.3", table.unpack(children) } else nil,
+		-- What it asks, scrolling when the window is too short for it all.
+		-- (Inset by a focus ring's reach inside the scroll, and drawn back out
+		-- by as much, so a field's ring isn't clipped and the fields stay
+		-- where they were.)
+		if #children > 0
+			then ui.scroll {
+				w_full = true,
+				-- (As tall as what's in it, up to what the window leaves once
+				-- its words, its buttons and its margins are placed.)
+				h = content_height,
+				m = ui.raw(-RING, "a focus ring's reach, given back"),
+				fade = { 12, 12 },
+				fade_overflow = true,
+				ui.column {
+					w_full = true,
+					p = ui.raw(RING, "a focus ring's reach"),
+					gap = "$space.3",
+					on_resize = measured(content_h),
+					table.unpack(children),
+				},
+			}
+			else nil,
 		if props.confirm_text
 			then ui.column {
 				gap = "$space.2",
@@ -237,9 +317,11 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			}
 			else nil,
 		ui.row {
+			on_resize = measured(foot_h),
 			gap = "$space.2",
 			justify = "end",
 			items = "center",
+			shrink = 0,
 			if props.aside
 				then ui.div {
 					grow = 1,
@@ -258,7 +340,14 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				}
 				else nil,
 			if props.cancel ~= false
-				then Button { (props.cancel or locale.t("common.cancel")) :: any, tone = "secondary", on_click = close }
+				then Button {
+					(props.cancel or locale.t("common.cancel")) :: any,
+					tone = "secondary",
+					disabled = function(): boolean
+						return props.hold ~= nil and props.hold()
+					end,
+					on_click = close,
+				}
 				else nil,
 			if props.confirm
 				then Button {
@@ -293,6 +382,7 @@ M.Dialog = ui.component(function(props: DialogProps): Node
 		open = open,
 		label = props.title,
 		dismissable = props.dismissable ~= false,
+		hold = props.hold,
 		w = `$zeron.dialog.{props.size or "sm"}`,
 		panel = function(phase: State<number>): Node
 			return DialogBody { props = props, close = close, phase = phase }

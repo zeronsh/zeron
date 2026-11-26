@@ -6,15 +6,78 @@
  * it without pulling vault code into its bundle.
  */
 
-export type VaultProviderId = "codex" | "claude" | "github" | "anthropic-key" | "openai-key";
+/** The user's own API keys, one vendor's each (`{key}` material, never
+ * refreshed). One key serves every agent that reaches its vendor. */
+export type VaultKeyProviderId =
+  | "anthropic-key"
+  | "openai-key"
+  | "openrouter-key"
+  | "gemini-key"
+  | "xai-key"
+  | "deepseek-key"
+  | "ai-gateway-key"
+  | "meta-key"
+  | "cursor-key";
+
+export type VaultProviderId =
+  | "codex"
+  | "claude"
+  | "github"
+  | "copilot"
+  | "devin"
+  | "grok"
+  | "xai-oauth"
+  | "nous"
+  | "antigravity"
+  | "muse"
+  | VaultKeyProviderId;
+
+export const VAULT_KEY_PROVIDERS: readonly VaultKeyProviderId[] = [
+  "anthropic-key",
+  "openai-key",
+  "openrouter-key",
+  "gemini-key",
+  "xai-key",
+  "deepseek-key",
+  "ai-gateway-key",
+  "meta-key",
+  "cursor-key"
+];
 
 export const VAULT_PROVIDERS: readonly VaultProviderId[] = [
   "codex",
   "claude",
   "github",
   "anthropic-key",
+  "openai-key",
+  "openrouter-key",
+  "gemini-key",
+  "xai-key",
+  "deepseek-key",
+  "ai-gateway-key",
+  "meta-key",
+  "cursor-key",
+  "copilot",
+  "devin",
+  "grok",
+  "xai-oauth",
+  "nous",
+  "antigravity",
+  "muse"
+];
+
+/** What a client built before the providers above existed understands: a
+ * status listing anything else would fail its whole read. */
+export const LEGACY_VAULT_PROVIDERS: readonly VaultProviderId[] = [
+  "codex",
+  "claude",
+  "github",
+  "anthropic-key",
   "openai-key"
 ];
+
+export const isKeyProvider = (provider: VaultProviderId): provider is VaultKeyProviderId =>
+  (VAULT_KEY_PROVIDERS as readonly string[]).includes(provider);
 
 /** Identity the main Worker verified (WorkOS JWT or runner JWT). */
 export interface VaultCaller {
@@ -52,7 +115,7 @@ export type VaultResult<T> =
 
 /** One provider's connection, summarized from its active account (else its
  * most recent one). */
-export interface VaultConnectionView {
+export interface VaultProviderConnectionView {
   readonly provider: VaultProviderId;
   readonly status: "connected" | "needsReconnect";
   readonly authorizedDevices: readonly string[];
@@ -85,7 +148,7 @@ export interface VaultAccountView {
   readonly slot: string;
   readonly status: "connected" | "needsReconnect";
   readonly active: boolean;
-  /** `oauth` (subscription login) · `setup-token` · `api-key` · `github`. */
+  /** `oauth` (a sign-in) · `setup-token` · `api-key` · `github`. */
   readonly kind: "oauth" | "setup-token" | "api-key" | "github";
   /** Email / GitHub login / `…abcd` key suffix / plan. Never secret. */
   readonly account?: string;
@@ -164,7 +227,7 @@ export interface GithubListingView {
 }
 
 export interface VaultStatusView {
-  readonly connections: readonly VaultConnectionView[];
+  readonly connections: readonly VaultProviderConnectionView[];
   readonly devices: readonly VaultDeviceView[];
   readonly available: true;
   /** Where the user installs the GitHub App on accounts / repositories
@@ -183,7 +246,34 @@ export interface VaultStatusView {
  *   Running Claude Code on the user's own Cloud device with their subscription is
  *   permitted for Zeron under its arrangement with Anthropic; grants go only to the
  *   unmodified Claude Code CLI on the user's own devices.
- * - `anthropic-key` / `openai-key`: `{ key }`.
+ * - `*-key`: `{ key }` — the user's own API key. `cursor-key` may add
+ *   `expiresAt` (Unix ms): a key Cursor's browser sign-in minted expires.
+ * - `copilot`: `{ copilotToken, login }` — the GitHub token of Copilot's editor
+ *   app (device flow) and the GitHub login it belongs to. Never expires.
+ * - `devin`: `{ devinCredentials }` — Devin's `credentials.toml` as a table
+ *   (`windsurf_api_key` and its server urls). Never refreshed.
+ * - `grok`: `{ grokAuth, scope }` — one entry of the `auth.json` that
+ *   `grok login` writes (`key`, `refresh_token`, `expires_at`, `oidc_issuer`,
+ *   `oidc_client_id`, identity fields) and its map key `{issuer}::{client_id}`.
+ *   Refreshed by the vault at the issuer (an xAI host only).
+ * - `xai-oauth`: `{ xaiOauth }` — Hermes' `providers["xai-oauth"]` record
+ *   (`tokens: {access_token, refresh_token, id_token?, expires_in?,
+ *   token_type?}`, `discovery.token_endpoint?`) and optional `clientId`
+ *   (default Hermes' public xAI client). Refreshed at the token endpoint, an
+ *   `https` `x.ai` host only.
+ * - `nous`: `{ nousAuth }` — Hermes' `providers.nous` record (`access_token`,
+ *   `refresh_token`, `expires_at` ISO, `client_id`, `portal_base_url`,
+ *   `inference_base_url`, `scope`, `token_type`, …). Refreshed at
+ *   `{portal}/api/oauth/token` (an `https` `nousresearch.com` host only),
+ *   the refresh token in the `x-nous-refresh-token` header.
+ * - `antigravity`: `{ antigravityToken }` — Antigravity's `acp_token.json`
+ *   (`client_id`, `client_secret`, `refresh_token`, `token_uri`, `scopes`,
+ *   `project_id`). Refreshed at Google's token endpoint; Google refresh
+ *   tokens don't rotate.
+ * - `muse`: `{ museAuth }` — Muse's whole `auth.json` document; its
+ *   `providers.meta` login (`access_token`, `expires_at` Unix seconds) is
+ *   used until it expires (Muse refreshes nothing; it mints model keys from
+ *   the access token).
  * - `github`: not uploadable; use the device flow. The resulting user token
  *   stays in the vault: `github` grants are App installation tokens.
  */
@@ -191,7 +281,14 @@ export type VaultMaterial =
   | { readonly authJson: Record<string, unknown> }
   | { readonly claudeAiOauth: Record<string, unknown> }
   | { readonly oauthToken: string; readonly expiresAt?: number }
-  | { readonly key: string };
+  | { readonly key: string; readonly expiresAt?: number }
+  | { readonly copilotToken: string; readonly login: string }
+  | { readonly devinCredentials: Record<string, unknown> }
+  | { readonly grokAuth: Record<string, unknown>; readonly scope: string }
+  | { readonly xaiOauth: Record<string, unknown>; readonly clientId?: string }
+  | { readonly nousAuth: Record<string, unknown> }
+  | { readonly antigravityToken: Record<string, unknown> }
+  | { readonly museAuth: Record<string, unknown> };
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
@@ -246,6 +343,9 @@ export interface Grant {
   readonly accessToken: string;
   /** Unix ms. The consumer may cache the grant until then (offline fallback). */
   readonly expiresAt: number;
+  /** The account it comes from (the active one): what a consumer keys what
+   * it learns with it by, such as the models a machine discovers with it. */
+  readonly slot?: string;
   /** Codex: ChatGPT account id. */
   readonly accountId?: string;
   /** Claude: OAuth scopes and plan of the stored login (the CLI's credential
@@ -259,7 +359,38 @@ export interface Grant {
   readonly account?: string;
   /** `github`: the App installation the token came from. */
   readonly installationId?: number;
+  /**
+   * What the consumer needs beside the token to write the agent's own
+   * credential file, never a refresh token: `devin`, the rest of
+   * `credentials.toml` (its server urls); `grok`, the `auth.json` entry's
+   * identity and issuer fields plus `scope` (its map key); `xai-oauth`,
+   * `token_endpoint`, `token_type`, `id_token`; `nous`, the record's
+   * non-token fields (`portal_base_url`, `inference_base_url`, `client_id`,
+   * `scope`, `token_type`); `antigravity`, `client_id`, `project_id`,
+   * `scopes` (space-separated); `muse`, `document` — the `auth.json` as
+   * uploaded, JSON-encoded, every `refresh_token` emptied.
+   */
+  readonly settings?: Readonly<Record<string, string>>;
   readonly generation: number;
+}
+
+/**
+ * Several providers' grants for one device in one round trip. `sig` signs
+ * the grant message with `providers.join(",")` as its provider. The list is
+ * sorted and distinct, and never holds `github` (its grants name a
+ * repository). One signature spends one `ts`.
+ */
+export interface GrantManyRequest {
+  readonly providers: readonly VaultProviderId[];
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+}
+
+export interface GrantManyReply {
+  readonly grants: readonly Grant[];
+  /** The providers granted nothing, and why (`not_found`, `needs_reconnect`, …). */
+  readonly missing: readonly { readonly provider: VaultProviderId; readonly error: VaultErrorCode; readonly message: string }[];
 }
 
 export interface GithubDeviceStart {
@@ -277,6 +408,118 @@ export interface GithubDevicePoll {
    * GitHub approves as whoever the browser is signed in as. */
   readonly alreadyConnected?: boolean;
   readonly error?: string;
+}
+
+// ── Remote MCP / plugin connections (`VaultConnections` DO) ──────────────────
+
+export const CONNECTION_ID_RE = /^(mcp|plugin):[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export type VaultConnectionKind = "mcp" | "plugin";
+export type VaultConnectionTransport = "http" | "sse";
+export type VaultConnectionAuthKind = "none" | "headers" | "oauth";
+export type VaultConnectionStatus = "connected" | "needs_auth" | "reauth_required" | "error";
+
+export type VaultConnectionMaterial =
+  | {
+      readonly kind: "headers";
+      readonly headers: Readonly<Record<string, string>>;
+    }
+  | {
+      readonly kind: "oauth";
+      readonly accessToken: string;
+      readonly refreshToken?: string;
+      readonly tokenType?: string;
+      readonly expiresAt?: number;
+      readonly tokenEndpoint: string;
+      readonly clientId: string;
+      readonly clientSecret?: string;
+      readonly scopes?: readonly string[];
+      readonly resource?: string;
+    };
+
+/** Metadata view of one stored connection. Never exposes tokens or secrets. */
+export interface VaultConnectionView {
+  readonly id: string;
+  readonly kind: VaultConnectionKind;
+  readonly name: string;
+  readonly preset?: string;
+  readonly url: string;
+  readonly transport: VaultConnectionTransport;
+  readonly enabled: boolean;
+  readonly authKind: VaultConnectionAuthKind;
+  readonly status: VaultConnectionStatus;
+  readonly headerKeys: readonly string[];
+  readonly scopes: readonly string[];
+  readonly accountLabel?: string;
+  readonly authorizedDevices: readonly string[];
+  readonly updatedAt: number;
+  readonly expiresAt?: number;
+  readonly lastError?: string;
+}
+
+export interface VaultConnectionsView {
+  readonly disabled: boolean;
+  readonly connections: readonly VaultConnectionView[];
+}
+
+export interface PutConnectionRequest {
+  readonly name: string;
+  readonly preset?: string;
+  readonly url: string;
+  readonly transport?: VaultConnectionTransport;
+  readonly enabled?: boolean;
+  readonly authKind: VaultConnectionAuthKind;
+  readonly material?: VaultConnectionMaterial;
+  readonly authorizedDevices?: readonly string[];
+  readonly scopes?: readonly string[];
+  readonly accountLabel?: string;
+}
+
+export interface UpdateConnectionRequest {
+  readonly name?: string;
+  readonly url?: string;
+  readonly transport?: VaultConnectionTransport;
+  readonly enabled?: boolean;
+  readonly authorizedDevices?: readonly string[];
+  readonly accountLabel?: string | null;
+}
+
+/**
+ * `sig` = base64url Ed25519 signature by the device key over the UTF-8 bytes of
+ * `zeron-vault-grant\n{userId}\n{deviceId}\nconn:{id}\n{ts}`.
+ */
+export interface ConnectionGrantRequest {
+  readonly id: string;
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+  readonly forceRefresh?: boolean;
+}
+
+/** Short-lived grant for one connection. Never includes refreshToken or clientSecret. */
+export interface ConnectionGrant {
+  readonly id: string;
+  readonly url: string;
+  readonly transport: VaultConnectionTransport;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly expiresAt?: number;
+  readonly generation: number;
+}
+
+/**
+ * Several connection grants in one round trip. `sig` signs the grant message
+ * with `conns:${ids.join(",")}` as its subject.
+ */
+export interface ConnectionGrantManyRequest {
+  readonly ids: readonly string[];
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+}
+
+export interface ConnectionGrantManyReply {
+  readonly grants: readonly ConnectionGrant[];
+  readonly missing: readonly { readonly id: string; readonly error: VaultErrorCode; readonly message: string }[];
 }
 
 /** The `VaultApi` WorkerEntrypoint's methods, as seen through the binding. */
@@ -298,6 +541,10 @@ export interface VaultRpc {
   /** Per-user kill switch. */
   setDisabled(caller: VaultCaller, disabled: boolean): Promise<VaultResult<VaultStatusView>>;
   grant(caller: VaultCaller, request: GrantRequest): Promise<VaultResult<Grant>>;
+  /** Several grants at once (`GrantManyRequest`). A refusal of the device
+   * (signature, revoked, disabled) fails the whole call; a provider with
+   * nothing to grant is listed in `missing`. */
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>>;
   githubDeviceStart(
     caller: VaultCaller,
     authorizedDevices: readonly string[]
@@ -336,7 +583,32 @@ export interface VaultRpc {
     provider: VaultProviderId,
     slot: string
   ): Promise<VaultResult<readonly VaultAccountView[]>>;
-  /** Plan usage of one Claude or Codex login, read by the vault (users only;
+  /** Plan usage of one Claude, Codex or Antigravity login, read by the vault (users only;
    * `not_found` for providers without a usage view). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>>;
+  /** List remote MCP / plugin connections (users see all; runners see enabled + authorized). */
+  listConnections(caller: VaultCaller, kind?: VaultConnectionKind): Promise<VaultResult<VaultConnectionsView>>;
+  /** Create or replace a remote MCP / plugin connection (users only). */
+  putConnection(
+    caller: VaultCaller,
+    id: string,
+    request: PutConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>>;
+  /** Update non-secret metadata on an existing connection (users only). */
+  updateConnection(
+    caller: VaultCaller,
+    id: string,
+    patch: UpdateConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>>;
+  /** Permanently delete a connection and its sealed credentials (allowed while disabled). */
+  deleteConnection(caller: VaultCaller, id: string): Promise<VaultResult<{ readonly deleted: boolean }>>;
+  /** Clear sealed auth material and mark `needs_auth`, keeping connection config (allowed while disabled). */
+  disconnectConnectionAuth(caller: VaultCaller, id: string): Promise<VaultResult<VaultConnectionView>>;
+  /** Draw a short-lived grant (headers, never refresh tokens or secrets) for one connection. */
+  grantConnection(caller: VaultCaller, request: ConnectionGrantRequest): Promise<VaultResult<ConnectionGrant>>;
+  /** Draw short-lived grants for several connections in one signed request. */
+  grantConnections(
+    caller: VaultCaller,
+    request: ConnectionGrantManyRequest
+  ): Promise<VaultResult<ConnectionGrantManyReply>>;
 }

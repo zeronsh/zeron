@@ -590,6 +590,10 @@
         "supervised_hint": "运行命令和更改文件前先询问。",
         "edits": "自动接受编辑",
         "edits_hint": "应用编辑，执行其他操作前先询问。",
+        "auto": "自动",
+        "auto_hint": "由智能体自己的审查判断：安全的操作直接执行，有风险的会询问你。",
+        "auto_unavailable": "自动模式不可用",
+        "auto_unavailable_hint": "此智能体不支持自动模式。请选择其他访问模式或智能体。",
         "full": "完全访问",
         "full_hint": "运行命令和编辑时不询问。"
       },
@@ -606,6 +610,13 @@
         "worktree_hint": "拥有独立分支的隔离副本。"
       },
       "work_in": "工作位置",
+      "reach": {
+        "label": "访问范围",
+        "devices": "所有设备",
+        "devices_hint": "可与你的其他设备协作：访问它们的对话，并在其上运行命令。",
+        "isolated": "隔离",
+        "isolated_hint": "仅限其自身的机器及其启动的对话。"
+      },
       "project": {
         "label": "项目",
         "search": "搜索项目…",
@@ -626,6 +637,7 @@
       "dictate": "听写",
       "queue_message": "将消息加入队列",
       "send_message": "发送消息",
+      "send_auto_unavailable": "此智能体不支持自动模式。请选择其他访问模式后再发送。",
       "stop": "停止",
       "back": "返回",
       "next": "下一步",
@@ -718,7 +730,18 @@
       "show_all_lines": "显示全部 {n} 行",
       "open_subagent": "打开子智能体 {title}",
       "subagent": "子智能体",
-      "worked_for": "运行了 {secs} 秒 · {summary}"
+      "worked_for": "运行了 {secs} 秒 · {summary}",
+      "review": {
+        "reviewing": "审查中…",
+        "approved": "已自动批准",
+        "denied": "已被自动审查拦截",
+        "timed-out": "审查超时",
+        "reviewing_hint": "智能体的审查正在检查此操作，之后才会执行。",
+        "approved_hint": "智能体的审查判断此操作安全，已允许执行。",
+        "denied_hint": "智能体的审查拦截了此操作，它没有执行。",
+        "timed-out_hint": "智能体的审查未能及时做出判断，此操作没有执行。",
+        "risk": "风险：{risk}"
+      }
     },
     "transcript": {
       "copy_message": "拷贝消息",
@@ -740,7 +763,23 @@
       "new_reply": "新回复",
       "display_failed": "无法显示此内容",
       "image_failed": "无法显示这张图片",
-      "visual_failed": "无法显示这个可视化"
+      "visual_failed": "无法显示这个可视化",
+      "delegated": {
+        "stopped": "已停止",
+        "open_chat": "打开 {title}",
+        "delegating": "{n, plural, other {正在委派给 # 个子代理}}",
+        "delegated": "{n, plural, other {已委派给 # 个子代理}}",
+        "starting": "{n, plural, other {正在启动 # 个对话}}",
+        "started": "{n, plural, other {已启动 # 个对话}}",
+        "messaging": "{n, plural, other {正在向 # 个对话发送消息}}",
+        "messaged": "{n, plural, other {已向 # 个对话发送消息}}",
+        "running": "{n, plural, other {# 个运行中}}",
+        "need_you": "{n, plural, other {# 个需要你处理}}",
+        "needs_approval": "需要批准",
+        "asks": "有问题",
+        "failed": "失败",
+        "untitled": "子代理"
+      }
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -871,6 +910,8 @@
       "default": "默认",
       "reasoning": "推理强度",
       "account": "账号",
+      "account_of": "{name} 账户",
+      "no_account": "无",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
       "search_agent": "搜索 {agent} 模型…",
@@ -882,7 +923,8 @@
       "not_found": "未找到模型",
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
-      "where_models": "模型"
+      "where_models": "模型",
+      "add_key": "添加 {name} API 密钥"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -910,6 +952,7 @@
       "use_reset": "使用一次重置",
       "connect": "连接 {name} 账户",
       "add_account": "添加账户",
+      "how_it_signs_in": "在 Cloud 上如何登录",
       "signing_in_to": "正在登录 {name}",
       "signing_in_hint": "等待你在浏览器中完成操作。切换账户前不会更改任何内容。",
       "signing_in": "正在登录",
@@ -969,7 +1012,23 @@
       "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
       "key_name": "{var}",
       "get_key": "获取密钥",
-      "save_key": "保存"
+      "save_key": "保存",
+      "add_named_account": "添加 {name} 账户",
+      "add_api_key": "添加 API 密钥",
+      "key_offline": "Zeron 引擎没有响应——请稍后再试。",
+      "key_remote": "API 密钥需在运行 {name} 的电脑上添加。",
+      "key_failed": "无法添加该密钥——请重试。",
+      "key_title": "添加 API 密钥",
+      "key_provider": "提供方",
+      "key_body": "{agent} 会用这个密钥调用 {name} 的模型。",
+      "key_field": "API 密钥",
+      "key_kept": "保存在这台 Mac 上 {agent} 的设置中。",
+      "key_name_label": "名称",
+      "key_name_placeholder": "工作、个人…",
+      "rename": "重命名",
+      "rename_title": "重命名 API 密钥",
+      "rename_hint": "留空则使用默认名称。",
+      "key_name_optional": "名称（可选）"
     },
     "command_palette": {
       "scope": {
@@ -1131,6 +1190,11 @@
         "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
         "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "将对话保留在此设备上",
+        "description": "保持登录，但此设备的对话、对话列表和项目不会同步到 Zeron 的服务器。你的其他设备看不到它们，此设备也看不到其他设备的。切换时 Zeron 会重启其引擎。",
+        "terms": "同步 本地 离线 隐私 服务器 云端 上传 对话 记录 设备 sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "默认浏览器。",
         "tab": "对话旁边的浏览器标签页。"
@@ -1163,6 +1227,17 @@
         "terms": "共同作者 署名 机器人 提交消息 co-author coauthor attribution bot commit message",
         "cloud": "Cloud 始终启用",
         "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
+      },
+      "keep_running": {
+        "label": "退出后让 Zeron 继续运行",
+        "on": "对话会继续进行，其他设备也能访问它们。",
+        "off": "退出时，Zeron 会在对话完成后停止。",
+        "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
+      },
+      "async_delegation": {
+        "label": "在后台委派",
+        "description": "代理将工作交给任意提供方或设备上的子代理，结束自己的回合，并在有结果时被唤醒。关闭后，代理会逐个等待。对每个对话的下一回合生效。",
+        "terms": "子代理, 编排, 等待, 异步"
       }
     },
     "engine": {
@@ -1486,6 +1561,11 @@
         "terms": "子智能体 委派 侧边对话 任务 创建 subagent delegate side chats tasks spawn",
         "description": "关闭时，通过侧边对话委派任务。"
       },
+      "code_mode": {
+        "label": "代码模式",
+        "terms": "代码模式 脚本 工具调用 编程 code mode javascript script tool calls programmatic",
+        "description": "在一轮中以代码方式执行多步工具调用。"
+      },
       "update_policy": {
         "label": "更新策略",
         "terms": "自动 升级 版本 命令行 automatic upgrade version cli"
@@ -1518,6 +1598,7 @@
         "off_note": "不检查新版本。"
       },
       "dialog_body": "位于 {device}。更改立即生效。",
+      "dialog_body_cloud": "适用于所有云端对话，无论由哪台机器运行。更改立即生效。",
       "done": "完成",
       "updates": "更新",
       "description": "设备上的编码智能体及其登录账户。",
@@ -1611,6 +1692,15 @@
           "label": "{name} 的登录"
         },
         "remove_row_description": "使用过它的对话会保留。"
+      },
+      "couldnt_switch": "无法切换账户",
+      "cloud": "云端",
+      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。",
+      "zeron_mcp_only": {
+        "label": "仅使用 Zeron 的 MCP 服务器",
+        "description": "隐藏 {name} 自带的 MCP 服务器和连接器，让它只使用「设置 → MCP」中的服务器，避免重复和多余的 token。",
+        "unavailable": "{name} 无法隐藏自带的 MCP 服务器，会与 Zeron 的一起使用。",
+        "terms": "mcp 服务器 连接器 内置 重复 token chatgpt 应用 claude.ai 自带 隐藏"
       }
     },
     "devices": {
@@ -1991,6 +2081,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard 机器 规格 内存 磁盘 额度",
         "description": "新 Cloud 对话使用的规格。更大的机器消耗额度更快。",
         "failed": "无法更改默认机器。请稍后再试。"
+      },
+      "reach": {
+        "title": "新对话的访问范围",
+        "terms": "reach access devices isolated isolate remote commands security 访问 范围 设备 隔离 命令 安全",
+        "description": "新的 Cloud 对话是否可与你的其他设备协作（访问它们的对话并在其上运行命令），还是仅限于其自身的机器。你可以在每个对话的输入框中单独更改。",
+        "failed": "无法更改新 Cloud 对话的访问范围。请稍后再试。"
       }
     },
     "billing": {
@@ -2289,7 +2385,7 @@
     },
     "voice": {
       "title": "语音",
-      "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
+      "terms": "语音 听写 麦克风 模型 speech dictation microphone model parakeet cohere",
       "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
       "couldnt": "语音无法完成此操作",
       "microphone": "麦克风",
@@ -2298,17 +2394,211 @@
       "dictation": {
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
-        "needs_download": "开启后将下载 {total} MB 的语音模型。",
-        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
+        "needs_download": "开启后将下载 {total} 的语音模型。"
       },
       "shortcut": {
         "label": "快捷键",
         "description": "按住说话,松开转写。"
       },
+      "keep": {
+        "label": "保持模型就绪",
+        "description": "就绪时，{name} 占用 {memory} 内存。释放后，会在你开始说话时重新加载。",
+        "instant": "立即释放",
+        "s15": "15 秒",
+        "m1": "1 分钟",
+        "m5": "5 分钟",
+        "m15": "15 分钟",
+        "h1": "1 小时",
+        "always": "始终"
+      },
       "model": {
-        "label": "语音模型",
-        "description": "Parakeet v3 · {total} MB",
+        "title": "语音模型",
+        "about": "{size} · {n} 种语言",
+        "unsupported": "这台电脑的处理器无法运行语音模型（需要 AVX2）。",
+        "downloading": "正在下载 · {done} / {total}",
+        "about_slow": "{size} · {n} 种语言 · 在这台电脑上较慢",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "下载",
+        "use": "使用",
+        "in_use": "使用中",
         "remove": "移除"
+      }
+    },
+    "mcp": {
+      "title": "MCP",
+      "terms": "mcp 服务器 模型上下文协议 工具 连接器 集成 oauth 保险库 linear notion sentry stripe vercel",
+      "description_synced": "你的智能体可在每个对话、任何提供方中使用这些工具。登录信息通过 Zeron Vault 同步到你的设备和 Cloud。",
+      "description_local": "你的智能体可在每个对话、任何提供方中使用这些工具。仅保存在此设备上；登录 Zeron 即可同步到你的其他设备。",
+      "servers": {
+        "title": "你的服务器",
+        "terms": "已连接 服务器 账号 登录 退出 启用 停用 工作 个人"
+      },
+      "add": {
+        "title": "添加服务器",
+        "terms": "添加 连接 自定义 服务器 网址 命令 常用",
+        "connect": "连接",
+        "custom": "自定义服务器",
+        "custom_description": "任意 MCP 服务器，通过网址或此电脑上的命令。"
+      },
+      "row": {
+        "waiting": "正在等待登录…",
+        "signin": "未登录",
+        "expired": "已退出登录。请重新登录后使用。",
+        "client": "需要 OAuth 应用才能登录",
+        "this_device": "{line} · 仅限此设备",
+        "command": "运行 {command}",
+        "sign_in": "登录",
+        "needs_attention": "需要处理",
+        "connected": "已连接",
+        "off_short": "已关闭",
+        "unnamed": "未命名账号",
+        "your_account": "你的账号",
+        "agent_name_tip": "你的智能体对此账号使用的名称",
+        "account_actions": "{name} 操作",
+        "server_actions": "{name} 操作",
+        "where_accounts": "{where} · {n} 个账号",
+        "add_account": "添加账号"
+      },
+      "connect": {
+        "title": "连接 {name}",
+        "waiting_title": "登录 {name}",
+        "waiting_body": "请在浏览器中完成 {name} 的登录。连接成功后此窗口会自动关闭。",
+        "waiting_hint": "正在等待浏览器…",
+        "waiting_label": "正在等待登录",
+        "waiting_button": "等待中…",
+        "error_title": "无法连接 {name}",
+        "error_body": "此次登录未保存任何内容。",
+        "try_again": "重试",
+        "continue": "在浏览器中继续",
+        "connect": "连接",
+        "synced": "通过 Zeron Vault 同步到你的设备",
+        "local": "保存在此设备上"
+      },
+      "client": {
+        "body": "{name} 只允许已注册的应用登录。请在你的 {name} 工作区中创建一个应用，允许此重定向网址，然后粘贴该应用的客户端 ID 和密钥。",
+        "redirect": "重定向网址",
+        "copy": "复制",
+        "id": "客户端 ID",
+        "secret": "客户端密钥",
+        "how": "如何创建应用"
+      },
+      "key": {
+        "body": "粘贴 {name} 提供的 API 密钥。它会被加密保存，且不会再次显示。",
+        "label": "API 密钥"
+      },
+      "error": {
+        "generic": "登录时出现问题。",
+        "client": "此服务器需要你自己的 OAuth 应用才能登录。",
+        "timed_out": "登录超时。准备好后请重试。",
+        "browser": "无法打开浏览器。",
+        "port": "另一个登录仍在使用重定向端口。请完成或取消后重试。",
+        "offline": "无法连接到 Zeron。请检查网络后重试。",
+        "detail": "无法连接：{detail}"
+      },
+      "form": {
+        "add_title": "自定义服务器",
+        "add_body": "通过网址连接任意 MCP 服务器，或在此电脑上运行一个。",
+        "name": "名称",
+        "name_placeholder": "我的服务器",
+        "kind": "服务器类型",
+        "kind_remote": "远程网址",
+        "kind_local": "本地命令",
+        "url": "网址",
+        "auth": "登录方式",
+        "auth_oauth": "OAuth（在浏览器中登录）",
+        "auth_bearer": "API 密钥或令牌",
+        "auth_headers": "自定义请求头",
+        "auth_none": "无",
+        "token": "API 密钥或令牌",
+        "token_kept": "留空则保留已保存的值。",
+        "headers": "请求头",
+        "headers_hint": "每行一个，格式为 名称: 值。",
+        "headers_kept": "已保存：{keys}。输入的请求头将替换它们。",
+        "own_client": "使用你自己的 OAuth 应用",
+        "own_client_hint": "适用于不能自行注册应用的服务器。请在应用设置中允许此重定向网址。",
+        "scopes": "权限范围",
+        "scopes_placeholder": "服务器默认值",
+        "command": "命令",
+        "args": "参数",
+        "env": "环境变量",
+        "env_kept": "已保存：{keys}。输入的变量将替换它们。",
+        "local_note": "本地命令仅在此电脑上运行，不会同步。",
+        "sync": "同步到你的设备",
+        "sync_description": "将此服务器及其登录信息保存在 Zeron Vault 中，供你的其他设备和 Cloud 使用。",
+        "save": "保存",
+        "add": "添加服务器",
+        "error_name": "请为服务器命名。",
+        "error_url": "请输入以 https:// 开头的网址。",
+        "error_command": "请输入要运行的命令。",
+        "error_token": "请粘贴 API 密钥或令牌。",
+        "error_header_line": "“{line}”不是请求头。请写成 名称: 值。",
+        "error_env_line": "“{line}”不是变量。请写成 NAME=值。"
+      },
+      "remove": {
+        "title": "移除 {name}？",
+        "body": "它的登录信息将从 Zeron Vault 和此设备中删除。你可以随时重新连接。",
+        "body_all": "将从 Zeron Vault 和此设备中移除全部 {n} 个账号及其登录信息。你可以随时重新连接。"
+      },
+      "toast": {
+        "added": "已添加 {name}",
+        "saved": "已保存 {name}",
+        "connected": "已连接 {name}",
+        "removed": "已移除 {name}",
+        "signed_out": "已退出 {name}",
+        "couldnt_add": "无法添加 {name}",
+        "couldnt_remove": "无法移除 {name}",
+        "couldnt_switch": "无法更改 {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "添加另一个 {name} 账号",
+        "body": "在浏览器中用另一个账号登录。你的智能体可以使用所有账号，每个账号都有自己的名称。",
+        "new_key": "新账号的 API 密钥或令牌",
+        "switch_hint": "请用另一个账号登录。如果浏览器直接以第一个账号登录，请在 {name} 的页面上切换账号。",
+        "error_taken": "你已有一个名为“{account}”的 {name} 账号。",
+        "add": "添加账号",
+        "name": "账号名称",
+        "name_placeholder": "个人、工作…",
+        "name_optional": "可选。你可以随时重命名。",
+        "agents_see_one": "你的智能体将以 {agent} 看到它。"
+      },
+      "menu": {
+        "rename": "重命名…",
+        "sign_in_again": "重新登录",
+        "sign_out": "退出登录",
+        "remove_account": "移除账号",
+        "edit": "编辑服务器…",
+        "remove_server": "移除 {name}"
+      },
+      "rename": {
+        "title": "重命名账号",
+        "body": "为此 {name} 账号命名，方便你和智能体区分。",
+        "save": "保存",
+        "unnamed_hint": "留空时，你的智能体会用编号区分它。"
+      },
+      "requests": {
+        "title": "等待你处理",
+        "description": "智能体请求更改你的 MCP 服务器。在你允许之前不会有任何更改。",
+        "terms": "请求 智能体 允许 拒绝 等待",
+        "add": "添加 {name}",
+        "remove": "移除 {name}",
+        "enable": "开启 {name}",
+        "disable": "关闭 {name}",
+        "from_chat": "{agent} 在“{chat}”中请求",
+        "an_agent": "一个智能体",
+        "from_agent": "一个智能体请求",
+        "because": "{who}：“{reason}”",
+        "runs": "在此电脑上运行 {command}",
+        "decline": "拒绝",
+        "allow": "允许",
+        "done": "已完成：{name}",
+        "couldnt": "无法完成：{name}",
+        "notice_body": "在你允许之前不会有任何更改。",
+        "notice_add": "一个智能体请求添加 {name}",
+        "notice_remove": "一个智能体请求移除 {name}",
+        "notice_enable": "一个智能体请求开启 {name}",
+        "notice_disable": "一个智能体请求关闭 {name}"
       }
     }
   },
@@ -2384,6 +2674,7 @@
         "unpin": "取消置顶",
         "move_to": "移至",
         "archive_working": "请先停止：智能体仍在运行",
+        "archive_working_some": "{n, plural, other {请先停止：其中 # 个仍在运行}}",
         "delete": "删除…",
         "rename": "重命名…",
         "remove": "移除…",
@@ -2453,11 +2744,13 @@
       "session": {
         "new_session": "新建会话",
         "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
+        "will_delete_some": "{n, plural, other {# 个会话}}将被永久删除。此操作无法撤销。",
         "will_delete_with": "{will}{also}",
-        "also_deletes_side": "{n, plural, other {它的 # 个侧边对话也会一并删除。}}",
-        "also_deletes_subagents": "{n, plural, other {它的 # 个子智能体也会一并删除。}}",
-        "also_deletes_both": "它的 {subagents, plural, other {# 个子智能体}}和 {sides, plural, other {# 个侧边对话}}也会一并删除。",
+        "also_deletes_side": "{n, plural, other {{of, plural, =1 {它的} other {它们的}} # 个侧边对话也会一并删除。}}",
+        "also_deletes_subagents": "{n, plural, other {{of, plural, =1 {它的} other {它们的}} # 个子智能体也会一并删除。}}",
+        "also_deletes_both": "{of, plural, =1 {它的} other {它们的}} {subagents, plural, other {# 个子智能体}}和 {sides, plural, other {# 个侧边对话}}也会一并删除。",
         "delete_title": "删除会话？",
+        "delete_title_some": "{n, plural, other {删除 # 个会话？}}",
         "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",
         "name": "名称",
@@ -2690,7 +2983,11 @@
       },
       "stop_waiting": "停止等待",
       "stop_waiting_failed": "无法停止等待",
-      "wake_failed": "无法唤醒此会话"
+      "wake_failed": "无法唤醒此会话",
+      "waiting_more": "{first} 等另外 {n} 个",
+      "waiting_on_chat": "另一个对话",
+      "stop_delegated": "停止子代理",
+      "stop_delegated_failed": "无法停止子代理"
     }
   },
   "onboarding": {
@@ -2960,6 +3257,8 @@
       "hold": "按住听写",
       "hold_hint": "说话时请按住麦克风或快捷键。",
       "no_speech": "未识别到语音。草稿未更改。",
+      "late": "仍在转写",
+      "late_body": "文字转写完成后会插入草稿。按 Esc 停止。",
       "transcribing": "正在转写…",
       "starting": "正在启动…"
     },
@@ -3054,6 +3353,14 @@
       "setup_summary": "已设置 Cloud 机器",
       "woke_summary": "已唤醒 Cloud 机器",
       "unreachable": "已中断——无法连接到{host}"
+    },
+    "delegates": {
+      "allow": "允许一次",
+      "deny": "拒绝",
+      "answer": "在其对话中回答",
+      "other": "其他",
+      "failed": "无法回复该子代理",
+      "stop_failed": "无法停止该子代理"
     }
   },
   "panel": {
@@ -3200,7 +3507,8 @@
         "show": "在访达中显示",
         "dismiss": "关闭 {name}",
         "saving": "正在保存…"
-      }
+      },
+      "dismiss_error": "关闭"
     },
     "browser_api": {
       "empty": "输入网站或 localhost 地址。",
@@ -3323,6 +3631,12 @@
       "old": "此版本 Zeron 需要更新的引擎",
       "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
       "short_old": "需要更新的引擎"
+    },
+    "quit": {
+      "working": "{n, plural, other {还有 # 个对话正在进行。}}",
+      "detail": "要在后台继续运行直到完成，还是现在停止？",
+      "keep": "继续运行",
+      "stop": "立即停止"
     }
   },
   "account": {
@@ -3349,6 +3663,9 @@
         "expired": "你已退出登录。请重新登录以继续。",
         "failed": "登录未完成。请重试。"
       }
+    },
+    "cloud": {
+      "reach_not_changed": "无法更改此 Cloud 对话的访问范围。"
     }
   },
   "plugins": {
@@ -3464,7 +3781,11 @@
         },
         "compose": {
           "title": "在消息输入框中填写文本",
-          "detail": "仍由你来发送。"
+          "detail": "它可以补充或替换你写的内容，仍由你来发送。"
+        },
+        "draft": {
+          "title": "读取你在消息输入框中输入的内容，并可暂存",
+          "detail": "它能在你发送前看到你在任意聊天中输入的文字，也能把草稿暂时取走、稍后放回。它不会替你发送。"
         },
         "network": {
           "title": "连接互联网",
@@ -3483,6 +3804,9 @@
         },
         "windows": {
           "title": "打开自己的窗口"
+        },
+        "scene3d": {
+          "title": "绘制 3D 场景"
         },
         "tools": {
           "title": "为你的智能体提供工具"

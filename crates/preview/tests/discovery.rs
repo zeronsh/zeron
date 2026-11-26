@@ -62,8 +62,13 @@ fn launch_from(cwd: &Path, http: bool, origin: Option<String>) -> Child {
             .unwrap(),
     )
 }
+/// How long discovery may take to list a server: a listener is probed only
+/// once it has stayed up 3 s, the scan may have slowed to every 16 s while
+/// nothing changed (a scope change doesn't wake it), and a busy machine
+/// slows every scan.
+const CONVERGE: Duration = Duration::from_secs(30);
 async fn wait(service: &PreviewService, expected_pid: Option<u32>) {
-    tokio::time::timeout(Duration::from_secs(12), async {
+    tokio::time::timeout(CONVERGE, async {
         loop {
             let services = service.catalog().snapshot().services;
             if match expected_pid {
@@ -407,7 +412,7 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
     roots.terminals.insert(terminal.clone(), chat.clone());
     service.start(Arc::new(move || roots.clone()), None).await;
     let app = app.canonicalize().unwrap();
-    let services = tokio::time::timeout(Duration::from_secs(12), async {
+    let services = tokio::time::timeout(CONVERGE, async {
         loop {
             let services = service.catalog().snapshot().services;
             if services.len() == 4 {

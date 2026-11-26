@@ -5,7 +5,7 @@ use chrono::Utc;
 use zeron_doc::RegistryDoc;
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
-    ConversationSourceContext, Device, HarnessId, ReasoningLevel, SandboxLevel, Session,
+    ChildKind, ConversationSourceContext, Device, HarnessId, ReasoningLevel, SandboxLevel, Session,
     SessionStatus, SessionWaiting, SidebarPinChange, SidebarSectionChange, Space, WaitingKind,
     WaitingOn,
 };
@@ -41,6 +41,34 @@ pub(crate) struct DemoChat {
     /// Put to sleep (the Activity view): until this far from now (ms; past,
     /// it has woken), put to sleep this long ago.
     pub sleep: Option<(i64, i64)>,
+    /// A child its parent's agent delegated to ([`ChildKind::Subagent`]).
+    pub delegated: bool,
+}
+
+/// What a parent waits on: its delegated children still at work (working,
+/// or asking the person).
+fn waiting_on_children(parent: &str, all: &[DemoChat], now: i64) -> Option<SessionWaiting> {
+    let open: Vec<&DemoChat> = all
+        .iter()
+        .filter(|c| c.delegated && c.parent == Some(parent))
+        .filter(|c| matches!(c.status, Some(SessionStatus::Working | SessionStatus::AwaitingInput)))
+        .collect();
+    let since = open.iter().map(|c| now - c.created_ago_ms).min()?;
+    Some(SessionWaiting {
+        since: ms(since),
+        on: open
+            .iter()
+            .map(|c| WaitingOn {
+                id: format!("task-{}", c.id),
+                kind: WaitingKind::SubagentChat,
+                label: c.title.into(),
+                child_chat_id: Some(c.id.into()),
+                device_id: Some(c.device.into()),
+                harness: Some(c.harness),
+                started_at: Some(ms(now - c.created_ago_ms)),
+            })
+            .collect(),
+    })
 }
 
 const MIN: i64 = 60_000;
@@ -70,6 +98,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         parent: None,
         waiting_on: None,
         sleep: None,
+        delegated: false,
     };
     vec![
         DemoChat {
@@ -218,6 +247,85 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 STUDIO,
                 "Draft the launch post",
                 "## Outline",
+            )
+        },
+        // Background delegation: a parent that handed work to four
+        // subagents and waits on the three still open: one on another device
+        // asking to run a command, one asking a question.
+        DemoChat {
+            last_ago_ms: 3 * MIN,
+            created_ago_ms: 20 * MIN,
+            status: Some(SessionStatus::Idle),
+            ..chat(
+                "chat-release",
+                Some("space-zeron"),
+                MAC,
+                "Release check",
+                "Four subagents are on it; I'll summarise when they report back.",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-release"),
+            delegated: true,
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: MIN,
+            created_ago_ms: 4 * MIN,
+            ..chat(
+                "chat-release-audit",
+                Some("space-zeron-vps"),
+                VPS,
+                "Audit the parser",
+                "Codex wants to run a fuzz target.",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-release"),
+            delegated: true,
+            model: "claude-haiku-5-5",
+            reasoning: Medium,
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 20_000,
+            created_ago_ms: 4 * MIN - 1_000,
+            ..chat(
+                "chat-release-notes",
+                Some("space-zeron"),
+                MAC,
+                "Draft the release notes",
+                "Reading the commits since 0.3.19.",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-release"),
+            delegated: true,
+            model: "claude-haiku-5-5",
+            reasoning: Medium,
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 40_000,
+            created_ago_ms: 4 * MIN - 1_500,
+            ..chat(
+                "chat-release-branch",
+                Some("space-zeron"),
+                MAC,
+                "Cut the release branch",
+                "Which branch should 0.3.21 be cut from?",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-release"),
+            delegated: true,
+            model: "claude-haiku-5-5",
+            reasoning: Medium,
+            last_ago_ms: 2 * MIN,
+            created_ago_ms: 4 * MIN - 2_000,
+            ..chat(
+                "chat-release-bench",
+                Some("space-zeron"),
+                MAC,
+                "Time the benchmark",
+                "bench.py: 0.90s for 60 runs.",
             )
         },
         DemoChat {
@@ -432,6 +540,7 @@ pub(crate) fn seed(
     for space in &spaces {
         doc.upsert_space(space)?;
     }
+    let all = chats();
     for demo in chats() {
         let space = demo.space.and_then(|id| spaces.iter().find(|s| s.id == id));
         let last = now - demo.last_ago_ms;
@@ -477,7 +586,7 @@ pub(crate) fn seed(
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
             parent_chat_id: demo.parent.map(str::to_owned),
-            child_kind: None,
+            child_kind: demo.delegated.then_some(ChildKind::Subagent),
             sleep: None,
         };
         doc.upsert_chat(&chat)?;
@@ -493,14 +602,14 @@ pub(crate) fn seed(
                 status,
                 started_at: Some(ms(now - 95_000)),
                 updated_at: Utc::now(),
-                waiting: demo.waiting_on.map(|command| SessionWaiting {
-                    since: ms(last),
-                    on: vec![WaitingOn {
-                        id: format!("bg-{}", demo.id),
-                        kind: WaitingKind::Process,
-                        label: command.into(),
-                    }],
-                }),
+                waiting: demo
+                    .waiting_on
+                    .map(|command| SessionWaiting {
+                        since: ms(last),
+                        on: vec![WaitingOn::runtime(format!("bg-{}", demo.id), WaitingKind::Process, command)],
+                    })
+                    .or_else(|| waiting_on_children(demo.id, &all, now)),
+                blocked_on_wait: false,
             })?;
         }
         if let Some((until_in, slept_ago)) = demo.sleep {

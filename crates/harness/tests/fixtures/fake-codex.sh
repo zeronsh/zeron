@@ -14,6 +14,9 @@ fail_turn() { # $1 = request id, $2 = message
   emit "{\"method\":\"turn/failed\",\"params\":{\"turn\":{\"id\":\"t-bad\",\"error\":{\"message\":\"$2\"}}}}"
 }
 
+# (A warm start's test counts launches.)
+[ -n "$FAKE_LAUNCH_LOG" ] && echo "launch $$" >> "$FAKE_LAUNCH_LOG"
+
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
@@ -41,6 +44,11 @@ if has "$line" '"method":"account/read"'; then
 fi
 if has "$line" '"method":"config/read"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"mcp_servers\":{\"test\":{\"enabled\":true}}}}}"
+  read -r line || exit 1
+fi
+if has "$line" '"method":"plugin/installed"'; then
+  # No plugins, so none of their MCP servers to switch off.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"marketplaces\":[]}}"
   read -r line || exit 1
 fi
 thread_line="$line"

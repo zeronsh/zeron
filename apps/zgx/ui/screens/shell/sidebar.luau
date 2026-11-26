@@ -42,6 +42,9 @@ export type Props = {
 	island: boolean?,
 	-- Room left at its top for the title bar laid over it.
 	top: number?,
+	-- Whether the sidebar stands as a card with the window's 5-point gap
+	-- before it (v3's default; v2's sidebar runs flush to the window edge).
+	card: boolean?,
 }
 
 -- What the sidebar and its rail share: the view options (Zeron's Organize,
@@ -86,36 +89,12 @@ local shared = {
 	project = ui.persist("shell_sidebar_project", nil :: string?),
 	places = ui.state("shell_places", { pinned = {}, sections = {} } :: sessions.Places),
 	selected = ui.state("shell_selected", nil :: string?),
+	-- The sessions picked out together (⇧-clicked), by id.
+	marked = ui.state("shell_sidebar_marked", {} :: { [string]: boolean }),
 	-- Its view, kept here so a sidebar made again comes back as it was.
 	offset = ui.state("shell_sidebar_offset", 0),
 	folded = ui.persist("shell_sidebar_folded", {} :: { [string]: boolean }),
 }
-
--- Scroll probe (for now: "it jumps back a step every few steps"): the
--- list's offset moving back within a moment of moving down is printed
--- (`sidebar-probe:` on the app's stderr), with how often the sidebar was
--- built and the sessions changed. It reads and prints; it writes nothing.
-local probe = { last = 0, at = 0, dir = 0, builds = 0, built_at = 0, sessions_at = 0 }
-ui.effect(function()
-	sessions.now:get()
-	probe.sessions_at = ui.now()
-end)
-ui.effect(function()
-	local offset = shared.offset:get()
-	local t = ui.now()
-	local d = offset - probe.last
-	if d < -0.5 and probe.dir > 0 and t - probe.at < 300 then
-		print(
-			`sidebar-probe: back {math.floor(-d + 0.5)} pt to {math.floor(offset)} ({math.floor(t - probe.at)} ms after a step down);`
-				.. ` sidebar built {probe.builds}x, last {math.floor(t - probe.built_at)} ms ago;`
-				.. ` sessions changed {math.floor(t - probe.sessions_at)} ms ago`
-		)
-	end
-	if math.abs(d) > 0.5 then
-		probe.dir = if d > 0 then 1 else -1
-	end
-	probe.last, probe.at = offset, t
-end)
 
 -- The same, field by field.
 local function same(a: any, b: any): boolean
@@ -245,6 +224,18 @@ ui.effect(function()
 	end
 end)
 
+-- Going anywhere (a key, the palette, a new chat) lets go of the sessions
+-- picked out, as a plain click in the list does.
+local settled = false
+ui.effect(function()
+	route.current:get()
+	-- (As it's made, a reload say, nothing has gone anywhere.)
+	if settled and next(shared.marked:peek()) ~= nil then
+		shared.marked:set({})
+	end
+	settled = true
+end)
+
 -- Device names, by id; this Mac's.
 local function devices(): ({ [string]: string }, string?)
 	local names: { [string]: string } = {}
@@ -306,6 +297,26 @@ local NO_PROJECT = "none"
 -- question.
 local asks = ui.shared("chat.asks", {} :: { [string]: string })
 local ASKED: { [string]: string } = { approval = "approval", question = "input" }
+-- A chat whose subagent asks to be allowed something: that's the person's to
+-- give, and the subagent's own chat isn't listed, so its parent says so. So
+-- does one at rest for a question (at work, it answers what it can itself).
+local function asked_under(c: sessions.Chat, asked: { [string]: string }): string?
+	if next(asked) == nil then
+		return nil
+	end
+	local found: string? = nil
+	for _, child in sessions.children(c.id) do
+		local ask = asked[child.id]
+		if child.child_kind == "subagent" and ask then
+			if ask == "approval" then
+				return "approval"
+			elseif c.status == nil or c.status == "done" or c.status == "waiting" then
+				found = "input"
+			end
+		end
+	end
+	return found
+end
 
 -- Which sessions show, as a plugin allowed to change how the sidebar shows
 -- asks (`sidebar.filter`, the plugin system's to grant): nil, all of them;
@@ -342,27 +353,6 @@ end)
 local function say(word: string): string
 	return locale.s(`shell.sidebar.filter.state.{word}`)
 end
-
--- The Archived shelf's sessions (the most recently moved first), as the
--- list's rows read them.
-local shelf = ui.computed(function(): { any }
-	local names = devices()
-	local out = {}
-	for _, c in sessions.archived:get() do
-		table.insert(out, {
-			id = c.id,
-			title = c.title,
-			time = c.updated,
-			created = c.created,
-			agent = c.agent,
-			harness = c.harness,
-			agent_icon = c.agent_icon,
-			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
-			branch = c.branch,
-		})
-	end
-	return out
-end)
 
 -- The project the list is narrowed to (the filter showing, and the
 -- project still there), else nil.
@@ -470,6 +460,51 @@ route.narrowed_project(function(): string?
 	return nil
 end)
 
+-- The projects' groups, with no sessions yet: one for each repository,
+-- whichever device its clones are on (it stands where the first of them
+-- does, and reads as the oldest of them), then the chats in none; and each
+-- project's group, by their ids.
+type Groups = { list: { ds.SidebarProject }, of: { [string]: string } }
+local groups = ui.computed(function(): Groups
+	local all = sessions.now:get().projects
+	local out: Groups = { list = {}, of = {} }
+	local seen: { [string]: boolean } = {}
+	for _, p in all do
+		local first = oldest_checkout(p, all)
+		out.of[p.id] = first.id
+		if not seen[first.id] then
+			seen[first.id] = true
+			local l = route.look(first.id) or { hue = route.hue(first.id) }
+			table.insert(out.list, { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} })
+		end
+	end
+	table.insert(out.list, { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} })
+	return out
+end)
+
+-- The Archived shelf's sessions (the most recently moved first), as the
+-- list's rows read them.
+local shelf = ui.computed(function(): { any }
+	local names = devices()
+	local of = groups:get().of
+	local out = {}
+	for _, c in sessions.archived:get() do
+		table.insert(out, {
+			id = c.id,
+			title = c.title,
+			time = c.updated,
+			created = c.created,
+			agent = c.agent,
+			harness = c.harness,
+			agent_icon = c.agent_icon,
+			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
+			branch = c.branch,
+			project = (c.project and of[c.project]) or NO_PROJECT,
+		})
+	end
+	return out
+end)
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
@@ -478,23 +513,20 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	local names = devices()
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
-	-- One group for each repository, whichever device its clones are on: it stands
-	-- where the first of them does, and reads as the oldest of them.
-	local of_repository: { [string]: ds.SidebarProject } = {}
-	for _, p in now.projects do
-		local group = if p.repository then of_repository[p.repository] else nil
-		if not group then
-			local first = oldest_checkout(p, now.projects)
-			local l = route.look(first.id) or { hue = route.hue(first.id) }
-			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
-			table.insert(out, group :: any)
-			if p.repository then
-				of_repository[p.repository] = group :: any
-			end
+	local made: { [string]: ds.SidebarProject } = {}
+	local all = groups:get()
+	for _, g in all.list do
+		local group = table.clone(g)
+		group.sessions = {}
+		made[g.id] = group
+		if g.id ~= NO_PROJECT then
+			table.insert(out, group)
 		end
-		by[p.id] = group :: any
 	end
-	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
+	for id, group in all.of do
+		by[id] = made[group]
+	end
+	local loose = made[NO_PROJECT]
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
@@ -527,7 +559,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
-		local status = ASKED[asked[c.id] or ""] or c.status
+		local status = ASKED[asked[c.id] or ""] or asked_under(c, asked) or c.status
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
 		-- on, and its place; asleep, its corner says when it wakes. Off, none
@@ -853,15 +885,18 @@ local renaming = ui.state("shell_renaming", nil :: string?)
 local rename_open = ui.state("shell_rename_open", false)
 -- The session renamed in its row (Zeron's inline rename), while it is.
 local renaming_row = ui.state("shell_renaming_row", nil :: string?)
--- The session asked about deleting, and its dialog.
-local deleting = ui.state("shell_deleting", nil :: string?)
+-- The sessions asked about deleting (one, or those picked out), and their
+-- dialog.
+local deleting = ui.state("shell_deleting_ids", {} :: { string })
 local delete_open = ui.state("shell_delete_open", false)
--- What the delete takes with it (its subagents and side chats, theirs in
--- turn), as the host counted them when it was asked.
+-- How many are asked about (kept as its dialog goes, its words still).
+local delete_of = ui.state("shell_delete_of", 1)
+-- What the delete takes with it (their subagents and side chats, and those'
+-- in turn), as the host counted them when it was asked.
 local delete_subagents = ui.state("shell_delete_subagents", 0)
 local delete_sides = ui.state("shell_delete_sides", 0)
--- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
-local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
+-- Sleep → Custom…: the chats, the moment chosen, and whether it's asking.
+local sleep_custom = ui.state("shell_sleep_custom_ids", {} :: { string })
 local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
 local sleep_custom_open = ui.state("shell_sleep_custom_open", false)
 local new_title = ui.state("shell_rename_title", "")
@@ -895,28 +930,39 @@ local function is_side(id: string): boolean
 	return chat(id) ~= nil
 end
 
--- Where a session is put by hand: pinned, a section, or back in its group.
-local function put(id: string, where: string?)
+-- Where sessions are put by hand: pinned, a section, or back in their
+-- group (nil). One already there keeps its place; the rest follow in order.
+local function put(ids: { string }, where: string?)
 	local p = plain(shared.places:peek())
-	local pinned = {}
-	for _, other in p.pinned do
-		if other ~= id then
-			table.insert(pinned, other)
+	-- `list` as it is after, `here` where they're put.
+	local function after(list: { string }, here: boolean): { string }
+		local out: { string } = {}
+		for _, id in list do
+			if here or not table.find(ids, id) then
+				table.insert(out, id)
+			end
 		end
+		for _, id in if here then ids else {} do
+			if not table.find(out, id) then
+				table.insert(out, id)
+			end
+		end
+		return out
 	end
-	if where == "pinned" then
-		table.insert(pinned, id)
-	end
+	p.pinned = after(p.pinned, where == "pinned")
 	for _, s in p.sections do
-		local i = table.find(s.sessions, id)
-		if i then
-			table.remove(s.sessions, i)
-		end
-		if s.id == where then
-			table.insert(s.sessions, id)
+		s.sessions = after(s.sessions, where == s.id)
+	end
+	shared.places:set(p)
+end
+-- Whether all of them are in `list`.
+local function all_in(ids: { string }, list: { string }): boolean
+	for _, id in ids do
+		if not table.find(list, id) then
+			return false
 		end
 	end
-	shared.places:set({ pinned = pinned, sections = p.sections })
+	return true
 end
 
 -- What else asks for these (the shell's keys, the palette).
@@ -1046,11 +1092,6 @@ function M.archive(id: string)
 	sessions.archive(id)
 end
 
--- A session's menu, as the gallery's (Zeron's sidebar chat menu): rename,
--- pin, copy, move into one of your sections, archive (kept: Settings →
--- Archived lists it), delete (for good, asked once more); then plugins'
--- items, under their names (screens/plugins/menus: the app's registry of
--- them, read as the menu opens).
 -- (Copied, said so, as Zeron's: "Path copied".)
 local function copy(text: string?, what: string)
 	if text then
@@ -1067,28 +1108,23 @@ end
 
 M.pin = function(id: string)
 	local pinned = table.find(shared.places:peek().pinned, id) ~= nil
-	put(id, if pinned then nil else "pinned")
+	put({ id }, if pinned then nil else "pinned")
 end
 
-local function menu(id: string): { any }?
-	local c = chat(id)
-	if not c then
-		return nil
-	end
-	local p = shared.places:peek()
-	local pinned = table.find(p.pinned, id) ~= nil
+-- Move to's sections, for `ids`.
+local function sections_menu(ids: { string }): { any }
 	local into: { any } = { { heading = locale.s("shell.sidebar.menu.sections") } }
-	for _, s in p.sections do
-		local here = table.find(s.sessions, id) ~= nil
+	for _, s in shared.places:peek().sections do
+		local here = all_in(ids, s.sessions)
 		table.insert(into, {
 			label = s.name,
 			icon = "folder",
 			checked = function(): boolean
 				return here
 			end,
-			-- (Chosen where it is: back to its project.)
+			-- (Chosen where they are: back to their project.)
 			on_select = function()
-				put(id, if here then nil else s.id)
+				put(ids, if here then nil else s.id)
 			end,
 		})
 	end
@@ -1101,11 +1137,14 @@ local function menu(id: string): { any }?
 			local now = plain(shared.places:peek())
 			table.insert(now.sections, { id = sid, name = locale.s("shell.sidebar.menu.new_section"), sessions = {} })
 			shared.places:set(now)
-			put(id, sid)
+			put(ids, sid)
 		end,
 	})
-	-- What Copy offers: its folder, its harness's link and id where it has
-	-- them (a Codex thread's), and its own id.
+	return into
+end
+-- What Copy offers a session: its folder, its harness's link and id where it
+-- has them (a Codex thread's), and its own id.
+local function copies_menu(c: sessions.Chat): { any }
 	local copies: { any } = {
 		{
 			label = locale.s("shell.sidebar.menu.path"),
@@ -1120,7 +1159,7 @@ local function menu(id: string): { any }?
 		label = locale.s("shell.sidebar.menu.zeron_link"),
 		icon = "arrow-up-right",
 		on_select = function()
-			sessions.link(id):after(function(link: any)
+			sessions.link(c.id):after(function(link: any)
 				copy(if type(link) == "string" then link else nil, locale.s("shell.sidebar.menu.zeron_link"))
 			end, function()
 				ds.toast.show { title = locale.s("shell.sidebar.menu.link_not_ready"), tone = "danger" }
@@ -1152,138 +1191,233 @@ local function menu(id: string): { any }?
 			copy(c.id, locale.s("shell.sidebar.menu.session_id"))
 		end,
 	})
-	local side = is_side(id)
-	-- The Activity view's Sleep (its times, each saying when, and one of
-	-- your own), or, asleep, Wake.
-	local sleep: any = false
-	if activity.on:peek() and not side then
-		if c.sleep_until then
-			sleep = {
-				label = locale.s("shell.activity.wake"),
-				icon = "sun",
-				on_select = function()
+	return copies
+end
+-- The Activity view's Sleep (its times, each saying when, and one of your
+-- own), or, all of them asleep, Wake.
+local function sleep_entry(chats: { sessions.Chat }): any
+	local ids: { string } = {}
+	local awake = false
+	for _, c in chats do
+		table.insert(ids, c.id)
+		awake = awake or not c.sleep_until
+	end
+	if not awake then
+		return {
+			label = locale.s("shell.activity.wake"),
+			icon = "sun",
+			on_select = function()
+				for _, id in ids do
 					activity.wake(id)
-				end,
-			}
-		else
-			local times: { any } = {}
-			for _, p in activity.presets() do
-				table.insert(times, {
-					label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
-					on_select = function()
-						activity.sleep(id, p.until_at)
-					end,
-				})
-			end
-			table.insert(times, { separator = true })
-			table.insert(times, {
-				label = locale.s("shell.activity.sleep.custom"),
-				on_select = function()
-					-- (It opens on tomorrow at 9: a time already chosen,
-					-- moved from there.)
-					local d = os.date("*t") :: any
-					sleep_custom:set(id)
-					sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
-					sleep_custom_open:set(true)
-				end,
-			})
-			sleep = { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
-		end
+				end
+			end,
+		}
 	end
-	-- Waiting on background work it said it waits on: the person can say
-	-- otherwise (a dev server marked by mistake). Its background agents
-	-- aren't its say, so there's nothing to take back there.
-	local stop_waiting: any = false
-	if c.status == "waiting" then
-		for _, w in c.waiting or {} do
-			if w.kind == "process" then
-				stop_waiting = {
-					label = locale.s("shell.activity.stop_waiting"),
-					icon = "close-circle",
-					on_select = function()
-						sessions.stop_waiting(id):after(function() end, function()
-							ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
-						end)
-					end,
-				}
-				break
+	local times: { any } = {}
+	for _, p in activity.presets() do
+		table.insert(times, {
+			label = locale.s("shell.activity.sleep.choice", { name = p.label, when = p.detail }),
+			on_select = function()
+				for _, id in ids do
+					activity.sleep(id, p.until_at)
+				end
+			end,
+		})
+	end
+	table.insert(times, { separator = true })
+	table.insert(times, {
+		label = locale.s("shell.activity.sleep.custom"),
+		on_select = function()
+			-- (It opens on tomorrow at 9: a time already chosen,
+			-- moved from there.)
+			local d = os.date("*t") :: any
+			sleep_custom:set(ids)
+			sleep_custom_at:set(activity.local_time({ year = d.year, month = d.month, day = d.day + 1, hour = 9, min = 0, sec = 0 }))
+			sleep_custom_open:set(true)
+		end,
+	})
+	return { label = locale.s("shell.activity.sleep.title"), icon = "moon", submenu = times }
+end
+-- Waiting on background work it said it waits on: the person can say
+-- otherwise (a dev server marked by mistake). Its background agents aren't
+-- its say, so there's nothing to take back there. (Of several: those that
+-- are; false, none.)
+local function stop_waiting_entry(chats: { sessions.Chat }): any
+	local waiting: { string } = {}
+	for _, c in chats do
+		if c.status == "waiting" then
+			for _, w in c.waiting or {} do
+				if w.kind == "process" then
+					table.insert(waiting, c.id)
+					break
+				end
 			end
 		end
 	end
-	local entries = {
-		{
+	if #waiting == 0 then
+		return false
+	end
+	return {
+		label = locale.s("shell.activity.stop_waiting"),
+		icon = "close-circle",
+		on_select = function()
+			for _, id in waiting do
+				sessions.stop_waiting(id):after(function() end, function()
+					ds.toast.show { title = locale.s("shell.activity.stop_waiting_failed"), tone = "danger" }
+				end)
+			end
+		end,
+	}
+end
+-- Waiting on its subagents: Stop ends them, and it.
+local function stop_delegated_entry(chats: { sessions.Chat }): any
+	local waiting: { string } = {}
+	for _, c in chats do
+		if c.status == "waiting" then
+			for _, w in c.waiting or {} do
+				if w.kind == "chat" then
+					table.insert(waiting, c.id)
+					break
+				end
+			end
+		end
+	end
+	if #waiting == 0 then
+		return false
+	end
+	return {
+		label = locale.s("shell.activity.stop_delegated"),
+		icon = "stop",
+		on_select = function()
+			for _, id in waiting do
+				sessions.stop(id):after(function() end, function()
+					ds.toast.show { title = locale.s("shell.activity.stop_delegated_failed"), tone = "danger" }
+				end)
+			end
+		end,
+	}
+end
+-- Deleting asks once more (Zeron's "Delete session?"), once it knows what
+-- goes with them, to say so.
+local function ask_delete(ids: { string })
+	local subagents, sides, left = 0, 0, #ids
+	local function heard(with: any)
+		subagents += tonumber(with and with.subagents) or 0
+		sides += tonumber(with and with.sides) or 0
+		left -= 1
+		if left == 0 then
+			delete_subagents:set(subagents)
+			delete_sides:set(sides)
+			deleting:set(ids)
+			delete_of:set(#ids)
+			delete_open:set(true)
+		end
+	end
+	for _, id in ids do
+		sessions.deleted_with(id):after(heard, function()
+			heard(nil)
+		end)
+	end
+end
+
+-- A session's menu, as the gallery's (Zeron's sidebar chat menu): rename,
+-- pin, copy, move into one of your sections, archive (kept: Settings →
+-- Archived lists it), delete (for good, asked once more); then plugins'
+-- items, under their names (screens/plugins/menus: the app's registry of
+-- them, read as the menu opens).
+-- Of several (`wanted`, picked out together), without what is one session's
+-- own: rename, copy, plugins' items, and the keys, which act on the one open.
+local function menu_of(wanted: { string }): { any }?
+	local ids: { string } = {}
+	local chats: { sessions.Chat } = {}
+	local busy = 0
+	for _, id in wanted do
+		local c = chat(id)
+		if c then
+			table.insert(ids, id)
+			table.insert(chats, c)
+			busy += if c.status == "working" or c.status == "waiting" then 1 else 0
+		end
+	end
+	if #ids == 0 then
+		return nil
+	end
+	local one = if #ids == 1 then chats[1] else nil
+	-- (A side chat's: without what doesn't apply to it.)
+	local side = one ~= nil and is_side(one.id)
+	local pinned = all_in(ids, shared.places:peek().pinned)
+	local all: { any } = {
+		one ~= nil and {
 			label = locale.s("common.rename"),
 			icon = "pen",
 			on_select = function()
-				M.rename(id)
+				M.rename(ids[1])
 			end,
 		},
-		if side
-			then false
-			else {
-				label = locale.s(if pinned then "shell.sidebar.menu.unpin" else "shell.sidebar.menu.pin"),
-				icon = "pin",
-				shortcut = "cmd+shift+p",
-				on_select = function()
-					M.pin(id)
-				end,
-			},
-		{
+		not side and {
+			label = locale.s(if pinned then "shell.sidebar.menu.unpin" else "shell.sidebar.menu.pin"),
+			icon = "pin",
+			shortcut = if one then "cmd+shift+p" else nil,
+			on_select = function()
+				put(ids, if pinned then nil else "pinned")
+			end,
+		},
+		one ~= nil and {
 			label = locale.s("common.copy"),
 			icon = "copy",
-			submenu = copies,
+			submenu = copies_menu(one),
 		},
 		-- (Activity lists no sections: nothing to move into.)
-		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
-		sleep,
-		stop_waiting,
+		not side and not activity.on:peek() and {
+			label = locale.s("shell.sidebar.menu.move_to"),
+			icon = "folder-with-files",
+			submenu = sections_menu(ids),
+		},
+		not side and activity.on:peek() and sleep_entry(chats),
+		stop_waiting_entry(chats),
+		stop_delegated_entry(chats),
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
 			label = locale.s("common.archive"),
 			icon = "archive-minimalistic",
-			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
+			disabled = if busy == 0
+				then nil
+				elseif one then locale.s("shell.sidebar.menu.archive_working")
+				else locale.s("shell.sidebar.menu.archive_working_some", { n = busy }),
 			on_select = function()
-				M.archive(id)
+				for _, id in ids do
+					M.archive(id)
+				end
 			end,
 		},
 		{
 			label = locale.s("shell.sidebar.menu.delete"),
 			icon = "trash-bin-minimalistic",
 			danger = true,
-			-- (Asked once more, as Zeron's: "Delete session?")
-			-- (Once it knows what goes with it, to say so.)
 			on_select = function()
-				local function ask(subagents: number, sides: number)
-					delete_subagents:set(subagents)
-					delete_sides:set(sides)
-					deleting:set(id)
-					delete_open:set(true)
-				end
-				sessions.deleted_with(id):after(function(with: any)
-					ask(tonumber(with and with.subagents) or 0, tonumber(with and with.sides) or 0)
-				end, function()
-					ask(0, 0)
-				end)
+				ask_delete(ids)
 			end,
 		},
 	}
-	-- (A side chat's: without what doesn't apply to it.)
-	local kept: { any } = {}
-	for _, e in entries :: { any } do
-		if e ~= false then
-			table.insert(kept, e)
+	local entries: { any } = {}
+	for _, e in all do
+		if e then
+			table.insert(entries, e)
 		end
 	end
-	entries = kept :: any
-	-- (The registry is the plugin system's: without it, the app's alone.)
+	-- (The registry is the plugin system's: without it, the app's alone. An
+	-- item is told one session.)
 	local menus: { extend: ((entries: { any }, kind: string, context: { [string]: any }) -> { any })? }? =
 		boundary.load("@app/screens/plugins/menus")
 	local extend = menus and menus.extend
-	if extend then
-		return extend(entries, "session", { id = id })
+	if extend and one then
+		return extend(entries, "session", { id = one.id })
 	end
 	return entries
+end
+local function menu(id: string): { any }?
+	return menu_of({ id })
 end
 
 -- The same menu, for a session shown elsewhere (the panel's side chat rows
@@ -1468,19 +1602,22 @@ local function project_dialogs(): Node
 	}
 end
 
--- Deleting a session, asked once more (Zeron's "Delete session?"): for
+-- Deleting sessions, asked once more (Zeron's "Delete session?"): for
 -- good, so its red Delete waits on Cancel.
+local function title_of(c: sessions.Chat?): string
+	return if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
+end
 local function delete_dialog(): Node
 	local function says(): string
-		local id = deleting:get()
-		local c = if id then chat(id) else nil
-		local t = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
-		local will = locale.s("shell.sidebar.session.will_delete", { title = t })
+		local first, of = deleting:get()[1], delete_of:get()
+		local will = if of == 1
+			then locale.s("shell.sidebar.session.will_delete", { title = title_of(if first then chat(first) else nil) })
+			else locale.s("shell.sidebar.session.will_delete_some", { n = of })
 		local subagents, sides = delete_subagents:get(), delete_sides:get()
 		local also = if subagents > 0 and sides > 0
-			then locale.s("shell.sidebar.session.also_deletes_both", { subagents = subagents, sides = sides })
-			elseif subagents > 0 then locale.s("shell.sidebar.session.also_deletes_subagents", { n = subagents })
-			elseif sides > 0 then locale.s("shell.sidebar.session.also_deletes_side", { n = sides })
+			then locale.s("shell.sidebar.session.also_deletes_both", { of = of, subagents = subagents, sides = sides })
+			elseif subagents > 0 then locale.s("shell.sidebar.session.also_deletes_subagents", { of = of, n = subagents })
+			elseif sides > 0 then locale.s("shell.sidebar.session.also_deletes_side", { of = of, n = sides })
 			else nil
 		if not also then
 			return will
@@ -1489,30 +1626,31 @@ local function delete_dialog(): Node
 	end
 	return ds.Dialog {
 		open = delete_open,
-		title = ui.t("shell.sidebar.session.delete_title") :: any,
+		title = function(): string
+			local of = delete_of:get()
+			return if of == 1 then locale.s("shell.sidebar.session.delete_title") else locale.s("shell.sidebar.session.delete_title_some", { n = of })
+		end,
 		tone = "danger",
 		size = "sm",
 		confirm = {
 			label = ui.t("common.delete") :: any,
 			on_click = function()
-				local id = deleting:peek()
-				deleting:set(nil)
-				if not id then
-					return
+				local ids = deleting:peek()
+				deleting:set({})
+				for _, id in ids do
+					-- (Its title now: refused, the window has already left it.)
+					local title = title_of(chat(id))
+					if route.current:peek().session == id then
+						route.new_chat()
+					end
+					sessions.delete(id):after(function() end, function(err: any)
+						ds.toast.show {
+							title = locale.s("shell.sidebar.session.couldnt_delete", { title = title }),
+							body = if type(err) == "string" and err ~= "" then err else nil,
+							tone = "warning",
+						}
+					end)
 				end
-				-- (Its title now: refused, the window has already left it.)
-				local c = chat(id)
-				local title = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
-				if route.current:peek().session == id then
-					route.new_chat()
-				end
-				sessions.delete(id):after(function() end, function(err: any)
-					ds.toast.show {
-						title = locale.s("shell.sidebar.session.couldnt_delete", { title = title }),
-						body = if type(err) == "string" and err ~= "" then err else nil,
-						tone = "warning",
-					}
-				end)
 			end,
 		},
 		-- (As its own body line, but following the session.)
@@ -1542,11 +1680,13 @@ local function sleep_dialog(): Node
 			label = ui.t("shell.activity.sleep.title") :: any,
 			-- (A time that has passed, or none chosen, puts nothing to sleep.)
 			on_click = function()
-				local id, at = sleep_custom:peek(), sleep_custom_at:peek()
-				sleep_custom:set(nil)
+				local ids, at = sleep_custom:peek(), sleep_custom_at:peek()
+				sleep_custom:set({})
 				sleep_custom_open:set(false)
-				if id and at and at > os.time() then
-					activity.sleep(id, at)
+				if at and at > os.time() then
+					for _, id in ids do
+						activity.sleep(id, at)
+					end
 				end
 			end,
 		},
@@ -1586,12 +1726,11 @@ local function rename_dialog(): Node
 end
 
 M.Sidebar = ui.component(function(props: Props): Node
-	probe.builds += 1
-	probe.built_at = ui.now()
 	-- (Made again, a reload: no row is rested on yet.)
 	if not props.island then
 		M.card:set(nil)
 	end
+	local card = not props.island and props.card ~= false
 	local bar = ds.Sidebar {
 		compact = shared.compact,
 		organize = shared.organize :: any,
@@ -1601,8 +1740,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		places = shared.places :: any,
 		width = shared.width,
 		default_width = fit.SIDEBAR_DEFAULT,
-		shown = if props.island then nil else view.sidebar_shown,
-		before = if props.island then nil else 5,
+		shown = if card then view.sidebar_shown else nil,
+		before = if card then 5 else nil,
 		-- (Its edge double-clicked: the chat and the panel split again, as
 		-- Zeron's `reset_panel_widths`.)
 		on_reset = function()
@@ -1623,13 +1762,16 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
-		card = not props.island,
+		card = card,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,
 		archived = shelf,
+		known = function(): { ds.SidebarProject }
+			return groups:get().list
+		end :: any,
 		activity = activity.on,
 		on_activity_settings = function()
 			route.settings("activity")
@@ -1649,6 +1791,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_settings = M.account.on_settings,
 		settings_open = M.account.settings_open,
 		menu = menu,
+		marked = if props.island then nil else shared.marked,
+		menu_many = menu_of,
 		project_menu = project_menu,
 		narrowed = function(): boolean
 			return narrow:get() ~= nil
@@ -1680,7 +1824,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if props.island then
 		return bar
 	end
-	return ui.div {
+	local holder: { [any]: any } = {
 		id = "shell-sidebar",
 		hook = "shell.sidebar",
 		h_full = true,
@@ -1690,18 +1834,23 @@ M.Sidebar = ui.component(function(props: Props): Node
 		-- going only with its last 5 points, so the card's left edge stands
 		-- still as it folds and comes back. It once closed on the sidebar's
 		-- clock, the whole card sliding 5 points.)
-		pl = function(): number
-			local shown = view.sidebar_shown:get()
-			return ui.raw(math.min(5, shown), "the window's gap before its card")
-		end,
-		-- (That gap's top moves the window, as the bar beside it does.)
-		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
-		bar,
-		rename_dialog(),
-		delete_dialog(),
-		sleep_dialog(),
-		project_dialogs(),
+		pl = if card
+			then function(): number
+				local shown = view.sidebar_shown:get()
+				return ui.raw(math.min(5, shown), "the window's gap before its card")
+			end
+			else nil,
 	}
+	if card then
+		-- (That gap's top moves the window, as the bar beside it does.)
+		table.insert(holder, ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true })
+	end
+	table.insert(holder, bar)
+	table.insert(holder, rename_dialog())
+	table.insert(holder, delete_dialog())
+	table.insert(holder, sleep_dialog())
+	table.insert(holder, project_dialogs())
+	return ui.div(holder)
 end)
 
 -- A project's name and icon edited (Edit project…), from its header's menu

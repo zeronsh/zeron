@@ -81,9 +81,8 @@ and never looks in the store.
 ## Access
 
 Objects live at `attachments/{userId}/{chatId}/{uploadId}`, where the user id comes from the
-caller's verified token, so only that user's bearers can name them. A Cloud machine's token
-is admitted only for a chat it hosts, or a delegate it started
-(`edge/src/runner-access.ts`). Every read and write needs a bearer. The size limit is the
+caller's verified token, so only that user's bearers (their devices and Cloud machines) can
+name them. Every read and write needs a bearer. The size limit is the
 engine's existing upload cap, 32 MiB, refused from the `content-length` before anything is
 stored. Each object carries a SHA-256 that R2 checks on the way in and the machine checks on
 the way out.

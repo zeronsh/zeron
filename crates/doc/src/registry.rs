@@ -45,6 +45,8 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod cloud_agents;
+pub use cloud_agents::{CloudAgentChoice, CloudAgentChoices, KIND_CLOUD_AGENTS};
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;
@@ -1954,6 +1956,7 @@ impl RegistryDoc {
                 serde_json::to_value(&session.background_tasks)?,
             ),
             ("waiting", serde_json::to_value(&session.waiting)?),
+            ("blockedOnWait", json!(session.blocked_on_wait)),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())

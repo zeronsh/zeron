@@ -15,17 +15,20 @@
  *   PUT    /cloud/{orgId}/projects/{spaceId}       add/update a project (user)
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
  *   GET    /cloud/{orgId}/sessions                 sessions (user)
- *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId}: a machine for a new chat (user)
+ *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId, reach?}: a machine for a new chat (user)
  *   PUT    /cloud/{orgId}/machine                  {machine}: the default for new sessions (user)
+ *   PUT    /cloud/{orgId}/reach                    {reach}: the default reach for new sessions (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/wake   {machine?, wake?}: wake, or pick its size asleep (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/retry  {machine?}: retry; a fresh machine once its data expired (user)
  *   POST   /cloud/{orgId}/sessions/{chatId}/sleep  (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/reach  {reach}: devices | isolated (user only, never a machine)
  *   DELETE /cloud/{orgId}/sessions/{chatId}        delete that session's machine (user)
  *   POST   /runner/enroll                  pre-bearer: one-time code → key
  *   POST   /runner/token                   pre-bearer: signed ts → runner JWT
  *   POST   /runner/heartbeat               runner bearer
  *   POST   /runner/wake-timing             runner bearer: a wake's engine side
  *   POST   /runner/wake-stage              runner bearer: how far a wake has got
+ *   POST   /runner/models                  runner bearer: {harness, models, credential}, an agent's catalog
  *
  * Every route lands on the caller's OWN CloudAccount DO (`cloud1/{org}/{user}`,
  * org/user from the verified bearer — or, for the two pre-bearer runner
@@ -35,11 +38,21 @@
 import type { Verified } from "../auth";
 import type { Env } from "../env";
 import { json, jsonError, readJsonBody } from "../http";
+import { isRunnerReach } from "../registry-runner";
 import type { CloudResult, RepoInput } from "./cloud-account";
 import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
 import { DAY_MS, dayKey, isDayKey } from "./metering";
-import { CLOUD_MODELS } from "./models";
+import {
+  MAX_PUBLISH_BODY,
+  accountCatalogs,
+  cloudModels,
+  isCloudAgent,
+  parseAccounts,
+  parsePublishedModels,
+  parseUsageWindows,
+  type PublishedCatalogs
+} from "./models";
 
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
@@ -256,6 +269,7 @@ const machineOfBody = (body: unknown): { readonly machine?: SandboxMachine } | "
 };
 
 const BAD_MACHINE = `Expected machine: ${MACHINES.map((m) => m.id).join(" | ")}.`;
+const BAD_REACH = "Expected reach: devices | isolated.";
 
 /** `/cloud/*` (user bearer) and `/runner/heartbeat` (runner bearer). */
 export const handleCloudRoute = async (
@@ -315,6 +329,52 @@ export const handleCloudRoute = async (
     return rpc(() => accountStub(ns, runner.orgId, runner.userId).wakeStage(runner, parsed.stage));
   }
 
+  if (url.pathname === "/runner/models") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_PUBLISH_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    const { harness, credential } = body;
+    if (!isCloudAgent(harness)) return jsonError(400, "bad_request", "Unknown harness.");
+    if (typeof credential !== "string" || credential.length === 0 || credential.length > 512) {
+      return jsonError(400, "bad_request", "Expected credential: the catalog's credential fingerprint.");
+    }
+    const models = parsePublishedModels(body.models);
+    if (!models) return jsonError(400, "bad_request", "Expected models: a non-empty list of models.");
+    // (Optional: a machine whose vault names no account sends none.)
+    const accounts = body.accounts === undefined ? undefined : parseAccounts(body.accounts);
+    if (body.accounts !== undefined && !accounts) {
+      return jsonError(400, "bad_request", "Expected accounts: sorted provider@slot pairs, comma-joined.");
+    }
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() =>
+      accountStub(ns, runner.orgId, runner.userId).publishModels(runner, harness, models, credential, accounts)
+    );
+  }
+
+  if (url.pathname === "/runner/usage") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    // One account's: a run's subscription.
+    const account = parseAccounts(body.accounts);
+    if (!account || account.includes(",")) return jsonError(400, "bad_request", "Expected accounts: one provider@slot.");
+    const windows = parseUsageWindows(body.windows);
+    if (!windows) return jsonError(400, "bad_request", "Expected windows: one to four {label, usedFraction, resetsAt?}.");
+    const planLabel = typeof body.planLabel === "string" && body.planLabel.length <= 60 ? body.planLabel : undefined;
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).reportUsage(runner, account, windows, planLabel));
+  }
+
   if (url.pathname === "/runner/wake-timing") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
     if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
@@ -356,7 +416,15 @@ export const handleCloudRoute = async (
     // An unconfigured deployment still answers status, so the UI can hide
     // the enable button instead of erroring.
     if (!ns) {
-      return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false, machines: MACHINES, machine: parseMachine(undefined) });
+      return json({
+        state: "off",
+        awakeSessions: 0,
+        maxAwakeSessions: 0,
+        available: false,
+        machines: MACHINES,
+        machine: parseMachine(undefined),
+        reach: "devices"
+      });
     }
     const available = cloudAvailable(env);
     return rpc(async () => {
@@ -380,8 +448,37 @@ export const handleCloudRoute = async (
     return rpc(() => accountStub(ns, orgId, auth.userId).usage(caller, from, to));
   }
   if (rest.length === 1 && rest[0] === "models" && request.method === "GET") {
-    // Static (models.ts): readable whether or not this account turned Cloud on.
-    return json({ models: CLOUD_MODELS });
+    // The hand-kept lists (models.ts), readable whether or not this account
+    // turned Cloud on, and every other agent's catalog as a machine of this
+    // account last discovered it. A failure reading those still answers the
+    // hand-kept lists: the picker always has Claude Code's and Codex's.
+    if (!ns) return json({ models: cloudModels({}), catalogs: {} });
+    let published: PublishedCatalogs = { latest: {}, byAccount: {} };
+    try {
+      published = await accountStub(ns, orgId, auth.userId).publishedModels(caller);
+    } catch (e) {
+      console.error("cloud models: published catalogs unreadable", String(e));
+    }
+    return json({ models: cloudModels(published.latest), catalogs: accountCatalogs(published.byAccount) });
+  }
+  if (rest.length === 1 && rest[0] === "plan-usage" && request.method === "GET") {
+    // Subscriptions' usage as machines' runs reported it, by account.
+    if (!ns) return json({ usage: {} });
+    return json({ usage: await accountStub(ns, orgId, auth.userId).reportedUsage(caller) });
+  }
+  if (rest.length === 1 && rest[0] === "models" && request.method === "POST") {
+    // An agent's models as this account's own device discovered them while
+    // signing an account in for Cloud: shown before any machine runs it.
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_PUBLISH_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    if (!isCloudAgent(body.harness)) return jsonError(400, "bad_request", "Unknown harness.");
+    const harness = body.harness;
+    const accounts = parseAccounts(body.accounts);
+    if (!accounts) return jsonError(400, "bad_request", "Expected accounts: sorted provider@slot pairs, comma-joined.");
+    const models = parsePublishedModels(body.models);
+    if (!models) return jsonError(400, "bad_request", "Expected models: a non-empty list of models.");
+    return rpc(() => accountStub(ns, orgId, auth.userId).publishAccountModels(caller, harness, models, accounts));
   }
   if (rest[0] === "billing") {
     if (!ns) return unavailable();
@@ -443,6 +540,13 @@ export const handleCloudRoute = async (
     return rpc(() => stub.setDefaultMachine(caller, machine));
   }
 
+  if (rest.length === 1 && rest[0] === "reach" && request.method === "PUT") {
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (!isObject(body) || !isRunnerReach(body.reach)) return jsonError(400, "bad_request", BAD_REACH);
+    const reach = body.reach;
+    return rpc(() => stub.setDefaultReach(caller, reach));
+  }
+
   if (rest[0] === "sessions") {
     const sessionRpc = <T>(run: () => Promise<CloudResult<T>>) =>
       rpc(async () => {
@@ -457,7 +561,7 @@ export const handleCloudRoute = async (
       if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
       if (auth.kind === "runner") {
         // A delegate: the project and repository are the parent's.
-        const { chatId, parentChatId, branch, config } = body;
+        const { chatId, parentChatId, branch, config, childKind } = body;
         if (parentChatId === undefined) {
           return jsonError(403, "forbidden", "A Cloud machine starts sessions only for the chat it hosts.");
         }
@@ -467,9 +571,12 @@ export const handleCloudRoute = async (
         if (config !== undefined && !isChildConfig(config)) {
           return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
         }
-        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
+        if (childKind !== undefined && !isChildKind(childKind)) {
+          return jsonError(400, "bad_request", "Expected childKind 'side' or 'subagent'.");
+        }
+        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config, childKind));
       }
-      const { chatId, spaceId, repo, branch } = body;
+      const { chatId, spaceId, repo, branch, reach } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
       if (typeof spaceId !== "string" || !ID_RE.test(spaceId)) return jsonError(400, "bad_request", "Bad spaceId.");
       // The repository (the project's GitHub origin) and the branch the
@@ -478,7 +585,9 @@ export const handleCloudRoute = async (
       if (branch !== undefined && (typeof branch !== "string" || branch.length > 255)) {
         return jsonError(400, "bad_request", "Bad branch.");
       }
-      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch));
+      // What it reaches: the composer's pick, or the account's default.
+      if (reach !== undefined && !isRunnerReach(reach)) return jsonError(400, "bad_request", BAD_REACH);
+      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, reach));
     }
     const chatId = rest[1];
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");
@@ -492,6 +601,12 @@ export const handleCloudRoute = async (
         return sessionRpc(() => stub.wakeSession(caller, chatId, options));
       }
       if (rest[2] === "sleep") return sessionRpc(() => stub.sleepSession(caller, chatId));
+      if (rest[2] === "reach") {
+        const body = await readJsonBody(request, MAX_RUNNER_BODY);
+        if (!isObject(body) || !isRunnerReach(body.reach)) return jsonError(400, "bad_request", BAD_REACH);
+        const reach = body.reach;
+        return sessionRpc(() => stub.setSessionReach(caller, chatId, reach));
+      }
       if (rest[2] === "retry") {
         if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
         const picked = machineOfBody(await readJsonBody(request, MAX_RUNNER_BODY));
@@ -511,10 +626,9 @@ export const handleCloudRoute = async (
  * sends wake a session; dials (viewing a chat) never do. The DO is the
  * caller's own, so another user's device id is simply not found there.
  *
- * A Cloud machine's runner wakes a session too, but only one it started (its
- * delegate): the agent there sent work to a side chat on a machine that went
- * to sleep. The account DO checks the parentage, as it does for every other
- * session action a runner takes.
+ * A Cloud machine's runner wakes a session too: its agent sent work to a
+ * chat (a delegate, or any other of the person's Cloud chats) on a machine
+ * that went to sleep.
  */
 export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,
@@ -547,3 +661,7 @@ const isChildConfig = (config: unknown): config is Record<string, unknown> =>
   isObject(config) &&
   (config.harness === "codex" || config.harness === "claude-code") &&
   JSON.stringify(config).length <= 4096;
+
+/** A delegate's relation to its parent chat (`crates/proto`: `ChildKind`). */
+const isChildKind = (value: unknown): value is "side" | "subagent" =>
+  value === "side" || value === "subagent";

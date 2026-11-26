@@ -47,6 +47,7 @@
  * key re-seals it under the current one (see `open`).
  */
 import { DurableObject } from "cloudflare:workers";
+import { isKeyProvider } from "./api";
 import type {
   Grant,
   GithubDevicePoll,
@@ -57,7 +58,7 @@ import type {
   GithubUnavailableView,
   VaultAccountProfile,
   VaultAccountView,
-  VaultConnectionView,
+  VaultProviderConnectionView,
   VaultMaterial,
   VaultProviderId,
   VaultResult,
@@ -294,7 +295,7 @@ const statusOf = (row: AccountRow, now: number): "connected" | "needsReconnect" 
 
 const kindOf = (provider: VaultProviderId, secret: unknown): AccountKind => {
   if (provider === "github") return "github";
-  if (provider === "anthropic-key" || provider === "openai-key") return "api-key";
+  if (isKeyProvider(provider)) return "api-key";
   if (provider === "claude" && (secret as { kind?: string } | null)?.kind === "setup-token") return "setup-token";
   return "oauth";
 };
@@ -445,6 +446,7 @@ export class VaultAccount extends DurableObject<Env> {
       const provider = this.getMeta("provider");
       const kind: AccountKind =
         provider === "github" ? "github" : provider === "anthropic-key" || provider === "openai-key" ? "api-key" : "oauth";
+      // (Only the original five providers ever had a single `record`.)
       this.sql.exec(
         `INSERT INTO accounts (slot, generation, status, kind, identity, account, profile, authorized_devices, envelope,
            created_at, updated_at, hard_expires_at, last_refresh_at, last_attempt_at, last_error, failures)
@@ -473,7 +475,7 @@ export class VaultAccount extends DurableObject<Env> {
 
   /** The provider's connection, summarized from its active account (else
    * its most recent one); null when it holds none. */
-  view(userId: string, provider: VaultProviderId): VaultResult<VaultConnectionView | null> {
+  view(userId: string, provider: VaultProviderId): VaultResult<VaultProviderConnectionView | null> {
     const owner = this.claim(userId, provider);
     if (owner) return owner;
     const rows = this.rows();
@@ -627,11 +629,11 @@ export class VaultAccount extends DurableObject<Env> {
       }
       const usable = await this.usableMaterial(active.slot, allowed);
       if (!usable.ok) return usable;
-      return ok(this.toGrant(usable.value.generation, usable.value.material));
+      return ok(this.toGrant(usable.value.generation, usable.value.material, active.slot));
     });
   }
 
-  /** Plan usage of one Claude or Codex account, read here; the token never
+  /** Plan usage of one Claude, Codex or Antigravity account, read here; the token never
    * leaves. Refreshes the token first when due (same path as grants). */
   usage(userId: string, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     const owner = this.claim(userId, provider);
@@ -1504,7 +1506,9 @@ export class VaultAccount extends DurableObject<Env> {
       fetch: this.fetchFn,
       now: Date.now(),
       githubClientId: this.env.GITHUB_APP_CLIENT_ID,
-      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET
+      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET,
+      antigravityClientId: this.env.ANTIGRAVITY_OAUTH_CLIENT_ID,
+      antigravityClientSecret: this.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
     });
     let generation = row.generation;
     const done = await this.ctx.blockConcurrencyWhile(async (): Promise<RefreshDone> => {
@@ -1610,10 +1614,12 @@ export class VaultAccount extends DurableObject<Env> {
   /** What makes two uploads the same login: never secret material itself. */
   private async identityOf(secret: unknown, profile: VaultAccountProfile): Promise<string | undefined> {
     const value = (secret ?? {}) as Record<string, unknown>;
+    const adapter = this.adapter();
+    if (adapter.identity) return adapter.identity(secret, profile);
+    if (isKeyProvider(this.provider)) {
+      return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
+    }
     switch (this.provider) {
-      case "anthropic-key":
-      case "openai-key":
-        return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
       case "github":
         return typeof value.login === "string" ? `login:${value.login.toLowerCase()}` : undefined;
       case "codex": {
@@ -1627,17 +1633,19 @@ export class VaultAccount extends DurableObject<Env> {
     }
   }
 
-  private toGrant(generation: number, material: GrantMaterial): Grant {
+  private toGrant(generation: number, material: GrantMaterial, slot: string): Grant {
     return {
       provider: this.provider,
       accessToken: material.accessToken,
       expiresAt: material.expiresAt,
+      slot,
       generation,
       ...(material.accountId ? { accountId: material.accountId } : {}),
       ...(material.idToken ? { idToken: material.idToken } : {}),
       ...(material.account ? { account: material.account } : {}),
       ...(material.scopes ? { scopes: [...material.scopes] } : {}),
-      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {})
+      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {}),
+      ...(material.settings && Object.keys(material.settings).length > 0 ? { settings: { ...material.settings } } : {})
     };
   }
 

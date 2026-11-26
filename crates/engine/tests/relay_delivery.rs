@@ -255,6 +255,8 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             auto_approve: true,
             access: Default::default(),
             plan: false,
+            code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

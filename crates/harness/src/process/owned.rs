@@ -11,7 +11,7 @@ use crate::process::{Child as ProcessChild, Command};
 /// own configuration (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`,
 /// `CLAUDE_CODE_GIT_BASH_PATH`, `ANTHROPIC_*`) is kept. Every Claude Zeron
 /// starts, directly or through an adapter, reports Zeron as its entrypoint.
-pub(crate) fn configure(command: &mut Command) {
+pub fn configure(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     for key in INHERITED_SESSION_MARKERS {
@@ -34,22 +34,27 @@ const INHERITED_SESSION_MARKERS: [&str; 11] = [
     "CLAUDE_AGENT_SDK_VERSION",
 ];
 
-pub(crate) struct Child {
+pub struct Child {
     inner: ProcessChild,
     #[cfg(unix)]
     group: Option<i32>,
+    /// For the engine's agent ledger (`registry`), once it has exited.
+    pid: Option<u32>,
 }
 
 impl Child {
-    pub(crate) fn new(inner: ProcessChild) -> Self {
+    pub fn new(inner: ProcessChild) -> Self {
         Self {
             #[cfg(unix)]
             group: Some(-(inner.id().expect("newly spawned child") as i32)),
+            pid: inner.id(),
             inner,
         }
     }
 
-    pub(crate) async fn shutdown(&mut self, grace: std::time::Duration) {
+    /// End it and everything it started: its group (and, on Unix, the
+    /// descendants that left it) asked to stop, then killed after `grace`.
+    pub async fn shutdown(&mut self, grace: std::time::Duration) {
         self.shutdown_with(Vec::new(), grace).await;
     }
 
@@ -134,6 +139,9 @@ impl Drop for Child {
         // Tokio's kill_on_drop covers the direct child. Keep the group id
         // even after wait() has reaped it, so descendants cannot escape cleanup.
         self.terminate_group();
+        if let Some(pid) = self.pid {
+            crate::process::registry::forget(pid);
+        }
     }
 }
 

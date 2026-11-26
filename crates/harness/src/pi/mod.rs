@@ -1,5 +1,8 @@
 //! Native Pi JSONL RPC driver. See PROTOCOL.md for the legacy ACK barrier.
 mod catalog;
+/// A provider's name as people say it (`openai-codex` → Codex), for every
+/// agent that reaches models through several providers.
+pub(crate) use catalog::provider_name;
 mod mcp;
 mod normalize;
 // Shared with the omp driver, whose RPC descends from Pi's (same JSONL framing).
@@ -60,6 +63,18 @@ impl Default for PiHarness {
         }
     }
 }
+/// The first Pi with `--no-mcp`: its built-in MCP (the user's `mcp.json`
+/// servers) off for the run, while Zeron's servers, which ride its own
+/// extension (`mcp.rs`), still load.
+const NO_MCP_SINCE: semver::Version = semver::Version::new(1, 0, 4);
+
+/// `--no-mcp` for a run with only Zeron's MCP servers, where a Pi of
+/// `version` knows it; an older one (or one whose version can't be read)
+/// keeps its own servers rather than refusing to start.
+fn no_mcp_arg(version: Option<semver::Version>) -> Option<String> {
+    (version? >= NO_MCP_SINCE).then(|| "--no-mcp".to_owned())
+}
+
 impl PiHarness {
     pub fn new() -> Self {
         Self::default()
@@ -114,12 +129,13 @@ impl PiHarness {
         })
     }
     async fn probe(&self, cwd: &Path, models: bool) -> Result<Value, HarnessError> {
+        // (A Cloud machine's credential keys for Pi: crate::catalog_env.)
         let mut process = self.spawn(
             cwd,
             &["--no-session".into()],
             None,
             &[],
-            &Default::default(),
+            &crate::catalog_env::get(HarnessId::Pi),
         )?;
         let (mut tx, rx) = tokio::sync::oneshot::channel();
         let grace = self.kill_grace;
@@ -171,7 +187,7 @@ impl PiHarness {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let scratch = self::mcp::configure_all(&mut cmd, mcp, extra_mcp)?;
-        let child = cmd.spawn().map_err(|e| {
+        let child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, Some(cwd), || crate::executable::binary_hint(&exe))
         })?;
         let mut child = Child::new(child);
@@ -239,11 +255,20 @@ impl Process {
         command: Value,
         backlog: &mut Vec<Value>,
     ) -> Result<Value, HarnessError> {
+        self.try_query(command, backlog).await?
+    }
+    /// [`Self::query`], keeping Pi's own refusal (the inner `Err`) apart
+    /// from a broken process or pipe (the outer `Err`).
+    async fn try_query(
+        &mut self,
+        command: Value,
+        backlog: &mut Vec<Value>,
+    ) -> Result<Result<Value, HarnessError>, HarnessError> {
         let id = self.transport.client.request(command)?;
         loop {
             let frame = self.next().await?;
             if frame["type"] == "response" && frame["id"] == id {
-                return response_data(frame);
+                return Ok(response_data(frame));
             }
             if frame["type"] == "extension_ui_request" {
                 self.dialogs.request(self.transport.client.clone(), &frame);
@@ -363,6 +388,7 @@ impl Harness for PiHarness {
             default: false,
             id: "default".into(),
             label: "Pi default".into(),
+            provider: None,
             description: Some("Model configured in Pi".into()),
             reasoning_levels: vec![],
             options: vec![],
@@ -393,6 +419,14 @@ impl Harness for PiHarness {
         };
         if lost_context.is_some() {
             request.resume = None;
+        }
+        let mut args = args;
+        if request.zeron_mcp_only {
+            let version = self
+                .resolve_executable()
+                .ok()
+                .and_then(|exe| crate::executable::binary_version(&exe));
+            args.extend(no_mcp_arg(version));
         }
         let process = self.spawn(
             Path::new(&request.cwd),
@@ -1255,5 +1289,21 @@ mod tests {
             })
             .collect();
         assert_eq!(lengths, [8, 4]);
+    }
+}
+
+#[cfg(test)]
+mod zeron_mcp_only_tests {
+    use super::no_mcp_arg;
+
+    /// `--no-mcp` only for a Pi that knows it.
+    #[test]
+    fn no_mcp_only_where_pi_knows_it() {
+        let v = |s: &str| Some(semver::Version::parse(s).unwrap());
+        assert_eq!(no_mcp_arg(v("1.0.4")).as_deref(), Some("--no-mcp"));
+        assert_eq!(no_mcp_arg(v("1.2.0")).as_deref(), Some("--no-mcp"));
+        assert_eq!(no_mcp_arg(v("1.0.3")), None);
+        assert_eq!(no_mcp_arg(v("0.85.1")), None);
+        assert_eq!(no_mcp_arg(None), None);
     }
 }

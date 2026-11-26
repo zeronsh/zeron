@@ -49,6 +49,7 @@ local Math = require("@self/math")
 -- ```mermaid fences drawn as their diagrams (ds/mermaid).
 local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
+local AttachmentMentions = require("@self/attachment_mentions")
 local locale = require("@self/locale")
 local look = require("@self/look")
 
@@ -139,31 +140,125 @@ export type Find = {
 -- it has shown; what's new is a chunk, fading exactly once, its time following how fast
 -- text is coming. Kept by the reply's key, so a row made again doesn't fade again.
 local VEIL_MIN, VEIL_MAX, VEIL_EMA_SEED, VEIL_GAP_MAX = 120, 400, 160, 1000
+local VEIL_SETTLE = 50
 type VeilChunk = { from: number, to: number, started: number, ms: number, boost: number }
 type VeilElem = { text: string, chunks: { VeilChunk }, ema: number, last: number? }
-type Veil = { elems: { [string]: VeilElem }, block: number, n: number, seeding: boolean, tick: State<number>?, ticking: any }
-local VEILS: { [string]: Veil } = {}
+type Veil = {
+	elems: { [string]: VeilElem },
+	seeding: boolean,
+	tick: State<number>?,
+	ticking: any,
+	clocks: number?,
+	ends: number?,
+}
+local VEIL_MOST = 400
+local veils_now: { [string]: Veil } = {}
+local veils_old: { [string]: Veil } = {}
 local veil_count = 0
 local function veil_of(key: string, seeding: boolean): Veil
-	local v = VEILS[key]
-	if not v then
-		-- (A reply's blocks a chat at a time; forgotten in a lump now and then.)
-		veil_count += 1
-		if veil_count > 400 then
-			VEILS, veil_count = {}, 1
-		end
-		v = { elems = {}, block = 0, n = 0, seeding = seeding, ticking = nil } :: any
-		VEILS[key] = v
+	local v = veils_now[key]
+	if v then
+		return v
 	end
+	v = veils_old[key]
+	if not v then
+		v = { elems = {}, seeding = seeding, ticking = nil } :: any
+	end
+	-- (Two generations, as `kept`: active streaming keys are promoted and never
+	-- wiped in a lump when the cache fills.)
+	if veil_count >= VEIL_MOST then
+		veils_now, veils_old, veil_count = {}, veils_now, 0
+	end
+	veil_count += 1
+	veils_now[key] = v
 	return v
 end
+-- The veil's clock (`v.tick`) run until its fades have ended (`v.ends`). The
+-- fades are timed by `ui.now()`, the wall clock, and the clock by the frames',
+-- which can run a little ahead of it: a few frames past the end, and again
+-- if the wall clock isn't there yet, so the last frame paints the ink and not
+-- a hair short of it.
+local function veil_tick(v: Veil)
+	local tick = v.tick
+	if not tick then
+		return
+	end
+	if v.ticking then
+		v.ticking:cancel()
+	end
+	-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
+	-- By number: a callback holding its own clip would keep both for good.)
+	local clock = (v.clocks or 0) + 1
+	v.clocks = clock
+	v.ticking = anime.animate(tick, {
+		value = tick:peek() + 1,
+		duration = math.max((v.ends or 0) - ui.now(), 0) + VEIL_SETTLE,
+		ease = "linear",
+		onComplete = function()
+			if v.clocks ~= clock then
+				return
+			end
+			v.ticking = nil
+			if ui.now() < (v.ends or 0) then
+				veil_tick(v)
+			end
+		end,
+	})
+end
+-- Inline markdown delimiter bytes that streaming mending (`zgx`'s Mender) may
+-- add or drop in place as a block settles (`*`, `_`, `~`, `` ` ``, `[`, `]`, `\`).
+local function is_md_syntax(b: number): boolean
+	return b == 42 or b == 95 or b == 126 or b == 96 or b == 91 or b == 93 or b == 92
+end
+-- When `new` diverges from `old` before `#old` only because unclosed inline
+-- markdown markers (like `2**3` or `[INFO`) appeared or vanished as a block
+-- settled, return the byte index in `new` up to which `old` was already shown.
+local function syntax_covered(old: string, new: string, p: number): number?
+	local i, j = p + 1, p + 1
+	local olen, nlen = #old, #new
+	while i <= olen and j <= nlen do
+		if string.byte(old, i) == string.byte(new, j) then
+			i += 1
+			j += 1
+		else
+			local skipped = 0
+			while skipped < 4 and j + skipped <= nlen and is_md_syntax(string.byte(new, j + skipped)) do
+				skipped += 1
+			end
+			if skipped > 0 and (j + skipped > nlen or string.byte(old, i) == string.byte(new, j + skipped)) then
+				j += skipped
+			else
+				local removed = 0
+				while removed < 4 and i + removed <= olen and is_md_syntax(string.byte(old, i + removed)) do
+					removed += 1
+				end
+				if removed > 0 and (i + removed > olen or string.byte(old, i + removed) == string.byte(new, j)) then
+					i += removed
+				else
+					return nil
+				end
+			end
+		end
+	end
+	while i <= olen and is_md_syntax(string.byte(old, i)) do
+		i += 1
+	end
+	if i <= olen then
+		return nil
+	end
+	local covered = j - 1
+	while covered > 0 and covered < nlen and bit32.band(string.byte(new, covered + 1), 0xC0) == 0x80 do
+		covered -= 1
+	end
+	return covered
+end
 -- What of `text` is still fading, after what's newly arrived is added.
-local function veil_chunks(v: Veil, text: string): { VeilChunk }
-	v.n += 1
-	local id = `{v.block}:{v.n}`
+-- `id` identifies the element by its stable tree path, independent of deferred
+-- mount order (`ui.presence`, `TableBlock`).
+local function veil_chunks(v: Veil, id: string, text: string, seed: boolean?): { VeilChunk }
 	local e = v.elems[id]
 	if not e then
-		e = { text = if v.seeding then text else "", chunks = {}, ema = VEIL_EMA_SEED, last = nil } :: any
+		e = { text = if v.seeding or seed then text else "", chunks = {}, ema = VEIL_EMA_SEED, last = nil } :: any
 		v.elems[id] = e
 	end
 	local now = ui.now()
@@ -177,57 +272,78 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 		while p > 0 and p < #text and bit32.band(string.byte(text, p + 1), 0xC0) == 0x80 do
 			p -= 1
 		end
+		local covered = p
+		local shifted = false
+		if p < #e.text then
+			local repaired = syntax_covered(e.text, text, p)
+			if repaired then
+				covered = repaired
+				shifted = true
+			end
+		end
 		local kept: { VeilChunk } = {}
-		for _, c in e.chunks do
-			if c.from < p then
-				c.to = math.min(c.to, p)
-				table.insert(kept, c)
+		if shifted then
+			local delta = covered - #e.text
+			for _, c in e.chunks do
+				if c.to <= p then
+					table.insert(kept, c)
+				elseif c.from < p then
+					c.to = math.clamp(c.to + delta, p, covered)
+					if c.from < c.to then
+						table.insert(kept, c)
+					end
+				else
+					c.from = math.clamp(c.from + delta, p, covered)
+					c.to = math.clamp(c.to + delta, p, covered)
+					if c.from < c.to then
+						table.insert(kept, c)
+					end
+				end
+			end
+		else
+			for _, c in e.chunks do
+				if c.from < p then
+					c.to = math.min(c.to, p)
+					table.insert(kept, c)
+				end
 			end
 		end
 		e.chunks = kept
-		if #text > p then
+		if #text > covered then
 			if e.last then
 				e.ema = e.ema * 0.7 + math.min(now - e.last, VEIL_GAP_MAX) * 0.3
 			end
 			e.last = now
-			table.insert(e.chunks, { from = p, to = #text, started = now, ms = math.clamp(e.ema * 3, VEIL_MIN, VEIL_MAX), boost = 1 })
+			table.insert(e.chunks, { from = covered, to = #text, started = now, ms = math.clamp(e.ema * 3, VEIL_MIN, VEIL_MAX), boost = 1 })
 		end
 		e.text = text
 	end
 	local going: { VeilChunk } = {}
-	local longest = 0
 	for _, c in e.chunks do
-		local left = c.ms - (now - c.started)
-		if left > 0 then
+		if (now - c.started) * c.boost < c.ms then
 			table.insert(going, c)
-			longest = math.max(longest, left)
 		end
 	end
 	e.chunks = going
-	-- (A stream backed up, three or more at once: a little faster.)
+	-- (A stream backed up, three or more at once: a little faster; never
+	-- slower than a chunk has already run, so a fade never steps backward.)
+	local boost = 1 + 0.3 * math.max(#going - 2, 0)
+	local longest = 0
 	for _, c in going do
-		c.boost = 1 + 0.3 * math.max(#going - 2, 0)
-	end
-	-- A clock for what's fading, its frames what the colours below follow.
-	local tick = v.tick
-	if tick and longest > 0 then
-		if v.ticking then
-			v.ticking:cancel()
+		if boost > c.boost then
+			c.boost = boost
 		end
-		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
-		-- By number: a callback holding its own clip would keep both for good.)
-		local clock = (v.clocks or 0) + 1
-		v.clocks = clock
-		v.ticking = anime.animate(tick, {
-			value = tick:peek() + 1,
-			duration = longest,
-			ease = "linear",
-			onComplete = function()
-				if v.clocks == clock then
-					v.ticking = nil
-				end
-			end,
-		})
+		local left = c.ms / c.boost - (now - c.started)
+		if left > longest then
+			longest = left
+		end
+	end
+	-- A clock for what's fading, its frames what the colours below follow: on
+	-- until the last of the reply's fades ends (another paragraph's may end
+	-- later than this one's).
+	if v.tick and longest > 0 then
+		v.ends = math.max(v.ends or 0, now + longest)
+		veil_tick(v)
 	end
 	return going
 end
@@ -279,6 +395,7 @@ end
 -- (`tasks`: each task item's place among them, from the latest parse.)
 type Ctx = {
 	veil: Veil?,
+	veil_seed: boolean?,
 	image: ((src: string) -> string?)?,
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
@@ -400,19 +517,23 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
--- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
--- `paint_chip`): its pill hugs its name, 2 points above and below, corner
--- 5; its icon (14) on a well of its own 2 points round it, corner 4
--- (`zeron.chip.*`), a point in from the pill's start and 2 before the
--- name; 7 points after the name (Zeron's room: a no-break space of Geist
--- is a quarter em, its well and name 6 of them in, 2 after, at 14).
-local CHIP_PADDING = { 1, 7, 2 }
+-- A chip's look: its pill hugs its name with corner 5, and its icon well
+-- (13px icon + 2pt pad = 17pt square, concentric corner 3) sits with equal
+-- 2pt spacing on left, top, bottom, and between the well and the label.
+-- Code-styled chips (`span.text_size` set to inline code size, 13.5pt) get
+-- 3pt vertical padding so the pill height matches prose chips (~21.4pt)
+-- instead of cramping the upper/lower gap around the well.
+local CHIP_PADDING = { 2, 7, 2 }
+local CHIP_PADDING_TIGHT = { 2, 7, 3 }
 local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_padding(span: { [any]: any }): { number }
+	return if span.text_size ~= nil then CHIP_PADDING_TIGHT else CHIP_PADDING
+end
 local function chip_icon(icon: { [string]: any }): { [string]: any }
-	icon.size = 14
+	icon.size = 13
 	icon.gap = 2
 	icon.bg = "$zeron.chip.well"
-	icon.radius = 4
+	icon.radius = 3
 	icon.pad = 2
 	return icon
 end
@@ -442,7 +563,7 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	span.hover = {}
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	span.icon = if chat
 		then chip_icon { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }
@@ -516,7 +637,7 @@ local function attachment_chip(span: { [any]: any }, name: string, item: { kind:
 	span.color = nil
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
 	span.icon = if glyph
@@ -539,7 +660,7 @@ local function invocation_chip(span: { [any]: any }, name: string)
 	span.hover = {}
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	span.icon = chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
 end
@@ -614,9 +735,13 @@ local function autolinked(list: { MarkdownRun }): { MarkdownRun }
 	return out or list
 end
 
+-- Sentinel href emitted by zgx's streaming mender while a link URL is still
+-- arriving: styled as a link, never clickable and never resolved as a chip.
+local PENDING_LINK = "zgx:pending-link"
+
 -- A paragraph's runs as one paragraph of spans; `style` sets the
 -- paragraph's own (a heading's size, a quote's ink).
-local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?, veil_id: string?): Node
 	list = attached_runs(autolinked(list), ctx)
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
@@ -644,12 +769,12 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 	-- What's still fading in the paragraph (the streaming veil).
 	local veil = if ctx then ctx.veil else nil
 	local fading: { VeilChunk } = {}
-	if veil then
+	if veil and veil_id then
 		local flat: { string } = {}
 		for _, run in list do
 			table.insert(flat, if run.img then MarkdownFind.PICTURE else run.x)
 		end
-		fading = veil_chunks(veil, table.concat(flat))
+		fading = veil_chunks(veil, veil_id, table.concat(flat), if ctx then ctx.veil_seed else nil)
 	end
 	local function emit(span: { [any]: any }, text: string)
 		local from, to = pos + 1, pos + #text
@@ -741,7 +866,8 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		end
 		-- (What the page says a link is: one of the chat's files, or one of
 		-- its agent's skills.)
-		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
+		local pending = r.a == PENDING_LINK
+		local chip = if r.a and not pending and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
 		local named = (r :: any).attached
 		if named and ctx and ctx.attached and ctx.attached[named] then
 			attachment_chip(span, named, ctx.attached[named])
@@ -750,7 +876,10 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
 			-- What it carries, mentioned by its number (ds/attachment_mentions):
 			-- its chip, a picture's glyph or a file's icon, by its name.
-			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
+			local is_image = string.match(r.a, "^zeron%-image:") ~= nil
+				or AttachmentMentions.is_image_name(r.x)
+				or (ctx ~= nil and ctx.attached ~= nil and ctx.attached[r.x] ~= nil and ctx.attached[r.x].kind == "image")
+			attachment_chip(span, r.x, { kind = if is_image then "image" else "file" })
 		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
 			-- A browser pick, mentioned (its token): its chip.
 			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
@@ -764,42 +893,50 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
-			if
-				string.match(r.a, "^zeron%-file:")
-				or string.match(r.a, "^zeron%-chat:")
-				or (chip and chip.file)
-			then
-				mention_chip(span, r.a, r.x)
-			end
-			local target = r.a
-			local open = if ctx then ctx.open else nil
-			local asked = if ctx then ctx.link_menu else nil
-			if opens(target) then
-				-- A link of its own (its cursor, role and menu); the app's
-				-- opener takes its click where it takes links (ds/links: its
-				-- browser tab), which keeps the href from opening outside.
-				span.href = target
-				span.on_click = function(): boolean
-					return Links.take(target)
+			if not pending then
+				if
+					string.match(r.a, "^zeron%-file:")
+					or string.match(r.a, "^zeron%-chat:")
+					or (chip and chip.file)
+				then
+					mention_chip(span, r.a, r.x)
 				end
-			elseif open then
-				span.on_click = function()
-					open(target)
-				end
-			end
-			-- Its menu, by its kind (ds/links), built as it opens.
-			if opens(target) or open or asked then
-				span.context_menu = Links.menu_for(target, function(): { Links.Entry }?
-					local own = if asked then asked(target) else nil
-					if own ~= nil or opens(target) then
-						return own
+				local target = r.a
+				local open = if ctx then ctx.open else nil
+				local asked = if ctx then ctx.link_menu else nil
+				if opens(target) then
+					-- A link of its own (its cursor, role and menu); the app's
+					-- opener takes its click where it takes links (ds/links: its
+					-- browser tab), which keeps the href from opening outside.
+					span.href = target
+					span.on_click = function(): boolean
+						return Links.take(target)
 					end
-					return Links.other(target, if open
-						then function()
-							open(target)
+				elseif open then
+					-- A link too (its role, as a reader hears it), going where
+					-- the page opens it: zgx makes a run that only acts a button.
+					-- (Its click handled here, so a web address doesn't open
+					-- outside as well; zgx opens no other scheme.)
+					span.href = target
+					span.on_click = function(): boolean
+						open(target)
+						return true
+					end
+				end
+				-- Its menu, by its kind (ds/links), built as it opens.
+				if opens(target) or open or asked then
+					span.context_menu = Links.menu_for(target, function(): { Links.Entry }?
+						local own = if asked then asked(target) else nil
+						if own ~= nil or opens(target) then
+							return own
 						end
-						else nil)
-				end)
+						return Links.other(target, if open
+							then function()
+								open(target)
+							end
+							else nil)
+					end)
+				end
 			end
 		end
 		if r.img then
@@ -837,19 +974,19 @@ local TABLE_SHARE = 40
 -- built again when what the page says of them changes (the chat's skills
 -- read after it showed), so it's the same as if they'd been known first.
 -- Words with none of those links: built once.
-local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?, veil_id: string?): Node
 	local asked = if ctx then ctx.link_chip else nil
 	if not asked then
-		return runs_now(list, style, ctx)
+		return runs_now(list, style, ctx, veil_id)
 	end
 	local targets: { string } = {}
 	for _, r in list do
-		if r.a and not opens(r.a) and not string.match(r.a, "^zeron%-") then
+		if r.a and r.a ~= PENDING_LINK and not opens(r.a) and not string.match(r.a, "^zeron%-") then
 			table.insert(targets, r.a)
 		end
 	end
 	if #targets == 0 then
-		return runs_now(list, style, ctx)
+		return runs_now(list, style, ctx, veil_id)
 	end
 	return ui.presence(function(): string
 		local says: { string } = {}
@@ -859,7 +996,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 		end
 		return table.concat(says, "|")
 	end, function(): Node
-		return runs_now(list, style, ctx)
+		return runs_now(list, style, ctx, veil_id)
 	end)
 end
 
@@ -881,8 +1018,8 @@ local function is_number(text: string): boolean
 	return #unit <= 4
 end
 
-local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
-	local b, ctx = props.b, props.ctx
+local TableBlock = ui.component(function(props: { b: any, ctx: Ctx?, veil_id: string? }): Node
+	local b, ctx, veil_id = props.b, props.ctx, props.veil_id
 	local count = #b.head
 	local tracks: { string } = {}
 	local aligns: { string } = {}
@@ -917,7 +1054,7 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 	if not any_long then
 		tracks[count] = "minmax(max-content, 1fr)"
 	end
-	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean): Node
+	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean, cell_id: string?): Node
 		local text: { [string]: any } = {
 			class = "md-text",
 			-- (Not wrapping by a rounding, a short column's track being as wide
@@ -941,16 +1078,16 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 			py = "$space.2",
 			border_sides = { 0, 0, if last_row then 0 else 1, 0 },
 			border_color = if head then "$border" else "$border.subtle",
-			runs(content, text, ctx),
+			runs(content, text, ctx, cell_id),
 		}
 	end
 	local cells: { Node } = {}
 	for c, head in b.head do
-		table.insert(cells, cell(head, c, true, #b.rows == 0))
+		table.insert(cells, cell(head, c, true, #b.rows == 0, if veil_id then `{veil_id}.h{c}` else nil))
 	end
 	for r, row in b.rows do
 		for c = 1, count do
-			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows))
+			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows, if veil_id then `{veil_id}.r{r}.{c}` else nil))
 		end
 	end
 	-- (As wide as the view, or what the grid's minimums need if that's more:
@@ -1288,7 +1425,7 @@ local Picture = ui.component(function(props: { src: string, name: string, w: num
 	}
 end)
 
-local blocks: (list: { MarkdownBlock }, ink: string?, ctx: Ctx?) -> { Node }
+local blocks: (list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?) -> { Node }
 
 -- A list item's marker, hanging in its gutter, on the first line's middle.
 local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
@@ -1339,8 +1476,8 @@ local function pending_height(b: any): number
 end
 
 -- One block, by its kind; `ink`, its text's colour where not the primary (a
--- quote's).
-local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
+-- quote's). `veil_id`: stable path for the streaming veil.
+local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?): Node
 	if (b :: any).t == "pending" then
 		-- (Its place, held until it's parsed: a frame or two.)
 		return ui.div { w_full = true, h = pending_height(b) }
@@ -1357,6 +1494,14 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			local pieces: { Node } = {}
 			local words: { MarkdownRun } = {}
 			local shown: { any } = {}
+			local part = 0
+			local function part_id(): string?
+				if not veil_id then
+					return nil
+				end
+				part += 1
+				return if part == 1 then veil_id else `{veil_id}.p{part}`
+			end
 			local function worded(): boolean
 				for _, w in words do
 					if w.img or string.find(w.x, "%S") then
@@ -1367,9 +1512,9 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			end
 			local function show()
 				if #shown == 1 then
-					table.insert(pieces, block(shown[1], ink, ctx))
+					table.insert(pieces, block(shown[1], ink, ctx, nil))
 				elseif #shown > 1 then
-					table.insert(pieces, block({ t = "pics", list = shown } :: any, ink, ctx))
+					table.insert(pieces, block({ t = "pics", list = shown } :: any, ink, ctx, nil))
 				end
 				shown = {}
 			end
@@ -1377,7 +1522,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				if r.img and pictures.resolve(r.img) ~= nil then
 					if worded() then
 						show()
-						table.insert(pieces, runs(words, style, ctx))
+						table.insert(pieces, runs(words, style, ctx, part_id()))
 					end
 					words = {}
 					table.insert(shown, { t = "img", src = r.img, alt = r.x })
@@ -1388,7 +1533,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			if #pieces > 0 or #shown > 0 then
 				show()
 				if worded() then
-					table.insert(pieces, runs(words, style, ctx))
+					table.insert(pieces, runs(words, style, ctx, part_id()))
 				end
 				return ui.column {
 					w_full = true,
@@ -1398,7 +1543,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				}
 			end
 		end
-		return runs(b.s, style, ctx)
+		return runs(b.s, style, ctx, veil_id)
 	elseif b.t == "h" then
 		local level = math.min(b.l, 3)
 		local key = `zeron.prose.h{level}`
@@ -1417,7 +1562,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			pt = if level < 3 then "$space.3" else "$space.1",
 			mb = ui.raw(-6, "a heading sits closer to what it heads"),
 			class = "md-heading",
-		}, ctx)
+		}, ctx, veil_id)
 	elseif b.t == "code" and b.lang == "math" then
 		-- Display math (`$$…$$`, or a ```math fence): the formula, else its
 		-- source as the code block it is.
@@ -1445,9 +1590,9 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			find = { q = f.q, from = f.n, cur = f.cur }
 			f.n += #MarkdownFind.occurrences(b.text, f.q)
 		end
-		-- (Its fade kept here, in the block's order: what it has shown is by its place.)
+		-- (Its fade kept here, by its stable path.)
 		local veil = if ctx then ctx.veil else nil
-		local code_veil = if veil then { veil = veil, fading = veil_chunks(veil, code_shown(b.text)) } else nil
+		local code_veil = if veil and veil_id then { veil = veil, fading = veil_chunks(veil, veil_id, code_shown(b.text), if ctx then ctx.veil_seed else nil) } else nil
 		if lang == "mermaid" then
 			-- Its diagram once the fence has closed and the host has drawn
 			-- it; the code until then, or if it can't be (ds/mermaid).
@@ -1521,7 +1666,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 					w_full = true,
 					items = "start",
 					lead,
-					ui.column { grow = 1, min_w = 0, gap = "$space.2", blocks(body, ink, ctx) },
+					ui.column { grow = 1, min_w = 0, gap = "$space.2", blocks(body, ink, ctx, if veil_id then `{veil_id}.i{i}` else nil) },
 				}
 			)
 		end
@@ -1532,12 +1677,12 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			w_full = true,
 			gap = "$space.4",
 			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
-			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
+			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx, if veil_id then `{veil_id}.q` else nil) },
 		}
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
 	elseif b.t == "table" then
-		return TableBlock { b = b, ctx = ctx }
+		return TableBlock { b = b, ctx = ctx, veil_id = veil_id }
 	elseif (b.t == "img" or b.t == "pics") and ctx and ctx.pictures then
 		-- A reply's pictures (ds/reply_picture): one alone, or several that
 		-- follow one another together on a tray. One it won't draw (a URL, a
@@ -1568,14 +1713,14 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			end
 			run = {}
 		end
-		for _, it in members do
+		for idx, it in members do
 			if pictures.resolve(it.src) ~= nil then
 				enlist(group, it)
 				table.insert(run, { src = it.src, alt = it.alt })
 			else
 				flush()
 				local words = if it.alt ~= "" then it.alt else (string.match(it.src, "([^/]+)$") or it.src)
-				table.insert(out, ui.div { class = "md-image", min_w = 0, runs({ { x = words, a = it.src } :: any }, nil, ctx) })
+				table.insert(out, ui.div { class = "md-image", min_w = 0, runs({ { x = words, a = it.src } :: any }, nil, ctx, if veil_id then `{veil_id}.m{idx}` else nil) })
 			end
 		end
 		flush()
@@ -1588,7 +1733,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		-- document's, one under another.)
 		local out: { Node } = {}
 		for _, it in (b :: any).list do
-			table.insert(out, block(it, ink, ctx))
+			table.insert(out, block(it, ink, ctx, nil))
 		end
 		return ui.column { w_full = true, min_w = 0, gap = "$space.3", out }
 	elseif b.t == "img" then
@@ -1620,10 +1765,12 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 	return ui.div {}
 end
 
-function blocks(list: { MarkdownBlock }, ink: string?, ctx: Ctx?): { Node }
+function blocks(list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?): { Node }
 	local out: { Node } = {}
-	for _, b in list do
-		table.insert(out, block(b, ink, ctx))
+	local has_veil = ctx ~= nil and ctx.veil ~= nil
+	for i, b in list do
+		local id = if has_veil then (if prefix then `{prefix}.{i}` else tostring(i)) else nil
+		table.insert(out, block(b, ink, ctx, id))
 	end
 	return out
 end
@@ -1798,13 +1945,6 @@ return function(props: Props): Node
 		ui.on_cleanup(track(r))
 		return ui.div { ref = r, w_full = true, min_w = 0, node }
 	end
-	-- The veil's place, as block `n` is made (and made again): its paragraphs are
-	-- counted from here, so each finds what it has already shown.
-	local function veil_at(n: number)
-		if ctx and ctx.veil then
-			ctx.veil.block, ctx.veil.n = n, 0
-		end
-	end
 	-- A top-level block, the `n`th: with a find, made again as its matches
 	-- change (the query, or the current match coming or going), its marks
 	-- numbered from its first part; holding the current match, handed to
@@ -1813,14 +1953,20 @@ return function(props: Props): Node
 	-- A top-level block, the `n`th, with a find's marks (`q`: the query, ""
 	-- for none; `k`: the current match's place in it, 0 if it's elsewhere).
 	-- Holding the current match, it's handed to `reveal` once laid out.
-	local function marked(b: MarkdownBlock, n: number, q: string?, k: number): Node
-		veil_at(n)
-		if not find or not q or q == "" then
-			return boxed(block(b, ink,ctx))
+	local function marked(b: MarkdownBlock, n: number, q: string?, k: number, seed: boolean?): Node
+		local id = if ctx and ctx.veil then tostring(n) else nil
+		local use_ctx = ctx
+		if seed and ctx and ctx.veil then
+			local seeded = table.clone(ctx)
+			seeded.veil_seed = true
+			use_ctx = seeded
 		end
-		local mine: Ctx = if ctx then table.clone(ctx) else { tasks = {} }
+		if not find or not q or q == "" then
+			return boxed(block(b, ink, use_ctx, id))
+		end
+		local mine: Ctx = if use_ctx then table.clone(use_ctx) else { tasks = {} }
 		mine.find = { q = string.lower(q), cur = k, n = 0 }
-		local node = block(b, ink,mine)
+		local node = block(b, ink, mine, id)
 		local reveal = (find :: Find).reveal
 		if k == 0 or not reveal then
 			return boxed(node)
@@ -1856,9 +2002,9 @@ return function(props: Props): Node
 		return `|0:0|{q}`
 	end
 	local function top(b: MarkdownBlock, n: number): Node
+		local id = if ctx and ctx.veil then tostring(n) else nil
 		if not find then
-			veil_at(n)
-			return boxed(block(b, ink,ctx))
+			return boxed(block(b, ink, ctx, id))
 		end
 		local f = find :: Find
 		local r = ui.ref()
@@ -1881,14 +2027,13 @@ return function(props: Props): Node
 				local k, q = string.match(sig, "^(%d+):(.*)$")
 				local mine: Ctx = if ctx then table.clone(ctx) else { tasks = {} }
 				mine.find = if q and q ~= "" then { q = string.lower(q), cur = tonumber(k) or 0, n = 0 } else nil
-				veil_at(n)
 				if mine.find and mine.find.cur > 0 and f.reveal then
 					local reveal = f.reveal
 					ui.after(0, function()
 						reveal(r)
 					end)
 				end
-				return block(b, ink,mine)
+				return block(b, ink, mine, id)
 			end, { w_full = true, min_w = 0 }),
 		})
 	end
@@ -2015,6 +2160,7 @@ return function(props: Props): Node
 				if string.sub(kind, 1, 5) == "built" then
 					local cb, ck, q = string.match(kind, "^built|(%d+):(%d+)|(.*)$")
 					local cur_block, cur_k = tonumber(cb) or 0, tonumber(ck) or 0
+					local settled_run = after() > 0 or (w.live ~= nil and not w.live())
 					return ui.column {
 						w_full = true,
 						min_w = 0,
@@ -2023,7 +2169,7 @@ return function(props: Props): Node
 							return run:get()
 						end), function(b: MarkdownBlock, i: number)
 							local n = (at - 1) * CHUNK + i
-							return marked(b, n, q, if n == cur_block then cur_k else 0)
+							return marked(b, n, q, if n == cur_block then cur_k else 0, settled_run)
 						end),
 					}
 				end

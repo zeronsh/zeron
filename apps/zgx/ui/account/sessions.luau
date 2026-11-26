@@ -73,12 +73,21 @@ export type Chat = {
 	working_side_chats: number?,
 	-- What its agent waits on after its turn (status "waiting").
 	waiting: { WaitingOn }?,
+	-- Since when, in Unix seconds.
+	waiting_since: number?,
 	-- Put to sleep: until when; or, woken and not looked at since, when it
 	-- woke (Unix seconds).
 	sleep_until: number?,
 	woke: number?,
+	-- The last turn its agent finished (an opaque mark, nil before its
+	-- first), and whether its session row was fresh as that was read: what
+	-- the "finished" chime rings on moving (screens/settings/chimes).
+	turn: string?,
+	turn_fresh: boolean?,
 }
-export type WaitingOn = { id: string, kind: string, label: string }
+-- ("agent" and "process": its own runtime's; "chat": a child chat it
+-- delegated to, with which, where, on what agent, and since when.)
+export type WaitingOn = { id: string, kind: string, label: string, chat: string?, device: string?, harness_name: string?, since: number? }
 -- A side chat: a chat under another (its `parent`).
 export type Child = {
 	id: string,
@@ -93,6 +102,10 @@ export type Child = {
 	-- Started by a Zeron chat (through Zeron's tools), as a subagent or a
 	-- side chat: "subagent" | "side"; nil for one the person started.
 	child_kind: string?,
+	harness_name: string?,
+	model: string?,
+	-- At work (or asking): since when, in Unix seconds.
+	since: number?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
@@ -180,6 +193,36 @@ function M.children(id: string?): { Child }
 		return {}
 	end
 	return (M.now:get().children or {})[id] or {}
+end
+
+-- What a chat runs on, in words: its agent, and its device where that isn't
+-- the one it was started from ("Codex · Build box"). Nil with nothing to say.
+function M.ran_on(c: { [string]: any }): string?
+	local now = M.now:get()
+	local home: string? = nil
+	if c.parent then
+		for _, p in now.chats do
+			if p.id == c.parent then
+				home = p.device
+				break
+			end
+		end
+	end
+	local said: { string } = {}
+	if c.harness_name and c.harness_name ~= "" then
+		table.insert(said, c.harness_name)
+	end
+	for _, d in now.devices or {} do
+		if d.id == c.device then
+			-- (A chat of its own: where it isn't this device.)
+			local away = if home then home ~= d.id else not d.here
+			if away and d.name and d.name ~= "" then
+				table.insert(said, d.name)
+			end
+			break
+		end
+	end
+	return if #said > 0 then table.concat(said, " · ") else nil
 end
 
 function M.archive(id: string)

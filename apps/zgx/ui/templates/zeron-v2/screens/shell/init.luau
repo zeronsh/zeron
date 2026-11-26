@@ -123,8 +123,15 @@ return function(): Node
 		local find: any = boundary.load("@app/screens/chat/find")
 		return find ~= nil and find.open ~= nil and (find.open :: any)() == true
 	end
+	-- ⌘N: the new chat, its composer given the keys in the same step (one
+	-- composer, its draft now the new chat's), so a key typed straight after
+	-- is the new chat's, never the one left.
 	runs["shell.new_chat"] = function()
 		route.new_chat()
+		local shared: any = boundary.load("@app/screens/chat/shared")
+		if shared and shared.focus then
+			shared.focus:add(1)
+		end
 	end
 	runs["shell.palette"] = function()
 		view.palette:set(not view.palette:peek())
@@ -486,7 +493,7 @@ return function(): Node
 				min_h = 0,
 				w_full = true,
 				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
-					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
+					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H, card = false }
 				end),
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
 					return Page { files = files, width = window_w }
@@ -537,9 +544,13 @@ return function(): Node
 					return ui.div {}
 				end
 				local function chat(): any
-					for _, c in sessions.now:get().chats do
-						if c.id == id then
-							return c
+					local now = sessions.now:get()
+					-- (An archived one's too, from its shelf.)
+					for _, list in { now.chats, now.archived or {} } do
+						for _, c in list do
+							if c.id == id then
+								return c
+							end
 						end
 					end
 					return nil

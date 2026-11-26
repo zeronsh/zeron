@@ -1,0 +1,120 @@
+-- Settings → Providers offers Cloud as one more choice after the computers,
+-- while Cloud is on: its agents' accounts (the vault's, every Cloud machine
+-- uses them), with no switch and nothing to install, each card adding its
+-- sign-ins and API keys, and settings that are Cloud's: how each agent runs
+-- on every Cloud machine. Without Cloud, no such choice. On the shell in
+-- ui/shell_fixture.luau, Cloud from ui/cloud_stub.luau.
+
+local PAGE = "#settings-page"
+local NAV = "#settings-nav"
+
+local function shows(app: any, scope: string, text: string): boolean
+	return app:tree(scope):find(text, 1, true) ~= nil
+end
+
+local function asked(app: any, entry: string): boolean
+	for _, c in (app:state("settings_stub_calls") :: any) or {} do
+		if c == entry then
+			return true
+		end
+	end
+	return false
+end
+
+local function open(with_cloud: boolean): any
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("settings_stub.sign_in")
+	if with_cloud then
+		app:command("cloud_stub.offer")
+	end
+	app:command("shell.settings")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Providers"`)
+	app:frames(30)
+	return app
+end
+
+test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or settings, keys added on each card", function()
+	local app = open(true)
+	app:click(`{PAGE} >> role:button "Device"`)
+	app:frames(10)
+	expect(app:has('role:menuitem "Cloud"')).to_be(true)
+	app:click('role:menuitem "Cloud"')
+	app:frames(30)
+	expect(asked(app, "agents.target:cloud")).to_be(true)
+	expect(shows(app, PAGE, "Claude Code")).to_be(true)
+	expect(shows(app, PAGE, "Codex")).to_be(true)
+	expect(shows(app, PAGE, "ada@example.com")).to_be(true)
+	-- Nothing to switch or install: its accounts, and how each agent runs
+	-- there.
+	expect(app:has(`{PAGE} >> role:switch "Codex on"`)).to_be(false)
+	expect(shows(app, PAGE, "Add another agent")).to_be(false)
+	-- Its settings are Cloud's, for every Cloud machine: no updates to take
+	-- (Zeron keeps Cloud's agents current).
+	app:click(`{PAGE} >> role:button "Codex settings"`)
+	app:frames(30)
+	local dialog = 'role:dialog "Agent settings"'
+	expect(shows(app, dialog, "For every Cloud chat")).to_be(true)
+	expect(shows(app, dialog, "Updates")).to_be(false)
+	app:click(`{dialog} >> role:switch "Only Zeron's MCP servers"`)
+	app:frames(10)
+	expect(asked(app, "settings.engine:SetZeronMcpOnly:codex:cloud")).to_be(true)
+	app:click(`{dialog} >> role:button "Done"`)
+	app:frames(30)
+	-- Every agent signs in on Cloud as it does on a computer, Muse Code
+	-- included, and takes its API key on its own card: no keys section.
+	expect(shows(app, PAGE, "Add Muse Code account")).to_be(true)
+	expect(shows(app, PAGE, "Add Claude Code account")).to_be(true)
+	expect(shows(app, PAGE, "Anthropic API key")).to_be(false)
+	app:click(`{PAGE} >> "Add API key" [1]`)
+	app:frames(20)
+	expect(app:has('role:dialog "Add API key"')).to_be(true)
+	-- Kept by Cloud's vault, so it takes no name.
+	expect(app:has('role:textbox "Name (optional)"')).to_be(false)
+	app:type('role:dialog "Add API key" >> role:textbox "API key"', "sk-ant-test-123")
+	app:frames(5)
+	app:click('role:dialog "Add API key" >> role:button "Save"')
+	app:frames(20)
+	expect(asked(app, "agents.add_key:claude-code:anthropic")).to_be(true)
+	expect(app:error()).to_be_nil()
+	-- Back to this computer: its agents as they were, with their switches.
+	app:click(`{PAGE} >> role:button "Device"`)
+	app:frames(10)
+	app:click('role:menuitem "MacBook Pro"')
+	app:frames(30)
+	expect(asked(app, "agents.target:")).to_be(true)
+	expect(app:has(`{PAGE} >> role:switch "Claude Code on"`)).to_be(true)
+end)
+
+test("an agent's settings are ruled between the rows that show, never under the last, here and on Cloud", function()
+	local app = open(true)
+	local dialog = 'role:dialog "Agent settings"'
+	-- (Each row of these has one switch, or the updates' select.)
+	local function ruled(agent: string, rows: number)
+		app:click(`{PAGE} >> role:button "{agent} settings"`)
+		app:frames(30)
+		expect(app:count(`{dialog} >> .settings-rule`)).to_be(rows - 1)
+		app:click(`{dialog} >> role:button "Done"`)
+		app:wait('"never shown, only waited past"', { timeout_ms = 400 })
+		app:frames(4)
+	end
+	-- Claude Code: subagents, Zeron's servers alone, $, / and updates; no
+	-- Code Mode, no environment, nothing to remove. On Cloud, no updates.
+	ruled("Claude Code", 5)
+	app:click(`{PAGE} >> role:button "Device"`)
+	app:frames(10)
+	app:click('role:menuitem "Cloud"')
+	app:frames(30)
+	ruled("Claude Code", 4)
+	-- Codex runs in Code Mode: one row more.
+	ruled("Codex", 5)
+end)
+
+test("without Cloud, Providers offers no Cloud", function()
+	local app = open(false)
+	app:click(`{PAGE} >> role:button "Device"`)
+	app:frames(10)
+	expect(app:has('role:menuitem "Cloud"')).to_be(false)
+end)

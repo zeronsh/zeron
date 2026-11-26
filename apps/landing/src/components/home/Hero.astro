@@ -1,0 +1,67 @@
+---
+import { SITE } from "../../data/site.ts";
+import SessionWindow from "../app/SessionWindow.astro";
+import GitHubStars from "../site/GitHubStars.astro";
+import Button from "../ui/Button.astro";
+import Icon from "../ui/Icon.astro";
+---
+
+<section class="hero">
+  <div class="wrap">
+    <h1 class="rise">The agent workspace that can become anything</h1>
+    <p class="lead rise" style="--i:1">
+      Zeron runs Claude Code, Codex, Cursor and your other coding agents on
+      your own machines, in one native, open source app.
+    </p>
+    <div class="actions rise" style="--i:2">
+      <Button id="hero-download" href="#downloads" size="lg" data-download="long"><span data-download-label>Download</span></Button>
+      <a class="star" href={SITE.github}>Star on GitHub <GitHubStars /><Icon name="alt-arrow-right" size={12} /></a>
+    </div>
+  </div>
+  <!-- The app, laid back on the page and running off it. The window is the
+       HTML recreation, so it stays sharp at this size and angle. -->
+  <div class="visual rise" style="--i:4">
+    <div class="plane"><SessionWindow walker /></div>
+  </div>
+</section>
+
+<style>
+  .hero { position: relative; padding-top: clamp(64px, 8vw, 112px); overflow: hidden; }
+  h1 {
+    max-width: 15em;
+    font-size: clamp(38px, 5.4vw, 68px);
+    font-weight: 560;
+    line-height: 1.03;
+    letter-spacing: -0.038em;
+  }
+  .lead { max-width: 31em; margin-top: 22px; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 34px; }
+  .star { display: inline-flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
+  .star:hover { color: var(--text); }
+
+  .visual {
+    --tilt-width: clamp(940px, 116vw, 1760px);
+    position: relative;
+    height: clamp(340px, 54vw, 820px);
+    margin-top: clamp(20px, 2.5vw, 36px);
+    perspective: 4000px;
+    perspective-origin: 100% 0;
+    -webkit-mask-image: linear-gradient(to bottom, #000 52%, transparent 98%), linear-gradient(to right, #000 74%, transparent 99.5%);
+    mask-image: linear-gradient(to bottom, #000 52%, transparent 98%), linear-gradient(to right, #000 74%, transparent 99.5%);
+    -webkit-mask-composite: source-in;
+    mask-composite: intersect;
+  }
+  .plane {
+    position: absolute;
+    left: max(var(--gutter), calc(50% - var(--page) / 2));
+    top: clamp(70px, 12vw, 190px);
+    width: var(--tilt-width);
+    transform-origin: 0 0;
+    transform: translate(2%, 0) scale(1.1) rotateX(47deg) rotateY(31deg) rotateZ(324deg);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px var(--border-strong);
+  }
+  /* A little light from the top left, where the plane is nearest. */
+  .plane::after { content: ""; position: absolute; inset: 0; background: linear-gradient(115deg, rgb(255 255 255 / 0.07), transparent 38%); pointer-events: none; }
+</style>

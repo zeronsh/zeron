@@ -19,6 +19,17 @@ export type Name =
 	| "omp"
 	| "hermes"
 	| "muse"
+	-- Model providers (an agent's accounts per provider, their API keys):
+	-- one set, one ink each.
+	| "provider-anthropic"
+	| "provider-openai"
+	| "provider-openrouter"
+	| "provider-gemini"
+	| "provider-xai"
+	| "provider-deepseek"
+	| "nvidia"
+	| "moondream"
+	| "cohere"
 
 local FILES: { [Name]: string } = {
 	claude = "claude-mark",
@@ -33,11 +44,34 @@ local FILES: { [Name]: string } = {
 	omp = "omp-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
+	["provider-anthropic"] = "provider-anthropic",
+	["provider-openai"] = "provider-openai",
+	["provider-openrouter"] = "provider-openrouter",
+	["provider-gemini"] = "provider-gemini",
+	["provider-xai"] = "provider-xai",
+	["provider-deepseek"] = "provider-deepseek",
+	-- Speech models' makers (Settings → Voice).
+	nvidia = "nvidia-mark",
+	moondream = "moondream-mark",
+	cohere = "cohere-mark",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the
 -- colour of the text around them instead, or they vanish on dark.
-local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true, omp = true }
+local MONO: { [Name]: boolean } = {
+	openai = true,
+	grok = true,
+	cursor = true,
+	devin = true,
+	hermes = true,
+	omp = true,
+	["provider-anthropic"] = true,
+	["provider-openai"] = true,
+	["provider-openrouter"] = true,
+	["provider-gemini"] = true,
+	["provider-xai"] = true,
+	["provider-deepseek"] = true,
+}
 
 local RegistryMark = require("@self/registry_mark")
 

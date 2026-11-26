@@ -12,6 +12,7 @@
 -- icon = "folder", placeholder = "No project", search = "Search projects…" }`
 
 local Icon = require("@self/icon")
+local motion = require("@self/motion")
 local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local RollText = require("@self/roll_text")
@@ -51,6 +52,14 @@ export type Item = {
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
 	emoji: string?,
 	description: string?,
+	-- Quiet words beside its name, in the name's size and on its line (a
+	-- model's provider, telling it from a namesake), searched as its name
+	-- is. The name gives way first: it fades, the hint stays whole. With
+	-- `hint_when_found`, they show only while a search found the row by
+	-- them (its name alone doesn't hold what was typed). A row whose hint
+	-- changes is built again (its key holds them).
+	hint: string?,
+	hint_when_found: boolean?,
 	-- Its label is an email address: drawn as ds.PrivateText draws one, its
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
@@ -61,9 +70,17 @@ export type Item = {
 	disabled: boolean?,
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
--- to open or close it. A submenu trigger forwards its hover changes so
--- leaving both the row and its panel can close it.
-export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
+-- to open or close it. A submenu trigger forwards its hover, pointer-move,
+-- mount and press events so the hover corridor can keep it open across gaps
+-- and sibling rows.
+export type Menu = {
+	open: State<boolean>,
+	toggle: () -> (),
+	on_mount: ((el: Element) -> ())?,
+	on_hover: ((inside: boolean) -> ())?,
+	on_pointer_move: ((ev: PointerEvent) -> ())?,
+	on_click: (() -> ())?,
+}
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
@@ -123,6 +140,9 @@ export type Props = {
 	-- What the trigger says instead of the chosen item, while it says
 	-- anything (a chip with nothing to choose: "No project").
 	say: (() -> (string | Message)?)?,
+	-- With `mark`: the mark the trigger shows while no item is chosen (the
+	-- model chip naming a model its catalog doesn't list: its agent's).
+	say_mark: (() -> Mark.Name?)?,
 	empty: ((query: string) -> Empty)?,
 	-- A panel that opens folded on its chosen item: while `expanded` is
 	-- false the head and the search fold away and every item but the chosen
@@ -150,6 +170,8 @@ export type Props = {
 	trigger: ((menu: Menu) -> Node)?,
 	-- A side-opening menu whose parent stays reachable by the pointer.
 	submenu: boolean?,
+	-- Shared hover-intent corridor coordinating a parent panel and its submenus.
+	corridor: Menu.Corridor?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -200,6 +222,15 @@ end
 -- The list's height for `n` rows: its insets, the rows, the gaps between.
 local function list_h(n: number): number
 	return INSET * 2 + math.max(n * step() - gap(), 0)
+end
+-- A row with a description, before it has laid out: its inset above and
+-- below, its name's line, the hair between, a line of its description.
+local function tall_row(): number
+	local function token(name: string, default: number): number
+		local v = ui.theme.get(name)
+		return if type(v) == "number" then v else default
+	end
+	return token("space.2", 8) * 2 + token("font.line.md", 20) + token("zeron.space.hair", 2) + token("font.line.sm", 16)
 end
 -- An empty list's height: room for its glyph, title and a two-line hint.
 local EMPTY_H = 128
@@ -386,12 +417,144 @@ return ui.component(function(props: Props): Node
 		return control.text(props.placeholder) or locale.s("ds.dropdown.placeholder")
 	end
 
+	-- Whether a search finds an item: by its name, else by its hint from the
+	-- start of one of its words ("code" finds OpenCode's, "ai" not OpenAI's),
+	-- or by its name and hint read together ("gpt-5.5 codex").
+	local function word_start(text: string, q: string): boolean
+		local low = string.lower(text)
+		local at = string.find(low, q, 1, true)
+		while at do
+			local before = if at > 1 then string.sub(text, at - 1, at - 1) else " "
+			-- A word starts after a space or a mark, or at a capital inside
+			-- one (Open|Code).
+			if not string.match(before, "%w") or (string.match(before, "%l") and string.match(string.sub(text, at, at), "%u")) then
+				return true
+			end
+			at = string.find(low, q, at + 1, true)
+		end
+		return false
+	end
+	local function by_name(item: Item, q: string): boolean
+		return q == "" or string.find(string.lower(item.label), q, 1, true) ~= nil
+	end
+	local function found(item: Item, q: string): boolean
+		if by_name(item, q) then
+			return true
+		end
+		local hint = item.hint
+		if not hint then
+			return false
+		end
+		if word_start(hint, q) then
+			return true
+		end
+		-- Read together, the search runs from the name on into the hint,
+		-- reaching it at a word's start (its first).
+		local label = string.lower(item.label)
+		local together = label .. " " .. string.lower(hint)
+		local from, to = string.find(together, q, 1, true)
+		while from do
+			if from <= #label and (to :: number) > #label + 1 then
+				return true
+			end
+			from, to = string.find(together, q, from + 1, true)
+		end
+		return false
+	end
+	-- Whether an item's hint shows now (`hint_when_found`: while a search
+	-- found it by its hint, not its name).
+	local function hint_shown(now: Item): boolean
+		return now.hint ~= nil and (not now.hint_when_found or not by_name(now, string.lower(query:get())))
+	end
+	-- A name with its hint beside it, read as one line: where it runs past
+	-- the row, its right edge fades (as FadeText's does), and while the row
+	-- is highlighted (`lit`: under the pointer, or the keys') the line glides
+	-- left until its end shows, rests, and glides back, over and over. With
+	-- motion reduced it stays put, faded.
+	local NAMED_FADE = 24
+	local function named(item: Item, lit: () -> boolean): Node
+		local clip, line = ui.ref(), ui.ref()
+		local el: any = nil
+		local run: any = nil
+		-- How far the line runs past its row.
+		local function over(): number
+			return math.max(0, (line.width or 0) - (clip.width or 0))
+		end
+		local function still()
+			if run then
+				run:cancel()
+				run = nil
+			end
+			if el then
+				anime.utils.cleanInlineStyles(el, "x")
+			end
+		end
+		ui.effect(function()
+			local on = lit()
+			local past = over()
+			if not on or past <= 0.5 or motion.reduced() or not el then
+				still()
+				return
+			end
+			if run then
+				return
+			end
+			local travel = past + NAMED_FADE
+			run = anime.animate(el, {
+				x = { 0, -travel },
+				-- (About 40 points a second: read as it passes, not a jump.)
+				duration = math.max(900, travel * 25),
+				delay = 700,
+				loopDelay = 1000,
+				loop = true,
+				alternate = true,
+				ease = "inOut(2)",
+			})
+			ui.on_cleanup(still)
+		end)
+		return ui.row {
+			ref = clip,
+			grow = 1,
+			min_w = 0,
+			overflow = "hidden",
+			items = "center",
+			fade_x = function()
+				local past = (line.width or 0) > (clip.width or 0) + 0.5
+				-- (Gliding, its start runs off the left too.)
+				local moving = past and lit() and not motion.reduced()
+				return { if moving then NAMED_FADE else 0, if past then NAMED_FADE else 0 }
+			end,
+			ui.row {
+				ref = line,
+				shrink = 0,
+				gap = "$space.2",
+				items = "center",
+				on_mount = function(node: any)
+					el = node
+				end,
+				ui.text {
+					item.label,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.primary",
+				},
+				ui.show(function(): boolean
+					return hint_shown(item)
+				end, ui.text {
+					item.hint :: string,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.tertiary",
+				}),
+			},
+		}
+	end
 	local shown = ui.computed(function(): { Item }
 		local q = string.lower(query:get())
 		local out: { Item } = {}
 		local keep = props.filter
 		for _, item in items() do
-			if (keep == nil or keep(item)) and (q == "" or string.find(string.lower(item.label), q, 1, true)) then
+			if (keep == nil or keep(item)) and found(item, q) then
 				table.insert(out, item)
 			end
 		end
@@ -414,29 +577,66 @@ return ui.component(function(props: Props): Node
 		end
 		return nil
 	end
+	-- A row's key: its value (and its hint: a row whose hint changes, or
+	-- comes or goes, is built again, its hint part of what it is).
+	local function key_of(item: Item): string
+		return if item.hint
+			then `{item.value}\0{item.hint}\0{if item.hint_when_found then "found" else "always"}`
+			else item.value
+	end
+	-- The rows with a description, as tall as they laid out (by key): the
+	-- list builds only the rows in view, so its whole height is worked out
+	-- from its items, a row's height each, these as they really are.
+	local tall_h: { [string]: number } = {}
+	local remeasured = ui.use_state(0)
+	local function height_of(item: Item): number
+		return if item.description then tall_h[key_of(item)] or tall_row() else ROW
+	end
+	-- How far down `list` row `i` starts, and how tall it is.
+	local function row_at(list: { Item }, i: number): (number, number)
+		local top = INSET + (i - 1) * step()
+		for j = 1, i - 1 do
+			if list[j].description then
+				top += height_of(list[j]) - ROW
+			end
+		end
+		return top, if list[i] then height_of(list[i]) else ROW
+	end
+	-- The list's whole height: its insets, each row, the gaps between.
+	local function extent(list: { Item }): number
+		local h = list_h(#list)
+		for _, item in list do
+			if item.description then
+				h += height_of(item) - ROW
+			end
+		end
+		return h
+	end
+	local whole = ui.computed(function(): number
+		remeasured:get()
+		return extent(shown:get())
+	end)
 	-- The list's height: its rows up to the view (a short list leaves no
 	-- space under it), or an empty one's message.
 	-- (Its rows as laid out: a row with a description under it is taller
 	-- than a row, so the list is as tall as its rows really are.)
-	local content_h = ui.use_state(0)
 	local function list_height(): number
-		local n = #shown:get()
-		if n == 0 then
+		if #shown:get() == 0 then
 			return EMPTY_H
 		end
-		local measured = content_h:get()
-		return math.min(VIEW, if measured > 0 then measured else list_h(n))
+		return math.min(VIEW, whole:get())
 	end
 	-- Scroll so row `i` keeps a gutter from either edge.
+	-- (A row with a description where it really is, as tall as it is.)
 	local function reveal(i: number)
-		local n = #shown:peek()
-		local top = INSET + (i - 1) * step()
+		local list = shown:peek()
+		local top, h = row_at(list, i)
 		local o = offset:peek()
-		local most = math.max(0, list_h(n) - VIEW)
+		local most = math.max(0, extent(list) - VIEW)
 		if top - GUTTER < o then
 			offset:set(math.max(0, top - GUTTER))
-		elseif top + ROW + GUTTER > o + VIEW then
-			offset:set(math.min(most, top + ROW + GUTTER - VIEW))
+		elseif top + h + GUTTER > o + VIEW then
+			offset:set(math.min(most, top + h + GUTTER - VIEW))
 		end
 	end
 	local actions: { Action } = props.actions or {}
@@ -651,7 +851,7 @@ return ui.component(function(props: Props): Node
 				return if item.svg then nil else item.mark
 			end
 		end
-		return nil
+		return if props.say_mark then props.say_mark() else nil
 	end
 	-- (A registry agent's icon, in the mark's place: its seed, then the SVG.)
 	local function chosen_svg(): string
@@ -783,6 +983,9 @@ return ui.component(function(props: Props): Node
 	if props.loading then
 		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
 	end
+	local corridor = props.corridor
+	local corridor_item: Menu.CorridorItem? = nil
+
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its
 	-- trigger, it was put back folded, the search and tab lost.)
@@ -792,6 +995,9 @@ return ui.component(function(props: Props): Node
 		end
 		if props.on_open then
 			props.on_open()
+		end
+		if corridor and corridor_item then
+			corridor:opened(corridor_item)
 		end
 		query:set("")
 		local v = value:peek()
@@ -845,7 +1051,9 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	-- A hover-opened submenu stays open across the gap between its row
-	-- and panel. Leaving both starts a short, cancellable closing grace.
+	-- and panel. When coordinated by a `corridor`, the corridor owns the
+	-- hover-intent cone and closing timers; otherwise leaving both starts
+	-- a short, cancellable closing grace.
 	local over_trigger = false
 	local over_panel = false
 	local cancel_close: (() -> ())? = nil
@@ -872,11 +1080,35 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	if props.submenu then
-		ui.on_cleanup(stop_close)
+		if corridor then
+			local item = corridor:register(open, show_panel, function()
+				open:set(false)
+			end)
+			corridor_item = item
+			ui.on_cleanup(function()
+				corridor:unregister(item)
+			end)
+			ui.effect(function()
+				if not open:get() then
+					corridor:closed(item)
+				end
+			end)
+		else
+			ui.on_cleanup(stop_close)
+			ui.effect(function()
+				if not open:get() then
+					stop_close()
+					over_panel = false
+				end
+			end)
+		end
+	elseif corridor then
+		ui.on_cleanup(function()
+			corridor:cleanup()
+		end)
 		ui.effect(function()
 			if not open:get() then
-				stop_close()
-				over_panel = false
+				corridor:close_all()
 			end
 		end)
 	end
@@ -892,9 +1124,33 @@ return ui.component(function(props: Props): Node
 	local trigger = if props.trigger then props.trigger({
 		open = open,
 		toggle = toggle,
+		on_mount = if props.submenu and corridor and corridor_item
+			then function(el: Element)
+				corridor:mount_trigger(corridor_item :: Menu.CorridorItem, el)
+			end
+			else nil,
 		on_hover = if props.submenu
-			then function(inside: boolean)
-				hover(inside, false)
+			then if corridor and corridor_item
+				then function(inside: boolean)
+					local item = corridor_item :: Menu.CorridorItem
+					if inside then
+						corridor:enter_trigger(item)
+					else
+						corridor:leave_trigger(item)
+					end
+				end
+				else function(inside: boolean)
+					hover(inside, false)
+				end
+			else nil,
+		on_pointer_move = if props.submenu and corridor and corridor_item
+			then function(ev: PointerEvent)
+				corridor:move_trigger(corridor_item :: Menu.CorridorItem, { x = ev.x, y = ev.y })
+			end
+			else nil,
+		on_click = if props.submenu and corridor and corridor_item
+			then function()
+				corridor:click_trigger(corridor_item :: Menu.CorridorItem)
 			end
 			else nil,
 	}) else ui.button {
@@ -1005,7 +1261,7 @@ return ui.component(function(props: Props): Node
 						table.insert(top, gated(rule()))
 					end
 				end
-				local head = if props.head then ui.column { w_full = true, p = "$space.1", props.head } else nil
+				local head = if props.head then ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.head } else nil
 				if head and not bottom_up then
 					section(head, true)
 				end
@@ -1085,134 +1341,146 @@ return ui.component(function(props: Props): Node
 					end
 					return ui.show(expanded, node)
 				end
-				local items: { Node } = {}
-				table.insert(
-					items,
-					ui.each(shown, function(item: Item)
-						local r = row({
-							role = "option",
-							-- What assistive technology hears the selected
-							-- state as (the check it no longer shows).
-							selected = function(): boolean
-								return value:get() == item.value
-							end,
-							bg = function()
-								-- Folded, the one row is a control of its own: a
-								-- wash under the pointer, nothing else.
-								if props.expanded and not props.expanded() then
-									return if under:get() == item.value then "$hover" else "#00000000"
-								end
-								-- The chosen item in the selected state (as a
-								-- sidebar's row), the highlight (pointer or keys) a
-								-- wash on the rest.
-								if value:get() == item.value then
-									return "$zeron.menu.selected"
-								end
-								return if hi:get() == item.value then "$hover" else "#00000000"
-							end,
-							on_hover = function(inside: boolean)
-								if inside then
-									hi:set(item.value)
-									under:set(item.value)
-								elseif under:peek() == item.value then
-									under:set(nil)
-								end
-							end,
-							on_click = function()
-								-- Folded, the chosen item opens it out.
-								if props.expanded and not props.expanded() then
-									if props.on_expand then
-										props.on_expand()
-									end
-									return
-								end
-								choose(item.value)
-							end,
-							tall = item.description ~= nil,
-							opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
-							cursor = if item.disabled then "default" else nil,
-							tile(item),
-							if item.description
-								then ui.column {
-									grow = 1,
-									min_w = 0,
-									gap = "$zeron.space.hair",
-									if item.private
-										then PrivateText {
-											item.label,
-											reveal = false,
-											truncate = true,
-											text_size = "$font.size.md",
-											line_height = "$font.line.md",
-											weight = "$font.weight.medium",
-											color = "$text.primary",
-										}
-										else ui.text {
-											item.label,
-											text_size = "$font.size.md",
-											line_height = "$font.line.md",
-											weight = "$font.weight.medium",
-											color = "$text.primary",
-										},
-									ui.text {
-										item.description,
-										text_size = "$font.size.sm",
-										line_height = "$font.line.sm",
-										color = "$text.tertiary",
-										wrap = true,
-									},
-								}
-								else text(item.label),
-							if item.tag
-								then ui.text {
-									item.tag,
-									self = "center",
-									shrink = 0,
-									text_size = "$font.size.xs",
-									color = "$text.tertiary",
-								}
-								else nil,
-							-- Out of reach: Wi-Fi off, in the warning's ink (a glyph,
-							-- not the word, as Zeron's device menu shows it).
-							if item.warn
-								then ui.div { self = "center", shrink = 0, color = "$warning", Icon { name = "wifi-off", size = 12 } }
-								else nil,
-							trailing(item),
-							-- Folded, a chevron where the check is: it opens.
-							if props.expanded
-								then ui.show(function()
-									return value:get() == item.value and not (props.expanded :: () -> boolean)()
-								end, ui.div {
-									self = "center",
-									color = "$text.tertiary",
-									Icon { name = "alt-arrow-down", size = 14 },
-								})
-								else nil,
-						}, false)
-						if props.wrap_item then
-							r = props.wrap_item(item, r)
-						end
-						if not props.expanded then
-							return r
-						end
-						-- Folded, the others are out of sight (the edges of
-						-- the rows either side would show in the window's
-						-- insets), at once as it folds and opens out.
-						local expanded = props.expanded
-						return ui.div {
-							w_full = true,
-							opacity = function(): number
-								return if expanded() or value:get() == item.value then 1 else 0
-							end,
-							r,
-						}
-					end, {
-						key = function(item: Item)
-							return item.value
+				-- An item's row. `measure`: one with a description says how
+				-- tall it laid out (the list's whole height counts it).
+				local function item_row(item: Item, measure: boolean): Node
+					local r = row({
+						role = "option",
+						-- A row with a hint is heard as it reads: its name,
+						-- then its hint while that shows.
+						label = if item.hint
+							then function(): string
+								return if hint_shown(item) then `{item.label} {item.hint}` else item.label
+							end
+							else nil,
+						-- What assistive technology hears the selected
+						-- state as (the check it no longer shows).
+						selected = function(): boolean
+							return value:get() == item.value
 						end,
+						bg = function()
+							-- Folded, the one row is a control of its own: a
+							-- wash under the pointer, nothing else.
+							if props.expanded and not props.expanded() then
+								return if under:get() == item.value then "$hover" else "#00000000"
+							end
+							-- The chosen item in the selected state (as a
+							-- sidebar's row), the highlight (pointer or keys) a
+							-- wash on the rest.
+							if value:get() == item.value then
+								return "$zeron.menu.selected"
+							end
+							return if hi:get() == item.value then "$hover" else "#00000000"
+						end,
+						on_hover = function(inside: boolean)
+							if inside then
+								hi:set(item.value)
+								under:set(item.value)
+							elseif under:peek() == item.value then
+								under:set(nil)
+							end
+						end,
+						on_click = function()
+							-- Folded, the chosen item opens it out.
+							if props.expanded and not props.expanded() then
+								if props.on_expand then
+									props.on_expand()
+								end
+								return
+							end
+							choose(item.value)
+						end,
+						tall = item.description ~= nil,
+						on_resize = if measure and item.description
+							then function(size: { w: number, h: number })
+								local key = key_of(item)
+								if math.abs((tall_h[key] or 0) - size.h) >= 0.5 then
+									tall_h[key] = size.h
+									remeasured:set(remeasured:peek() + 1)
+								end
+							end
+							else nil,
+						opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
+						cursor = if item.disabled then "default" else nil,
+						tile(item),
+						if item.description
+							then ui.column {
+								grow = 1,
+								min_w = 0,
+								gap = "$zeron.space.hair",
+								if item.private
+									then PrivateText {
+										item.label,
+										reveal = false,
+										truncate = true,
+										text_size = "$font.size.md",
+										line_height = "$font.line.md",
+										weight = "$font.weight.medium",
+										color = "$text.primary",
+									}
+									else ui.text {
+										item.label,
+										text_size = "$font.size.md",
+										line_height = "$font.line.md",
+										weight = "$font.weight.medium",
+										color = "$text.primary",
+									},
+								ui.text {
+									item.description,
+									text_size = "$font.size.sm",
+									line_height = "$font.line.sm",
+									color = "$text.tertiary",
+									wrap = true,
+								},
+							}
+							elseif item.hint then named(item, function(): boolean
+								return hi:get() == item.value
+							end)
+							else text(item.label),
+						if item.tag
+							then ui.text {
+								item.tag,
+								self = "center",
+								shrink = 0,
+								text_size = "$font.size.xs",
+								color = "$text.tertiary",
+							}
+							else nil,
+						-- Out of reach: Wi-Fi off, in the warning's ink (a glyph,
+						-- not the word, as Zeron's device menu shows it).
+						if item.warn
+							then ui.div { self = "center", shrink = 0, color = "$warning", Icon { name = "wifi-off", size = 12 } }
+							else nil,
+						trailing(item),
+						-- Folded, a chevron where the check is: it opens.
+						if props.expanded
+							then ui.show(function()
+								return value:get() == item.value and not (props.expanded :: () -> boolean)()
+							end, ui.div {
+								self = "center",
+								color = "$text.tertiary",
+								Icon { name = "alt-arrow-down", size = 14 },
+							})
+							else nil,
+					}, false)
+					if props.wrap_item then
+						r = props.wrap_item(item, r)
+					end
+					if not props.expanded then
+						return r
+					end
+					-- Folded, the others are out of sight (the edges of
+					-- the rows either side would show in the window's
+					-- insets), at once as it folds and opens out.
+					local expanded = props.expanded
+					return ui.div {
 						w_full = true,
-					})
-				)
+						opacity = function(): number
+							return if expanded() or value:get() == item.value then 1 else 0
+						end,
+						r,
+					}
+				end
 				-- Nothing to list: the list's room as a quiet field of
 				-- characters (the slider's, in one faint ink), clearing in the
 				-- middle for what is missing (a mono label, as the panel's
@@ -1227,116 +1495,162 @@ return ui.component(function(props: Props): Node
 						hint = if q ~= "" then locale.s("ds.dropdown.nothing_matches", { query = q }) else nil,
 					}
 				end
-				table.insert(
-					items,
-					ui.show(function()
-						return #shown:get() == 0 and props.loading ~= nil and props.loading()
-					end, ui.column {
-						w_full = true,
-						gap = "$zeron.list.gap",
-						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
-						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
-						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
-					})
-				)
-				table.insert(
-					items,
-					ui.show(function()
-						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
-					end, ui.column {
-						w_full = true,
-						-- (Opened out, the list's whole window: its message in
-						-- the middle of it.)
-						h = if props.expanded
-							then function(): number
-								return math.max(EMPTY_H, view_h:get()) - INSET * 2
-							end
-							else EMPTY_H - INSET * 2,
-						relative = true,
-						overflow = "hidden",
-						rounded = Menu.row_radius(),
-						-- The field thins out toward the list's top and foot.
-						fade = { 16, 16 },
-						px = "$space.4",
-						gap = "$zeron.space.tight",
-						items = "center",
-						justify = "center",
-						ui.div {
-							absolute = true,
-							left = 0,
-							right = 0,
-							top = 0,
-							bottom = 0,
-							pointer_events = "none",
-							bg_shader = ascii.QUIET,
-							shader_params = ascii.quiet("$text.tertiary", 0.15, { 100, 20 }),
-							on_mount = ascii.drift,
-						},
-						ui.text {
-							function(): string
-								return string.upper(control.text(said().title) or "")
-							end,
-							font = "$font.mono",
-							text_size = "$font.size.xs",
-							letter_spacing = 1,
-							color = "$text.secondary",
-						},
-						ui.show(function(): boolean
-							return said().hint ~= nil
-						end, Text {
-							function(): string
-								return control.text(said().hint) or ""
-							end,
-							style = "caption",
-							tone = "tertiary",
-							align = "center",
-							wrap = true,
+				-- What shows in the list's place while it has no rows: its rows'
+				-- shapes while they're on their way, else what is missing.
+				local function nothing(): { Node }
+					return {
+						ui.show(function()
+							return #shown:get() == 0 and props.loading ~= nil and props.loading()
+						end, ui.column {
 							w_full = true,
+							gap = "$zeron.list.gap",
+							Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+							Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+							Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
 						}),
-					})
-				)
+						ui.show(function()
+							return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
+						end, ui.column {
+							w_full = true,
+							-- (Opened out, the list's whole window: its message in
+							-- the middle of it.)
+							h = if props.expanded
+								then function(): number
+									return math.max(EMPTY_H, view_h:get()) - INSET * 2
+								end
+								else EMPTY_H - INSET * 2,
+							relative = true,
+							overflow = "hidden",
+							rounded = Menu.row_radius(),
+							-- The field thins out toward the list's top and foot.
+							fade = { 16, 16 },
+							px = "$space.4",
+							gap = "$zeron.space.tight",
+							items = "center",
+							justify = "center",
+							ui.div {
+								absolute = true,
+								left = 0,
+								right = 0,
+								top = 0,
+								bottom = 0,
+								pointer_events = "none",
+								bg_shader = ascii.QUIET,
+								shader_params = ascii.quiet("$text.tertiary", 0.15, { 100, 20 }),
+								on_mount = ascii.drift,
+							},
+							ui.text {
+								function(): string
+									return string.upper(control.text(said().title) or "")
+								end,
+								font = "$font.mono",
+								text_size = "$font.size.xs",
+								letter_spacing = 1,
+								color = "$text.secondary",
+							},
+							ui.show(function(): boolean
+								return said().hint ~= nil
+							end, Text {
+								function(): string
+									return control.text(said().hint) or ""
+								end,
+								style = "caption",
+								tone = "tertiary",
+								align = "center",
+								wrap = true,
+								w_full = true,
+							}),
+						}),
+					}
+				end
 				-- The items scroll past about seven rows; the search and the
 				-- actions stay put. Without a search there are only a few: they
 				-- sit as they are.
 				if listless then
 					-- (Nothing to list.)
 				elseif props.search == false then
+					local items: { Node } = {
+						ui.show(
+							function(): boolean
+								return #shown:get() > 0
+							end,
+							ui.each(shown, function(item: Item)
+								return item_row(item, false)
+							end, { key = key_of, w_full = true, gap = "$zeron.list.gap" })
+						),
+					}
+					for _, node in nothing() do
+						table.insert(items, node)
+					end
 					table.insert(rows, gated(ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(items) }))
 				else
-					local list = ui.scroll {
-						w_full = true,
-						-- As tall as its rows, up to the view: a short list leaves
-						-- no empty space under it.
-						-- (Folding: the window's height, eased with its scroll.)
-						h = if props.expanded then view_h else list_height,
-						offset = offset,
-						-- Each edge fades only where there is more to scroll that way
-						-- (in the list as it will stand), easing out as the end
-						-- comes; folded, neither.
-						fade = function()
-							if folded() then
-								return { 0, 0 }
-							end
-							local list = shown:get()
-							local measured = content_h:get()
-							local whole = if measured > 0 then measured else list_h(#list)
-							local most = math.max(0, whole - list_height())
-							local o = offset:get()
-							return { math.min(o, 12), math.min(math.max(0, most - o), 12) }
+					-- As tall as its rows, up to the view: a short list leaves
+					-- no empty space under it.
+					-- (Folding: the window's height, eased with its scroll.)
+					local h = if props.expanded then view_h else list_height
+					-- Only the rows in view are built (a repository's thousands
+					-- of branches cost what a screenful does), each as tall as
+					-- it lays out.
+					local list = ui.show(
+						function(): boolean
+							return #shown:get() > 0
 						end,
-						ui.column {
+						ui.list {
 							w_full = true,
-							p = "$space.1",
-							gap = "$zeron.list.gap",
-							on_resize = function(size: { w: number, h: number })
-								if math.abs(size.h - content_h:peek()) >= 0.5 then
-									content_h:set(size.h)
+							h = h,
+							-- (Its inset; above and below, less the half gap each row
+							-- has about it.)
+							px = "$space.1",
+							py = ui.raw(INSET - gap() / 2, "the list's inset, less a row's half gap"),
+							data = shown,
+							key = key_of,
+							measured = true,
+							-- (A row and the gap about it; one with a description
+							-- taller, until it has laid out.)
+							height = step(),
+							estimate = { height = step(), has = { description = { height = tall_row() - ROW } } },
+							offset = offset,
+							-- Each edge fades only where there is more to scroll that way
+							-- (in the list as it will stand), easing out as the end
+							-- comes; folded, neither.
+							fade = function()
+								if folded() then
+									return { 0, 0 }
 								end
+								local most = math.max(0, whole:get() - list_height())
+								local o = offset:get()
+								return { math.min(o, 12), math.min(math.max(0, most - o), 12) }
+							end,
+							on_resize = function()
 								back_on_chosen()
 							end,
-							table.unpack(items),
+							-- Half the gap above each row and half under it: every
+							-- row a step down the list, its estimate its height.
+							row = function(item: Item): Node
+								return ui.column {
+									w_full = true,
+									py = ui.raw(gap() / 2, "half the list's gap, either side of a row"),
+									item_row(item, true),
+								}
+							end,
 						},
-					}
+						-- No rows: the list's room, inset as its rows are, what
+						-- it says a gap under where they'd start (as tall as
+						-- it is: past the room, cut off).
+						ui.column {
+							w_full = true,
+							h = h,
+							overflow = "hidden",
+							ui.column {
+								w_full = true,
+								shrink = 0,
+								p = "$space.1",
+								gap = "$zeron.list.gap",
+								ui.div { w_full = true },
+								table.unpack(nothing()),
+							},
+						}
+					)
 					if props.expanded then
 						-- Folded, the one row is a control, not a list: a layer
 						-- over it takes the pointer, so a wheel there scrolls
@@ -1386,7 +1700,18 @@ return ui.component(function(props: Props): Node
 					table.insert(rows, gated(list))
 				end
 				if props.actions and #props.actions > 0 then
-					table.insert(rows, rule())
+					local all = props.actions
+					-- (The rule and the actions' inset only while an action
+					-- shows: a menu whose every action is hidden ends at its
+					-- last item, with no line or gap under it.)
+					local function any_shown(): boolean
+						for _, action in all do
+							if not action.shown or action.shown() then
+								return true
+							end
+						end
+						return false
+					end
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
@@ -1408,7 +1733,18 @@ return ui.component(function(props: Props): Node
 						}, false)
 						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
-					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
+					table.insert(
+						rows,
+						ui.show(
+							any_shown,
+							ui.column {
+								w_full = true,
+								gap = 0,
+								rule(),
+								ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) },
+							}
+						)
+					)
 				end
 				if bottom_up then
 					place_top()
@@ -1420,13 +1756,26 @@ return ui.component(function(props: Props): Node
 				table.insert(rows, row)
 			end
 			if props.extra then
-				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", props.extra } }
+				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.extra } }
 				table.insert(rows, if props.extra_when then ui.show(props.extra_when, foot) else foot)
+			end
+			local function finish(col: { [any]: any }): Node
+				if corridor and not props.submenu then
+					col.on_pointer_move = function(ev: PointerEvent)
+						corridor:move_parent({ x = ev.x, y = ev.y })
+					end
+					col.on_hover = function(inside: boolean)
+						if not inside then
+							corridor:leave_parent()
+						end
+					end
+				end
+				return ui.column(col)
 			end
 			if props.search == false then
 				-- No field to type in: the panel itself takes the keys, focused
 				-- as it opens.
-				return ui.column {
+				return finish {
 					-- The panel's full width, so its rules reach both edges
 					-- (not the width of its widest row).
 					w_full = true,
@@ -1460,7 +1809,7 @@ return ui.component(function(props: Props): Node
 						end)
 					end
 				end)
-				return ui.column {
+				return finish {
 					w_full = true,
 					gap = 0,
 					role = "listbox",
@@ -1484,7 +1833,7 @@ return ui.component(function(props: Props): Node
 			-- it folds it back, rather than reaching the popover, which
 			-- closes.
 			local on_escape = props.on_escape
-			return ui.column {
+			return finish {
 				w_full = true,
 				gap = 0,
 				on_key = if on_escape
@@ -1510,8 +1859,22 @@ return ui.component(function(props: Props): Node
 			end
 			return ui.column {
 				w_full = true,
+				on_mount = if corridor and corridor_item
+					then function(el: Element)
+						corridor:mount_panel(corridor_item :: Menu.CorridorItem, el)
+					end
+					else nil,
 				on_hover = function(inside: boolean)
-					hover(inside, true)
+					if corridor and corridor_item then
+						local item = corridor_item :: Menu.CorridorItem
+						if inside then
+							corridor:enter_panel(item)
+						else
+							corridor:leave_panel(item)
+						end
+					else
+						hover(inside, true)
+					end
 				end,
 				build(),
 			}

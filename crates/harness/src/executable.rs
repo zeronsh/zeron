@@ -137,11 +137,33 @@ fn runnable(path: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         path.metadata()
             .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            && !is_lazy_installer(path)
     }
     #[cfg(not(unix))]
     {
         path.is_file()
     }
+}
+
+/// A stand-in some hosted sandbox images put where an agent's CLI would be
+/// (Boat's `ascii-harness-shim`, `ascii-lazy-harness`): running it, even
+/// for `--version`, downloads and installs the agent on the spot, and its
+/// install fails or lags behind the agent's own installer. It is never the
+/// agent's CLI: the search goes on to a real one, else the agent counts as
+/// not installed and its own installer runs.
+pub(crate) fn is_lazy_installer(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0_u8; 256];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let read = file.read(&mut head).unwrap_or(0);
+    let head = &head[..read];
+    if !head.starts_with(b"#!") {
+        return false;
+    }
+    let text = String::from_utf8_lossy(head);
+    text.contains("# ascii-harness-shim") || text.contains("# ascii-lazy-harness")
 }
 
 fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
@@ -493,6 +515,15 @@ fn is_windows_absolute(path: &Path) -> bool {
     drive || text.starts_with(r"\\")
 }
 
+/// The node version managers' and global installs' bin directories that
+/// exist on this machine (nvm's newest version first).
+pub fn node_manager_bins() -> Vec<PathBuf> {
+    node_version_manager_bins_with(&|key| std::env::var_os(key), Platform::current())
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
 fn node_version_manager_bins_with(
     env: &impl Fn(&str) -> Option<OsString>,
     platform: Platform,
@@ -813,6 +844,25 @@ pub(crate) fn find_on_paths_matching_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sandbox_images_lazy_installer_is_never_the_agents_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let shim = write("hermes", "#!/bin/sh\n# ascii-harness-shim\nexec /usr/local/lib/ascii-harnesses/bin/hermes \"$@\"\n");
+        let lazy = write("pi", "#!/bin/sh\n# ascii-lazy-harness pi\nexec lazy-run pi \"$@\"\n");
+        let real = write("opencode", "#!/bin/sh\necho opencode 1.0\n");
+        assert!(is_lazy_installer(&shim) && !runnable(&shim));
+        assert!(is_lazy_installer(&lazy) && !runnable(&lazy));
+        assert!(!is_lazy_installer(&real) && runnable(&real));
+    }
     use std::collections::HashMap;
 
     /// Resolution walks the PATHs in the child PATH's order: the login shell

@@ -5,7 +5,7 @@
 
 use zeron_cli::EngineCommand;
 
-use crate::{auth_cli, engine_config_from_env, ipc_cli, plugin_cli};
+use crate::{auth_cli, engine_config_from_env, ipc_cli, mcp_cli, plugin_cli};
 
 pub fn run_engine_command(command: EngineCommand) -> anyhow::Result<()> {
     match command {
@@ -39,6 +39,11 @@ pub fn run_engine_command(command: EngineCommand) -> anyhow::Result<()> {
             runtime.block_on(ipc_cli::quiesce_cli(config.ipc_port, &config.data_dir))
         }
         EngineCommand::Mcp => crate::run_mcp(),
+        EngineCommand::McpServers(command) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(mcp_cli::run(command, config.ipc_port, &config.data_dir))
+        }
         EngineCommand::Plugin(command) => {
             let runtime = tokio::runtime::Runtime::new()?;
             let config = engine_config_from_env();
@@ -54,5 +59,9 @@ pub fn run_engine_command(command: EngineCommand) -> anyhow::Result<()> {
             ))
         }
         EngineCommand::Engine => crate::background::run(),
+        EngineCommand::DiscoverModels(harness) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(zeron_engine::sign_in_catalog::print_discovered(&harness))
+        }
     }
 }

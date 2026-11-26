@@ -410,6 +410,20 @@ fn cloud_edge(request: &str, body: &str) -> (u16, String) {
                 .into(),
         );
     }
+    // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
     if request.starts_with("GET ") && request.contains("/github/repos") {
         return (
             200,
@@ -544,6 +558,86 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     assert_eq!(side.device_id, "cloud-s-chat-1");
     assert_eq!(side.cwd.as_deref(), Some("/home/user/app"));
 
+    // An agent naming another of the person's devices starts its chat
+    // there; naming the parent's machine, or none, it shares that machine.
+    use zeron_rpc::RpcService as _;
+    let rpc = core.rpc_service();
+    let agent_creates = |chat_id: &str, device: Option<String>| {
+        let mut op = serde_json::json!({
+            "op": "createChat", "chatId": chat_id, "spaceId": "sp-app", "parentChatId": "chat-1",
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+        });
+        if let Some(device) = device {
+            op["deviceId"] = serde_json::json!(device);
+        }
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent { chat: None },
+            rpc.handle(methods::MUTATE, op),
+        )
+    };
+    agent_creates("side-here", Some(core.workspace.device_id().to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace.chat("side-here").unwrap().unwrap().device_id,
+        core.workspace.device_id()
+    );
+    agent_creates("side-there", Some("cloud-s-chat-1".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-there")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+    agent_creates("side-unnamed", None).await.unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-unnamed")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+
+    // What a new machine reaches: the person's pick goes to the edge; an
+    // agent's is never taken (the account's default applies).
+    let session_bodies = |chat_id: &str| -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(request, _)| request.starts_with("POST ") && request.ends_with("/sessions"))
+            .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+            .filter(|body| body["chatId"] == chat_id)
+            .collect()
+    };
+    assert!(session_bodies("chat-1")[0].get("reach").is_none());
+    create(
+        &client,
+        serde_json::json!({
+        "chatId": "chat-isolated", "spaceId": "sp-app", "cloud": true, "cloudReach": "isolated" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session_bodies("chat-isolated")[0]["reach"], "isolated");
+    zeron_rpc::with_caller(
+        zeron_rpc::Caller::Agent { chat: None },
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-by-agent", "spaceId": "sp-app",
+                "cloud": true, "cloudReach": "devices",
+                "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(session_bodies("chat-by-agent")[0].get("reach").is_none());
+
     // Without Cloud picked, the same project runs here.
     create(
         &client,
@@ -609,6 +703,18 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
                 "sp-app",
                 "https://github.com/acme/app.git",
                 Some("dev")
+            ),
+            (
+                "chat-isolated",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
+            ),
+            (
+                "chat-by-agent",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
             ),
             (
                 "chat-fail",
@@ -677,8 +783,8 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     });
     let client = memory_client(core.rpc_service());
 
-    // Harnesses for any Cloud device: Codex and Claude Code, both usable
-    // there, without dialing anything (no peer links exist here).
+    // Harnesses for any Cloud device: every built-in agent, without dialing
+    // anything (no peer links exist here).
     for target in ["cloud-acct", "cloud-s-chat-1"] {
         let harnesses: Vec<serde_json::Value> = client
             .call_as(
@@ -687,12 +793,11 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
             )
             .await
             .unwrap();
-        let ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
-        assert_eq!(ids.len(), 2, "{harnesses:?}");
-        assert!(
-            ids.contains(&"codex") && ids.contains(&"claude-code"),
-            "{ids:?}"
-        );
+        let mut ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
+        ids.sort_unstable();
+        let mut cloud: Vec<&str> = zeron_proto::CLOUD_HARNESSES.to_vec();
+        cloud.sort_unstable();
+        assert_eq!(ids, cloud, "{harnesses:?}");
         assert!(harnesses.iter().all(|h| h["installed"] == true));
     }
     let refused = client
@@ -703,9 +808,31 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains("Codex and Claude Code only"),
+        refused.to_string().contains("doesn't run on Cloud"),
         "{refused}"
     );
+
+    // A Cloud chat's composer asks its session machine for accounts: they
+    // come from the vault, the same for every machine, never by dialing the
+    // machine (which may be asleep).
+    for target in ["cloud-s-chat-1", "cloud"] {
+        let snapshot: serde_json::Value = client
+            .call_as(
+                methods::LIST_AGENT_ACCOUNTS,
+                serde_json::json!({ "targetDeviceId": target }),
+            )
+            .await
+            .unwrap();
+        let codex: Vec<&serde_json::Value> = snapshot["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["harness"] == "codex")
+            .collect();
+        assert_eq!(codex.len(), 1, "{target}: {snapshot}");
+        assert_eq!(codex[0]["id"], "codex:a1");
+        assert_eq!(codex[0]["active"], true);
+    }
 
     // Models for a chat on a session machine (asleep, or gone): Cloud's, as
     // the edge lists them, whatever this computer has installed or signed in.
@@ -759,6 +886,97 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
             .iter()
             .all(|(r, _)| !r.contains("/device/"))
     );
+    core.shutdown().await;
+}
+
+/// Settings → Providers' agent settings for Cloud are the account's, kept
+/// in its registry for every Cloud machine: read and made here for Cloud and
+/// for any of its machines, never by dialing one (made for one chat).
+#[tokio::test]
+async fn cloud_agent_settings_are_the_accounts_and_answered_here() {
+    use zeron_rpc::RpcService;
+    let (edge_url, seen) = scripted_edge(cloud_edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+
+    // Nothing chosen yet: off for each agent Cloud runs that can hide its own.
+    let got: serde_json::Value = client
+        .call_as(methods::GET_ZERON_MCP_ONLY, serde_json::json!({ "targetDeviceId": "cloud" }))
+        .await
+        .unwrap();
+    assert_eq!(got["on"], serde_json::json!([]), "{got}");
+    let supported: Vec<&str> = got["supported"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(supported.contains(&"codex") && supported.contains(&"claude-code"), "{got}");
+
+    // Made for Cloud, read back from a machine of Cloud's: the same rows.
+    let set: serde_json::Value = client
+        .call_as(
+            methods::SET_ZERON_MCP_ONLY,
+            serde_json::json!({ "targetDeviceId": "cloud", "harness": "codex", "enabled": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set["on"], serde_json::json!(["codex"]));
+    let _: serde_json::Value = client
+        .call_as(
+            methods::SET_NATIVE_SUBAGENTS,
+            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "claude-code", "enabled": false }),
+        )
+        .await
+        .unwrap();
+    let native: serde_json::Value = client
+        .call_as(methods::GET_NATIVE_SUBAGENTS, serde_json::json!({ "targetDeviceId": "cloud" }))
+        .await
+        .unwrap();
+    assert_eq!(native["off"], serde_json::json!(["claude-code"]), "{native}");
+    let choices = core.workspace.cloud_agent_choices(HarnessId::Codex);
+    assert_eq!(choices.zeron_mcp_only, Some(true));
+    // This computer's own settings are its own.
+    let here: serde_json::Value = client.call_as(methods::GET_ZERON_MCP_ONLY, serde_json::json!({})).await.unwrap();
+    assert_eq!(here["on"], serde_json::json!([]), "{here}");
+
+    // An agent that can't is refused, and nothing changes.
+    let refused = client
+        .call_as::<serde_json::Value>(
+            methods::SET_CODE_MODE,
+            serde_json::json!({ "targetDeviceId": "cloud", "harness": "claude-code", "enabled": true }),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("can't change that on Cloud"), "{refused}");
+
+    // Nor from another device (a Cloud machine may reach this one, and the
+    // room takes these rows from no Cloud machine) or an agent; reading may.
+    for caller in [
+        zeron_rpc::Caller::Peer { device: None },
+        zeron_rpc::Caller::Agent { chat: None },
+    ] {
+        let service = core.rpc_service();
+        let (set, got) = zeron_rpc::with_caller(caller.clone(), async move {
+            let set = service
+                .handle(
+                    methods::SET_ZERON_MCP_ONLY,
+                    serde_json::json!({ "targetDeviceId": "cloud", "harness": "codex", "enabled": false }),
+                )
+                .await;
+            let got = service
+                .handle(methods::GET_ZERON_MCP_ONLY, serde_json::json!({ "targetDeviceId": "cloud" }))
+                .await;
+            (set.err().map(|e| e.to_string()), got.is_ok())
+        })
+        .await;
+        assert!(set.is_some_and(|e| e.contains("Zeron's own window")), "{caller:?}");
+        assert!(got, "{caller:?}");
+    }
+    assert_eq!(core.workspace.cloud_agent_choices(HarnessId::Codex).zeron_mcp_only, Some(true));
+    assert!(seen.lock().unwrap().iter().all(|(r, _)| !r.contains("/device/")), "no machine dialed");
     core.shutdown().await;
 }
 
@@ -894,7 +1112,21 @@ async fn github_logins_are_listed_and_changed_one_at_a_time() {
             let accounts = [login("awork", "work-me", true), login("ahome", "home-me", false)];
             return (200, serde_json::json!({ "accounts": accounts }).to_string());
         }
-        if request.starts_with("GET ") && request.contains("/github/repos") {
+        // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
+    if request.starts_with("GET ") && request.contains("/github/repos") {
             let reply = serde_json::json!({
                 "repos": [{
                     "fullName": "work-org/api", "cloneUrl": "https://github.com/work-org/api.git",
@@ -1064,6 +1296,8 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
             auto_approve: true,
             access: Default::default(),
             plan: false,
+            code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

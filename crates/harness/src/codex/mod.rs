@@ -152,10 +152,21 @@ fn agent_tools_off() -> [(String, Value); 3] {
 /// to the user's `mcp_servers` table.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-    vec![
-        (key("command"), mcp.command.clone().into()),
-        (key("args"), json!(mcp.args)),
-        (key("env"), json!(mcp.env)),
+    // The engine serves Zeron's tools itself over Streamable HTTP, which
+    // Codex speaks: no server process. These overrides ride `thread/start`
+    // on the app-server's stdin, never the command line.
+    let transport = match &mcp.http {
+        Some(http) => vec![
+            (key("url"), http.url.clone().into()),
+            (key("http_headers"), json!(http.headers)),
+        ],
+        None => vec![
+            (key("command"), mcp.command.clone().into()),
+            (key("args"), json!(mcp.args)),
+            (key("env"), json!(mcp.env)),
+        ],
+    };
+    transport.into_iter().chain([
         // Our injected server's tools are Zeron's own: approve them in every
         // access mode, so Codex neither rejects a call under `never` nor
         // asks about one under the others.
@@ -167,25 +178,98 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         // A cold start (a fresh machine paging the binary in) can outlast
         // the 10 s default before the server answers `initialize`.
         (key("startup_timeout_sec"), 30.into()),
-    ]
+    ])
+    .collect()
 }
 
-/// Dotted `thread/start` config overrides for the plugins' native MCP
-/// servers ([`RunRequest::extra_mcp`]). Unlike Zeron's own server they get no
-/// `default_tools_approval_mode`: their tools are a plugin's, so Codex asks
-/// (or refuses) under the chat's access mode like any user-configured server.
+/// Dotted `thread/start` config overrides for extra MCP servers
+/// ([`RunRequest::extra_mcp`], plugins and managed servers). Unlike Zeron's own
+/// server they get no `default_tools_approval_mode` or custom timeout: their
+/// tools are approved (or refused) under the chat's access mode like any
+/// user-configured server.
 fn codex_extra_mcp_overrides(extras: &[zeron_proto::McpServer]) -> Vec<(String, Value)> {
     extras
         .iter()
         .flat_map(|mcp| {
             let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-            [
-                (key("command"), mcp.command.clone().into()),
-                (key("args"), json!(mcp.args)),
-                (key("env"), json!(mcp.env)),
-            ]
+            match &mcp.http {
+                Some(http) => vec![
+                    (key("url"), http.url.clone().into()),
+                    (key("http_headers"), json!(http.headers)),
+                ],
+                None => vec![
+                    (key("command"), mcp.command.clone().into()),
+                    (key("args"), json!(mcp.args)),
+                    (key("env"), json!(mcp.env)),
+                ],
+            }
         })
         .collect()
+}
+
+/// How long a run waits for Codex to say which MCP servers its plugins
+/// bring. A local marketplace answers in milliseconds; a remote one asks
+/// ChatGPT's catalog, so a slow network costs a run start no more than this.
+const PLUGIN_READ_BUDGET: Duration = Duration::from_millis(1500);
+
+/// The MCP servers Codex's enabled plugins bring (a plugin's `.mcp.json`,
+/// which `config/read` doesn't list), as the `plugins` config overlay that
+/// switches each off: `{"<plugin id>": {"mcp_servers": {"<name>":
+/// {"enabled": false}}}}`. Only those servers: a plugin's skills and the
+/// rest stay. Overlaid on the user's own `plugins` table, never in place of
+/// it. All are asked at once within [`PLUGIN_READ_BUDGET`]; a plugin that
+/// doesn't answer in time keeps its servers. `None` when there are none to
+/// switch off, or Codex has no plugins (or predates these methods).
+async fn plugin_mcp_servers_off(client: &RpcClient, cwd: &str) -> Option<Value> {
+    let deadline = tokio::time::Instant::now() + PLUGIN_READ_BUDGET;
+    let installed = tokio::time::timeout_at(
+        deadline,
+        client.request("plugin/installed", json!({"cwds": [cwd]})),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let mut reads: futures::stream::FuturesUnordered<_> = installed["marketplaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|marketplace| {
+            let source = match marketplace["path"].as_str() {
+                Some(path) => ("marketplacePath", path),
+                None => ("remoteMarketplaceName", marketplace["name"].as_str().unwrap_or_default()),
+            };
+            marketplace["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|plugin| plugin["installed"] == true && plugin["enabled"] == true)
+                .filter_map(move |plugin| {
+                    let id = plugin["id"].as_str()?.to_owned();
+                    let params = serde_json::Map::from_iter([
+                        ("pluginName".to_owned(), plugin["name"].as_str()?.into()),
+                        (source.0.to_owned(), source.1.into()),
+                    ]);
+                    let read = client.request_now("plugin/read", Value::Object(params));
+                    Some(async move { (id, read.await) })
+                })
+        })
+        .collect();
+    let mut off = serde_json::Map::new();
+    while let Ok(Some((id, read))) = tokio::time::timeout_at(deadline, reads.next()).await {
+        let servers: serde_json::Map<String, Value> = read
+            .ok()
+            .as_ref()
+            .and_then(|read| read["plugin"]["mcpServers"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|name| (name.to_owned(), json!({"enabled": false})))
+            .collect();
+        if !servers.is_empty() {
+            off.insert(id, json!({ "mcp_servers": servers }));
+        }
+    }
+    (!off.is_empty()).then_some(Value::Object(off))
 }
 
 /// The longest a Zeron MCP tool may take: its longest wait (an hour) plus
@@ -216,6 +300,19 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    /// App-servers started before their chat's first message
+    /// ([`Harness::prewarm`]), by key: launched and past `initialize`.
+    warm: std::sync::Mutex<std::collections::HashMap<String, WarmServer>>,
+}
+
+/// A parked warm start: the app-server, initialized, and what it was
+/// launched from (its binary, folder and environment: all a launch takes —
+/// the thread's model, modes and MCP servers ride `thread/start`).
+struct WarmServer {
+    exe: PathBuf,
+    cwd: String,
+    env: std::collections::BTreeMap<String, String>,
+    server: AppServer,
 }
 
 impl Default for CodexHarness {
@@ -225,6 +322,7 @@ impl Default for CodexHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            warm: Default::default(),
         }
     }
 }
@@ -232,6 +330,28 @@ impl Default for CodexHarness {
 impl CodexHarness {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The binary a launch runs: the physical release, pinned for this
+    /// process and its voice helper (an installer may move the current
+    /// symlink while this runtime stays warm), its version checked.
+    async fn launch_executable(&self) -> Result<PathBuf, HarnessError> {
+        let exe = plain_executable(
+            self.resolve_executable()?
+                .canonicalize()
+                .map_err(HarnessError::Io)?,
+        );
+        // Cached per binary; a fixed test executable is never version-probed.
+        if self.executable.is_none() {
+            let probe = exe.clone();
+            let version =
+                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
+                    .await
+                    .ok()
+                    .flatten();
+            check_codex_version(version.as_ref())?;
+        }
+        Ok(exe)
     }
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
@@ -285,7 +405,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -338,7 +458,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -446,12 +566,27 @@ fn run_access(request: &RunRequest) -> AccessMode {
 /// supervised, asks before anything but codex's known-safe reads (under
 /// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
 /// A title run never asks and never writes, whatever its chat's mode.
+/// Auto writes the workspace and asks on request, and its requests go to
+/// codex's auto-review rather than the person ([`approvals_reviewer`]).
 fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
     match access {
         _ if title_only => ("never", SandboxLevel::ReadOnly),
         AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
+        AccessMode::Auto => ("on-request", SandboxLevel::WorkspaceWrite),
         AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
         AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
+    }
+}
+
+/// Who answers a run's approval requests: codex's auto-review in Auto (it
+/// escalates what it won't decide), the person in the other asking modes,
+/// and nobody to name in full access or a title run (they never ask).
+fn approvals_reviewer(access: AccessMode, title_only: bool) -> Option<&'static str> {
+    match access {
+        _ if title_only => None,
+        AccessMode::FullAccess => None,
+        AccessMode::Auto => Some("auto_review"),
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits => Some("user"),
     }
 }
 
@@ -639,6 +774,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
                 default: false,
                 id: id.to_owned(),
                 label,
+                provider: None,
                 description,
                 reasoning_levels,
                 options,
@@ -738,7 +874,7 @@ impl Harness for CodexHarness {
     /// Supervised asks before what codex does not know to be safe, and
     /// auto-accept edits before stepping outside the workspace sandbox.
     fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
+        &AccessMode::WITH_AUTO
     }
     /// Codex's own `plan` collaboration mode.
     fn supports_plan(&self) -> bool {
@@ -753,14 +889,21 @@ impl Harness for CodexHarness {
             && service_tier(live) == service_tier(next)
             && run_access(live) == run_access(next)
             && live.plan == next.plan
+            && live.code_mode == next.code_mode
+            && live.zeron_mcp_only == next.zeron_mcp_only
     }
     /// `turn/start` carries model, effort, service tier, approval policy,
     /// sandbox and collaboration mode, and each sticks for later turns — so
     /// a change applies from the next turn without a new app-server.
     /// Clearing a model, effort or tier back to the default cannot be
     /// expressed that way (an omitted parameter keeps the previous value).
+    /// Code Mode and "Only Zeron's MCP servers" are `thread/start` /
+    /// `thread/resume` config overrides, so switching either starts a fresh
+    /// thread.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.code_mode == next.code_mode
+            && live.zeron_mcp_only == next.zeron_mcp_only
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -827,7 +970,91 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, false).await
+        self.run_with_mode(request, controls, false, false, None).await
+    }
+
+    /// An app-server waits for its client once `initialize` is answered:
+    /// started that far, it has done its startup and asked no model anything
+    /// (the thread is started with the first message, from its config).
+    fn prewarms(&self) -> bool {
+        true
+    }
+
+    async fn prewarm(&self, key: &str, mut request: RunRequest) -> Result<(), HarnessError> {
+        self.discard_warm(key).await;
+        let exe = self.launch_executable().await?;
+        request.sandbox = permissions(run_access(&request), false).1;
+        let mut server = spawn_app_server(&exe, &request)?;
+        // The same handshake a run makes (`run_session`), opt-outs first;
+        // bounded, so a stuck app-server never holds the warm start open.
+        let mut opt_out = true;
+        loop {
+            let handshake = server.client.request("initialize", initialize_params(opt_out));
+            let answered = tokio::time::timeout(WARM_HANDSHAKE, handshake)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(HarnessError::Protocol("codex app-server: initialize timed out".into()))
+                });
+            match answered {
+                Ok(_) => break,
+                Err(_) if !server.client.is_closed() && std::mem::take(&mut opt_out) => continue,
+                Err(error) => {
+                    server.client.close_stdin_for_teardown();
+                    shutdown_child(&mut server.child, self.kill_grace).await;
+                    return Err(error);
+                }
+            }
+        }
+        server.client.notify("initialized", None);
+        let warm = WarmServer {
+            exe,
+            cwd: request.cwd.clone(),
+            env: request.env.clone(),
+            server,
+        };
+        let replaced = lock_warm(&self.warm).insert(key.to_owned(), warm);
+        if let Some(old) = replaced {
+            spawn_retire(old, self.kill_grace);
+        }
+        Ok(())
+    }
+
+    async fn run_warm(
+        &self,
+        key: &str,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut warm = lock_warm(&self.warm).remove(key);
+        let alive = warm
+            .as_mut()
+            .is_some_and(|w| matches!(w.server.child.try_wait(), Ok(None)) && !w.server.client.is_closed());
+        let exe = self.launch_executable().await.ok();
+        let server = match warm {
+            Some(w)
+                if alive
+                    && exe.as_ref() == Some(&w.exe)
+                    && w.cwd == request.cwd
+                    && w.env == request.env =>
+            {
+                Some(w.server)
+            }
+            Some(w) => {
+                tracing::info!(target: "zeron_harness::codex", key, "warm start not used; starting afresh");
+                spawn_retire(w, self.kill_grace);
+                None
+            }
+            None => None,
+        };
+        self.run_with_mode(request, controls, false, false, server).await
+    }
+
+    /// Ends once the app-server has.
+    async fn discard_warm(&self, key: &str) {
+        let warm = lock_warm(&self.warm).remove(key);
+        if let Some(warm) = warm {
+            retire(warm, self.kill_grace).await;
+        }
     }
 
     async fn start_idle(
@@ -835,7 +1062,7 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, true).await
+        self.run_with_mode(request, controls, false, true, None).await
     }
 
     async fn run_title(
@@ -853,7 +1080,33 @@ impl Harness for CodexHarness {
         request.auto_approve = false;
         request.access = AccessMode::Supervised;
         request.plan = false;
-        self.run_with_mode(request, controls, true, false).await
+        self.run_with_mode(request, controls, true, false, None).await
+    }
+}
+
+fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How long a warm start waits for its app-server's `initialize` answer.
+const WARM_HANDSHAKE: Duration = Duration::from_secs(30);
+
+/// End a warm start no message reached.
+async fn retire(warm: WarmServer, kill_grace: Duration) {
+    let WarmServer { server, .. } = warm;
+    let AppServer { mut child, client, .. } = server;
+    client.close_stdin_for_teardown();
+    shutdown_child(&mut child, kill_grace).await;
+}
+
+/// [`retire`], in the background.
+fn spawn_retire(warm: WarmServer, kill_grace: Duration) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(retire(warm, kill_grace));
+        }
+        // (No runtime: the child is killed on drop.)
+        Err(_) => drop(warm),
     }
 }
 
@@ -864,6 +1117,7 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
         idle: bool,
+        warm: Option<AppServer>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -880,36 +1134,26 @@ impl CodexHarness {
                 "Codex commands cannot include attachments; send them in a separate prompt".into(),
             ));
         }
-        // Pin the physical release for this process and its voice helper: an
-        // installer may move the current symlink while this runtime stays warm.
-        let exe = plain_executable(
-            self.resolve_executable()?
-                .canonicalize()
-                .map_err(HarnessError::Io)?,
-        );
-        // Cached per binary; a fixed test executable is never version-probed.
-        if self.executable.is_none() {
-            let probe = exe.clone();
-            let version =
-                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
-                    .await
-                    .ok()
-                    .flatten();
-            check_codex_version(version.as_ref())?;
-        }
+        let exe = self.launch_executable().await?;
         // The sandbox is the access mode's (see [`permissions`]), never the
         // request's own level.
         request.sandbox = permissions(run_access(&request), title_only).1;
+        // A warm start (`prewarm`) is launched and initialized already.
+        let initialized = warm.is_some();
         let AppServer {
             child,
             client,
             incoming,
             stderr_tail,
-        } = spawn_app_server(&exe, &request)?;
+        } = match warm {
+            Some(server) => server,
+            None => spawn_app_server(&exe, &request)?,
+        };
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
             idle,
+            initialized,
             executable: exe,
             child,
             client,
@@ -951,7 +1195,7 @@ fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, Harne
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
         let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
@@ -1153,6 +1397,8 @@ struct Session {
     executable: PathBuf,
     title_only: bool,
     idle: bool,
+    /// Its app-server answered `initialize` already (a warm start).
+    initialized: bool,
     child: Child,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
@@ -1361,6 +1607,7 @@ async fn run_session(session: Session) {
         executable,
         title_only,
         idle,
+        initialized,
         mut child,
         mut client,
         mut incoming,
@@ -1387,7 +1634,7 @@ async fn run_session(session: Session) {
     // configured `approvals_reviewer` could otherwise hand them to an AI
     // reviewer instead.
     let (approval_policy, sandbox) = permissions(run_access(&request), title_only);
-    let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
+    let reviewer = |live: &RunRequest| approvals_reviewer(run_access(live), title_only);
     let start_tier = service_tier(&request);
 
     let start_params = {
@@ -1442,10 +1689,27 @@ async fn run_session(session: Session) {
                 .expect("thread/start config overrides are an object")
                 .extend(codex_extra_mcp_overrides(&request.extra_mcp));
         }
+        if !title_only && request.zeron_mcp_only {
+            // Only Zeron's MCP servers: ChatGPT's apps (its `codex_apps`
+            // server) off for this thread; the user's own configured servers
+            // are switched off by name once the config is read (below).
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object")
+                .insert("features.apps".into(), false.into());
+        }
+        if !title_only && request.code_mode {
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object")
+                .insert("features.code_mode".into(), true.into());
+        }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(sandbox).into());
-        if asks_person(&request) {
-            p.insert("approvalsReviewer".into(), "user".into());
+        if let Some(reviewer) = reviewer(&request) {
+            p.insert("approvalsReviewer".into(), reviewer.into());
         }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
@@ -1460,6 +1724,9 @@ async fn run_session(session: Session) {
     let mut attempt = 0;
     let mut opt_out = true;
     loop {
+        if initialized {
+            break;
+        }
         let handshake = client.request("initialize", initialize_params(opt_out));
         let failed = tokio::select! {
             res = handshake => match res {
@@ -1565,7 +1832,9 @@ async fn run_session(session: Session) {
         shutdown_child(&mut child, kill_grace).await;
         return;
     }
-    client.notify("initialized", None);
+    if !initialized {
+        client.notify("initialized", None);
+    }
 
     // ---- thread + first turn (interruptible) ------------------------------
     let setup = async {
@@ -1580,20 +1849,42 @@ async fn run_session(session: Session) {
         }
 
         let mut start_params = start_params.clone();
-        if title_only {
+        if title_only || request.zeron_mcp_only {
             // Disable each configured MCP server explicitly: an empty table
             // would merge with user configuration and leave servers enabled.
+            // As the run's folder sees it, so a project's own
+            // `.codex/config.toml` servers count too. Never one Zeron put
+            // there itself (its own server, plugins', the managed ones).
             let config = client
-                .request("config/read", json!({"includeLayers": false}))
+                .request(
+                    "config/read",
+                    json!({"includeLayers": false, "cwd": request.cwd}),
+                )
                 .await?;
+            let zerons: HashSet<&str> = request
+                .mcp
+                .iter()
+                .chain(&request.extra_mcp)
+                .map(|server| server.name.as_str())
+                .collect();
             if let Some(servers) = config["config"]["mcp_servers"].as_object() {
                 let overrides = start_params
-                    .get_mut("config")
-                    .and_then(Value::as_object_mut)
-                    .unwrap();
-                for name in servers.keys() {
+                    .entry("config")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("thread/start config overrides are an object");
+                for name in servers.keys().filter(|name| !zerons.contains(name.as_str())) {
                     overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
                 }
+            }
+            // And those Codex's plugins bring (its computer use, its app tools).
+            if let Some(plugins) = plugin_mcp_servers_off(&client, &request.cwd).await {
+                start_params
+                    .entry("config")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("thread/start config overrides are an object")
+                    .insert("plugins".into(), plugins);
             }
         }
         let mut restore_notice = None;
@@ -1696,8 +1987,8 @@ async fn run_session(session: Session) {
         let (approval_policy, sandbox) = permissions(run_access(live), title_only);
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandboxPolicy".into(), sandbox_policy_value(sandbox));
-        if asks_person(live) {
-            p.insert("approvalsReviewer".into(), "user".into());
+        if let Some(reviewer) = reviewer(live) {
+            p.insert("approvalsReviewer".into(), reviewer.into());
         }
         // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
         // when asked for — without this codex "thinks" in silence for minutes:
@@ -1902,6 +2193,15 @@ async fn run_session(session: Session) {
                             && let Some(active) = router.active.clone()
                         {
                             send_turn_interrupt(&client, &thread_id, active);
+                        }
+                    }
+
+                    // Auto's reviewer on a call: shown on the call.
+                    "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+                        if let Some(event) = normalize::auto_review_event(&params)
+                            && !send(&event_tx, event).await
+                        {
+                            break 'main;
                         }
                     }
 
@@ -2956,6 +3256,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
             let question = UserInputQuestion {
+                note: None,
                 id: new_message_id(),
                 header: {
                     let h = field(["header", "title", "label"]);
@@ -3126,6 +3427,8 @@ mod tests {
             auto_approve: false,
             access,
             plan,
+            code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -3156,7 +3459,24 @@ mod tests {
             wire(AccessMode::Supervised, false),
             ("untrusted", "read-only", json!({"type": "readOnly"}))
         );
-        for access in AccessMode::ALL {
+        // Auto asks on request, and auto-review answers (it escalates what
+        // it won't decide); the other asking modes name the person.
+        assert_eq!(
+            wire(AccessMode::Auto, false),
+            (
+                "on-request",
+                "workspace-write",
+                json!({"type": "workspaceWrite", "networkAccess": true})
+            )
+        );
+        assert_eq!(approvals_reviewer(AccessMode::Auto, false), Some("auto_review"));
+        assert_eq!(approvals_reviewer(AccessMode::AutoAcceptEdits, false), Some("user"));
+        assert_eq!(approvals_reviewer(AccessMode::Supervised, false), Some("user"));
+        assert_eq!(approvals_reviewer(AccessMode::FullAccess, false), None);
+        for access in AccessMode::WITH_AUTO {
+            assert_eq!(approvals_reviewer(access, true), None);
+        }
+        for access in AccessMode::WITH_AUTO {
             assert_eq!(
                 wire(access, true),
                 ("never", "read-only", json!({"type": "readOnly"}))
@@ -3183,6 +3503,8 @@ mod tests {
         assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
         assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
         assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
+        // What auto-review escalates is asked.
+        assert_eq!(allowed(AccessMode::Auto), [false, false, false]);
     }
 
     #[test]
@@ -3204,7 +3526,15 @@ mod tests {
         let mut moved = run_request(AccessMode::Supervised, false);
         moved.cwd = "/elsewhere".into();
         assert!(!harness.reconfigures_in_place(&live, &moved));
-        assert_eq!(harness.access_modes(), &AccessMode::ALL);
+        let mut code_mode = run_request(AccessMode::FullAccess, false);
+        code_mode.code_mode = true;
+        assert!(!harness.same_runtime(&live, &code_mode));
+        assert!(!harness.reconfigures_in_place(&live, &code_mode));
+        let mut zeron_only = run_request(AccessMode::FullAccess, false);
+        zeron_only.zeron_mcp_only = true;
+        assert!(!harness.same_runtime(&live, &zeron_only));
+        assert!(!harness.reconfigures_in_place(&live, &zeron_only));
+        assert_eq!(harness.access_modes(), &AccessMode::WITH_AUTO);
         assert!(harness.supports_plan());
     }
 
@@ -3416,6 +3746,32 @@ mod tests {
 mod mcp_injection_tests {
     use super::*;
 
+    /// The engine serves Zeron's tools itself: Codex gets its URL and
+    /// header (over the app-server's stdin), no command to start.
+    #[test]
+    fn an_engine_served_zeron_server_is_codex_http() {
+        let mcp = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: Default::default(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        };
+        let overrides: std::collections::HashMap<String, Value> =
+            codex_mcp_overrides(&mcp).into_iter().collect();
+        assert_eq!(overrides["mcp_servers.zeron.url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(overrides["mcp_servers.zeron.http_headers"]["Authorization"], "Bearer t");
+        assert!(!overrides.contains_key("mcp_servers.zeron.command"));
+        assert!(!overrides.contains_key("mcp_servers.zeron.env"));
+        assert_eq!(overrides["mcp_servers.zeron.default_tools_approval_mode"], "approve");
+        assert_eq!(overrides["mcp_servers.zeron.tool_timeout_sec"], ZERON_TOOL_TIMEOUT_SECS);
+    }
+
     #[test]
     fn codex_mcp_overrides_use_the_dotted_mcp_servers_keys() {
         let mcp = zeron_proto::McpServer {
@@ -3425,6 +3781,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_mcp_overrides(&mcp).into_iter().collect();
@@ -3449,6 +3806,7 @@ mod mcp_injection_tests {
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_extra_mcp_overrides(&[extra]).into_iter().collect();
@@ -3471,6 +3829,35 @@ mod mcp_injection_tests {
             "a plugin's tools are never pre-approved"
         );
         assert_eq!(overrides.len(), 3);
+    }
+
+    #[test]
+    fn codex_extra_mcp_overrides_emit_http_url_and_headers_without_auto_approve_or_custom_timeout() {
+        let http_extra = zeron_proto::McpServer {
+            name: "linear".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp-proxy".into()],
+            env: Default::default(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:43210/mcp/server/linear".into(),
+                headers: [("Authorization".into(), "Bearer run-token".into())].into(),
+            }),
+        };
+        let overrides: serde_json::Map<String, Value> =
+            codex_extra_mcp_overrides(&[http_extra]).into_iter().collect();
+        assert_eq!(
+            overrides["mcp_servers.linear.url"],
+            "http://127.0.0.1:43210/mcp/server/linear"
+        );
+        assert_eq!(
+            overrides["mcp_servers.linear.http_headers"],
+            json!({ "Authorization": "Bearer run-token" })
+        );
+        assert!(!overrides.contains_key("mcp_servers.linear.command"));
+        assert!(!overrides.contains_key("mcp_servers.linear.default_tools_approval_mode"));
+        assert!(!overrides.contains_key("mcp_servers.linear.tool_timeout_sec"));
+        assert!(!overrides.contains_key("mcp_servers.linear.startup_timeout_sec"));
+        assert_eq!(overrides.len(), 2);
     }
 }
 

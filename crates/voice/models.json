@@ -1,0 +1,47 @@
+[
+  {
+    "id": "parakeet-ultra-q8",
+    "name": "Parakeet Ultra",
+    "repository": "handy-computer/parakeet-ultra-gguf",
+    "revision": "a1539be1b849ea7463b88343e5277b373d0c4ea9",
+    "source": "moondream/parakeet-ultra",
+    "license": "CC-BY-4.0",
+    "languages": ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+    "files": [
+      {
+        "name": "parakeet-ultra-Q8_0.gguf",
+        "size": 740363168,
+        "sha256": "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59"
+      }
+    ],
+    "memory": 1150000000,
+    "marks": ["nvidia", "moondream"]
+  },
+  {
+    "id": "cohere-transcribe-q5",
+    "name": "Cohere Transcribe",
+    "repository": "handy-computer/cohere-transcribe-03-2026-gguf",
+    "revision": "7353b6040bdc1be9e5a3823d99d5fe12afe88264",
+    "source": "CohereLabs/cohere-transcribe-03-2026",
+    "license": "Apache-2.0",
+    "languages": ["ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh"],
+    "files": [
+      {
+        "name": "cohere-transcribe-03-2026-Q5_K_M.gguf",
+        "size": 1770270208,
+        "sha256": "14d02f1ad6dd77b3a60f82639879012c3adb4fe25c50a5a47a2c4c661daf1558"
+      },
+      {
+        "name": "lang-id-voxlingua107-ecapa-Q8_0.gguf",
+        "size": 26693632,
+        "sha256": "063e6cb0af3d53085fc7d68356dfde5ecee2ffa7bc79855f7e4ff930081bfe3a",
+        "role": "language",
+        "repository": "handy-computer/lang-id-voxlingua107-ecapa-gguf",
+        "revision": "e59f0f3847e77723b7d58447ef9456fa0c7e9436"
+      }
+    ],
+    "cpu_slow": true,
+    "memory": 2800000000,
+    "marks": ["cohere"]
+  }
+]

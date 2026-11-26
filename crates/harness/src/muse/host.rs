@@ -15,8 +15,8 @@ const SCHEMA_VERSION: u64 = 1;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     /// A coding session: the workspace is trusted, sandboxed unless the run
-    /// auto-approves everything.
-    Session { sandbox: bool },
+    /// auto-approves everything, and optionally launched with Code Mode on.
+    Session { sandbox: bool, code_mode: bool },
     /// Model discovery and title generation: no shell, no writes, no log.
     ReadOnly,
 }
@@ -24,10 +24,14 @@ pub(super) enum Mode {
 impl Mode {
     fn args(self) -> Vec<&'static str> {
         match self {
-            Mode::Session { sandbox } => {
+            Mode::Session { sandbox, code_mode } => {
                 let mut args = vec!["serve", "--trust-workspace"];
                 if !sandbox {
                     args.push("--disable-sandbox");
+                }
+                if code_mode {
+                    args.push("-c");
+                    args.push(r#"run.code_mode="additive""#);
                 }
                 args
             }
@@ -79,7 +83,7 @@ impl Host {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = Child::new(cmd.spawn().map_err(|e| {
+        let mut child = Child::new(crate::process::spawn_agent(&mut cmd).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
             } else {

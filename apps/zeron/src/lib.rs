@@ -10,13 +10,14 @@ pub mod auth_cli;
 pub mod background;
 pub mod engine_commands;
 pub mod ipc_cli;
+pub mod mcp_cli;
 pub mod plugin_cli;
 
+pub use engine_commands::run_engine_command;
 pub use zeron_cli::{
     DEFAULT_EDGE_URL, DEFAULT_WORKOS_CLIENT_ID, edge_url_from_env, init_logging,
     long_running_setup, open_log_file, paths, workos_client_id_from_env,
 };
-pub use engine_commands::run_engine_command;
 
 /// mimalloc, macOS only: libmalloc never returns the streaming churn's
 /// high-water pages, so transient allocation became permanent RSS
@@ -33,6 +34,9 @@ static ALLOC: allocator::Allocator = allocator::Allocator;
 /// `logout`, and `status` — one resolution so the CLI auth commands always
 /// operate on the exact session the daemon will load.
 pub fn engine_config_from_env() -> zeron_engine::EngineConfig {
+    // (Every way an engine starts here resolves its configuration first.)
+    #[cfg(target_os = "macos")]
+    zeron_engine::heap::set_trim(allocator::trim);
     // Dev-mode bearer (no WorkOS): an explicit token enables sync.
     let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
     zeron_engine::EngineConfig {

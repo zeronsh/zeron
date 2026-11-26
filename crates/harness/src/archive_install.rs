@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
@@ -37,13 +37,18 @@ const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
-/// an archive release whose integrity is proven after extraction (by a
-/// vendor code signature) rather than by a digest pinned in zeron's source.
+/// an archive or standalone binary release whose integrity is proven by a
+/// manifest SHA-512/SHA-256 digest and/or post-extraction verification (vendor
+/// code signature, version probe) rather than a pin hardcoded in zeron's source.
 pub struct VerifiedRelease<'a> {
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
     pub entry: &'a str,
+    /// lowercase hex SHA-512 of the downloaded artifact, verified when present.
+    pub sha512: Option<&'a str>,
+    /// lowercase hex SHA-256 of the downloaded artifact, verified when present.
+    pub sha256: Option<&'a str>,
     /// written as the install marker once verification passes.
     pub marker: &'a str,
 }
@@ -54,6 +59,7 @@ struct Source<'a> {
     url: &'a str,
     entry: &'a str,
     sha512: Option<&'a str>,
+    sha256: Option<&'a str>,
     marker: &'a str,
 }
 
@@ -65,6 +71,7 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             url: pin.url,
             entry: pin.entry,
             sha512: Some(pin.sha512),
+            sha256: None,
             marker: pin.sha512,
         }
     }
@@ -77,7 +84,8 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             version: release.version,
             url: release.url,
             entry: release.entry,
-            sha512: None,
+            sha512: release.sha512,
+            sha256: release.sha256,
             marker: release.marker,
         }
     }
@@ -215,23 +223,80 @@ where
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadKind {
+    Zip,
+    TarGz,
+    RawBinary,
+}
+
+fn download_kind(url: &str) -> DownloadKind {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        DownloadKind::TarGz
+    } else if lower.ends_with(".zip") {
+        DownloadKind::Zip
+    } else {
+        DownloadKind::RawBinary
+    }
+}
+
+fn sanitize_relative_path(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => clean.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(clean)
+}
+
 async fn download_and_extract(
     source: &Source<'_>,
     dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
-    let archive = dir.join("download.zip");
-    download(source, &archive, display_name).await?;
-    extract_zip(&archive, dir).await?;
-    let _ = std::fs::remove_file(&archive);
-    let entry = dir.join(source.entry);
+    let safe_entry = sanitize_relative_path(Path::new(source.entry))
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            HarnessError::Install(format!(
+                "the {display_name} entry path ({}) is unsafe",
+                source.entry
+            ))
+        })?;
+    match download_kind(source.url) {
+        DownloadKind::Zip => {
+            let archive = dir.join("download.zip");
+            download(source, &archive, display_name).await?;
+            extract_zip(&archive, dir).await?;
+            let _ = std::fs::remove_file(&archive);
+        }
+        DownloadKind::TarGz => {
+            let archive = dir.join("download.tar.gz");
+            download(source, &archive, display_name).await?;
+            extract_tar_gz(&archive, dir).await?;
+            let _ = std::fs::remove_file(&archive);
+        }
+        DownloadKind::RawBinary => {
+            let dest = dir.join(&safe_entry);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            download(source, &dest, display_name).await?;
+        }
+    }
+    let entry = dir.join(&safe_entry);
     if !entry.is_file() {
         return Err(HarnessError::Install(format!(
             "the {display_name} archive ({}) has no {}",
             source.url, source.entry
         )));
     }
-    mark_executables(dir)?;
+    mark_executables(dir, &entry)?;
     Ok(())
 }
 
@@ -268,7 +333,8 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
-    let mut digest = Sha512::new();
+    let mut sha512 = source.sha512.map(|_| Sha512::new());
+    let mut sha256 = source.sha256.map(|_| Sha256::new());
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -287,7 +353,12 @@ async fn download(
                         MAX_ARCHIVE_BYTES / (1024 * 1024)
                     )));
                 }
-                digest.update(&bytes);
+                if let Some(digest) = sha512.as_mut() {
+                    digest.update(&bytes);
+                }
+                if let Some(digest) = sha256.as_mut() {
+                    digest.update(&bytes);
+                }
                 file.write_all(&bytes).await?;
             }
             Some(Err(e)) => return Err(failed(e.to_string())),
@@ -295,13 +366,21 @@ async fn download(
         }
     }
     file.flush().await?;
-    let actual = format!("{:x}", digest.finalize());
-    if let Some(expected) = source.sha512
-        && actual != expected
-    {
-        return Err(failed(format!(
-            "SHA-512 mismatch (expected {expected}, got {actual})"
-        )));
+    if let (Some(expected), Some(digest)) = (source.sha512, sha512) {
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected {
+            return Err(failed(format!(
+                "SHA-512 mismatch (expected {expected}, got {actual})"
+            )));
+        }
+    }
+    if let (Some(expected), Some(digest)) = (source.sha256, sha256) {
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected {
+            return Err(failed(format!(
+                "SHA-256 mismatch (expected {expected}, got {actual})"
+            )));
+        }
     }
     Ok(())
 }
@@ -310,6 +389,16 @@ pub(crate) async fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Harne
     let archive = archive.to_owned();
     let dest = dest.to_owned();
     tokio::task::spawn_blocking(move || extract_zip_blocking(&archive, &dest))
+        .await
+        .map_err(|error| {
+            HarnessError::Install(format!("archive extraction task failed: {error}"))
+        })?
+}
+
+pub(crate) async fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), HarnessError> {
+    let archive = archive.to_owned();
+    let dest = dest.to_owned();
+    tokio::task::spawn_blocking(move || extract_tar_gz_blocking(&archive, &dest))
         .await
         .map_err(|error| {
             HarnessError::Install(format!("archive extraction task failed: {error}"))
@@ -333,6 +422,97 @@ fn archive_entry_path(
         }
     }
     Ok(dest.join(name))
+}
+
+fn extract_tar_gz_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessError> {
+    use std::io::Read;
+    let file = std::fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| HarnessError::Install(format!("invalid tar.gz archive: {error}")))?;
+    let mut entry_count = 0usize;
+    let mut extracted = 0_u64;
+    for item in entries {
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(HarnessError::Install(format!(
+                "archive exceeds the {MAX_ARCHIVE_ENTRIES} entry limit"
+            )));
+        }
+        let mut entry = item.map_err(|error| {
+            HarnessError::Install(format!(
+                "invalid tar.gz archive entry {entry_count}: {error}"
+            ))
+        })?;
+        let entry_type = entry.header().entry_type();
+        let is_dir = entry_type.is_dir();
+        let is_file = entry_type.is_file();
+        if !is_dir && !is_file {
+            return Err(HarnessError::Install(format!(
+                "archive entry {entry_count} is a link or special file"
+            )));
+        }
+        let raw_path = entry.path().map_err(|error| {
+            HarnessError::Install(format!("archive entry {entry_count} path is invalid: {error}"))
+        })?;
+        let Some(clean_path) = sanitize_relative_path(&raw_path) else {
+            return Err(HarnessError::Install(
+                "archive contains an unsafe entry path".into(),
+            ));
+        };
+        if clean_path.as_os_str().is_empty() {
+            if is_dir {
+                continue;
+            }
+            return Err(HarnessError::Install(
+                "archive contains an unsafe entry path".into(),
+            ));
+        }
+        let output = dest.join(&clean_path);
+        if output == archive_path {
+            return Err(HarnessError::Install(
+                "archive attempts to overwrite its download file".into(),
+            ));
+        }
+        if is_dir {
+            std::fs::create_dir_all(&output)?;
+            continue;
+        }
+        let declared_size = entry.size();
+        let next_extracted = extracted.checked_add(declared_size).ok_or_else(|| {
+            HarnessError::Install("archive's extracted size overflows its limit".into())
+        })?;
+        if next_extracted > MAX_EXTRACTED_BYTES {
+            return Err(HarnessError::Install(format!(
+                "archive expands beyond the {} MiB limit",
+                MAX_EXTRACTED_BYTES / (1024 * 1024)
+            )));
+        }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let remaining = MAX_EXTRACTED_BYTES.saturating_sub(extracted);
+        let mut limited = (&mut entry).take(remaining.saturating_add(1));
+        let mut output_file = std::fs::File::create(&output)?;
+        let copied = std::io::copy(&mut limited, &mut output_file)?;
+        if copied > remaining {
+            return Err(HarnessError::Install(format!(
+                "archive expands beyond the {} MiB limit",
+                MAX_EXTRACTED_BYTES / (1024 * 1024)
+            )));
+        }
+        if copied != declared_size {
+            return Err(HarnessError::Install(format!(
+                "archive entry {} extracted {copied} bytes but declared {declared_size}",
+                output.display()
+            )));
+        }
+        extracted = next_extracted;
+        output_file.flush()?;
+    }
+    Ok(())
 }
 
 fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessError> {
@@ -390,7 +570,7 @@ fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessE
 /// archives built off-unix can lose the executable bit, and the entry spawns
 /// sibling helper binaries of its own.
 #[cfg(unix)]
-fn mark_executables(dir: &Path) -> std::io::Result<()> {
+fn mark_executables(dir: &Path, entry_path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -400,11 +580,16 @@ fn mark_executables(dir: &Path) -> std::io::Result<()> {
             std::fs::set_permissions(entry.path(), permissions)?;
         }
     }
+    if entry_path.is_file() {
+        let mut permissions = std::fs::metadata(entry_path)?.permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        std::fs::set_permissions(entry_path, permissions)?;
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn mark_executables(_dir: &Path) -> std::io::Result<()> {
+fn mark_executables(_dir: &Path, _entry_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -432,7 +617,7 @@ mod tests {
 
         let dest = tempfile::tempdir().unwrap();
         extract_zip(&archive, dest.path()).await.unwrap();
-        mark_executables(dest.path()).unwrap();
+        mark_executables(dest.path(), &dest.path().join("server.par")).unwrap();
         for name in ["server.par", "helper"] {
             let mode = std::fs::metadata(dest.path().join(name))
                 .unwrap()
@@ -440,6 +625,54 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o111, 0o111, "{name} is executable");
         }
+    }
+
+    #[tokio::test]
+    async fn extracts_tar_gz_and_rejects_symlinks_and_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_tar_gz = |path: &Path, build: &dyn Fn(&mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>)| {
+            let file = std::fs::File::create(path).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            build(&mut tar);
+            let enc = tar.into_inner().unwrap();
+            enc.finish().unwrap();
+        };
+
+        let good = dir.path().join("good.tar.gz");
+        make_tar_gz(&good, &|tar| {
+            let payload = b"#!/bin/sh\necho ok\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "antigravity", &payload[..])
+                .unwrap();
+        });
+        let dest = tempfile::tempdir().unwrap();
+        extract_tar_gz(&good, dest.path()).await.unwrap();
+        assert_eq!(
+            std::fs::read(dest.path().join("antigravity")).unwrap(),
+            b"#!/bin/sh\necho ok\n"
+        );
+
+        let symlink_tar = dir.path().join("link.tar.gz");
+        make_tar_gz(&symlink_tar, &|tar| {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_cksum();
+            tar.append_link(&mut header, "evil", "/etc/passwd").unwrap();
+        });
+        let err = extract_tar_gz(&symlink_tar, dest.path()).await.unwrap_err();
+        assert!(err.to_string().contains("link or special file"), "{err}");
+
+        assert!(sanitize_relative_path(Path::new("../escape")).is_none());
+        assert!(sanitize_relative_path(Path::new("/abs/path")).is_none());
+        assert_eq!(
+            sanitize_relative_path(Path::new("./antigravity")).unwrap(),
+            PathBuf::from("antigravity")
+        );
     }
 
     #[tokio::test]
@@ -500,12 +733,43 @@ mod tests {
                     .unwrap();
                 zip.write_all(b"#!/bin/sh\n").unwrap();
                 let bytes = zip.finish().unwrap().into_inner();
-                let url = serve(bytes).await;
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let url = serve(bytes, "archive.zip").await;
+                let wrong_digest = VerifiedRelease {
+                    name: "verified-acp",
+                    version: "2.0.0",
+                    url: &url,
+                    entry: "server",
+                    sha512: None,
+                    sha256: Some(&"0".repeat(64)),
+                    marker: "registry-sha256",
+                };
+                let mismatch = install_verified(&wrong_digest, "Test", |_| async {
+                    panic!("verify must not run when SHA-256 mismatches");
+                })
+                .await
+                .unwrap_err();
+                assert!(
+                    mismatch.to_string().contains("SHA-256 mismatch"),
+                    "{mismatch}"
+                );
+                let root = adapters_root().unwrap();
+                assert!(!root.join("verified-acp").exists());
+                assert!(
+                    std::fs::read_dir(&root)
+                        .unwrap()
+                        .flatten()
+                        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp-")),
+                    "a checksum mismatch leaves no temporary directory behind"
+                );
+
                 let release = VerifiedRelease {
                     name: "verified-acp",
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
+                    sha512: None,
+                    sha256: Some(&digest),
                     marker: "vendor-signature",
                 };
 
@@ -516,7 +780,6 @@ mod tests {
                 .await
                 .unwrap_err();
                 assert!(rejected.to_string().contains("not signed"), "{rejected}");
-                let root = adapters_root().unwrap();
                 assert!(!root.join("verified-acp").exists());
                 assert!(
                     std::fs::read_dir(&root)
@@ -538,14 +801,67 @@ mod tests {
                     installed_entry_with_marker("verified-acp", "2.0.0", "server", "other"),
                     None
                 );
+
+                // Verify .tar.gz + SHA-512 path.
+                let mut tgz_buf = Vec::new();
+                {
+                    let enc = flate2::write::GzEncoder::new(
+                        &mut tgz_buf,
+                        flate2::Compression::default(),
+                    );
+                    let mut tar = tar::Builder::new(enc);
+                    let payload = b"#!/bin/sh\n";
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(payload.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    tar.append_data(&mut header, "antigravity", &payload[..])
+                        .unwrap();
+                    let enc = tar.into_inner().unwrap();
+                    enc.finish().unwrap();
+                }
+                let tgz_sha512 = format!("{:x}", Sha512::digest(&tgz_buf));
+                let tgz_url = serve(tgz_buf, "cli_linux_x64.tar.gz").await;
+                let tgz_release = VerifiedRelease {
+                    name: "verified-tgz",
+                    version: "1.5.15",
+                    url: &tgz_url,
+                    entry: "antigravity",
+                    sha512: Some(&tgz_sha512),
+                    sha256: None,
+                    marker: "sha512:ok",
+                };
+                let tgz_entry = install_verified(&tgz_release, "TestTgz", |_| async { Ok(()) })
+                    .await
+                    .unwrap();
+                assert_eq!(tgz_entry, root.join("verified-tgz/1.5.15/antigravity"));
+
+                // Verify standalone raw binary (.exe) + SHA-512 path.
+                let exe_bytes = b"MZ-fake-cli-binary".to_vec();
+                let exe_sha512 = format!("{:x}", Sha512::digest(&exe_bytes));
+                let exe_url = serve(exe_bytes.clone(), "cli_windows_x64.exe").await;
+                let exe_release = VerifiedRelease {
+                    name: "verified-exe",
+                    version: "1.5.15",
+                    url: &exe_url,
+                    entry: "antigravity.exe",
+                    sha512: Some(&exe_sha512),
+                    sha256: None,
+                    marker: "sha512:exe",
+                };
+                let exe_entry = install_verified(&exe_release, "TestExe", |_| async { Ok(()) })
+                    .await
+                    .unwrap();
+                assert_eq!(exe_entry, root.join("verified-exe/1.5.15/antigravity.exe"));
+                assert_eq!(std::fs::read(&exe_entry).unwrap(), exe_bytes);
             });
     }
 
     /// answer every request with `body`, returning the url to fetch it.
-    async fn serve(body: Vec<u8>) -> String {
+    async fn serve(body: Vec<u8>, filename: &str) -> String {
         use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/archive.zip", listener.local_addr().unwrap());
+        let url = format!("http://{}/{filename}", listener.local_addr().unwrap());
         let body = std::sync::Arc::new(body);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {

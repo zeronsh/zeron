@@ -1393,6 +1393,11 @@ void uniffi_zeron_mobile_fn_method_transcriptview_toggle_detail(uint64_t ptr, ui
 RustBuffer uniffi_zeron_mobile_fn_method_transcriptview_visual(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_TRANSCRIPTVIEW_WORKSPACE_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_TRANSCRIPTVIEW_WORKSPACE_CHANGED
+void uniffi_zeron_mobile_fn_method_transcriptview_workspace_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_CLONE_ORBRENDERER
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_CLONE_ORBRENDERER
 uint64_t uniffi_zeron_mobile_fn_clone_orbrenderer(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -3184,6 +3189,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_transcriptview_toggle_detail(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_TRANSCRIPTVIEW_VISUAL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_TRANSCRIPTVIEW_VISUAL
 uint16_t uniffi_zeron_mobile_checksum_method_transcriptview_visual(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_TRANSCRIPTVIEW_WORKSPACE_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_TRANSCRIPTVIEW_WORKSPACE_CHANGED
+uint16_t uniffi_zeron_mobile_checksum_method_transcriptview_workspace_changed(void
     
 );
 #endif

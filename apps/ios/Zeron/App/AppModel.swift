@@ -102,6 +102,9 @@ final class AppModel {
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
+    /// Told on every workspace rebuild, changed rows or not (a chat a
+    /// transcript names may not be in any list).
+    private var workspaceObservers: [UUID: () -> Void] = [:]
     private lazy var bridge = ListenerBridge(app: self)
     private var refreshScheduled = false
     private var clock: Timer?
@@ -434,6 +437,13 @@ final class AppModel {
         return Token { [weak self] in self?.observers[id] = nil }
     }
 
+    /// Every workspace rebuild (`WorkspaceChanged`), whatever changed.
+    func observeWorkspace(_ handler: @escaping () -> Void) -> AnyObject {
+        let id = UUID()
+        workspaceObservers[id] = handler
+        return Token { [weak self] in self?.workspaceObservers[id] = nil }
+    }
+
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
         let id = UUID()
         sessionObservers[chatId, default: [:]][id] = handler
@@ -523,6 +533,7 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+        workspaceObservers.values.forEach { $0() }
         sweepIdle(pinsReady: ws.pinsReady)
     }
 
@@ -630,6 +641,8 @@ final class AppModel {
             sendFailed: r.sendState == .failed,
             waiting: r.indicator == .waiting,
             canStopWaiting: r.waitsOnProcess,
+            waitingOn: r.waitingOn.first,
+            waitingMore: max(0, r.waitingOn.count - 1),
             sleepUntil: r.sleepUntilMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
             wokeAt: r.wokeAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
             lastActivity: Date(timeIntervalSince1970: TimeInterval(r.lastActivityMs) / 1000)
@@ -745,12 +758,14 @@ final class AppModel {
 
     // MARK: Companions (side chats, subagents)
 
-    /// A session's side chats, newest first.
+    /// A session's side chats, newest first (the chats its agent delegated
+    /// to are its subagents, not side chats).
     func sideChats(of chatId: String) -> [SessionRowVM] {
-        (client?.childSessions(parentId: chatId) ?? []).filter { !$0.archived }.map(Self.vm)
+        (client?.childSessions(parentId: chatId) ?? []).filter { !$0.archived && !$0.delegated }.map(Self.vm)
     }
 
-    /// The subagents a session's agent spawned (its open transcript).
+    /// A session's subagents: those its agent spawned (its open transcript),
+    /// then the chats it delegated to.
     func sessionSubagents(_ chatId: String) -> [SubagentRow] {
         guard let client, !chatId.contains("--sub--") else { return [] }
         return (client.session(chatId: chatId) ?? (try? client.openSession(chatId: chatId)))?.subagents() ?? []
@@ -865,19 +880,30 @@ final class AppModel {
     /// A Cloud chat created whose first message didn't go out yet.
     private var unsentCloudChat: (key: String, chatId: String)?
 
-    /// The agents Cloud runs.
-    static let cloudHarnesses = ["claude-code", "codex"]
+    /// The agents Cloud runs: every built-in one (mirrors
+    /// `zeron_proto::CLOUD_HARNESSES`).
+    static let cloudHarnesses = [
+        "claude-code", "codex", "cursor", "devin", "grok", "hermes", "fx", "pi", "opencode", "antigravity", "muse",
+    ]
 
     /// Cloud's models, as the edge lists them (no computer or Cloud machine
     /// is asked).
     func cloudModels() async -> [ModelChoice] {
         guard let client else { return [] }
-        var out: [ModelChoice] = []
-        for h in Self.cloudHarnesses {
-            let label = HarnessNames.label(h)
-            out += await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+        // One request per agent, all at once; the list keeps the agents' order.
+        let lists = await withTaskGroup(of: (Int, [ModelChoice]).self) { group in
+            for (i, h) in Self.cloudHarnesses.enumerated() {
+                group.addTask {
+                    let label = HarnessNames.label(h)
+                    let models = await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+                    return (i, models)
+                }
+            }
+            var byIndex: [Int: [ModelChoice]] = [:]
+            for await (i, models) in group { byIndex[i] = models }
+            return byIndex
         }
-        return out
+        return Self.cloudHarnesses.indices.flatMap { lists[$0] ?? [] }
     }
 
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {

@@ -11,20 +11,31 @@
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
+  ConnectionGrant,
+  ConnectionGrantManyReply,
+  ConnectionGrantManyRequest,
+  ConnectionGrantRequest,
   EnrollDeviceRequest,
   GithubDevicePoll,
   GithubDeviceStart,
   GithubListingView,
   GithubRepoView,
   Grant,
+  GrantManyReply,
+  GrantManyRequest,
   GrantRequest,
+  PutConnectionRequest,
   PutCredentialRequest,
+  UpdateConnectionRequest,
+  VaultAccountView,
   VaultCaller,
+  VaultConnectionKind,
+  VaultConnectionsView,
+  VaultConnectionView,
   VaultProviderId,
   VaultResult,
   VaultRpc,
   VaultStatusView,
-  VaultAccountView,
   VaultUsageView
 } from "./api";
 import { runCanary } from "./canary";
@@ -32,6 +43,7 @@ import type { Env } from "./env";
 import { Vault } from "./vault";
 
 export { VaultAccount } from "./account";
+export { VaultConnections } from "./connections";
 export { VaultDevices } from "./devices";
 
 export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
@@ -79,6 +91,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
     return this.vault().grant(caller, request);
   }
 
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>> {
+    return this.vault().grantMany(caller, request);
+  }
+
   githubDeviceStart(caller: VaultCaller, authorizedDevices: readonly string[]): Promise<VaultResult<GithubDeviceStart>> {
     return this.vault().githubDeviceStart(caller, authorizedDevices);
   }
@@ -117,6 +133,45 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
 
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     return this.vault().accountUsage(caller, provider, slot);
+  }
+
+  listConnections(caller: VaultCaller, kind?: VaultConnectionKind): Promise<VaultResult<VaultConnectionsView>> {
+    return this.vault().listConnections(caller, kind);
+  }
+
+  putConnection(
+    caller: VaultCaller,
+    id: string,
+    request: PutConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>> {
+    return this.vault().putConnection(caller, id, request);
+  }
+
+  updateConnection(
+    caller: VaultCaller,
+    id: string,
+    patch: UpdateConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>> {
+    return this.vault().updateConnection(caller, id, patch);
+  }
+
+  deleteConnection(caller: VaultCaller, id: string): Promise<VaultResult<{ readonly deleted: boolean }>> {
+    return this.vault().deleteConnection(caller, id);
+  }
+
+  disconnectConnectionAuth(caller: VaultCaller, id: string): Promise<VaultResult<VaultConnectionView>> {
+    return this.vault().disconnectConnectionAuth(caller, id);
+  }
+
+  grantConnection(caller: VaultCaller, request: ConnectionGrantRequest): Promise<VaultResult<ConnectionGrant>> {
+    return this.vault().grantConnection(caller, request);
+  }
+
+  grantConnections(
+    caller: VaultCaller,
+    request: ConnectionGrantManyRequest
+  ): Promise<VaultResult<ConnectionGrantManyReply>> {
+    return this.vault().grantConnections(caller, request);
   }
 }
 

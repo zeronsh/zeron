@@ -1,0 +1,73 @@
+---
+import { Image } from "astro:assets";
+import { LEAD_VOICE, VOICES } from "../../data/voices.ts";
+---
+
+<section class="section" id="voices" aria-labelledby="voices-title">
+  <div class="wrap">
+    <h2 id="voices-title" class="sr-only">What people say about Zeron</h2>
+    <figure class="lead-voice">
+      <blockquote>“{LEAD_VOICE.text}”</blockquote>
+      <figcaption>
+        <a href={LEAD_VOICE.url} target="_blank" rel="noopener">
+          <Image src={LEAD_VOICE.avatar} alt="" width={28} height={28} />
+          <span>{LEAD_VOICE.name}</span>
+          <span class="handle">{LEAD_VOICE.handle}</span>
+        </a>
+      </figcaption>
+    </figure>
+    <ul>
+      {
+        VOICES.map((voice) => (
+          <li>
+            <a href={voice.url} target="_blank" rel="noopener">
+              <p>{voice.text}</p>
+              <span class="who">
+                <Image src={voice.avatar} alt="" width={22} height={22} />
+                <span>{voice.name}</span>
+                <span class="handle">{voice.handle}</span>
+              </span>
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .lead-voice { max-width: 880px; }
+  blockquote {
+    font-size: clamp(24px, 2.9vw, 38px);
+    font-weight: 550;
+    line-height: 1.18;
+    letter-spacing: -0.028em;
+    text-wrap: pretty;
+  }
+  figcaption { margin-top: 24px; }
+  figcaption a, .who { display: inline-flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 500; }
+  .handle { font-weight: 400; color: var(--text-3); }
+  figcaption :global(img), .who :global(img) { border-radius: 50%; }
+  .wrap > ul { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: clamp(40px, 5vw, 64px); }
+  .wrap > ul a {
+    box-shadow: inset 0 0 0 1px var(--line);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 24px;
+    height: 100%;
+    padding: 20px;
+    background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%);
+    border-radius: 16px;
+    transition: background-color 0.12s;
+  }
+  .wrap > ul a:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .wrap > ul p { font-size: 15.5px; line-height: 1.5; text-wrap: pretty; }
+  .who { font-size: 13.5px; }
+  @media (max-width: 900px) {
+    .wrap > ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .wrap > ul { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>

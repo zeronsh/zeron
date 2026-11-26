@@ -1,0 +1,66 @@
+---
+import { INSTALL_COMMAND } from "../../data/releases.ts";
+import PhoneSession from "../app/PhoneSession.astro";
+import CopyCommand from "../ui/CopyCommand.astro";
+import Icon from "../ui/Icon.astro";
+import WorkIn from "../app/WorkIn.astro";
+---
+
+<section class="section" id="machines">
+  <div class="wrap">
+    <h2 class="statement"><b>Run agents on any of your machines.</b> Start a session on your laptop, on a server or in the cloud, and follow it from every device you own.</h2>
+    <div class="bento">
+      <article class="card span-7">
+        <div class="card-copy">
+          <h3>Choose where each session runs</h3>
+          <p>Start a session on this computer, on a server you have set up, or on a Zeron Cloud machine created for it.</p>
+        </div>
+        <div class="card-visual"><WorkIn class="piece context" /></div>
+      </article>
+      <article class="card span-5">
+        <div class="card-copy">
+          <h3>Follow along from your phone</h3>
+          <p>Open any running session on iOS or Android to read its progress, answer its questions and send new instructions.</p>
+        </div>
+        <div class="card-visual phone"><div class="device"><PhoneSession /></div></div>
+      </article>
+    </div>
+
+    <!-- The rest, without boxes: three columns under one rule. -->
+    <ul class="also">
+      <li>
+        <Icon name="laptop" size={18} />
+        <h3>Local by default</h3>
+        <p>Zeron needs no account and no network connection. Your sessions stay on your computer unless you turn on sync.</p>
+      </li>
+      <li>
+        <Icon name="terminal" size={18} />
+        <h3>Runs on a server</h3>
+        <p>Install the headless engine on a Linux server to keep agents running after you close your laptop.</p>
+        <CopyCommand command={INSTALL_COMMAND} />
+      </li>
+      <li>
+        <Icon name="cloud" size={18} />
+        <h3>Zeron Cloud</h3>
+        <p>Give a session its own hosted machine, which sleeps while the session is idle.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<style>
+  /* The message box and its menus stand on the app's own page colour, cut by the card. */
+  :global(.piece.context) { background: #161618; }
+  @media (max-width: 700px) {
+    /* On a phone the picker keeps a size that can be read, and runs off the card. */
+    :global(.piece.context) { width: 540px; }
+  }
+  /* The phone: a bezel round the recreated screen, standing in the card and running off its foot. */
+  .phone { display: flex; flex: 1; justify-content: center; min-height: 400px; max-height: 440px; margin-top: 0; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent 99%); mask-image: linear-gradient(to bottom, #000 70%, transparent 99%); }
+  .device { flex: none; width: 330px; height: fit-content; padding: 7px; background: #19191b; border-radius: 46px; box-shadow: 0 0 0 1px var(--line-strong), 0 30px 60px -20px rgb(0 0 0 / 0.8); transition: translate 0.5s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .device :global(.zp-fit) { border-radius: 39px; }
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    :global(.card:hover) .device { translate: 0 -8px; }
+  }
+
+</style>

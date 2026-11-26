@@ -50,6 +50,40 @@ pub struct Origin {
     /// ends, so it may say it waits on that work
     /// ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
     pub waits_on_background: bool,
+    /// How the host wants this agent to delegate
+    /// ([`zeron_proto::McpServer::ASYNC_DELEGATION_ENV`]).
+    pub delegation: Delegation,
+}
+
+/// How an agent works with others (Settings → General).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Delegation {
+    /// It waits for a child inside its turn, and messages any chat.
+    #[default]
+    Off,
+    /// It hands work to children in the background, works with them alone,
+    /// and is woken with their results.
+    Parent,
+    /// It is such a child: its final reply is its result.
+    Child,
+}
+
+impl Delegation {
+    pub fn env_value(self) -> Option<&'static str> {
+        match self {
+            Delegation::Off => None,
+            Delegation::Parent => Some("parent"),
+            Delegation::Child => Some("child"),
+        }
+    }
+
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some("parent") => Delegation::Parent,
+            Some("child") => Delegation::Child,
+            _ => Delegation::Off,
+        }
+    }
 }
 
 impl Origin {
@@ -68,6 +102,9 @@ impl Origin {
             waits_on_background: read(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
                 .as_deref()
                 == Some("1"),
+            delegation: Delegation::from_env_value(
+                read(zeron_proto::McpServer::ASYNC_DELEGATION_ENV).as_deref(),
+            ),
         }
     }
 }
@@ -712,9 +749,11 @@ impl Zeron {
                         last = Some(session);
                     }
                     SessionStatus::Idle => {
+                        // (Cut off by its engine's own stop, the turn goes on
+                        // once that starts again.)
                         if session
                             .last_turn_outcome
-                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
+                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted && !o.resumes)
                             && (!expect_turn
                                 || saw_working
                                 || advanced

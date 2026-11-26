@@ -78,12 +78,51 @@ M.ago = ago
 -- in a binding moves on as the clock ticks, so "now" becomes "1m" without
 -- anything else changing. One timer for every reader, sleeping between
 -- ticks. (The clock is never behind the wall's: a test can set it ahead.)
+--
+-- It ticks only as a label read from it would change: each age read says
+-- when its label next steps (`ago`'s: "now" to "1m" at a minute, minutes
+-- to "1h" at an hour, hours to days, days to weeks), and the clock moves at
+-- the soonest of those, on a half-minute grid so that labels due within the
+-- same half minute move together, as late as the half-minute tick that
+-- once moved them all. Corners an hour old wake the window once an hour,
+-- not twice a minute.
 local clock = ui.state("ds_status_clock", os.time())
-ui.every(30000, function()
-	clock:set(os.time())
+-- When it next moves (`os.time()` seconds; none: nothing read).
+local due = ui.state("ds_status_clock_due", math.huge)
+ui.effect(function()
+	local at = due:get()
+	if at == math.huge then
+		return
+	end
+	-- (This run's: the next moves it, or cancels it.)
+	ui.after(math.max(1, at - os.time()) * 1000, function()
+		ui.batch(function()
+			due:set(math.huge)
+			-- (Readers run again and say when they next change.)
+			clock:set(os.time())
+		end)
+	end)
 end)
+-- Seconds until an age's label (`ago`) next reads otherwise.
+local function next_step(age: number): number
+	local span = if age < 3600 then 60 elseif age < 86400 then 3600 elseif age < 7 * 86400 then 86400 else 7 * 86400
+	return span - age % span
+end
+local GRID = 30
 function M.since(t: number): number
-	return math.max(0, math.max(clock:get(), os.time()) - t)
+	local now = math.max(clock:get(), os.time())
+	local age = math.max(0, now - t)
+	local at = math.ceil((now + next_step(age)) / GRID) * GRID
+	if at < due:peek() then
+		-- (A binding reading the clock doesn't write state: the next turn
+		-- does. Should this run be replaced first, the next run asks again.)
+		ui.after(0, function()
+			if at < due:peek() then
+				due:set(at)
+			end
+		end)
+	end
+	return age
 end
 
 -- Working: the dashed ring (the glyph's eight dashes, on its 24-unit grid:

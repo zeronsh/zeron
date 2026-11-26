@@ -10,7 +10,7 @@ import androidx.compose.ui.res.painterResource
 import sh.zeron.android.R
 
 /**
- * Zeron's icon set — the same glyphs the desktop (crates/ui/assets/icons,
+ * Zeron's icon set — the same glyphs the desktop (assets/icons,
  * Solar Linear + Zeron's hand-drawn additions) and iOS draw, compiled to
  * VectorDrawables at build time by scripts/android/svg2vd.py.
  */
@@ -54,6 +54,9 @@ object ZIcons {
     val Moon = R.drawable.zi_moon
     val Magic = R.drawable.zi_magic_stick_3
     val Info = R.drawable.zi_info_circle
+    /** The desktop's status glyphs: an approval asked (a shield with a question), a question asked. */
+    val StatusApproval = R.drawable.zi_status_approval
+    val StatusInput = R.drawable.zi_status_input
     val Logout = R.drawable.zi_logout_2
     val Offline = R.drawable.zi_wifi_off
     val Chat = R.drawable.zi_chat_round_line

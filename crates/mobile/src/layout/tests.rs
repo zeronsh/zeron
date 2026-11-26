@@ -20,7 +20,7 @@ impl PlatformMeasurer for FixedFallback {
 }
 
 fn font(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/../ui/assets/fonts/{name}.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!("{}/../../assets/fonts/{name}.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
 pub(crate) fn text_system() -> Arc<TextSystem> {
@@ -146,6 +146,40 @@ fn agent_messages_show_their_sender_over_the_bubble() {
 }
 
 #[test]
+fn a_wake_shows_nothing_and_its_reply_reads_on() {
+    let mut w = worker(390.0);
+    let item = |title: &str, status| zeron_proto::WakeItem {
+        task_id: "t".into(),
+        chat_id: format!("chat-{title}"),
+        device_id: "mac".into(),
+        title: title.into(),
+        harness: zeron_proto::HarnessId::Codex,
+        status,
+    };
+    let notice = zeron_proto::WakeNotice {
+        kind: zeron_proto::WakeKind::Results,
+        tasks: vec![
+            item("Audit the parser", zeron_proto::DelegatedStatus::Completed),
+            item("Draft the notes", zeron_proto::DelegatedStatus::Failed),
+        ],
+        open: 0,
+    };
+    let text = zeron_proto::delegation::wake_message(&notice, "<result>clean</result>");
+    w.input = debug_input(
+        vec![
+            DebugEntry { id: "u".into(), user: true, text, streaming: false },
+            DebugEntry { id: "a".into(), user: false, text: "The audit is clean.".into(), streaming: false },
+        ],
+        false,
+    );
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 1);
+    let only = frame.display(0).unwrap();
+    assert!(only.text.contains("The audit is clean."), "{}", only.text);
+    assert!(only.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
+}
+
+#[test]
 fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
     let tool = |id: &str, name: &str, input: serde_json::Value| MessagePart::Tool {
         id: id.into(),
@@ -165,6 +199,8 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
+        chats: Vec::new(),
     };
     let mut w = worker(390.0);
     w.input = TranscriptInput {
@@ -197,6 +233,90 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
     assert!(frame.display(3).unwrap().text.ends_with(" b"));
 }
 
+#[test]
+fn work_handed_over_shows_a_line_per_chat() {
+    let mut w = worker(390.0);
+    let call = zeron_proto::ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "create_chats".into(),
+        input: Some(serde_json::json!({ "requests": [
+            { "title": "Audit the parser", "harness": "codex", "prompt": "secret" },
+            { "title": "Draft the notes", "prompt": "secret" },
+        ] })),
+    };
+    let mut parts = Vec::new();
+    zeron_doc::fold_event_into_parts(&mut parts, &zeron_proto::AgentEvent::ToolCall { id: "k".into(), call });
+    let MessagePart::Tool { resolved, chats, .. } = &mut parts[0] else { panic!("{parts:?}") };
+    (*resolved, *chats) = (true, vec!["c1".into(), String::new()]);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 2);
+    assert_eq!(frame.display(0).unwrap().text, "Delegated to \u{2060} Audit the parser");
+    assert_eq!(frame.display(1).unwrap().text, "Couldn't delegate to \u{2060} Draft the notes");
+}
+
+#[test]
+fn work_handed_over_says_how_each_chat_stands() {
+    let dir = std::env::temp_dir().join(format!("zeron-layout-demo-{}", std::process::id()));
+    let mut config = zeron_client::ClientConfig::new("https://edge.invalid", &dir);
+    config.device_id = "layout-test".into();
+    let client = zeron_client::Client::new(
+        config,
+        zeron_client::Credentials::Demo(Default::default()),
+        Arc::new(zeron_client::events::NullListener),
+    )
+    .unwrap();
+    let mut w = worker(390.0);
+    let call = zeron_proto::ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "create_chats".into(),
+        input: Some(serde_json::json!({ "requests": [
+            { "title": "Audit the parser", "harness": "codex" },
+            { "title": "Draft the release notes" },
+            { "title": "Time the benchmark" },
+        ] })),
+    };
+    let mut parts = Vec::new();
+    zeron_doc::fold_event_into_parts(&mut parts, &zeron_proto::AgentEvent::ToolCall { id: "k".into(), call });
+    let MessagePart::Tool { resolved, chats, .. } = &mut parts[0] else { panic!("{parts:?}") };
+    *resolved = true;
+    *chats = vec!["chat-release-audit".into(), "chat-release-notes".into(), "chat-release-bench".into()];
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        workspace: Some(client.workspace()),
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 3);
+    assert_eq!(frame.display(0).unwrap().text, "Delegated to \u{2060} Audit the parser · Needs you");
+    assert_eq!(frame.display(1).unwrap().text, "Delegated to \u{2060} Draft the release notes · Working");
+    // Done says nothing.
+    assert_eq!(frame.display(2).unwrap().text, "Delegated to \u{2060} Time the benchmark");
+    drop(client);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
@@ -206,6 +326,7 @@ fn transcript_one(text: &str) -> TranscriptInput {
 #[test]
 fn question_chip_reads_what_was_answered() {
     let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+        note: None,
         id: id.into(),
         header: header.into(),
         question: format!("{header}?"),
@@ -688,6 +809,8 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
+        chats: Vec::new(),
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);

@@ -31,19 +31,24 @@ local locale = require("@self/locale")
 -- An agent: a tab of its own.
 -- (`icon`: an agent from the ACP registry's one-ink SVG, in its mark's
 -- place.)
-export type Harness = { id: string, label: string, mark: Mark.Name, icon: string? }
+export type Harness = { id: string, label: string, mark: Mark.Name, icon: string?, auto: boolean? }
 -- One of a model option's choices.
 export type Choice = { id: string, label: string }
 -- An option of a model (Devin Fusion's lead and sidekick): its choices and
 -- the one it starts on (by id).
 export type Option = { id: string, label: string, default: string, choices: { Choice } }
+-- Where a model is served from, for an agent reaching models through
+-- several providers (Pi signed in to Codex and OpenCode): its id and name.
+export type Provider = { id: string, name: string }
 -- A model: its agent, its reasoning levels (low to high) and the one it
--- starts on, whether it offers Fast mode, its other options, and whether
--- it's its agent's default (what a chat that names no model runs).
+-- starts on, whether it offers Fast mode, its other options, whether it's
+-- its agent's default (what a chat that names no model runs), and its
+-- provider.
 export type Model = {
 	value: string,
 	label: string,
 	harness: string,
+	provider: Provider?,
 	efforts: { EffortSlider.Level }?,
 	effort: string?,
 	fast: boolean?,
@@ -62,11 +67,20 @@ export type Account = {
 	active: boolean,
 	can_switch: boolean,
 }
+-- The accounts a model runs on, where its agent keeps a login per model
+-- provider (Pi, OpenCode, Hermes): who they're with ("ChatGPT"), and, where
+-- Zeron can sign in to it, what adds one and what that does.
+export type AccountGroup = { name: string, add: string?, on_add: (() -> ())? }
 export type Props = {
 	-- The accounts of a model's agent (nil or none: no row, no ring), followed
-	-- as they change. `on_account` puts one in use; `on_accounts_open` asks
-	-- after them again as the panel opens.
-	accounts: ((harness: string, model: string) -> { Account }?)?,
+	-- as they change; for an agent with a login per model provider, its
+	-- provider's alone (`provider`, the model's). `on_account` puts one in
+	-- use; `on_accounts_open` asks after them again as the panel opens.
+	accounts: ((harness: string, model: string, provider: string?) -> { Account }?)?,
+	-- The model's provider's accounts, named (nil: the agent keeps one
+	-- login): the row is "<name> account", and offers to add one, even with
+	-- none yet.
+	account_group: ((harness: string, provider: string?) -> AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
 	model: State<string?>,
@@ -177,6 +191,15 @@ return ui.component(function(props: Props): Node
 	local function current(): Model?
 		return by_id:get()[shown_id() or ""]
 	end
+	-- The chosen model's agent, listed or not: a value is `<agent>/<model>`,
+	-- so a model its catalog doesn't list (renamed, retired, or a catalog not
+	-- yet in) still names its agent, whose mark and tab it keeps rather
+	-- than falling to the first agent's.
+	local function chosen_agent(): Harness?
+		local m = current()
+		local id = if m then m.harness else string.match(shown_id() or "", "^([^/]+)/")
+		return if id then agents:get()[id] else nil
+	end
 	-- The level a model starts on.
 	local function own_effort(m: Model): string?
 		if not m.efforts or #m.efforts == 0 then
@@ -265,9 +288,9 @@ return ui.component(function(props: Props): Node
 		if t then
 			return t
 		end
-		local m = current()
-		if m then
-			return m.harness
+		local agent = chosen_agent()
+		if agent then
+			return agent.id
 		end
 		-- No model chosen: the first agent's tab; with none (a catalog
 		-- still coming), the starred one.
@@ -295,11 +318,15 @@ return ui.component(function(props: Props): Node
 		props.effort:set(own_effort(m))
 	end)
 
-	-- The models as the dropdown's items, each in its agent's mark.
+	-- The models as the dropdown's items, each in its agent's mark. A model
+	-- with a provider (Pi's, OpenCode's, Hermes's: agents that reach models
+	-- through providers) has its name as the row's hint, always: which GPT-6
+	-- Luna is which, and where one comes from even when it's the only one.
 	local items = ui.computed(function(): { Dropdown.Item }
 		local out: { Dropdown.Item } = {}
 		local by_agent = agents:get()
-		for _, m in read(props.models) :: { Model } do
+		local models = read(props.models) :: { Model }
+		for _, m in models do
 			local agent = by_agent[m.harness]
 			table.insert(out, {
 				value = m.value,
@@ -307,6 +334,9 @@ return ui.component(function(props: Props): Node
 				mark = if agent then agent.mark else nil,
 				svg = if agent then agent.icon else nil,
 				svg_seed = m.harness,
+				hint = if m.provider then m.provider.name else nil,
+				-- (Always: where a model comes from is part of which it is.)
+				hint_when_found = nil,
 			})
 		end
 		return out
@@ -499,10 +529,32 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	-- The chosen model's agent's accounts, and the one in use.
+	-- The chosen model's agent's accounts (its provider's, where the agent
+	-- keeps a login per provider), and the one in use.
+	local function provider_of(m: Model?): string?
+		return if m and m.provider then m.provider.id else nil
+	end
 	local function accounts(): { Account }
 		local m = current()
-		return (if m and props.accounts then props.accounts(m.harness, m.value) else nil) or {}
+		return (if m and props.accounts then props.accounts(m.harness, m.value, provider_of(m)) else nil) or {}
+	end
+	-- Those accounts' provider, named, and how to add one (nil: the agent
+	-- keeps one login).
+	local function group(): AccountGroup?
+		local m = current()
+		return if m and props.account_group then props.account_group(m.harness, provider_of(m)) else nil
+	end
+	-- Whether the row shows: an account to show, or one the provider can add.
+	local function has_account_row(): boolean
+		if #accounts() > 0 then
+			return true
+		end
+		local g = group()
+		return g ~= nil and g.add ~= nil
+	end
+	local function account_label(): string
+		local g = group()
+		return if g then locale.s("ds.model_picker.account_of", { name = g.name }) else locale.s("ds.model_picker.account")
 	end
 	local function account_by_id(id: string?): Account?
 		for _, a in accounts() do
@@ -555,11 +607,32 @@ return ui.component(function(props: Props): Node
 				end
 				return out
 			end,
-			label = locale.t("ds.model_picker.account"),
+			label = account_label,
 			search = false,
 			width = 300,
 			placement = { side = "right", align = "start", offset = 7 },
 			on_open = sync,
+			-- (Another of the model's provider's accounts, where Zeron can
+			-- sign in to it: "Add ChatGPT account".)
+			actions = {
+				{
+					label = function(): string
+						local g = group()
+						return if g and g.add then g.add else ""
+					end,
+					icon = "plus",
+					shown = function(): boolean
+						local g = group()
+						return g ~= nil and g.add ~= nil and g.on_add ~= nil
+					end,
+					on_click = function()
+						local g = group()
+						if g and g.on_add then
+							g.on_add()
+						end
+					end,
+				},
+			},
 			trailing_item = function(item: Dropdown.Item): Node?
 				return ui.show(function(): boolean
 					local a = account_by_id(item.value)
@@ -584,12 +657,16 @@ return ui.component(function(props: Props): Node
 			trigger = function(menu: Dropdown.Menu): Node
 				local row: ContainerProps = {
 					id = "model-picker-account",
-					label = locale.t("ds.model_picker.account"),
+					label = account_label,
 					bg = function()
 						return if menu.open:get() then "$hover" else "#00000000"
 					end,
 					on_click = menu.toggle,
-					ui.text { locale.t("ds.model_picker.account"), text_size = "$font.size.md", color = "$text.primary", grow = 1 },
+					ui.text { account_label, text_size = "$font.size.md", color = "$text.primary", grow = 1, min_w = 0, truncate = true },
+					-- (None in use: none signed in to the model's provider.)
+					ui.show(function(): boolean
+						return in_use() == nil
+					end, ui.text { locale.t("ds.model_picker.no_account"), shrink = 0, text_size = "$font.size.md", color = "$text.tertiary" }),
 					PrivateText {
 						function(): string
 							local a = in_use()
@@ -702,18 +779,26 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local foot: { Node } = {
-		ui.show(function(): boolean
-			return #accounts() > 0
-		end, account_row()),
-		ui.each(owned, function(it: Owned): Node
-			return option_row(it.option)
-		end, {
-			key = function(it: Owned): string
-				return `{it.model.value}/{it.option.id}`
+		ui.show(has_account_row, account_row()),
+		ui.show(
+			function(): boolean
+				return #owned:get() > 0
 			end,
-			w_full = true,
-			gap = "$zeron.list.gap",
-		}),
+			-- (The column is what keeps the rows the menu's width: a list
+			-- straight in a show is as wide as its own rows.)
+			ui.column {
+				w_full = true,
+				ui.each(owned, function(it: Owned): Node
+					return option_row(it.option)
+				end, {
+					key = function(it: Owned): string
+						return `{it.model.value}/{it.option.id}`
+					end,
+					w_full = true,
+					gap = "$zeron.list.gap",
+				}),
+			}
+		),
 		ui.show(
 			function(): boolean
 				return #levels() > 0
@@ -756,6 +841,10 @@ return ui.component(function(props: Props): Node
 			end
 			else nil,
 		say = named,
+		say_mark = function(): Mark.Name?
+			local agent = chosen_agent()
+			return if agent and not agent.icon then agent.mark else nil
+		end,
 		value = shown_model,
 		items = items :: any,
 		tone = props.tone or "chip",
@@ -871,13 +960,14 @@ return ui.component(function(props: Props): Node
 		-- (The slider's groove in the panel's foot corners, its fill 2 inside.)
 		extra = ui.column {
 			w_full = true,
+			gap = "$zeron.list.gap",
 			theme = { radius = { md = corner, sm = control.nest(corner, "$zeron.space.hair") } },
 			table.unpack(foot),
 		},
 		extra_when = function(): boolean
 			local m = current()
 			return m ~= nil
-				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0 or #accounts() > 0)
+				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0 or has_account_row())
 		end,
 		placement = props.placement,
 		bottom_up = bottom_up,

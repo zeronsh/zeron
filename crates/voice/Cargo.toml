@@ -7,10 +7,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-parakeet-rs = "=0.3.8"
-# Keep the nested ZGX workspace on the same native runtime as ZUI.
-ort = "=2.0.0-rc.13"
-ort-sys = "=2.0.0-rc.13"
 cpal = "=0.17.3"
 rubato = "=0.16.2"
 reqwest.workspace = true
@@ -18,6 +14,15 @@ tokio.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sys-locale = "0.3.2"
+
+# transcribe.cpp, built from source (CMake, a C++ compiler): Metal on macOS,
+# the CPU elsewhere. (Vulkan would make the app need libvulkan / vulkan-1.dll
+# to start at all.)
+[target.'cfg(target_os = "macos")'.dependencies]
+transcribe-cpp = { version = "=0.4.2", default-features = false, features = ["metal"] }
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+transcribe-cpp = { version = "=0.4.2", default-features = false }
 
 [dev-dependencies]
 hound = "3.5"

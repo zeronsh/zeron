@@ -1,0 +1,63 @@
+/* The recreated window: a fixed 1320 × 840 point stage. Every element is
+   placed by tools/recreate from the app's layout tree; each colour comes
+   once a theme captured (--c0, --c1, …), and the window's class (t0, t1, …)
+   says which the stage wears. Written by tools/recreate; don't edit. */
+.zw { position: relative; width: 1320px; height: 840px; overflow: hidden; background: var(--zw-window); font-family: var(--font-sans); font-size: 13px; text-align: left; -webkit-font-smoothing: antialiased; font-synthesis: none; }
+.zw > * { position: absolute; margin: 0; padding: 0; font-style: normal; }
+.zw .dot { border-radius: 50%; }
+.zw .i { -webkit-mask: var(--m) center / 100% 100% no-repeat; mask: var(--m) center / 100% 100% no-repeat; }
+.zw .t { white-space: nowrap; font-weight: 400; }
+.zw .m { font-family: var(--font-mono); }
+.zw .t b { font-weight: inherit; }
+.zw .p { font-size: 15px; line-height: 24px; white-space: normal; }
+.zw .p code { font-family: var(--font-mono); font-size: 13.5px; padding: 0 4px; border-radius: 4px; color: var(--zw-code); background: var(--zw-wash); }
+.zw .g svg { display: block; width: 100%; height: 100%; }
+.zw .branches { fill: none; stroke-width: 1; }
+/* A session at work: the app's dashed ring, turning. The ring is centred in
+   its box, so the box turns, not the circle: a rotation of a box runs on the
+   compositor, while one of a shape inside an SVG repaints the page every frame. */
+.zw .working { animation: zw-turn 2.4s linear infinite; }
+.zw .working circle { fill: none; stroke-width: 1.5; stroke-dasharray: 6.4 3.6; }
+@keyframes zw-turn { to { rotate: 1turn; } }
+@media (prefers-reduced-motion: reduce) { .zw .working { animation: none; } }
+.zw .tl { width: 14px; height: 14px; border-radius: 50%; }
+.zw .b { background: var(--f0); }
+.zw .b.e { box-shadow: inset 0 0 0 1px var(--e0); }
+.zw .dot { background: var(--f0); }
+.zw .i { background-color: var(--c0); }
+.zw .t, .zw .t b, .zw .g { color: var(--c0); }
+.zw .branches, .zw .working circle { stroke: var(--c0); }
+.zw.t1 .b { background: var(--f1); }
+.zw.t1 .b.e { box-shadow: inset 0 0 0 1px var(--e1); }
+.zw.t1 .dot { background: var(--f1); }
+.zw.t1 .i { background-color: var(--c1); }
+.zw.t1 .t, .zw.t1 .t b, .zw.t1 .g { color: var(--c1); }
+.zw.t1 .branches, .zw.t1 .working circle { stroke: var(--c1); }
+.zw.t2 .b { background: var(--f2); }
+.zw.t2 .b.e { box-shadow: inset 0 0 0 1px var(--e2); }
+.zw.t2 .dot { background: var(--f2); }
+.zw.t2 .i { background-color: var(--c2); }
+.zw.t2 .t, .zw.t2 .t b, .zw.t2 .g { color: var(--c2); }
+.zw.t2 .branches, .zw.t2 .working circle { stroke: var(--c2); }
+.zw.t3 .b { background: var(--f3); }
+.zw.t3 .b.e { box-shadow: inset 0 0 0 1px var(--e3); }
+.zw.t3 .dot { background: var(--f3); }
+.zw.t3 .i { background-color: var(--c3); }
+.zw.t3 .t, .zw.t3 .t b, .zw.t3 .g { color: var(--c3); }
+.zw.t3 .branches, .zw.t3 .working circle { stroke: var(--c3); }
+.zw.t4 .b { background: var(--f4); }
+.zw.t4 .b.e { box-shadow: inset 0 0 0 1px var(--e4); }
+.zw.t4 .dot { background: var(--f4); }
+.zw.t4 .i { background-color: var(--c4); }
+.zw.t4 .t, .zw.t4 .t b, .zw.t4 .g { color: var(--c4); }
+.zw.t4 .branches, .zw.t4 .working circle { stroke: var(--c4); }
+.zw.t5 .b { background: var(--f5); }
+.zw.t5 .b.e { box-shadow: inset 0 0 0 1px var(--e5); }
+.zw.t5 .dot { background: var(--f5); }
+.zw.t5 .i { background-color: var(--c5); }
+.zw.t5 .t, .zw.t5 .t b, .zw.t5 .g { color: var(--c5); }
+.zw.t5 .branches, .zw.t5 .working circle { stroke: var(--c5); }
+/* The stage scales to the box it is put in. --zx, --zy, --zw, --zh name the
+   part of it shown (the whole window by default): that part fills the box. */
+.zw-fit { container-type: inline-size; aspect-ratio: var(--zw, 1320) / var(--zh, 840); overflow: hidden; }
+.zw-fit > .zw { transform-origin: 0 0; scale: tan(atan2(100cqw, var(--zw, 1320) * 1px)); transform: translate(calc(var(--zx, 0) * -1px), calc(var(--zy, 0) * -1px)); }

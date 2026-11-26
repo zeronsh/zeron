@@ -5,7 +5,7 @@
  * VaultAccount owns persistence, generations and the one-refresh-in-flight
  * gate — so every adapter is unit-testable in Node with an injected `fetch`.
  */
-import type { VaultMaterial, VaultProviderId } from "../api";
+import type { VaultAccountProfile, VaultMaterial, VaultProviderId } from "../api";
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -21,6 +21,8 @@ export interface RefreshContext {
   readonly now: number;
   readonly githubClientId?: string;
   readonly githubClientSecret?: string;
+  readonly antigravityClientId?: string;
+  readonly antigravityClientSecret?: string;
 }
 
 /**
@@ -46,6 +48,8 @@ export interface GrantMaterial {
   readonly account?: string;
   readonly scopes?: readonly string[];
   readonly subscriptionType?: string;
+  /** Non-secret fields the consumer writes beside the token (`Grant.settings`). */
+  readonly settings?: Readonly<Record<string, string>>;
 }
 
 export interface ProviderAdapter<S> {
@@ -54,6 +58,10 @@ export interface ProviderAdapter<S> {
   parseUpload?(material: VaultMaterial, now: number): ParseResult<S>;
   /** Display label: email / login / `…abcd`. Never secret material. */
   account(secret: S): string | undefined;
+  /** What makes two uploads the same account (never secret material): the
+   * same identity replaces its account instead of adding one. Absent: the
+   * account DO's own rule for the provider. */
+  identity?(secret: S, profile: VaultAccountProfile): Promise<string | undefined>;
   /** Whether a refresh token exists at all (canary: "not_refreshable"). */
   refreshable(secret: S): boolean;
   refreshDue(secret: S, now: number): boolean;

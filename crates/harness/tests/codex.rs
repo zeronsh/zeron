@@ -104,6 +104,8 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -2330,6 +2332,7 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        http: None,
     });
     let (mut controls, steer, token) = controls("Yes");
     let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
@@ -2397,6 +2400,7 @@ async fn a_side_chats_only_thread_starts_without_agent_tools() {
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         if side_chats_only {
             server.env.insert(
@@ -2440,6 +2444,156 @@ async fn a_side_chats_only_thread_starts_without_agent_tools() {
     }
 }
 
+/// A Codex run with Code Mode enabled passes `features.code_mode = true` on
+/// `thread/start`; off, the key is omitted so older CLIs stay untouched.
+#[tokio::test]
+async fn code_mode_thread_starts_with_feature_flag() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for code_mode in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("use code mode");
+        req.cwd = dir.path().display().to_string();
+        req.code_mode = code_mode;
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let start = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = start["params"].get("config");
+        if code_mode {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                Some(&serde_json::Value::Bool(true)),
+                "{start}"
+            );
+        } else {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                None,
+                "{start}"
+            );
+        }
+    }
+}
+
+/// "Only Zeron's MCP servers": the thread starts with ChatGPT's apps off
+/// and each of the user's configured servers (as the run's folder sees
+/// them) switched off by name, never a server Zeron itself passes (even one
+/// named alike). Off, none of that is sent.
+#[tokio::test]
+async fn zeron_mcp_only_hides_apps_and_configured_servers() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config-read.json"),
+            r#"{"config": {"mcp_servers": {"github": {"url": "https://x"}, "linear": {"command": "npx"}}}}"#,
+        )
+        .unwrap();
+        // Codex's plugins: one bringing a server, one only skills, one
+        // turned off, and a remote one whose catalog never answers.
+        std::fs::write(
+            dir.path().join("plugins-installed.json"),
+            r#"{"marketplaces": [
+                {"name": "bundled", "path": "/m/bundled.json", "plugins": [
+                    {"id": "computer@bundled", "name": "computer", "installed": true, "enabled": true},
+                    {"id": "docs@bundled", "name": "docs", "installed": true, "enabled": true},
+                    {"id": "off@bundled", "name": "off", "installed": true, "enabled": false}]},
+                {"name": "remote", "path": null, "plugins": [
+                    {"id": "slow@remote", "name": "slow", "installed": true, "enabled": true}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("plugin-computer.json"), r#"{"mcpServers": ["cua_repl"]}"#).unwrap();
+        std::fs::write(dir.path().join("plugin-off.json"), r#"{"mcpServers": ["off_server"]}"#).unwrap();
+        std::fs::write(dir.path().join("plugin-slow.json"), r#"{"silent": true}"#).unwrap();
+        let mut req = request("only zeron's");
+        req.cwd = dir.path().display().to_string();
+        req.zeron_mcp_only = only;
+        // Zeron's own managed Linear, named as the user's is.
+        req.extra_mcp = vec![zeron_proto::McpServer {
+            name: "linear".into(),
+            command: "zeron".into(),
+            ..Default::default()
+        }];
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let frames: Vec<serde_json::Value> = wire
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let start = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = &start["params"]["config"];
+        if only {
+            assert_eq!(config["features.apps"], false, "{start}");
+            assert_eq!(config["mcp_servers.github.enabled"], false, "{start}");
+            assert!(config.get("mcp_servers.linear.enabled").is_none(), "{start}");
+            // Read as the run's folder sees it.
+            let read = frames
+                .iter()
+                .find(|frame| frame["method"] == "config/read")
+                .expect("the config is read");
+            assert_eq!(read["params"]["cwd"], dir.path().display().to_string());
+            // A plugin's servers alone, overlaid on the user's `plugins`
+            // table; the remote catalog that never answered held nothing up.
+            assert_eq!(
+                config["plugins"],
+                serde_json::json!({"computer@bundled": {"mcp_servers": {"cua_repl": {"enabled": false}}}}),
+                "{start}"
+            );
+            let reads: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame["method"] == "plugin/read")
+                .map(|frame| frame["params"].clone())
+                .collect();
+            assert!(reads.contains(&serde_json::json!({"pluginName": "computer", "marketplacePath": "/m/bundled.json"})));
+            assert!(reads.contains(&serde_json::json!({"pluginName": "slow", "remoteMarketplaceName": "remote"})));
+            assert!(!reads.iter().any(|read| read["pluginName"] == "off"), "{reads:?}");
+        } else {
+            assert!(config.get("features.apps").is_none(), "{start}");
+            assert!(config.get("mcp_servers.github.enabled").is_none(), "{start}");
+            assert!(config.get("plugins").is_none(), "{start}");
+            assert!(!frames.iter().any(|frame| frame["method"] == "plugin/installed"));
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn external_voice_keeps_canonical_events_without_any_local_helper() {
@@ -2463,6 +2617,7 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        http: None,
     });
     let (mut controls, _steer, token) = controls("Yes");
     let (voice, bridge, mut events) = channel();
@@ -2614,4 +2769,109 @@ async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
         "4",
         "one launch + three relaunches"
     );
+}
+
+// ---- warm starts (a new chat's agent launched before its first message) ----
+
+fn launches(log: &std::path::Path) -> Vec<i32> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("launch ")?.trim().parse().ok())
+        .collect()
+}
+
+fn warm_alive(pid: i32) -> bool {
+    // A zombie (`Z`) has exited; `ps` prints nothing for a reaped pid.
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+async fn warm_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never: {what}");
+}
+
+async fn warm_run(harness: &CodexHarness, key: &str, req: RunRequest) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls("Yes");
+    let stream = harness.run_warm(key, req, controls).await.expect("run starts");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time")
+}
+
+/// A warm start launches the agent before its message, and the run takes
+/// that very process.
+#[tokio::test]
+async fn a_warm_start_is_taken_by_its_run() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    // (The happy scenario checks every param the turn must carry, and the
+    // warm handshake's notification opt-outs.)
+    req.model_options.insert("serviceTier".into(), serde_json::Value::String("fast".into()));
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    let mut early = req.clone();
+    early.prompt.clear();
+    harness.prewarm("chat-w#1", early).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    let events = warm_run(&harness, "chat-w#1", req).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { status: DoneStatus::Completed, .. })), "{events:?}");
+    assert_eq!(launches(log.path()).len(), 1, "the warm process ran it");
+}
+
+/// Launched in another folder or environment than its run: ended, and the
+/// run starts its own.
+#[tokio::test]
+async fn a_warm_start_launched_otherwise_is_not_used() {
+    for what in ["folder", "environment"] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let harness = harness();
+        let mut req = request("scenario:happy");
+        req.cwd = "/tmp".into();
+        req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+        let mut early = req.clone();
+        early.prompt.clear();
+        match what {
+            "folder" => early.cwd = "/".into(),
+            _ => {
+                early.env.insert("GH_TOKEN".into(), "another".into());
+            }
+        }
+        harness.prewarm("chat-x#1", early).await.expect("prewarms");
+        warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+        warm_run(&harness, "chat-x#1", req).await;
+        let pids = launches(log.path());
+        assert_eq!(pids.len(), 2, "{what}: a fresh launch ran it");
+        warm_until(&format!("{what}: the unused one ends"), || !warm_alive(pids[0])).await;
+    }
+}
+
+/// Discarded, the warm process has ended by the time the discard returns.
+#[tokio::test]
+async fn a_discarded_warm_start_is_ended() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("");
+    req.cwd = "/tmp".into();
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    harness.prewarm("chat-y#1", req).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    harness.discard_warm("chat-y#1").await;
+    assert!(!warm_alive(launches(log.path())[0]));
 }

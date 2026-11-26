@@ -20,7 +20,7 @@ multi-device app working across versions.
 The toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
 (stable, with `rustfmt` and `clippy`).
 
-**Linux** needs the GPUI system libraries CI installs:
+**Linux** needs the desktop system libraries CI installs:
 
 ```sh
 sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
@@ -28,25 +28,50 @@ sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
   libasound2-dev libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
 ```
 
-**macOS** needs Xcode. **Windows** is covered in
+(Add `mesa-vulkan-drivers` if you run GPU visual tests without a hardware GPU.)
+
+**macOS** needs Xcode and **Zig 0.16** (`brew install zig@0.16`, used to build
+Ghostty for the panel's terminals in `apps/zgx`; cached in
+`~/Library/Caches/zgx-ghostty` after the first build). **Windows** is covered in
 [docs/reference/windows-development.md](docs/reference/windows-development.md).
 
-Build and run the app with `cargo run -p zeron`.
+### Running the desktop app (`apps/zgx`)
 
-### Running a dev build next to an installed Zeron
-
-An installed daemon holds the default data directory and IPC port. Give your
-dev build its own so the two never share state:
+The shipping desktop app lives in [`apps/zgx`](apps/zgx/README.md) (its own
+Cargo workspace) and talks to `zeron-engine` built from the root workspace:
 
 ```sh
-ZERON_DATA_DIR=~/.zeron-dev ZERON_IPC_PORT=27700 cargo run -p zeron
+cargo build -p zeron --bin zeron-engine
+cd apps/zgx
+cargo run --release              # intro / onboarding / main window
+cargo run --release -- main      # straight to the main window
+cargo run --release -- gallery   # design-system workbench (light + dark)
+```
+
+Edits under `apps/zgx/ui/` hot-reload in place without rebuilding Rust.
+Dev builds default to the staging engine (`~/.zeron-staging`, port `27871`) and
+refuse the production data dir and port so they never touch your installed
+Zeron. Override with `ZERON_ZGX_ENGINE_PORT`, `ZERON_ZGX_ENGINE_DATA`, and
+`ZERON_ZGX_ENGINE_HOME` for a throwaway engine (see
+[`apps/zgx/README.md`](apps/zgx/README.md)).
+
+### Running the engine or headless CLI (`apps/zeron`)
+
+An installed daemon holds the default data directory and IPC port. Give a
+standalone engine or headless CLI run its own so the two never share state:
+
+```sh
+ZERON_DATA_DIR=~/.zeron-dev ZERON_IPC_PORT=27700 cargo run -p zeron --bin zeron-engine
+# Or via the CLI binary (`apps/zeron` opens no window; use `apps/zgx` for desktop):
+ZERON_DATA_DIR=~/.zeron-dev ZERON_IPC_PORT=27700 cargo run -p zeron -- headless
 ```
 
 Useful knobs for exercising the UI without a real agent or account:
 
 | Variable | Effect |
 | --- | --- |
-| `ZERON_HARNESS=mock` | Offers the mock harness, which streams canned turns |
+| `ZERON_ZGX_MOCK=1` | Offers the engine's mock agent in `apps/zgx`'s model picker |
+| `ZERON_HARNESS=mock` | Offers the mock harness on the engine, streaming canned turns |
 | `ZERON_MOCK_SUBAGENT=1` | Mock turns spawn subagents |
 | `ZERON_MOCK_THINKING=1` | Mock turns include markdown-heavy thinking |
 | `ZERON_MOCK_TODO=1` | Mock turns work through an 8-item checklist (pair with `ZERON_MOCK_DELAY_MS=900` to watch the todo panel) |
@@ -54,10 +79,15 @@ Useful knobs for exercising the UI without a real agent or account:
 
 ## Tests
 
-Run the suites for the crates you touched before opening a PR. These mirror CI:
+Run the suites for the areas you touched before opening a PR. These mirror CI:
 
 ```sh
-cargo test --locked -p zeron-ui --lib -- --test-threads=1
+# ZGX desktop app (Rust host unit tests, integration tests, and Luau UI tests):
+scripts/ci/test-zgx.sh rust
+scripts/ci/test-zgx.sh tests
+scripts/ci/test-zgx.sh ui        # requires `zgx` CLI; see apps/zgx/README.md
+
+# Root workspace crates:
 cargo test --locked -p zeron-engine --lib
 cargo test --locked -p zeron-harness            # includes tests/ fixtures, not just --lib
 cargo test --locked -p zeron-sync --lib
@@ -114,9 +144,15 @@ running an older engine. So:
 
 ## UI changes
 
-- Reuse the app's existing idioms exactly: rows, menus, seams, hover
-  treatments, empty states. If something similar already exists, copy it.
-  Don't invent new visual elements as polish.
+- Desktop UI work lives in `apps/zgx/ui/` (Luau) and `apps/zgx/src/` (Rust
+  host). Follow the design system rules and patterns in
+  [`apps/zgx/README.md`](apps/zgx/README.md): theme tokens only (no hard-coded
+  colors/spacing/radii), concentric corners, even container insets, and
+  in-place state updates (`ui.each`, live functions/states — never rebuild
+  subtrees on data change).
+- Reuse the app's existing `@ds` components and idioms exactly: rows, menus,
+  seams, hover treatments, empty states. Prototype new shared components in
+  `gallery` first. Run `zgx lint ui` and `zgx check ui` on Luau changes.
 - Do what the change calls for and nothing more. Unrequested restyling of
   nearby UI gets reverted in review.
 - Check light and dark mode, frosted and opaque surfaces. Hover and selection
@@ -125,8 +161,7 @@ running an older engine. So:
   below their trigger.
 - The bundled Geist font lacks most exotic whitespace (em space, thin space,
   and so on). Reserve space with characters it actually has.
-- Animations use the shared motion kit (`crate::motion`) so they match the
-  rest of the app.
+- Keep user-visible strings localized via `ui.t(...)` (`apps/zgx/docs/i18n.md`).
 
 ## Pull requests
 

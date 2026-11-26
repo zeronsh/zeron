@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Shared by both binaries; the UI is referenced only by `zeron`, so the
-# background engine links without it.
+# Shared by both binaries.
 [lib]
 name = "zeron_app"
 path = "src/lib.rs"
@@ -22,16 +21,20 @@ path = "src/bin/zeron-engine.rs"
 [dependencies]
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
-zeron-ui.workspace = true
+zeron-proto.workspace = true
 zeron-update.workspace = true
 zeron-cli.workspace = true
 zeron-mcp.workspace = true
 zeron-notify.workspace = true
+zeron-sync.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# `zeron mcp sign-in` opens the sign-in page (as the zgx app does).
+open = "5"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

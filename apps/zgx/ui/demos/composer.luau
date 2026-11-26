@@ -774,7 +774,6 @@ local function behind(): Node
 		pointer_events = "none",
 		ui.column {
 			w_full = true,
-			max_w = "$zeron.prose.measure",
 			gap = "$space.4",
 			UserMessage { text = "Port the composer dock to zgx: the queue tray first, then the plan. Keep Zeron's tuck." },
 			Markdown {

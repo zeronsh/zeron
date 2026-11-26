@@ -42,6 +42,8 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
+        chats: Vec::new(),
     }
 }
 
@@ -573,6 +575,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     request_id: "req-1".into(),
                     questions: vec![
                         UserInputQuestion {
+                            note: None,
                             id: "q1".into(),
                             header: "Catalog source".into(),
                             question:
@@ -588,6 +591,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                             multi_select: false,
                         },
                         UserInputQuestion {
+                            note: None,
                             id: "q2".into(),
                             header: "Harnesses".into(),
                             question: "Which harnesses should the picker offer on phones?".into(),
@@ -949,6 +953,106 @@ fn side(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+/// A parent that delegated in the background: its `create_chats` call (each
+/// request's chat named on the part, as Zeron's MCP server notes them), then
+/// its turn's end.
+fn release(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let call = ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "create_chats".into(),
+        input: Some(serde_json::json!({ "requests": [
+            { "title": "Audit the parser", "harness": "codex", "device": "dev-vps", "prompt": "Audit crates/parser for panics on untrusted input." },
+            { "title": "Draft the release notes", "harness": "claude-code", "prompt": "Draft release notes for the commits since 0.3.19." },
+            { "title": "Cut the release branch", "harness": "claude-code", "prompt": "Cut the 0.3.21 release branch." },
+            { "title": "Time the benchmark", "harness": "claude-code", "prompt": "Run bench.py and report its time." },
+        ] })),
+    };
+    let mut handed = tool("k1", call, false, None);
+    if let MessagePart::Tool { chats, .. } = &mut handed {
+        *chats = vec![
+            "chat-release-audit".into(),
+            "chat-release-notes".into(),
+            "chat-release-branch".into(),
+            "chat-release-bench".into(),
+        ];
+    }
+    vec![
+        user("m1", now - 240_000, "Get 0.3.21 ready: audit the parser, draft the notes, cut the branch, and time the benchmark."),
+        assistant(
+            "m2",
+            host,
+            now - 230_000,
+            vec![
+                text("t0", "Those don't depend on each other, so I'll hand them out and carry on."),
+                handed,
+                text("t1", "Four subagents are on it; I'll summarise when they report back."),
+            ],
+        ),
+    ]
+}
+
+/// A delegated child that asks the person to approve a command.
+fn release_audit(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user("m1", now - 230_000, "Audit crates/parser for panics on untrusted input."),
+        assistant(
+            "m2",
+            host,
+            now - 60_000,
+            vec![
+                text("t0", "Three fuzz targets cover the tokenizer and the expression parser. I'll run the parser's for a minute."),
+                MessagePart::Input {
+                    id: "req-fuzz".into(),
+                    request_id: "req-fuzz".into(),
+                    questions: vec![UserInputQuestion {
+                        note: None,
+                        id: "q1".into(),
+                        header: "Approve command".into(),
+                        question: "Codex wants to run `cargo fuzz run parse -- -max_total_time=60`. Allow it?".into(),
+                        options: vec!["Yes".into(), "No".into()],
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                    }],
+                    resolved: false,
+                    answers: None,
+                },
+            ],
+        ),
+    ]
+}
+
+/// A delegated child that asks the person a question.
+fn release_branch(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user("m1", now - 230_000, "Cut the 0.3.21 release branch."),
+        assistant(
+            "m2",
+            host,
+            now - 40_000,
+            vec![
+                text("t0", "`main` is 82 commits past `release/0.3`, and `next` has the new sync protocol."),
+                MessagePart::Input {
+                    id: "req-branch".into(),
+                    request_id: "req-branch".into(),
+                    questions: vec![UserInputQuestion {
+                        note: None,
+                        id: "q1".into(),
+                        header: "Branch".into(),
+                        question: "Which branch should 0.3.21 be cut from?".into(),
+                        options: vec!["main".into(), "release/0.3".into(), "next".into()],
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                    }],
+                    resolved: false,
+                    answers: None,
+                },
+            ],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -979,6 +1083,11 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Draft the launch post outline.",
             "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
         ),
+        "chat-release" => release(host, now),
+        "chat-release-audit" => release_audit(host, now),
+        "chat-release-branch" => release_branch(host, now),
+        "chat-release-notes" => vec![user("m1", now - 230_000, "Draft release notes for the commits since 0.3.19.")],
+        "chat-release-bench" => short(host, now, "Run bench.py and report its time.", "`bench.py` reported **0.90s** for 60 runs (10.9s wall clock, most of it the script's own 10s sleep)."),
         "chat-side" => side(host, now),
         "chat-side-easing" => easing(host, now),
         "chat-oklch" => short(
@@ -1141,6 +1250,7 @@ pub(crate) fn asking() -> Vec<Step> {
     vec![
         Step::Text("Before I continue I need one decision:".into()),
         Step::Question(vec![UserInputQuestion {
+            note: None,
             id: "q1".into(),
             header: "Scope".into(),
             question: "Should the fix cover Android too?".into(),

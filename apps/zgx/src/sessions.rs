@@ -35,6 +35,8 @@
 //!                                  without one, `device` hosts it; `parent`:
 //!                                  a side chat of that chat, where it is;
 //!                                  `cloud`: on a Cloud machine of its own,
+//!                                  reaching `reach` (`devices` | `isolated`;
+//!                                  none: the account's default),
 //!                                  `{ id, cwd }`, or why not in words)
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
@@ -184,6 +186,9 @@ struct RowWith {
     status: Option<&'static str>,
     /// What its agent waits on, while that shows.
     waiting: Option<Vec<zeron_proto::WaitingOn>>,
+    /// Since when it waits, while that shows (a child: since when it's been
+    /// at it), in Unix seconds.
+    since: Option<i64>,
     /// Its sleep: asleep until (`true`), or woke at (`false`), in Unix seconds.
     sleep: Option<(bool, i64)>,
     running_subagents: u32,
@@ -191,6 +196,21 @@ struct RowWith {
     working_side_chats: u32,
     known_project: bool,
     agent_icon: Option<String>,
+    /// The last turn its agent finished, as its session row marks it
+    /// (`lastCompletedTurn`): what a "finished" chime rings on moving.
+    turn: Option<String>,
+}
+
+/// A session row's finished turn, and whether the row is fresh: written in
+/// the last `SESSION_STALE_MS`, so a turn's end just published rather than
+/// an old row a sync or reconnect brings back (the shipping app's chime
+/// rule, crates/engine/src/desktop_notify.rs `SessionNotificationState`).
+fn finished_turn(session: Option<&Session>, at: chrono::DateTime<chrono::Utc>) -> (Option<String>, bool) {
+    let Some(s) = session else {
+        return (None, false);
+    };
+    let fresh = at.signed_duration_since(s.updated_at).num_milliseconds() <= zeron_proto::view::SESSION_STALE_MS;
+    (s.last_completed_turn.clone(), fresh)
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -615,12 +635,17 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
     let with = RowWith {
         status,
         waiting: None,
+        since: session
+            .filter(|_| matches!(status, Some("working" | "waiting" | "input")))
+            .and_then(|s| s.started_at.or(s.waiting.as_ref().map(|w| w.since)))
+            .map(|since| since.timestamp()),
         sleep: None,
         running_subagents: 0,
         side_chats: 0,
         working_side_chats: 0,
         known_project: false,
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        turn: None,
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
         return;
@@ -649,6 +674,10 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         // Started by a Zeron chat through Zeron's tools ("subagent" or
         // "side"); none for a side chat the person started.
         ("child_kind", opt(c["childKind"].as_str())),
+        ("harness_name", opt(harness.map(crate::chat::known_harness_name))),
+        ("model", opt(c["config"]["model"].as_str())),
+        // At work (or asking): since when, in Unix seconds.
+        ("since", with.since.map_or(Value::Nil, |at| Value::from(at as f64))),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -675,12 +704,18 @@ fn top_row(
     let with = RowWith {
         status,
         waiting: (status == Some("waiting")).then(|| zeron_proto::view::waiting(session, at).map(|w| w.on.clone())).flatten(),
+        // (Blocked on another chat mid-turn, since its turn began.)
+        since: (status == Some("waiting"))
+            .then(|| session.and_then(|s| s.waiting.as_ref().map(|w| w.since).or(s.started_at)))
+            .flatten()
+            .map(|since| since.timestamp()),
         sleep: sleep_of(c, marks, at),
         running_subagents: zeron_proto::view::running_subagents(session, at),
         side_chats,
         working_side_chats,
         known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        turn: finished_turn(session, at).0,
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
         return row.value.clone();
@@ -715,12 +750,20 @@ fn top_row(
         ("side_chats", Value::from(with.side_chats as f64)),
         ("working_side_chats", Value::from(with.working_side_chats as f64)),
         // What its agent waits on after its turn (status "waiting"):
-        // `{ id, kind = "agent" | "process", label }`.
+        // `{ id, kind = "agent" | "process" | "chat", label }`, a child
+        // chat's with `{ chat, device, harness_name, since }`; and since when.
         ("waiting", with.waiting.as_deref().map_or(Value::Nil, waiting_value)),
+        ("waiting_since", with.since.map_or(Value::Nil, |at| Value::from(at as f64))),
         // Put to sleep: until when; or, woken and not looked at since, when
         // it woke (Unix seconds).
         ("sleep_until", with.sleep.filter(|s| s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
         ("woke", with.sleep.filter(|s| !s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
+        // The last turn its agent finished (an opaque mark), and whether its
+        // session row was fresh when that was read: the chimes ring
+        // "finished" on this moving, never on the status alone ("done" is
+        // only unseen activity, which your own send makes too).
+        ("turn", with.turn.as_deref().map_or(Value::Nil, Value::from)),
+        ("turn_fresh", Value::from(finished_turn(session, at).1)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
@@ -1529,6 +1572,9 @@ impl Sessions {
         if let Some(branch) = field("branch") {
             params["branch"] = Json::from(branch);
         }
+        if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
+            params["cloudReach"] = Json::from(reach);
+        }
         if let Some(config) = args
             .field("config")
             .filter(|c| !matches!(c, Value::Nil))
@@ -1627,6 +1673,12 @@ impl Sessions {
             me.publish();
         });
     }
+}
+
+/// Whether the person uses Cloud: a device of Cloud's (its logical device,
+/// or a chat's machine) is among theirs.
+pub(crate) fn uses_cloud() -> bool {
+    SESSIONS.with(|s| s.devices.borrow().as_array().into_iter().flatten().any(is_cloud))
 }
 
 /// A device row of Cloud's: the logical Cloud device or a session's machine
@@ -1768,6 +1820,8 @@ struct Live {
     waiting: Option<Vec<zeron_proto::WaitingOn>>,
     /// Its subagents streaming now, none once the row has gone quiet.
     subagents: u32,
+    /// Its turn does nothing but wait on another chat.
+    blocked: bool,
     /// Its last turn's outcome and the turn it marks, as the status reads
     /// them (whether a finish is new, or was interrupted).
     outcome: Option<String>,
@@ -1787,6 +1841,7 @@ fn live_of(s: &Session, at: chrono::DateTime<chrono::Utc>) -> Live {
         indicator: zeron_proto::view::effective_indicator(Some(s), at),
         waiting: zeron_proto::view::waiting(Some(s), at).map(|w| w.on.clone()),
         subagents: zeron_proto::view::running_subagents(Some(s), at),
+        blocked: s.blocked_on_wait,
         outcome: s.last_turn_outcome.as_ref().and_then(|o| serde_json::to_string(o).ok()),
         last_completed_turn: s.last_completed_turn.clone(),
     }
@@ -1898,16 +1953,23 @@ fn sleep_of(chat: &Json, marks: SeenMarks, now: chrono::DateTime<chrono::Utc>) -
 /// What a chat's agent waits on, as scripts read it.
 fn waiting_value(on: &[zeron_proto::WaitingOn]) -> Value {
     Value::List(on.iter().map(|w| {
+        let opt = |v: Option<&str>| v.map_or(Value::Nil, Value::from);
         Value::record([
             ("id", Value::from(w.id.as_str())),
             (
                 "kind",
                 Value::from(match w.kind {
                     zeron_proto::WaitingKind::Agent => "agent",
+                    zeron_proto::WaitingKind::SubagentChat => "chat",
                     _ => "process",
                 }),
             ),
             ("label", Value::from(w.label.as_str())),
+            // A child chat's: which, where, on what, and since when.
+            ("chat", opt(w.child_chat_id.as_deref())),
+            ("device", opt(w.device_id.as_deref())),
+            ("harness_name", opt(w.harness.as_ref().map(|h| crate::chat::known_harness_name(h.as_str())))),
+            ("since", w.started_at.map_or(Value::Nil, |at| Value::from(at.timestamp() as f64))),
         ])
     }).collect())
 }
@@ -2514,6 +2576,33 @@ mod tests {
         chats.as_array_mut().unwrap().remove(2);
         s.heard(super::Slot::Chats, chats);
         assert!(!s.rows.borrow().contains_key("b"));
+    }
+
+    /// A chat's finished turn (what the "done" chime rings on, issue #1437):
+    /// its session's `lastCompletedTurn`, published as it moves, and whether
+    /// the row saying so is fresh.
+    #[test]
+    fn a_chat_s_finished_turn_is_published_as_it_moves() {
+        let now = now_seconds();
+        let s = with_children("2099-01-01T00:00:00Z");
+        s.heard.set(true);
+        let row = |turn: &str, ago: i64| {
+            json!([{ "chatId": "p", "deviceId": "d", "status": "idle", "updatedAt": iso(now - ago), "lastCompletedTurn": turn }])
+        };
+        s.set_live(row("t1", 1));
+        s.publish();
+        let p = s.value();
+        assert_eq!(chat(&p, "p").field("turn").map(crate::auth::text).as_deref(), Some("t1"));
+        assert!(chat(&p, "p").field("turn_fresh").is_some_and(zgx_script::Value::truthy));
+        let before = s.published.get();
+        s.heard(Slot::Live, row("t2", 0));
+        assert_eq!(s.published.get(), before + 1, "a finish is shown at once");
+        assert_eq!(chat(&s.value(), "p").field("turn").map(crate::auth::text).as_deref(), Some("t2"));
+        // An end published long ago (a sync, a reconnect): not fresh.
+        s.heard(Slot::Live, row("t3", 600));
+        let p = s.value();
+        assert_eq!(chat(&p, "p").field("turn").map(crate::auth::text).as_deref(), Some("t3"));
+        assert!(!chat(&p, "p").field("turn_fresh").is_some_and(zgx_script::Value::truthy));
     }
 
     #[test]
