@@ -74,6 +74,45 @@ fn level(name: &str) -> Option<ReasoningLevel> {
     })
 }
 
+/// The logins in omp's `agent.db` that decide its catalog, as bytes to hash:
+/// each stored credential's row, provider, type, account and disabled state,
+/// plus an API key's value. Never the file itself: every omp process writes
+/// caches and usage there, and an OAuth refresh rewrites its token in place,
+/// neither of which is another account.
+pub(super) fn logins(agent_db: &std::path::Path) -> Vec<u8> {
+    let read = || -> rusqlite::Result<Vec<u8>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            agent_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_millis(200))?;
+        let mut rows = conn.prepare(
+            "SELECT id, provider, credential_type, COALESCE(identity_key, ''), \
+             COALESCE(disabled_cause, ''), \
+             CASE WHEN credential_type = 'api_key' THEN data ELSE '' END \
+             FROM auth_credentials ORDER BY id",
+        )?;
+        let mut out = Vec::new();
+        let mut found = rows.query([])?;
+        while let Some(row) = found.next()? {
+            out.extend(row.get::<_, i64>(0)?.to_le_bytes());
+            for column in 1..6 {
+                let text: String = row.get(column)?;
+                out.extend((text.len() as u64).to_le_bytes());
+                out.extend(text.as_bytes());
+            }
+        }
+        Ok(out)
+    };
+    if !agent_db.is_file() {
+        return b"none".to_vec();
+    }
+    read().unwrap_or_else(|error| {
+        tracing::debug!(%error, "omp logins unreadable; catalog keyed without them");
+        b"unreadable".to_vec()
+    })
+}
+
 fn thinking_option() -> Vec<ModelOption> {
     vec![ModelOption {
         id: THINKING_OPTION.into(),
@@ -265,5 +304,50 @@ mod tests {
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[1].input_hint.as_deref(), Some("<plan|scan>"));
         assert_eq!(commands[2].name, "skill:frontend-design");
+    }
+
+    #[test]
+    fn logins_change_with_accounts_not_with_token_refreshes_or_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("agent.db");
+        assert_eq!(logins(&db), b"none");
+        // The columns omp 19.2 keeps (agent.db, `auth_credentials`).
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY AUTOINCREMENT,
+               provider TEXT NOT NULL, credential_type TEXT NOT NULL, data TEXT NOT NULL,
+               disabled_cause TEXT, identity_key TEXT, updated_at INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO auth_credentials (provider, credential_type, data, identity_key)
+               VALUES ('anthropic', 'oauth', '{\"access\":\"a1\"}', 'me@example.com'),
+                      ('cerebras', 'api_key', 'key-1', NULL);",
+        )
+        .unwrap();
+        let first = logins(&db);
+        conn.execute_batch(
+            "UPDATE auth_credentials SET data = '{\"access\":\"a2\"}', updated_at = 9 WHERE id = 1;
+             INSERT INTO cache VALUES ('usage', 'x');",
+        )
+        .unwrap();
+        assert_eq!(logins(&db), first, "a refreshed token is the same account");
+        conn.execute("UPDATE auth_credentials SET data = 'key-2' WHERE id = 2", [])
+            .unwrap();
+        let rekeyed = logins(&db);
+        assert_ne!(rekeyed, first, "a replaced API key");
+        conn.execute(
+            "UPDATE auth_credentials SET disabled_cause = 'deleted by user' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let signed_out = logins(&db);
+        assert_ne!(signed_out, rekeyed, "a removed login");
+        conn.execute(
+            "INSERT INTO auth_credentials (provider, credential_type, data, identity_key)
+               VALUES ('anthropic', 'oauth', '{}', 'other@example.com')",
+            [],
+        )
+        .unwrap();
+        assert_ne!(logins(&db), signed_out, "another account");
     }
 }

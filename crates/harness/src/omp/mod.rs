@@ -320,19 +320,23 @@ impl Harness for OmpHarness {
         Ok(self.model_catalog(false).await?.models)
     }
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        use sha2::Digest;
         let root = sessions::agent_dir();
-        crate::model_context::context(
+        let mut context = crate::model_context::context(
             HarnessId::Omp,
             &self.resolve_executable()?,
             &[
                 root.join("config.yml"),
                 root.join("models.yml"),
                 root.join("models.json"),
-                // Logins: signing in to a provider changes the catalog.
-                root.join("agent.db"),
             ],
-        )
-        .map(Some)
+        )?;
+        // Logins: signing in to a provider changes the catalog.
+        let mut hash = sha2::Sha256::new();
+        hash.update(context.hash.as_bytes());
+        hash.update(catalog::logins(&root.join("agent.db")));
+        context.hash = format!("{:x}", hash.finalize());
+        Ok(Some(context))
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.models_cache

@@ -1,7 +1,7 @@
 omp RPC compatibility contract
 
-The driver targets omp >= 18.7.0 and is verified against omp 18.20.0 (the
-installed `omp/18.20.0`, live) and the oh-my-pi sources at 5de4b03 (package
+The driver targets omp >= 18.7.0 and is verified against omp 18.20.0 and
+19.2.1 (installed, live) and the oh-my-pi sources at 5de4b03 (package
 version 18.20.0). It speaks omp's RPC mode, the surface omp documents for a
 host that owns the process ("RPC mode is the lowest-common-denominator way to
 embed omp"; ACP is for clients that already speak ACP). Frames are NDJSON,
@@ -118,6 +118,11 @@ profile's store, or `--session-dir`), headed by a `session` record, and only
 once the session has a message. Resume finds the file by id (name and header)
 and passes `--resume <file>`; a session with no file starts fresh with a
 visible notice. Zeron never writes omp's files.
+
+Catalog key: the model catalog is cached per login. Logins are the
+`auth_credentials` rows of `<agent dir>/agent.db` (row, provider, type,
+account, disabled state, an API key's value), read-only; never the file's
+bytes, which every omp process rewrites (caches, usage, OAuth refreshes).
 
 Sources: https://omp.sh/docs/rpc, /docs/modes, /docs/approvals,
 /docs/sessions, /docs/env, /docs/mcp (2026-11-13); oh-my-pi
