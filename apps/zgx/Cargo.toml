@@ -57,8 +57,8 @@ zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "b9e744dddf5f05affb
 # turns on).
 zgx-gpu = { git = "https://github.com/zeronsh/zgx", rev = "b9e744dddf5f05affba571f0c69aa579c34e1e3a", default-features = false }
 # Each plugin's own database (`zeron.db`, src/plugins/db.rs): SQLite,
-# built in; `limits` to keep one from attaching any other file.
-rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks"] }
+# the one file its service (the engine) opens too.
+zeron-plugin-db = { path = "../../crates/plugin-db" }
 # `fetch`: zgx's own transport for `ui.fetch` and remote images (HTTP and
 # HTTPS, rustls), given to every window (src/main.rs): the app's scripts,
 # and plugins granted "network". Nothing else of the runner.

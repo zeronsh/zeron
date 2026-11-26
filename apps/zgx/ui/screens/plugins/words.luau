@@ -265,6 +265,10 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "eye", "plugins.words.permission.account_email.title")
 	elseif permission == "files.read" then
 		return line(false, "folder", "plugins.words.permission.files_read.title")
+	elseif permission == "files.write" then
+		-- (Any file in your chats' and projects' folders, code included:
+		-- always asked, said so.)
+		return line(true, "folder", "plugins.words.permission.files_write.title", "plugins.words.permission.files_write.detail")
 	elseif permission == "panel.tabs" then
 		return line(false, "split-columns", "plugins.words.permission.panel_tabs.title")
 	elseif permission == "pages.add" then
@@ -321,6 +325,11 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "global", "plugins.words.permission.web.title")
 	elseif permission == "windows" then
 		return line(false, "monitor", "plugins.words.permission.windows.title")
+	elseif permission == "fonts" then
+		-- (A family Zeron draws in, given a face of the plugin's, changes
+		-- how Zeron's own text looks, a consent sheet's included: always
+		-- asked, said so.)
+		return line(true, "wrap-text", "plugins.words.permission.fonts.title", "plugins.words.permission.fonts.detail")
 	elseif permission == "scene3d" then
 		return line(false, "widget", "plugins.words.permission.scene3d.title")
 	elseif permission == "tools" then
@@ -334,17 +343,22 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "smartphone", "plugins.words.permission.devices.title")
 	elseif permission == "service" then
 		-- Its headless half, run by the engine on the device that allowed it
-		-- (another device's sheet names that one).
+		-- (another device's sheet names that one), with the memory it asks
+		-- past the default.
 		local on = (item :: any).on_device
+		local mb = item.service_memory_mb
 		return line(
 			false,
 			"action-play",
 			if type(on) == "string" then "plugins.words.permission.service.title_on" else "plugins.words.permission.service.title",
-			"plugins.words.permission.service.detail",
+			if type(mb) == "number" then "plugins.words.permission.service.detail_memory" else "plugins.words.permission.service.detail",
 			function()
-				return { device = on }
+				return { device = on, mb = mb }
 			end
 		)
+	elseif permission == "eval" then
+		-- Code nobody signed, inside the service's sandbox: said plainly.
+		return line(false, "magic-stick", "plugins.words.permission.eval.title", "plugins.words.permission.eval.detail")
 	elseif permission == "commands" then
 		-- The programs its manifest names, as you: what they can do, it can.
 		-- Each by name; a shell or an interpreter says it's full control, one
@@ -453,6 +467,12 @@ function M.diff(item: any): { Line }
 		local listed = hosts_said(d.network_added, d.network_local)
 		local maybe_near = type(d.network_named) == "table" and #d.network_named > 0
 		table.insert(out, line(listed.near, "global", "plugins.words.diff.network", if maybe_near then "plugins.words.permission.network.detail_named" else nil, nil, { literal = listed.list }))
+	end
+	if type(d.memory_changed) == "table" and type(d.memory_changed.after) == "number" then
+		local mb = d.memory_changed.after
+		table.insert(out, line(false, "action-play", "plugins.words.diff.memory", nil, function()
+			return { mb = mb }
+		end))
 	end
 	if d.settings_changed == true then
 		table.insert(out, line(false, "settings", "plugins.words.diff.settings"))

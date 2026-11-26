@@ -264,6 +264,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "files" => out.push(Capability::Files),
             "web" => out.push(Capability::Web),
             "windows" => out.push(Capability::Windows),
+            "fonts" => out.push(Capability::Fonts),
             "scene3d" => out.push(Capability::Scene3d),
             // The engine's: tools reach agents through Zeron's MCP server,
             // a native server runs beside agents.
@@ -285,6 +286,12 @@ mod tests {
     #[test]
     fn a_plugin_with_nothing_allowed_reaches_only_its_own() {
         assert_eq!(capabilities("focus", &[], &[], &[]), vec![own("focus")]);
+    }
+
+    #[test]
+    fn fonts_lets_its_windows_load_font_files() {
+        assert_eq!(capabilities("type", &s(&["fonts"]), &[], &[]), vec![own("type"), Capability::Fonts]);
+        assert!(!capabilities("type", &s(&["windows", "files"]), &[], &[]).contains(&Capability::Fonts));
     }
 
     #[test]

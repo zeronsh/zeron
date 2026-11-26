@@ -23,6 +23,13 @@ zeron-visual.workspace = true
 # Plugin services (plugins/service): a headless Luau VM per plugin, the
 # same mlua and Luau zeron-visual already links (no new crate).
 mlua = { version = "0.12", features = ["luau"] }
+# `zeron.measure_text` in services (plugins/service/vm/text.rs): zgx's own
+# shaper and font lookup, as a plugin window's canvas measures, with no
+# window. zgx-text is that alone, without zgx-gpu's renderer (no wgpu or
+# winit). Pinned, as apps/zgx is, to the zgx that makes it a crate
+# (zeronsh/zgx#2110), so the service and its windows measure alike.
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "7a8d5a4298c6c4ca7b47f922a18ddab563158c9a", default-features = false }
+zgx-text = { git = "https://github.com/zeronsh/zgx", rev = "7a8d5a4298c6c4ca7b47f922a18ddab563158c9a" }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -56,6 +63,8 @@ hyper = { version = "1", features = ["http1"] }
 http-body-util = "0.1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
+# A plugin's `zeron.db` in its service: the file its windows open too.
+zeron-plugin-db.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
 
