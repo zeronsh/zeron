@@ -259,6 +259,7 @@ fn questions(
         multi_select: false,
         prefill: None,
         multiline: false,
+        note: None,
     };
     match kind {
         Kind::Approval { .. } => vec![approval_question(title, args)],
@@ -298,6 +299,7 @@ fn questions(
                 multi_select: q["multi"] == true,
                 prefill: None,
                 multiline: false,
+                note: None,
             })
             .collect(),
     }

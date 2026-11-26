@@ -2,7 +2,8 @@
 use super::normalize::string;
 use serde_json::Value;
 use zeron_proto::{
-    Model, ModelOption, ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand,
+    Model, ModelOption, ModelOptionChoice, ModelProvider, ReasoningLevel, RunRequest,
+    SlashCommand,
 };
 
 /// The model option that turns thinking off (omp's `off` level), beside the
@@ -31,6 +32,10 @@ pub(super) fn models(available: &Value, current: &Value) -> Vec<Model> {
                     .filter(|n| !n.is_empty())
                     .unwrap_or(string(m, "id"))
                     .into(),
+                provider: Some(ModelProvider {
+                    id: string(m, "provider").into(),
+                    name: crate::pi::provider_name(string(m, "provider")),
+                }),
                 description: Some(string(m, "provider").into()),
                 options: if m["reasoning"] == true {
                     thinking_option()

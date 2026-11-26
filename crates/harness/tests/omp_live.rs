@@ -42,6 +42,8 @@ fn request(cwd: &std::path::Path, prompt: &str, access: AccessMode) -> RunReques
         mcp: None,
         env: Default::default(),
         extra_mcp: vec![],
+        code_mode: false,
+        zeron_mcp_only: false,
     }
 }
 

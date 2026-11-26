@@ -212,7 +212,9 @@ fn approval_mode(request: &RunRequest) -> &'static str {
         return "yolo";
     }
     match request.access {
-        AccessMode::Supervised => "always-ask",
+        // omp has no reviewer of its own (the descriptor never offers Auto):
+        // should one arrive, it asks, like supervised.
+        AccessMode::Supervised | AccessMode::Auto => "always-ask",
         AccessMode::AutoAcceptEdits => "write",
         AccessMode::FullAccess => "yolo",
     }
@@ -361,6 +363,7 @@ impl Harness for OmpHarness {
             description: Some("The model configured in omp".into()),
             reasoning_levels: vec![],
             options: vec![],
+            provider: None,
         }]
     }
     async fn commands(&self) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
@@ -483,6 +486,8 @@ pub(super) mod tests_support {
             mcp: None,
             env: Default::default(),
             extra_mcp: vec![],
+            code_mode: false,
+            zeron_mcp_only: false,
         }
     }
 }

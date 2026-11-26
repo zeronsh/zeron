@@ -301,12 +301,14 @@ for line in sys.stdin:
             command: "python3".into(),
             args: vec!["-I".into(), script.display().to_string()],
             env: Default::default(),
+            http: None,
         };
         let broken = McpServer {
             name: "broken".into(),
             command: dir.path().join("missing").display().to_string(),
             args: vec![],
             env: Default::default(),
+            http: None,
         };
         let (mut tools, definitions) = HostTools::start(
             Some(&server),

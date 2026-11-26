@@ -73,6 +73,8 @@ impl Rig {
             .into_iter()
             .collect(),
             extra_mcp: Vec::new(),
+            code_mode: false,
+            zeron_mcp_only: false,
         }
     }
 
@@ -566,6 +568,7 @@ for line in sys.stdin:
         command: "python3".into(),
         args: vec!["-I".into(), server.display().to_string()],
         env: Default::default(),
+        http: None,
     });
     let (controls, _c) = controls(vec![]);
     let mut events = rig.harness.run(request, controls).await.unwrap();
