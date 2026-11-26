@@ -26,7 +26,7 @@ local prefs = require("@app/screens/settings/prefs")
 
 local M = {}
 
-type Seen = { status: string, turn: string? }
+type Seen = { status: string, turn: string?, asleep: boolean? }
 
 -- Each chat as last seen, by id: its status ("" for idle) and finished turn.
 local seen = ui.state("settings_chimes_seen_turns", {} :: { [string]: Seen })
@@ -76,11 +76,12 @@ ui.effect(function()
 	local ring: string? = nil
 	for _, c in now.chats do
 		local status = c.status or ""
+		local asleep = c.sleep_until ~= nil
 		local was = before[c.id]
 		-- (A session row gone for a while, a host restarting, keeps the turn
 		-- last seen: its coming back is no finish.)
-		after[c.id] = { status = status, turn = c.turn or (was and was.turn) }
-		if busy(status) and waits[c.id] then
+		after[c.id] = { status = status, turn = c.turn or (was and was.turn), asleep = asleep }
+		if (busy(status) or asleep) and waits[c.id] then
 			waits[c.id] = nil
 			moved = true
 		end
@@ -88,7 +89,7 @@ ui.effect(function()
 			if was.status ~= status and SOUND[status] then
 				ring = louder(ring, SOUND[status])
 			end
-			if c.turn ~= nil and c.turn ~= was.turn and c.turn_fresh ~= false and not busy(status) then
+			if c.turn ~= nil and c.turn ~= was.turn and c.turn_fresh ~= false and not busy(status) and not asleep then
 				waits[c.id] = { turn = c.turn, at = ui.now() + SETTLE }
 				moved = true
 			end
@@ -118,7 +119,7 @@ local function stand(upto: number)
 	for id, w in waits do
 		if w.at <= upto then
 			local now = seen:peek()[id]
-			if now and now.turn == w.turn and not busy(now.status) then
+			if now and now.turn == w.turn and not busy(now.status) and not now.asleep then
 				ring = louder(ring, "done")
 			end
 		else

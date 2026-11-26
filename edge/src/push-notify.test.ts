@@ -66,13 +66,23 @@ describe("notificationFor (desktop parity)", () => {
 describe("chatForNotification", () => {
   const chat = (fields: Row["fields"]): Row => ({ kind: "chats", id: "c1", seq: 1, deleted: false, fields, clocks: {} });
   it("titles by the chat, falling back like desktop", () => {
-    expect(chatForNotification(chat({ title: "Fix login" }))).toEqual({ title: "Fix login" });
-    expect(chatForNotification(chat({}))).toEqual({ title: "New session" });
-    expect(chatForNotification(undefined)).toEqual({ title: "New session" });
+    expect(chatForNotification(chat({ title: "Fix login" }), "done", NOW)).toEqual({ title: "Fix login" });
+    expect(chatForNotification(chat({}), "done", NOW)).toEqual({ title: "New session" });
+    expect(chatForNotification(undefined, "done", NOW)).toEqual({ title: "New session" });
   });
   it("skips side chats and archived chats", () => {
-    expect(chatForNotification(chat({ parentChatId: "p" }))).toBeNull();
-    expect(chatForNotification(chat({ archived: true }))).toBeNull();
+    expect(chatForNotification(chat({ parentChatId: "p" }), "done", NOW)).toBeNull();
+    expect(chatForNotification(chat({ archived: true }), "done", NOW)).toBeNull();
+  });
+  it("keeps a sleeping chat's completion quiet, but not its wake events", () => {
+    const asleep = chat({ title: "Asleep", sleepUntil: NOW + 60_000 });
+    expect(chatForNotification(asleep, "done", NOW)).toBeNull();
+    expect(chatForNotification(asleep, "input", NOW)).toEqual({ title: "Asleep" });
+    expect(chatForNotification(asleep, "failed", NOW)).toEqual({ title: "Asleep" });
+    expect(chatForNotification(asleep, "done", NOW + 60_001)).toEqual({ title: "Asleep" });
+    expect(chatForNotification(chat({ title: "Woken", sleepUntil: NOW + 60_000, sleepWokeAt: NOW }), "done", NOW)).toEqual({
+      title: "Woken"
+    });
   });
 });
 

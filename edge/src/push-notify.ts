@@ -59,11 +59,18 @@ export const notificationFor = (before: Row | undefined, after: Row, now: number
 export const bodyFor = (category: Category): string =>
   category === "done" ? "Run finished" : category === "input" ? "Waiting on your input" : "Run failed";
 
-/** Title from the chat row; side chats and archived chats never notify. */
-export const chatForNotification = (chat: Row | undefined): { title: string } | null => {
+/** Title from the chat row; side chats and archived chats never notify. A
+ * sleeping chat's completions stay quiet; asking or failing is its wake event
+ * and still notifies. */
+export const chatForNotification = (chat: Row | undefined, category: Category, now: number): { title: string } | null => {
   if (chat?.deleted) return null;
   if (str(chat?.fields.parentChatId) !== undefined) return null;
   if (chat?.fields.archived === true) return null;
+  const asleep =
+    category === "done" &&
+    (num(chat?.fields.sleepUntil) ?? 0) > now &&
+    num(chat?.fields.sleepWokeAt) === undefined;
+  if (asleep) return null;
   const title = str(chat?.fields.title)?.trim();
   return { title: title ? title : "New session" };
 };
