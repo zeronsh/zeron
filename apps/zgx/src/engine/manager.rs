@@ -8,10 +8,12 @@
 //! detached with `ZERON_MANAGED_ENGINE` and the bundle as `ZERON_APP`, its
 //! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
 //! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
-//! (the shipping app's, before this one was installed). It signs in against
-//! production, or the edge the engine's own variables name, as `zeron` does
-//! (src/auth.rs); a staging engine (port 27871, ~/.zeron-staging) or any
-//! other edge is refused. No more devices, no other data: the same engine as
+//! (the shipping app's, before this one was installed), whatever edge it was
+//! started with. One this app starts signs in where src/auth.rs says:
+//! production's, or the edge the engine's own variables or its kept session
+//! name. An edge other than that one is refused (a check that src/auth.rs's
+//! answer is the one handed here), as is a staging engine (port 27871,
+//! ~/.zeron-staging). No more devices, no other data: the same engine as
 //! before the beta. When the bundle is replaced by a newer one, the engine
 //! restarts into it by itself once nothing runs (crates/update
 //! `SupersededRestart`, weighing the bundle's `ZeronEngineVersion`).
@@ -101,6 +103,20 @@ pub struct Config {
 /// Why no engine can be used.
 pub type Refusal = String;
 
+/// This user's home: `HOME`, or nothing.
+pub(crate) fn home() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+}
+
+/// Zeron.app's engine's data dir, as Zeron.app resolves it:
+/// `ZERON_DATA_DIR`, else ~/.zeron (crates/cli's paths).
+pub(crate) fn zeron_app_data_dir(var: &impl Fn(&str) -> Option<String>, home: &Path) -> PathBuf {
+    zeron_cli::paths::resolve_data_dir(|key| match key {
+        "HOME" => Some(home.as_os_str().to_owned()),
+        key => var(key).map(Into::into),
+    })
+}
+
 /// The file in an engine's data dir holding the build of the engine this
 /// app started there last (`zeron-engine --build-id`): an engine reporting
 /// that build is one this app started.
@@ -144,7 +160,7 @@ impl Config {
     /// callback port.
     pub fn from_env(edge: &str, client: &str, callback_port: u16) -> Result<Self, Refusal> {
         let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let home = home();
         let exe = std::env::current_exe().ok();
         Self::from_vars(var, &home, exe.as_deref(), edge, client, callback_port)
     }
@@ -175,18 +191,15 @@ impl Config {
         client: &str,
         callback_port: u16,
     ) -> Result<Self, Refusal> {
-        let named = crate::auth::endpoint_with(&var);
+        let port = zeron_cli::ipc_port_from(var("ZERON_IPC_PORT").as_deref());
+        let data_dir = zeron_app_data_dir(&var, home);
+        let named = crate::auth::endpoint_in(&var, &data_dir);
         if edge != named.edge || client != named.client || callback_port != named.port {
             return Err(format!(
-                "{edge} isn't the edge and sign-in this environment names ({})",
+                "{edge} isn't the edge and sign-in this environment and the session kept name ({})",
                 named.edge
             ));
         }
-        let port = zeron_cli::ipc_port_from(var("ZERON_IPC_PORT").as_deref());
-        let data_dir = zeron_cli::paths::resolve_data_dir(|key| match key {
-            "HOME" => Some(home.as_os_str().to_owned()),
-            key => var(key).map(Into::into),
-        });
         if port == STAGING_PORT {
             return Err(format!("port {STAGING_PORT} is the staging engine's"));
         }
@@ -507,12 +520,15 @@ mod tests {
         let macos = dir.join("Zeron.app/Contents/MacOS");
         std::fs::create_dir_all(&macos).unwrap();
         let exe = macos.join("zeron");
-        std::fs::write(macos.join("Zeron Engine"), "").unwrap();
+        // This platform's name for it: `Zeron Engine` on macOS, `zeron-engine`
+        // on Linux, `zeron-engine.exe` on Windows.
+        let engine = macos.join(zeron_launch::ENGINE_EXECUTABLES[0]);
+        std::fs::write(&engine, "").unwrap();
         let home = Path::new("/Users/someone");
         let prod = crate::auth::production();
         let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
         assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
-        assert_eq!(beta.startable(), Some(macos.join("Zeron Engine").as_path()));
+        assert_eq!(beta.startable(), Some(engine.as_path()));
         assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
         assert!(beta.follows_bundle());
         // As Zeron.app: ZERON_DATA_DIR and ZERON_IPC_PORT move it; the
@@ -545,6 +561,39 @@ mod tests {
         assert!(custom.follows_bundle());
         // Production's, where the variables name another edge: refused.
         assert!(config_of(&named, home, None, &prod.edge).is_err());
+    }
+
+    /// Opened from the Dock or Finder (none of the shell's variables), the
+    /// beta starts Zeron.app's engine against the edge that issued the
+    /// session kept in its data dir, and refuses production's there.
+    #[cfg(feature = "beta")]
+    #[test]
+    fn a_beta_build_starts_the_engine_against_the_edge_of_the_session_kept() {
+        let dir = std::env::temp_dir().join(format!("zgx-beta-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"refreshToken":"r","edgeUrl":"https://edge.example.com","workosClientId":"client_self_hosted"}"#,
+        )
+        .unwrap();
+        let home = Path::new("/Users/someone");
+        let data = [("ZERON_DATA_DIR", dir.to_str().unwrap())];
+        let prod = crate::auth::production();
+        let kept = Config::from_vars(
+            |key| data.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string()),
+            home,
+            None,
+            "https://edge.example.com",
+            "client_self_hosted",
+            prod.port,
+        )
+        .unwrap();
+        assert_eq!((kept.edge.as_str(), kept.client.as_str()), ("https://edge.example.com", "client_self_hosted"));
+        assert_eq!(kept.data_dir, dir);
+        // Production's, over that session: refused.
+        assert!(config_of(&data, home, None, &prod.edge).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An engine holding the data dir is on its way in or out: no second one
