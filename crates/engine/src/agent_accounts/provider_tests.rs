@@ -3262,7 +3262,14 @@ async fn opencode_keys_use_its_shape_and_opencode_2s_own_database_is_left_alone(
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     rusqlite::Connection::open(&db)
         .unwrap()
-        .execute_batch("CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL);")
+        .execute_batch(
+            "CREATE TABLE credential (\
+               id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL, active integer\
+             );\
+             INSERT INTO credential (id, integration_id, label, value, active) VALUES (\
+               'cred-go', 'opencode-go', 'OpenCode Go', '{\"type\":\"key\",\"key\":\"oc-test\"}', 1\
+             );",
+        )
         .unwrap();
     let err = accounts2
         .add_api_key(HarnessId::Opencode, "openrouter", OR_KEY, None)
@@ -3274,6 +3281,16 @@ async fn opencode_keys_use_its_shape_and_opencode_2s_own_database_is_left_alone(
     assert_eq!(server.hits("GET"), 1, "only the first add was checked");
     let warned = accounts2.list(false).await.unwrap();
     assert!(warned.warnings.iter().any(|w| w.harness == HarnessId::Opencode && w.message.contains("own database")));
+    let go = warned
+        .accounts
+        .iter()
+        .find(|account| account.harness == HarnessId::Opencode)
+        .expect("the active OpenCode Go credential is listed");
+    assert!(go.active);
+    assert!(!go.switchable);
+    assert_eq!(go.provider.as_deref(), Some("opencode-go"));
+    assert_eq!(go.auth_kind, Some(AgentAuthKind::ApiKey));
+    assert_eq!(go.plan_label.as_deref(), Some("OpenCode Go"));
 }
 
 #[cfg(unix)]

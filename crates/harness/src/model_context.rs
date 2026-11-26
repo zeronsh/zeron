@@ -120,6 +120,10 @@ pub(crate) fn context(
         );
     }
     hash_files(&mut hash, files.iter().chain(extra))?;
+    if id == HarnessId::Opencode {
+        let data = root("XDG_DATA_HOME", home.join(".local/share"));
+        hash_opencode_credentials(&mut hash, &data.join("opencode/opencode.db"));
+    }
     if id == HarnessId::Antigravity
         && let Ok(root) = crate::acp::antigravity_home()
     {
@@ -190,6 +194,53 @@ fn hash_files<'a>(
         }
     }
     Ok(())
+}
+
+/// Hash the credential rows that decide OpenCode 2.x's connected catalog.
+/// The database itself is large and mostly sessions/messages, so hashing its
+/// bytes would be expensive and would invalidate on unrelated writes. Only row
+/// identity, provider and active state are mixed in: token refreshes must not
+/// invalidate a catalog, and secrets never leave OpenCode's database.
+fn hash_opencode_credentials(hash: &mut Sha256, db: &Path) {
+    field(hash, b"opencode-2-credentials");
+    if !db.exists() {
+        hash.update([0]);
+        return;
+    }
+    let marker = |hash: &mut Sha256, marker: u8| hash.update([marker]);
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        marker(hash, 2);
+        return;
+    };
+    let Ok(mut statement) = conn.prepare(
+        "SELECT id, COALESCE(integration_id, ''), COALESCE(active, 0) \
+         FROM credential ORDER BY id",
+    ) else {
+        marker(hash, 2);
+        return;
+    };
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        marker(hash, 2);
+        return;
+    };
+    let mut count = 0_u64;
+    for row in rows.filter_map(Result::ok) {
+        count += 1;
+        field(hash, row.0.as_bytes());
+        field(hash, row.1.as_bytes());
+        field(hash, row.2.to_string().as_bytes());
+    }
+    field(hash, count.to_string().as_bytes());
 }
 
 /// Hash Antigravity's consumer OAuth login by stable account identity

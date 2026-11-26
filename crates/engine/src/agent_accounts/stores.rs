@@ -802,7 +802,85 @@ pub(super) fn copilot_api_base(
 
 // ── service ─────────────────────────────────────────────────────────────────
 
+/// One active OpenCode 2.x credential row. SQLite extracts only its credential
+/// kind; the secret-bearing `value` never leaves OpenCode's database.
+struct OpencodeCredentialRow {
+    id: String,
+    integration_id: String,
+    label: String,
+    kind: String,
+}
+
 impl AgentAccounts {
+    /// Active OpenCode 2.x logins, as live-but-unreadable rows. Detection is
+    /// read-only: `opencode.db` is OpenCode's store, so zeron shows these
+    /// accounts but leaves switching and removal to `opencode auth`.
+    fn opencode_v2_unreadable(&self) -> Vec<Detected> {
+        let db = self
+            .inner
+            .config
+            .opencode_auth_file
+            .with_file_name("opencode.db");
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return Vec::new();
+        };
+        let Ok(mut statement) = conn.prepare(
+            "SELECT id, integration_id, label, json_extract(value, '$.type') FROM credential \
+             WHERE COALESCE(active, 0) != 0 AND integration_id IS NOT NULL",
+        ) else {
+            return Vec::new();
+        };
+        let rows = statement.query_map([], |row| {
+            Ok(OpencodeCredentialRow {
+                id: row.get(0)?,
+                integration_id: row.get(1)?,
+                label: row.get(2)?,
+                kind: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            })
+        });
+        let Ok(rows) = rows else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok)
+            .map(|row| {
+                let auth_kind = match row.kind.as_str() {
+                    "key" | "api" | "api_key" => AgentAuthKind::ApiKey,
+                    _ => AgentAuthKind::Oauth,
+                };
+                let provider = zeron_proto::providers::account_group_label(
+                    HarnessId::Opencode,
+                    &row.integration_id,
+                );
+                let fallback = match auth_kind {
+                    AgentAuthKind::ApiKey => format!("{provider} API key"),
+                    AgentAuthKind::Oauth => format!("{provider} account"),
+                };
+                let title = if row.label.trim().is_empty() {
+                    fallback
+                } else {
+                    row.label
+                };
+                Detected {
+                    account_key: format!("{}:credential:{}", row.integration_id, row.id),
+                    profile: SlotProfile {
+                        email: title,
+                        display_name: None,
+                        organization: None,
+                        plan: Some(provider),
+                        auth_kind,
+                    },
+                    credentials: None,
+                    claude_config: None,
+                    store_key: Some(row.integration_id),
+                    identity_known: false,
+                }
+            })
+            .collect()
+    }
+
     fn grok_auth_file(&self) -> PathBuf {
         self.inner.config.grok_home.join("auth.json")
     }
@@ -923,6 +1001,13 @@ impl AgentAccounts {
     pub(super) async fn detect_keyed(&self, harness: HarnessId) -> (Vec<Detected>, Vec<Detected>) {
         let mut resolved = Vec::new();
         let mut unidentified = Vec::new();
+        // OpenCode 2.x imported auth.json once and never reads it again: its
+        // database is the live store. Its rows are shown active but unreadable —
+        // zeron does not copy OpenCode-owned secrets into its own slots.
+        if harness == HarnessId::Opencode && self.opencode_keeps_its_own_store() {
+            unidentified.extend(self.opencode_v2_unreadable());
+            return (resolved, unidentified);
+        }
         let Some(store) = read_json(&self.keyed_file(harness)) else {
             return (resolved, unidentified);
         };
