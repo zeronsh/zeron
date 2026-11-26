@@ -53,6 +53,7 @@ local MONO: { [Name]: boolean } = {
 	grok = true,
 	cursor = true,
 	devin = true,
+	opencode = true,
 	hermes = true,
 	["provider-anthropic"] = true,
 	["provider-openai"] = true,

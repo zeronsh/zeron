@@ -186,6 +186,8 @@ end
 -- id for the provider: its mark (one set, one ink) and the shape its keys start
 -- with (the field's placeholder).
 local KEY_PROVIDERS: { [string]: { mark: string, shape: string } } = {
+	opencode = { mark = "opencode", shape = "oc-…" },
+	["opencode-go"] = { mark = "opencode", shape = "oc-…" },
 	anthropic = { mark = "provider-anthropic", shape = "sk-ant-…" },
 	openai = { mark = "provider-openai", shape = "sk-…" },
 	["openai-api"] = { mark = "provider-openai", shape = "sk-…" },
