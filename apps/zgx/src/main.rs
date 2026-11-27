@@ -589,6 +589,18 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     heap::install(cx);
 }
 
+/// Open and close the windows `host`'s scripts declare (`ui.window`) as
+/// their states say, for as long as the window `cx` is open; closing it
+/// closes them.
+fn follow_windows(cx: &mut WindowContext, host: &ScriptHost) {
+    let following = RefCell::new(Some(zgx_run::follow_windows(host, cx)));
+    let (runtime, windows) = (cx.ui.runtime.clone(), host.windows());
+    cx.on_closed(move || {
+        runtime.batch(|| windows.with_untracked(|list| list.iter().for_each(|w| _ = w.open.set(Value::Bool(false)))));
+        drop(following.borrow_mut().take());
+    });
+}
+
 /// Where finishing setup on this Mac is remembered: a launch signed in
 /// opens the main window once it's there.
 fn onboarded_marker() -> Option<PathBuf> {
@@ -1074,6 +1086,9 @@ fn serve_with(
         None
     };
     let commands = serve_commands(cx, &host, role);
+    // Plugins' own windows (`ui.window`, a plugin granted "windows"; the
+    // app's scripts declare none), open while their `open` states are.
+    follow_windows(cx, &host);
     // Reload interface: every script evaluated again and the window's
     // interface mounted anew, as a save under ui/ does (state kept), on the
     // next turn rather than inside the command that asks. (The host is held
