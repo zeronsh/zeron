@@ -149,11 +149,19 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
         return Ok(());
     }
     match auth.state() {
-        AuthState::SignedOut => {
-            // Also remove malformed or stale files that could not be loaded.
-            auth.sign_out();
-            println!("No valid saved session; cleared any stale session file.");
-        }
+        AuthState::SignedOut => match auth.others_session_edge() {
+            // Another edge's or client's session is still good there.
+            Some(edge) => println!(
+                "The saved session was issued by another edge or sign-in client ({edge}); left it \
+                 as it is. Remove {} to discard it.",
+                config.data_dir.join("session.json").display()
+            ),
+            None => {
+                // Also remove malformed or stale files that could not be loaded.
+                auth.sign_out();
+                println!("No valid saved session; cleared any stale session file.");
+            }
+        },
         state => {
             let email = state
                 .user()
@@ -330,5 +338,18 @@ mod tests {
             Engine::initial_workspace_scope(&after),
             WorkspaceScope::Local
         );
+    }
+
+    #[tokio::test]
+    async fn logout_leaves_another_edges_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let session = dir.path().join("session.json");
+        let seeded = r#"{"refreshToken":"refresh-1","user":{"id":"user-1","email":"user@example.com"},"orgId":"org-1","edgeUrl":"https://edge.other.example","workosClientId":"client_test"}"#;
+        std::fs::write(&session, seeded).unwrap();
+
+        logout(config).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&session).unwrap(), seeded);
     }
 }

@@ -239,6 +239,47 @@ struct StoredSession {
     user: AuthUser,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     org_id: Option<String>,
+    /// The edge and WorkOS client that issued the session. Its refresh token
+    /// goes to no other: another edge can only turn it down, and a definitive
+    /// refusal signs out, deleting a session that still works where it came
+    /// from (`ZERON_EDGE_URL` pointed elsewhere for one start, an app that
+    /// starts the engine with production's edge over a self-hosted one's
+    /// session). A session kept before this learns them on its first
+    /// successful refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edge_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workos_client_id: Option<String>,
+}
+
+impl StoredSession {
+    /// Whether an engine of `edge_url` and `client` may use it. One another
+    /// edge or client issued is left as it is, unused: that engine starts
+    /// signed out, and the file stays for the edge it works with. One that
+    /// doesn't say is taken as this engine's, as before.
+    fn usable_by(&self, edge_url: &str, client: &str) -> bool {
+        if self.issued_by(edge_url, client) {
+            return true;
+        }
+        tracing::warn!(
+            session_edge = self.edge_url.as_deref().unwrap_or(edge_url),
+            session_client = self.workos_client_id.as_deref().unwrap_or(client),
+            edge = %edge_url,
+            client = %client,
+            "auth: the saved session is another edge's or client's; starting signed out and \
+             leaving it as it is (an engine of that edge and client uses it)"
+        );
+        false
+    }
+
+    /// `usable_by`, without a word: whether `edge_url` and `client` issued it
+    /// (or it doesn't say).
+    fn issued_by(&self, edge_url: &str, client: &str) -> bool {
+        let edge = self.edge_url.as_deref().unwrap_or(edge_url).trim();
+        let issuer = self.workos_client_id.as_deref().unwrap_or(client).trim();
+        edge.trim_end_matches('/') == edge_url.trim().trim_end_matches('/')
+            && issuer == client.trim()
+    }
 }
 
 /// Access-token cache. Expiry ages the token's own lifetime (`exp - iat`) by
@@ -410,18 +451,23 @@ pub struct Auth {
 
 impl Auth {
     /// Build from config: dev mode unless a WorkOS client id is configured.
-    pub fn new(config: AuthConfig) -> Self {
+    pub fn new(mut config: AuthConfig) -> Self {
+        // A stray space or newline (`ZERON_EDGE_URL="…\n"`) would otherwise
+        // be written into the session and set it apart from its own edge.
+        config.edge_url = config.edge_url.trim().to_owned();
         let workos = config
             .workos_client_id
-            .clone()
-            .filter(|s| !s.trim().is_empty());
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let session_file = config.data_dir.join("session.json");
-        let stored: Option<StoredSession> = if workos.is_some() {
-            std::fs::read_to_string(&session_file)
+        let stored: Option<StoredSession> = match &workos {
+            Some(client) => std::fs::read_to_string(&session_file)
                 .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
-        } else {
-            None
+                .and_then(|raw| serde_json::from_str::<StoredSession>(&raw).ok())
+                .filter(|session| session.usable_by(&config.edge_url, client)),
+            None => None,
         };
         let initial = match (&workos, &stored) {
             (None, _) => AuthState::SignedIn {
@@ -556,6 +602,18 @@ impl Auth {
     /// The value stays true even if a later refresh revokes that session.
     pub fn loaded_workos_session(&self) -> bool {
         self.inner.loaded_workos_session
+    }
+
+    /// The edge of the saved session when another edge or WorkOS client
+    /// issued it: this engine neither uses nor removes it.
+    pub fn others_session_edge(&self) -> Option<String> {
+        let client = self.inner.workos.as_deref()?;
+        let raw = std::fs::read_to_string(self.session_file()).ok()?;
+        let session: StoredSession = serde_json::from_str(&raw).ok()?;
+        if session.issued_by(&self.inner.config.edge_url, client) {
+            return None;
+        }
+        Some(session.edge_url.unwrap_or_else(|| self.inner.config.edge_url.clone()))
     }
 
     /// Whether this device keeps its chats local while signed in
@@ -900,7 +958,11 @@ impl Auth {
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
         self.retry_refresh();
-        self.persist::<&StoredSession>(None);
+        // Another edge's session was never this engine's to sign out of: it
+        // stays for the engine of the edge that issued it.
+        if self.others_session_edge().is_none() {
+            self.persist::<&StoredSession>(None);
+        }
         self.inner.state_tx.send_replace(AuthState::SignedOut);
         self.inner
             .token_tx
@@ -1117,6 +1179,8 @@ impl Auth {
             refresh_token: result.refresh_token,
             user: result.user.clone(),
             org_id: org_id.clone(),
+            edge_url: Some(self.inner.config.edge_url.trim_end_matches('/').to_owned()),
+            workos_client_id: self.inner.workos.clone(),
         };
         self.persist(Some(&session));
         *lock(&self.inner.stored) = Some(session);
@@ -1373,6 +1437,14 @@ impl Auth {
                     let changed = session.org_id != org_id;
                     session.refresh_token = tokens.refresh_token;
                     session.org_id = org_id.clone();
+                    // This edge took it: one kept before sessions said where
+                    // they came from says so now.
+                    session.edge_url.get_or_insert_with(|| {
+                        self.inner.config.edge_url.trim_end_matches('/').to_owned()
+                    });
+                    if session.workos_client_id.is_none() {
+                        session.workos_client_id = self.inner.workos.clone();
+                    }
                     (session.user.clone(), changed)
                 }
                 None => return Ok(None), // signed out mid-refresh
