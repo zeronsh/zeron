@@ -6,6 +6,8 @@
 //!                    presets = { Preset }, servers = { Server } }
 //!   `mcp.auth`     { [serverId] = { phase = "authorizing" | "error" | "done",
 //!                                   flowId?, error? } }
+//!   `mcp.outside`  { loaded, grants = { Grant }, asks = { Ask } }: the agents
+//!                  outside Zeron let in to this device, and those asking
 //!
 //! Actions (async):
 //!   `mcp.refresh`          RefreshMcpServers
@@ -15,6 +17,8 @@
 //!   `mcp.disconnect_auth`  DisconnectMcpAuth
 //!   `mcp.cancel_auth`      CancelMcpAuth
 //!   `mcp.start_auth`       StartMcpAuth + open browser + poll PollMcpAuth
+//!   `mcp.resolve_outside`  ResolveOutsideAgent
+//!   `mcp.revoke_outside`   RevokeOutsideAgent
 
 use std::{
     cell::RefCell,
@@ -48,6 +52,9 @@ struct Mcp {
     auth: RefCell<BTreeMap<String, AuthFlow>>,
     auth_generation: RefCell<u64>,
     watch: RefCell<Option<Watch>>,
+    outside_shared: RefCell<Vec<Shared>>,
+    outside: RefCell<Value>,
+    outside_watch: RefCell<Option<Watch>>,
 }
 
 thread_local! {
@@ -64,6 +71,10 @@ fn initial_snapshot() -> Value {
     }))
 }
 
+fn initial_outside() -> Value {
+    json_value(&json!({ "loaded": false, "grants": [], "asks": [] }))
+}
+
 impl Mcp {
     fn new() -> Self {
         Self {
@@ -73,7 +84,33 @@ impl Mcp {
             auth: RefCell::default(),
             auth_generation: RefCell::new(0),
             watch: RefCell::default(),
+            outside_shared: RefCell::default(),
+            outside: RefCell::new(initial_outside()),
+            outside_watch: RefCell::default(),
         }
+    }
+
+    fn take_outside(&self, mut item: Json) {
+        if let Json::Object(ref mut map) = item {
+            map.insert("loaded".to_string(), Json::Bool(true));
+        }
+        let value = json_value(&item);
+        *self.outside.borrow_mut() = value.clone();
+        for shared in self.outside_shared.borrow().iter() {
+            shared.set(value.clone());
+        }
+    }
+
+    fn watch_outside(self: &Rc<Self>, rpc: &crate::engine::rpc::Rpc) {
+        let heard = Rc::downgrade(self);
+        let watch = rpc.watch("WatchOutsideAgents", json!({}), move |item| {
+            if let Some(mcp) = heard.upgrade()
+                && item.is_object()
+            {
+                mcp.take_outside(item);
+            }
+        });
+        *self.outside_watch.borrow_mut() = Some(watch);
     }
 
     fn next_generation(&self) -> u64 {
@@ -323,15 +360,54 @@ pub fn install(host: &ScriptHost) {
     mcp.auth_shared
         .borrow_mut()
         .push(host.shared("mcp.auth", mcp.auth_value()));
+    mcp.outside_shared
+        .borrow_mut()
+        .push(host.shared("mcp.outside", mcp.outside.borrow().clone()));
 
     if mcp.servers_shared.borrow().len() == 1 {
         let weak = Rc::downgrade(&mcp);
         engine::get().on_connect(move |rpc| {
             if let Some(mcp) = weak.upgrade() {
                 mcp.watch_servers(rpc);
+                mcp.watch_outside(rpc);
             }
         });
     }
+
+    // The person's answer to an agent outside Zeron asking in (only this
+    // app can give it: the engine refuses it from an agent or another device).
+    let m = mcp.clone();
+    host.async_action("mcp.resolve_outside", move |args| {
+        let m = m.clone();
+        let id = args.field("id").map(|v| text(&v)).unwrap_or_default();
+        let allow = matches!(args.field("allow"), Some(Value::Bool(true)));
+        async move {
+            crate::plugins::preview::refuse("mcp.resolve_outside")?;
+            let reply = engine::get()
+                .call("ResolveOutsideAgent", json!({ "id": id, "allow": allow }))
+                .await?;
+            if reply.is_object() {
+                m.take_outside(reply.clone());
+            }
+            Ok(json_value(&reply))
+        }
+    });
+
+    let m = mcp.clone();
+    host.async_action("mcp.revoke_outside", move |args| {
+        let m = m.clone();
+        let id = args.field("id").map(|v| text(&v)).unwrap_or_default();
+        async move {
+            crate::plugins::preview::refuse("mcp.revoke_outside")?;
+            let reply = engine::get()
+                .call("RevokeOutsideAgent", json!({ "id": id }))
+                .await?;
+            if reply.is_object() {
+                m.take_outside(reply.clone());
+            }
+            Ok(json_value(&reply))
+        }
+    });
 
     let m = mcp.clone();
     host.async_action("mcp.refresh", move |_| {
@@ -851,5 +927,80 @@ mod tests {
         let form_texts = app.texts();
         assert!(form_texts.iter().any(|t| t == "Add server"), "missing custom server dialog: {form_texts:?}");
         assert!(form_texts.iter().any(|t| t == "Remote URL"), "missing server type choice: {form_texts:?}");
+    }
+
+    #[test]
+    fn settings_mcp_page_asks_about_and_revokes_outside_agents() {
+        use std::path::PathBuf;
+        use zgx_script::testing::TestApp;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
+        let outside = json!({
+            "loaded": true,
+            "grants": [{ "id": "grant-1", "client": "Claude", "redirectHost": "claude.ai", "createdAt": 1_700_000_000_000_i64 }],
+            "asks": [{ "id": "ask-1", "client": "Grok", "redirectHost": "grok.com", "at": 1_700_000_100_000_i64 }],
+        });
+        let heard: Rc<RefCell<Vec<(String, Json)>>> = Rc::default();
+        let calls = heard.clone();
+        let mut app = TestApp::new(move |runtime| {
+            let host = crate::plugins::lend_design_system(ScriptHost::new(runtime, path.clone()), &path);
+            host.shared("zgx.window.size", zgx_script::window_size_value(1200., 1200.));
+            host.shared("mcp.servers", initial_snapshot());
+            host.shared("mcp.auth", json_value(&json!({})));
+            host.shared("mcp.outside", json_value(&outside));
+            for name in ["mcp.refresh", "mcp.resolve_outside", "mcp.revoke_outside"] {
+                let calls = calls.clone();
+                host.async_action(name, move |args| {
+                    calls.borrow_mut().push((name.to_string(), value_json(&args)));
+                    async { Ok(Value::Nil) }
+                });
+            }
+            host
+        });
+        assert_eq!(app.error(), None);
+        app.ui.scene.borrow_mut().resize(1200., 1200.);
+        app.frames(20);
+        app.host.run_command("shell.settings");
+        app.frames(20);
+        app.click("#settings-nav >> role:tab \"MCP\"");
+        app.frames(30);
+        assert_eq!(app.error(), None);
+
+        let texts = app.texts();
+        assert!(texts.iter().any(|t| t == "Agents outside Zeron"), "missing section: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Claude"), "missing grant: {texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("Returns to claude.ai · allowed ")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Asking to connect · returns to grok.com"), "{texts:?}");
+        // The ask opens its dialog by itself: who, and where it returns to.
+        let ask = "role:dialog \"Let Grok use Zeron on this device?\"";
+        assert!(app.shown(ask), "missing ask dialog: {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("returns to grok.com")), "{texts:?}");
+        app.click(&format!("{ask} >> role:button \"Deny\""));
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        assert!(
+            heard.borrow().iter().any(|(name, args)| name == "mcp.resolve_outside" && *args == json!({ "id": "ask-1", "allow": false })),
+            "{:?}",
+            heard.borrow()
+        );
+        // Answered, it doesn't come back by itself.
+        app.frames(30);
+        assert!(!app.shown(ask), "came back: {}", app.tree());
+
+        // Revoke, behind a confirm.
+        app.click("#settings-page >> role:button \"Revoke\"");
+        app.frames(20);
+        let confirm = "role:dialog \"Revoke Claude?\"";
+        assert!(app.shown(confirm), "missing revoke confirm: {:?}", app.texts());
+        assert!(!heard.borrow().iter().any(|(name, _)| name == "mcp.revoke_outside"));
+        app.click(&format!("{confirm} >> role:button \"Revoke\""));
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        assert!(
+            heard.borrow().iter().any(|(name, args)| name == "mcp.revoke_outside" && *args == json!({ "id": "grant-1" })),
+            "{:?}",
+            heard.borrow()
+        );
+        assert!(!app.shown(confirm));
     }
 }

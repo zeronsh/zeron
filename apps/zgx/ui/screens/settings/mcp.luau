@@ -14,6 +14,7 @@
 
 local ds = require("@ds")
 local ds_select = require("@ds/select")
+local locale = require("@ds/locale")
 local material = require("@ds/material")
 local Menu = require("@ds/menu")
 local progress = require("@ds/progress")
@@ -33,6 +34,7 @@ search.index(M.ID, ui.t("settings.mcp.title"), ui.t("settings.mcp.terms"), {
 	{ key = "requests", title = ui.t("settings.mcp.requests.title"), terms = ui.t("settings.mcp.requests.terms") },
 	{ key = "servers", title = ui.t("settings.mcp.servers.title"), terms = ui.t("settings.mcp.servers.terms") },
 	{ key = "add", title = ui.t("settings.mcp.add.title"), terms = ui.t("settings.mcp.add.terms") },
+	{ key = "outside", title = ui.t("settings.mcp.outside.title"), terms = ui.t("settings.mcp.outside.terms") },
 })
 
 -- The engine's word for a server whose OAuth can't register a client
@@ -2015,6 +2017,233 @@ local RequestRow = ui.component(function(props: { now: State<mcp.Request> }): No
 	}
 end)
 
+-- ── Agents outside Zeron ───────────────────────────────────────────────
+-- An agent outside Zeron (Grok, say) signs in at the edge's MCP URL in your
+-- browser and picks this device; it asks here, in a dialog of its own.
+-- Allowed, this device keeps its grant (the engine's outside_agents.rs) and
+-- it gets what an agent in Zeron gets, in a read-only, supervised chat.
+-- Denied, or let wait, it gets nothing. Revoke ends a grant at once.
+
+-- (A dialog's way out takes 130.)
+local DIALOG_GONE_MS = 150
+local outside_open = ui.state("settings_mcp_outside_open", false)
+-- The ask the dialog is showing.
+local outside_ask = ui.state("settings_mcp_outside_ask", nil :: mcp.OutsideAsk?)
+-- Asks put off ("Not now") this run: shown again only from their row.
+local outside_later = ui.state("settings_mcp_outside_later", {} :: { [string]: boolean })
+local outside_busy = ui.state("settings_mcp_outside_busy", false)
+local revoke_open = ui.state("settings_mcp_outside_revoke_open", false)
+local revoke_target = ui.state("settings_mcp_outside_revoke", nil :: mcp.OutsideGrant?)
+local revoke_busy = ui.state("settings_mcp_outside_revoke_busy", false)
+
+local function show_ask(a: mcp.OutsideAsk)
+	ui.batch(function()
+		outside_ask:set(a)
+		outside_open:set(true)
+	end)
+end
+
+local function answer_outside(allow: boolean)
+	local a = outside_ask:peek()
+	if not a or outside_busy:peek() then
+		return
+	end
+	outside_busy:set(true)
+	mcp.resolve_outside(a.id, allow):after(function()
+		ui.batch(function()
+			outside_busy:set(false)
+			outside_open:set(false)
+		end)
+	end, function(err: any)
+		ui.batch(function()
+			outside_busy:set(false)
+			outside_open:set(false)
+		end)
+		toast.show { title = ui.t("settings.mcp.outside.couldnt", { name = a.client }), body = friendly(message_of(err)), tone = "danger" }
+	end)
+end
+
+local function revoke_outside()
+	local g = revoke_target:peek()
+	if not g or revoke_busy:peek() then
+		return
+	end
+	revoke_busy:set(true)
+	mcp.revoke_outside(g.id):after(function()
+		ui.batch(function()
+			revoke_busy:set(false)
+			revoke_open:set(false)
+		end)
+	end, function(err: any)
+		ui.batch(function()
+			revoke_busy:set(false)
+			revoke_open:set(false)
+		end)
+		toast.show { title = ui.t("settings.mcp.outside.revoke_failed", { name = g.client }), body = friendly(message_of(err)), tone = "danger" }
+	end)
+end
+
+type OutsideItem = {
+	key: string,
+	ask: mcp.OutsideAsk?,
+	grant: mcp.OutsideGrant?,
+}
+
+-- Those asking first, then the grants, newest first.
+local function outside_items(): { OutsideItem }
+	local now = mcp.outside:get()
+	local out: { OutsideItem } = {}
+	for _, a in now.asks or {} do
+		table.insert(out, { key = `ask:{a.id}`, ask = a })
+	end
+	local grants = table.clone(now.grants or {})
+	table.sort(grants, function(a: mcp.OutsideGrant, b: mcp.OutsideGrant): boolean
+		return a.createdAt > b.createdAt
+	end)
+	for _, g in grants do
+		table.insert(out, { key = `grant:{g.id}`, grant = g })
+	end
+	return out
+end
+
+local function outside_row(_it: OutsideItem, _i: number, now: State<OutsideItem>): Node
+	local first = now:peek()
+	return ds.Settings.Row {
+		label = function(): string
+			local it = now:get()
+			return if it.ask then it.ask.client else (it.grant :: mcp.OutsideGrant).client
+		end,
+		description = function(): string
+			local it = now:get()
+			if it.ask then
+				return ui.t("settings.mcp.outside.waiting", { host = it.ask.redirectHost }):get()
+			end
+			local g = it.grant :: mcp.OutsideGrant
+			return ui.t("settings.mcp.outside.granted", { host = g.redirectHost, date = locale.date(math.floor(g.createdAt / 1000)) }):get()
+		end,
+		truncate = true,
+		lead = ds.ProviderCard.disc(ds.Icon { name = "bot", size = 16 }),
+		control = if first.ask
+			then ds.Button {
+				ui.t("settings.mcp.outside.review"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					local a = now:peek().ask
+					if a then
+						show_ask(a)
+					end
+				end,
+			}
+			else ds.Button {
+				ui.t("settings.mcp.outside.revoke"),
+				tone = "ghost",
+				size = "sm",
+				on_click = function()
+					local g = now:peek().grant
+					if g then
+						ui.batch(function()
+							revoke_target:set(g)
+							revoke_open:set(true)
+						end)
+					end
+				end,
+			},
+	}
+end
+
+local function still_asking(id: string): boolean
+	for _, a in mcp.outside:peek().asks or {} do
+		if a.id == id then
+			return true
+		end
+	end
+	return false
+end
+
+local function outside_ask_dialog(): Node
+	-- A new ask opens the dialog; one it closed on (answered or put off) is
+	-- shown again only from its row. The next opens once the last has left,
+	-- so an answer given as it closes (Deny) is still the last one's.
+	ui.effect(function()
+		local asks = mcp.outside:get().asks or {}
+		local later = outside_later:get()
+		local shown = outside_ask:peek()
+		if outside_open:get() then
+			-- (Gone while open, answered nowhere here: it expired.)
+			if shown and not outside_busy:peek() and not still_asking(shown.id) then
+				outside_open:set(false)
+			end
+			return
+		end
+		if shown and not later[shown.id] then
+			local put = table.clone(later)
+			put[shown.id] = true
+			outside_later:set(put)
+			return
+		end
+		for _, a in asks do
+			if not later[a.id] then
+				ui.after(DIALOG_GONE_MS, function()
+					if not outside_open:peek() and not outside_later:peek()[a.id] and still_asking(a.id) then
+						show_ask(a)
+					end
+				end)
+				return
+			end
+		end
+	end)
+	return ds.Dialog {
+		open = outside_open,
+		title = function(): string
+			local a = outside_ask:get()
+			return ui.t("settings.mcp.outside.ask_title", { name = if a then a.client else "" }):get()
+		end,
+		body = function(): string
+			local a = outside_ask:get()
+			return ui.t("settings.mcp.outside.ask_body", { host = if a then a.redirectHost else "" }):get()
+		end,
+		icon = "bot",
+		cancel = ui.t("settings.mcp.outside.later"),
+		aside = {
+			label = ui.t("settings.mcp.outside.deny"),
+			on_click = function()
+				answer_outside(false)
+			end,
+		},
+		confirm = {
+			label = ui.t("settings.mcp.outside.allow"),
+			keep_open = true,
+			busy = function(): boolean
+				return outside_busy:get()
+			end,
+			on_click = function()
+				answer_outside(true)
+			end,
+		},
+	}
+end
+
+local function outside_revoke_dialog(): Node
+	return ds.Dialog {
+		open = revoke_open,
+		title = function(): string
+			local g = revoke_target:get()
+			return ui.t("settings.mcp.outside.revoke_title", { name = if g then g.client else "" }):get()
+		end,
+		body = ui.t("settings.mcp.outside.revoke_body"),
+		tone = "danger",
+		confirm = {
+			label = ui.t("settings.mcp.outside.revoke"),
+			keep_open = true,
+			busy = function(): boolean
+				return revoke_busy:get()
+			end,
+			on_click = revoke_outside,
+		},
+	}
+end
+
 -- The servers, a service's accounts together (the engine's order).
 local function services(): { Service }
 	local out: { Service } = {}
@@ -2122,6 +2351,25 @@ function M.view(): Node
 		)
 	)
 
+	local outside_list = ui.computed(outside_items)
+	local outside = ui.show(
+		function(): boolean
+			return #outside_list:get() > 0
+		end,
+		search.anchor(
+			"outside",
+			ds.Settings.Section {
+				title = ui.t("settings.mcp.outside.title"),
+				description = ui.t("settings.mcp.outside.description"),
+				ds.Settings.Each(outside_list, outside_row, {
+					key = function(it: OutsideItem): string
+						return it.key
+					end,
+				}),
+			}
+		)
+	)
+
 	local add = search.anchor(
 		"add",
 		ds.Settings.Section {
@@ -2167,11 +2415,14 @@ function M.view(): Node
 		end,
 		waiting,
 		yours,
+		outside,
 		add,
 		connect_dialog(),
 		form_dialog(),
 		remove_dialog(),
 		rename_dialog(),
+		outside_ask_dialog(),
+		outside_revoke_dialog(),
 	}
 end
 

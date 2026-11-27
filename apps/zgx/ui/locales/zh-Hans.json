@@ -2599,6 +2599,26 @@
         "notice_remove": "一个智能体请求移除 {name}",
         "notice_enable": "一个智能体请求开启 {name}",
         "notice_disable": "一个智能体请求关闭 {name}"
+      },
+      "outside": {
+        "title": "Zeron 之外的智能体",
+        "description": "你允许使用此设备的智能体（如 Grok）。它们可以阅读并给对话发消息。它们新建的对话是只读且受监督的，自己不能运行命令。",
+        "terms": "外部 智能体 远程 mcp grok 连接器 oauth 授权 撤销 访问",
+        "granted": "返回到 {host} · {date} 允许",
+        "waiting": "请求连接 · 返回到 {host}",
+        "review": "查看",
+        "revoke": "撤销",
+        "ask_title": "允许 {name} 在此设备上使用 Zeron？",
+        "ask_body": "它已在你的浏览器中登录 Zeron，并返回到 {host}。它可以阅读此设备上的对话并向它们发消息，你已经在跑的智能体保持你给它的权限。它新建的对话是只读且受监督的，自己不能运行命令。你可以随时在这里撤销。",
+        "allow": "允许",
+        "deny": "拒绝",
+        "later": "稍后",
+        "couldnt": "无法答复 {name}",
+        "revoke_title": "撤销 {name}？",
+        "revoke_body": "它会立即失去此设备的工具。要再次连接，它必须重新登录并再次征得你的同意。",
+        "revoke_failed": "无法撤销 {name}",
+        "notice": "{name} 请求使用 Zeron",
+        "notice_body": "在你于此设备上允许之前，不会共享任何内容。"
       }
     }
   },

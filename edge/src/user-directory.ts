@@ -69,6 +69,12 @@
  * it, at most `PLUGIN_KEYS_PER_DAY` new ones a user a day. Revoked rows stay,
  * so a key is never re-bound; deleting a user revokes theirs.
  *
+ * Outside agents (mcp-oauth.ts): `mcp_clients` holds each OAuth client an
+ * agent registered (public clients only: a name and its redirect URIs);
+ * past `MAX_MCP_CLIENTS`, ones never used for a day go. `oauth_sessions`
+ * holds the hash of each consent-page sign-in, its user, its form token and
+ * expiry; a deletion drops a user's.
+ *
  * Settings (auth-routes.ts): `PATCH /auth/me` writes the renamed user with the
  * webhook's own `upsert` right away, and an org's member list reads names,
  * pictures and usernames through `profiles`.
@@ -113,6 +119,11 @@ export const MAX_IMAGE_BYTES_PER_USER = 20_000_000;
 export const IMAGE_UPLOADS_PER_DAY = 200;
 /** How long an org's role lock holds before it lapses (a request that died). */
 export const ORG_LOCK_MS = 30_000;
+
+/** Registered outside-agent OAuth clients kept (mcp-oauth.ts). */
+export const MAX_MCP_CLIENTS = 10_000;
+/** How long a registered client nobody signed in with is kept past the cap. */
+const UNUSED_MCP_CLIENT_MS = 86_400_000;
 
 /** Availability checks and claims one user may make a minute. */
 const USERNAME_ATTEMPTS_PER_MINUTE = 60;
@@ -400,6 +411,13 @@ export class UserDirectory extends DurableObject<Env> {
       org_id TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS invite_quota_day (
       user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, sent INTEGER NOT NULL)`);
+    // mcp-oauth.ts: outside agents' OAuth clients, and consent-page sign-ins.
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS mcp_clients (
+      client_id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL,
+      created_at INTEGER NOT NULL, used_at INTEGER)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS oauth_sessions (
+      session_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, form_token TEXT NOT NULL, expires_at INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS oauth_sessions_user ON oauth_sessions(user_id)");
     this.backfillEarnedBadges();
   }
 
@@ -631,6 +649,7 @@ export class UserDirectory extends DurableObject<Env> {
     // Their plugins stop reading as theirs (or anyone's).
     this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", Date.now(), user.id);
     this.ctx.storage.sql.exec("DELETE FROM step_ups WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM oauth_sessions WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec(
       `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
        VALUES (?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
@@ -968,6 +987,58 @@ export class UserDirectory extends DurableObject<Env> {
         )
         .toArray().length > 0
     );
+  }
+
+  /** Record an outside agent's OAuth client (mcp-oauth.ts). False when the
+   * table is full even of clients someone signed in with. */
+  registerMcpClient(clientId: string, name: string, redirectUris: readonly string[]): boolean {
+    const now = Date.now();
+    return this.ctx.storage.transactionSync(() => {
+      const count = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM mcp_clients").one().n as number;
+      if (count >= MAX_MCP_CLIENTS) {
+        this.ctx.storage.sql.exec("DELETE FROM mcp_clients WHERE used_at IS NULL AND created_at <= ?", now - UNUSED_MCP_CLIENT_MS);
+        if ((this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM mcp_clients").one().n as number) >= MAX_MCP_CLIENTS) return false;
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO mcp_clients (client_id, name, redirect_uris, created_at) VALUES (?, ?, ?, ?)",
+        clientId,
+        name,
+        JSON.stringify(redirectUris),
+        now
+      );
+      return true;
+    });
+  }
+
+  mcpClient(clientId: string): { readonly name: string; readonly redirectUris: string[] } | undefined {
+    const [row] = this.ctx.storage.sql.exec("SELECT name, redirect_uris FROM mcp_clients WHERE client_id = ?", clientId).toArray();
+    return row ? { name: row.name as string, redirectUris: JSON.parse(row.redirect_uris as string) as string[] } : undefined;
+  }
+
+  /** Someone signed in with `clientId`: it's kept past the cap. */
+  useMcpClient(clientId: string): void {
+    this.ctx.storage.sql.exec("UPDATE mcp_clients SET used_at = ? WHERE client_id = ?", Date.now(), clientId);
+  }
+
+  /** A consent-page sign-in for `userId`, by its hash, with its form token. */
+  openOAuthSession(sessionHash: string, userId: string, formToken: string, ttlMs: number): void {
+    const now = Date.now();
+    this.ctx.storage.sql.exec("DELETE FROM oauth_sessions WHERE expires_at <= ?", now);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO oauth_sessions (session_hash, user_id, form_token, expires_at) VALUES (?, ?, ?, ?)",
+      sessionHash,
+      userId,
+      formToken,
+      now + ttlMs
+    );
+  }
+
+  /** The live consent-page sign-in `sessionHash` names. */
+  oauthSession(sessionHash: string): { readonly userId: string; readonly formToken: string } | undefined {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT user_id, form_token FROM oauth_sessions WHERE session_hash = ? AND expires_at > ?", sessionHash, Date.now())
+      .toArray();
+    return row ? { userId: row.user_id as string, formToken: row.form_token as string } : undefined;
   }
 
   /** Count an image of `bytes` against its owner's quota before it's stored. */

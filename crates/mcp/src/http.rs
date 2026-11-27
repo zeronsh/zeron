@@ -33,6 +33,13 @@
 //! the old stdio server's agent token reached — the engine's
 //! agent-scoped methods ([`zeron_rpc::agent_allowed`]) — and no more; the
 //! methods that act on "the calling chat" are pinned to the token's chat.
+//!
+//! **Outside agents** (docs/mcp.md, "Outside agents"). An agent outside
+//! Zeron reaches the same tools through the edge, which relays each of its
+//! requests over this device's room: [`McpHttpServer::relay`], with no socket
+//! and no bearer. It names a grant this device issued ([`RemoteGrant`]); one
+//! no `RemoteGrant` holds dispatches nothing. Its tools speak for no chat, so
+//! the engine gives what it does the least a calling chat can have.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -127,7 +134,10 @@ pub trait ExternalMcpProxy: Send + Sync {
 /// `notifications/cancelled` can stop one) and its `subscriptions/listen`
 /// streams. Not connection state: the same for every request the run's
 /// token makes. Its calls and streams end when the run's [`Grant`] drops.
+/// An outside agent's ([`RemoteGrant`]) is the same, with no token.
 struct GrantState {
+    /// Empty for a [`RemoteGrant`]'s, which no bearer reaches: it isn't in
+    /// [`Inner::grants`].
     token: String,
     origin: Origin,
     tools: std::sync::OnceLock<Arc<Tools>>,
@@ -141,6 +151,8 @@ struct Inner {
     factory: ToolsFactory,
     external: Option<Arc<dyn ExternalMcpProxy>>,
     grants: Mutex<Vec<Arc<GrantState>>>,
+    /// Outside agents' grants, by the id this device gave each.
+    remote: Mutex<HashMap<String, Arc<GrantState>>>,
 }
 
 /// A run's access to the endpoint: its token works until this drops.
@@ -168,14 +180,48 @@ impl Drop for Grant {
             return;
         };
         lock(&inner.grants).retain(|grant| !Arc::ptr_eq(grant, &self.state));
-        // Calls still running for a finished run end with it, and so do
-        // its listen streams (each held its tools' engine connection).
-        for (_, call) in lock(&self.state.in_flight).drain() {
-            call.abort();
+        end_calls(&self.state);
+    }
+}
+
+/// Calls still running for a finished run end with it, and so do its
+/// listen streams (each held its tools' engine connection).
+fn end_calls(state: &GrantState) {
+    for (_, call) in lock(&state.in_flight).drain() {
+        call.abort();
+    }
+    for (_, stream) in lock(&state.listens).drain() {
+        stream.abort();
+    }
+}
+
+/// An outside agent's access ([`McpHttpServer::relay`]): its grant id is
+/// served until this drops (the person revoked it), and what it was running
+/// ends then.
+pub struct RemoteGrant {
+    inner: Weak<Inner>,
+    id: String,
+    state: Arc<GrantState>,
+}
+
+impl std::fmt::Debug for RemoteGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteGrant").field("id", &self.id).finish()
+    }
+}
+
+impl Drop for RemoteGrant {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        {
+            let mut remote = lock(&inner.remote);
+            if remote.get(&self.id).is_some_and(|state| Arc::ptr_eq(state, &self.state)) {
+                remote.remove(&self.id);
+            }
         }
-        for (_, stream) in lock(&self.state.listens).drain() {
-            stream.abort();
-        }
+        end_calls(&self.state);
     }
 }
 
@@ -224,6 +270,7 @@ impl McpHttpServer {
             factory,
             external,
             grants: Mutex::new(Vec::new()),
+            remote: Mutex::new(HashMap::new()),
         });
         let weak = Arc::downgrade(&inner);
         let slots = Arc::new(tokio::sync::Semaphore::new(max_connections));
@@ -269,19 +316,44 @@ impl McpHttpServer {
     /// A fresh token for one run speaking as `origin`.
     pub fn grant(&self, origin: Origin) -> std::io::Result<Grant> {
         let token = zeron_rpc::ipc_auth::generate_token()?;
-        let state = Arc::new(GrantState {
-            token,
-            origin,
-            tools: std::sync::OnceLock::new(),
-            in_flight: Mutex::new(HashMap::new()),
-            listens: Mutex::new(HashMap::new()),
-            next_listen: std::sync::atomic::AtomicU64::new(0),
-        });
+        let state = grant_state(token, origin);
         lock(&self.inner.grants).push(state.clone());
         Ok(Grant {
             inner: Arc::downgrade(&self.inner),
             state,
         })
+    }
+
+    /// Serve the outside agent's grant `id` (one this device issued and
+    /// still holds) as `origin`, until the handle drops.
+    pub fn remote_grant(&self, id: &str, origin: Origin) -> RemoteGrant {
+        let state = grant_state(String::new(), origin);
+        lock(&self.inner.remote).insert(id.to_owned(), state.clone());
+        RemoteGrant {
+            inner: Arc::downgrade(&self.inner),
+            id: id.to_owned(),
+            state,
+        }
+    }
+
+    /// One `POST /mcp` an outside agent sent through the edge, served as
+    /// its grant `id`: the same JSON-RPC and tools as a run's requests. A
+    /// grant no [`RemoteGrant`] holds dispatches nothing (`401`).
+    pub async fn relay(
+        &self,
+        id: &str,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
+        let grant = lock(&self.inner.remote).get(id).cloned();
+        let Some(grant) = grant else {
+            tracing::warn!("outside agent MCP: refused a request for a grant this device doesn't hold");
+            return refusal(StatusCode::UNAUTHORIZED, "unknown grant");
+        };
+        if body.len() > MAX_BODY {
+            return refusal(StatusCode::PAYLOAD_TOO_LARGE, "request too large");
+        }
+        serve(&self.inner, &grant, &headers, body).await
     }
 
     /// Tool calls running now, across runs (tests, diagnostics).
@@ -309,6 +381,17 @@ impl McpHttpServer {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn grant_state(token: String, origin: Origin) -> Arc<GrantState> {
+    Arc::new(GrantState {
+        token,
+        origin,
+        tools: std::sync::OnceLock::new(),
+        in_flight: Mutex::new(HashMap::new()),
+        listens: Mutex::new(HashMap::new()),
+        next_listen: std::sync::atomic::AtomicU64::new(0),
+    })
 }
 
 async fn serve_socket(inner: Arc<Inner>, stream: tokio::net::TcpStream, peer: SocketAddr) {
@@ -668,6 +751,12 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
         Ok(collected) => collected.to_bytes(),
         Err(_) => return refusal(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
     };
+    serve(&inner, &grant, &headers, body).await
+}
+
+/// One `POST /mcp` body, as `grant`: a run's (the listener, past its
+/// checks) or an outside agent's ([`McpHttpServer::relay`]).
+async fn serve(inner: &Arc<Inner>, grant: &Arc<GrantState>, headers: &HeaderMap, body: Bytes) -> Response<Body> {
     let message: Value = match serde_json::from_slice(&body) {
         Ok(message) => message,
         Err(err) => {
@@ -693,7 +782,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
             chat = ?grant.origin.chat_id,
             version = %params["protocolVersion"],
             client = %params["clientInfo"],
-            header = header(&headers, "mcp-protocol-version").unwrap_or("-"),
+            header = header(headers, "mcp-protocol-version").unwrap_or("-"),
             "agent MCP: legacy initialize"
         ),
         (Era::Modern(version), "server/discover") => tracing::info!(
@@ -735,12 +824,12 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                     }),
                 );
             }
-            if let Err(refused) = check_modern_headers(&headers, &id, version, &method, &params) {
+            if let Err(refused) = check_modern_headers(headers, &id, version, &method, &params) {
                 return refused;
             }
             match method.as_str() {
                 "server/discover" => {
-                    let tools = tools_for(&inner, &grant);
+                    let tools = tools_for(inner, grant);
                     json_response(
                         StatusCode::OK,
                         &json!({
@@ -762,15 +851,15 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                         }),
                     )
                 }
-                "subscriptions/listen" => listen(&inner, &grant, id, &params),
+                "subscriptions/listen" => listen(inner, grant, id, &params),
                 // Gone in this revision (handshake, liveness by request).
                 "initialize" | "ping" | "logging/setLevel" => json_response(
                     StatusCode::NOT_FOUND,
                     &error_response(id, METHOD_NOT_FOUND, &format!("unknown method: {method}")),
                 ),
-                "tools/call" => call(&inner, &grant, &headers, id, method, params, true),
+                "tools/call" => call(inner, grant, headers, id, method, params, true),
                 _ => {
-                    let tools = tools_for(&inner, &grant);
+                    let tools = tools_for(inner, grant);
                     let response = handle_request(&tools, id, &method, params).await;
                     let status = if response["error"]["code"] == METHOD_NOT_FOUND {
                         StatusCode::NOT_FOUND
@@ -783,7 +872,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
         }
         Era::Legacy => {
             if method != "initialize"
-                && let Some(sent) = header(&headers, "mcp-protocol-version")
+                && let Some(sent) = header(headers, "mcp-protocol-version")
                 && !LEGACY_VERSIONS.contains(&sent)
             {
                 return refusal(
@@ -792,11 +881,11 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                 );
             }
             match method.as_str() {
-                "tools/call" => call(&inner, &grant, &headers, id, method, params, false),
+                "tools/call" => call(inner, grant, headers, id, method, params, false),
                 // `initialize` included: answered with no session id, so the
                 // client sends none (and one sent anyway is ignored).
                 _ => {
-                    let tools = tools_for(&inner, &grant);
+                    let tools = tools_for(inner, grant);
                     json_response(StatusCode::OK, &handle_request(&tools, id, &method, params).await)
                 }
             }

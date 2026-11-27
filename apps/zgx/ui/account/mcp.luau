@@ -11,6 +11,12 @@
 --   mcp.start_auth(req)        StartMcpAuth + browser open + PollMcpAuth loop
 --   mcp.cancel_auth(id, flow)  CancelMcpAuth
 --   mcp.disconnect_auth(id)    DisconnectMcpAuth
+--
+-- And the agents outside Zeron let in to this device (engine outside_agents.rs):
+--
+--   mcp.outside:get()          { loaded, grants, asks }
+--   mcp.resolve_outside(id, allow)  ResolveOutsideAgent
+--   mcp.revoke_outside(id)     RevokeOutsideAgent
 
 local M = {}
 
@@ -164,6 +170,40 @@ end
 
 function M.disconnect_auth(id: string): any
 	return ui.call("mcp.disconnect_auth", { id = id })
+end
+
+-- An agent outside Zeron this device let in. `client` is the name it
+-- registered with (its own say-so); `redirectHost`, where its sign-in returned.
+export type OutsideGrant = {
+	id: string,
+	client: string,
+	redirectHost: string,
+	-- Milliseconds.
+	createdAt: number,
+}
+
+-- One asking now, from the browser where the person picked this device.
+export type OutsideAsk = {
+	id: string,
+	client: string,
+	redirectHost: string,
+	at: number,
+}
+
+export type Outside = {
+	loaded: boolean,
+	grants: { OutsideGrant },
+	asks: { OutsideAsk },
+}
+
+M.outside = ui.shared("mcp.outside", { loaded = false, grants = {}, asks = {} } :: Outside)
+
+function M.resolve_outside(id: string, allow: boolean): any
+	return ui.call("mcp.resolve_outside", { id = id, allow = allow })
+end
+
+function M.revoke_outside(id: string): any
+	return ui.call("mcp.revoke_outside", { id = id })
 end
 
 return M

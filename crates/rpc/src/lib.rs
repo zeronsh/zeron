@@ -29,7 +29,7 @@ pub use caller::{Caller, caller, with_caller};
 pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ipc_as_agent, connect_ws};
 pub use device_room::{
     CallerProof, CallerProofFn, DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig,
-    LinkCache, LinkCacheConfig, caller_proof_message,
+    LinkCache, LinkCacheConfig, MCP_KIND, McpOut, McpRelay, caller_proof_message,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame, is_liveness_probe,
 };
@@ -768,6 +768,16 @@ pub mod methods {
     pub const CANCEL_MCP_AUTH: &str = "CancelMcpAuth";
     pub const DISCONNECT_MCP_AUTH: &str = "DisconnectMcpAuth";
     pub const REFRESH_MCP_SERVERS: &str = "RefreshMcpServers";
+
+    // ── Outside agents (docs/mcp.md, "Outside agents") ───────────────────────
+    /// Stream: `{grants: [{id, client, redirectHost, createdAt}], asks:
+    /// [{id, client, redirectHost, at}]}` — the outside agents this device
+    /// let in, and the ones waiting for the person to answer.
+    pub const WATCH_OUTSIDE_AGENTS: &str = "WatchOutsideAgents";
+    /// `{id, allow}`: the person's answer to an outside agent waiting.
+    pub const RESOLVE_OUTSIDE_AGENT: &str = "ResolveOutsideAgent";
+    /// `{id}`: take an outside agent's grant back.
+    pub const REVOKE_OUTSIDE_AGENT: &str = "RevokeOutsideAgent";
 }
 
 /// Methods answered only over this device's own local IPC, never to a peer
@@ -845,6 +855,11 @@ pub fn local_only(method: &str) -> bool {
             | methods::REQUEST_MCP_CHANGE
             | methods::GET_MCP_REQUEST
             | methods::RESOLVE_MCP_REQUEST
+            // Who gets this device's tools from outside is the person's to
+            // say, in this device's app.
+            | methods::WATCH_OUTSIDE_AGENTS
+            | methods::RESOLVE_OUTSIDE_AGENT
+            | methods::REVOKE_OUTSIDE_AGENT
     )
 }
 
@@ -1200,6 +1215,17 @@ mod tests {
         assert!(local_only(methods::RESOLVE_MCP_REQUEST));
         assert!(peer_refused(methods::RESOLVE_MCP_REQUEST, &serde_json::Value::Null));
         assert!(!agent_allowed(methods::RESOLVE_MCP_REQUEST));
+        // Outside agents: no agent (inside or out) and no peer device lets
+        // one in or keeps one.
+        for method in [
+            methods::WATCH_OUTSIDE_AGENTS,
+            methods::RESOLVE_OUTSIDE_AGENT,
+            methods::REVOKE_OUTSIDE_AGENT,
+        ] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
     }
 
     #[test]

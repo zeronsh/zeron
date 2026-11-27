@@ -12,6 +12,8 @@
  *   time (device-link.ts). The DO builds that header itself: nothing a client
  *   puts in its own header reaches the host.
  * - host → DO: must carry `to = connId`; DO strips routing keys and delivers.
+ * - kind `mcp` (outside agents, mcp-relay.ts): between the DO itself and the
+ *   host only. A client's `mcp` frame is dropped; the host's are the DO's.
  *
  * Also holds small "sidecar" JSON slots the host publishes (repos/branches
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
@@ -21,6 +23,7 @@ import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, type Env } from "./env";
+import { MCP_KIND, McpRelay } from "./mcp-relay";
 import { RUNNER_DROP_PATH, admittedRunner, applyDrop, parseDrop, revoked, runnerDroppedKey, type RunnerDrop } from "./runner-revocation";
 
 export interface DeviceFrameHeader {
@@ -105,6 +108,7 @@ const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export class DeviceRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly blobs: BlobStore;
+  private readonly mcp: McpRelay;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -114,6 +118,7 @@ export class DeviceRoom implements DurableObject {
     );
     ensureNudges(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
+    this.mcp = new McpRelay(ctx.storage.sql, () => this.liveHost(), (ws, header, payload) => this.deliver(ws, header, payload));
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
@@ -157,6 +162,9 @@ export class DeviceRoom implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
+    // Outside agents (internal: mcp-oauth.ts): a code or token is its own
+    // proof; an ask needs the signed-in person.
+    if (url.pathname.startsWith("/mcp/")) return this.mcp.fetch(request, url, userId, this.getMeta("owner"));
     if (!userId) return new Response("unauthenticated", { status: 401 });
     const owner = this.getMeta("owner");
 
@@ -203,7 +211,10 @@ export class DeviceRoom implements DurableObject {
         nudgeInflight: []
       };
       pair[1].serializeAttachment(state);
-      if (role === "host") this.replayNudges(pair[1]);
+      if (role === "host") {
+        this.replayNudges(pair[1]);
+        this.mcp.hostJoined(pair[1]);
+      }
       // Tells the dialer its device was stamped (device-link.ts).
       const headers = callerDevice ? { [CALLER_DEVICE_HEADER]: callerDevice } : undefined;
       return new Response(null, { status: 101, webSocket: pair[0], headers });
@@ -317,6 +328,8 @@ export class DeviceRoom implements DurableObject {
       return;
     }
     if (state.role === "client") {
+      // Only the DO speaks for outside agents.
+      if (frame.header.k === MCP_KIND) return;
       const host = this.liveHost();
       if (!host) {
         // Host offline: bounce a relay-level error so the client can surface
@@ -343,6 +356,10 @@ export class DeviceRoom implements DurableObject {
       } catch { /* malformed ACK cannot retire work */ }
       return;
     }
+    if (frame.header.k === MCP_KIND) {
+      this.mcp.hostFrame(frame.header, frame.payload);
+      return;
+    }
     // Host frame: route by `to`.
     const to = frame.header.to;
     if (!to) return;
@@ -365,6 +382,7 @@ export class DeviceRoom implements DurableObject {
       }
       return;
     }
+    this.mcp.hostGone(ws);
     // A host socket went away. Only tear the clients' links down when NO live
     // host is left: a superseded predecessor closing (or a corpse the runtime
     // finally reaps) must not knock clients off the successor that already

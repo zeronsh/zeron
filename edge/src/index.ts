@@ -57,6 +57,12 @@
  *   POST /admin/cloud/limits            — ADMIN_TOKEN (a user's awake/chat caps)
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  *
+ * Outside agents (mcp-oauth.ts, docs/mcp.md "Outside agents"; pre-bearer):
+ *   GET  /.well-known/oauth-protected-resource[/mcp], /.well-known/oauth-authorization-server
+ *   POST /oauth/register | /oauth/token — public-client OAuth (PKCE S256)
+ *   GET|POST /oauth/authorize, GET /oauth/authorize/wait, GET /oauth/callback — consent pages
+ *   POST /mcp                           — an outside agent's MCP requests, to its device
+ *
  * User directory (user-directory.ts):
  *   POST /workos/webhook                — pre-bearer, WorkOS-signed user, org and membership events
  *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
@@ -76,6 +82,7 @@ import { chatRoute } from "./chat-route";
 import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
+import { handleMcpRoute } from "./mcp-oauth";
 import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
 import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
@@ -161,6 +168,11 @@ export default {
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
     if (authRouted) return authRouted;
+
+    // ── outside agents (pre-bearer: an agent's own OAuth tokens, never a
+    //    Zeron bearer; the consent pages sign the person in themselves) ─────
+    const mcpRouted = await handleMcpRoute(request, env, url);
+    if (mcpRouted) return mcpRouted;
 
     // ── operator usage export (ADMIN_TOKEN, not a JWT) and the Cloud
     //    engine's identity routes (pre-bearer: it is proving possession of

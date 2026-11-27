@@ -2599,6 +2599,26 @@
         "notice_remove": "An agent asks to remove {name}",
         "notice_enable": "An agent asks to turn on {name}",
         "notice_disable": "An agent asks to turn off {name}"
+      },
+      "outside": {
+        "title": "Agents outside Zeron",
+        "description": "Agents like Grok that you let use this device. They can read and message your chats. Chats they start are read-only and supervised, and they can't run a shell.",
+        "terms": "outside agents remote mcp grok connector oauth grant revoke access",
+        "granted": "Returns to {host} · allowed {date}",
+        "waiting": "Asking to connect · returns to {host}",
+        "review": "Review",
+        "revoke": "Revoke",
+        "ask_title": "Let {name} use Zeron on this device?",
+        "ask_body": "It signed in to Zeron in your browser and returns to {host}. It can read the chats on this device and message them, so an agent you already run keeps the access you gave it. Chats it starts are read-only and supervised, and it can't run a shell itself. You can revoke it here any time.",
+        "allow": "Allow",
+        "deny": "Deny",
+        "later": "Not now",
+        "couldnt": "Couldn't answer {name}",
+        "revoke_title": "Revoke {name}?",
+        "revoke_body": "It loses this device's tools at once. To come back, it has to sign in and ask you again.",
+        "revoke_failed": "Couldn't revoke {name}",
+        "notice": "{name} asks to use Zeron",
+        "notice_body": "Nothing is shared until you allow it on this device."
       }
     }
   },
