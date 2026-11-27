@@ -23,10 +23,31 @@
 //! The engine's edge, sign-in client and loopback port come from here (the
 //! engine this app starts is given them, src/engine/manager.rs).
 //!
-//! Zeron.app's beta (the `beta` feature) is production's only: edge.zeron.sh,
-//! its client and port 27641 (the only loopback production's WorkOS client
-//! accepts, shared with Zeron.app). It has no staging built in, and the
-//! variables below do nothing in it.
+//! Zeron.app (the `beta` feature: the app every package script builds) is
+//! production's: edge.zeron.sh, its client and port 27641 (the only loopback
+//! production's WorkOS client accepts), unless another edge is named. The
+//! engine's own variables name it first, as `zeron` reads them (crates/cli's
+//! env.rs: self-hosting, a local edge):
+//!   ZERON_EDGE_URL=<url>           the edge
+//!   ZERON_WORKOS_CLIENT_ID=<id>    the sign-in client
+//!   ZERON_CALLBACK_PORT=<n>        the loopback port that client redirects to
+//! Then the session kept in the engine's data dir does (`session.json`'s
+//! `edgeUrl` and `workosClientId`, which the engine writes with it): an app
+//! opened from the Dock or Finder gets launchd's environment, not the
+//! shell's, so without it a self-hosted session `zeron login` kept would meet
+//! production's edge every time the app is opened.
+//!
+//! A variable left unset (or empty) falls to the next. The client is the
+//! session's only where the session is that edge's; the port is never the
+//! session's (it doesn't say), so a client that redirects elsewhere needs
+//! `ZERON_CALLBACK_PORT` for a new sign-in. An empty `ZERON_WORKOS_CLIENT_ID`
+//! is `zeron`'s dev-mode auth, which needs a `ZERON_EDGE_TOKEN` this app never
+//! hands its engine: here it's unset, as any empty variable is.
+//! The engine it starts on Zeron.app's data is given the same, so the session
+//! kept there goes on working: started with production's over a self-hosted
+//! session, the engine handed it to production, which turned it down, and
+//! signed out. It has no staging built in, and the variables below do nothing
+//! in it.
 //!
 //! Development builds are staging's by default, production one variable
 //! away:
@@ -89,10 +110,11 @@ const STAGING: Env = Env {
     client: "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
     port: 27642,
 };
+/// `zeron`'s defaults (crates/cli's env.rs), and the engine's loopback port.
 const PRODUCTION: Env = Env {
     name: "production",
-    edge: "https://edge.zeron.sh",
-    client: "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    edge: zeron_cli::DEFAULT_EDGE_URL,
+    client: zeron_cli::DEFAULT_WORKOS_CLIENT_ID,
     port: 27641,
 };
 
@@ -126,15 +148,78 @@ pub struct Endpoint {
 }
 
 pub fn endpoint() -> Endpoint {
-    endpoint_with(|key| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty()))
+    let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
+    #[cfg(feature = "beta")]
+    let endpoint = {
+        let data_dir = crate::engine::manager::zeron_app_data_dir(&var, &crate::engine::manager::home());
+        endpoint_in(var, &data_dir)
+    };
+    #[cfg(not(feature = "beta"))]
+    let endpoint = endpoint_with(var);
+    endpoint
 }
 
-/// The beta's: production's, whatever the environment says. Nothing
-/// of staging's is built into it (`STAGING` isn't), and no variable reaches
-/// another edge, client or port.
+/// The beta's, for Zeron.app's engine with its data in `data_dir`: as
+/// [`endpoint_with`] says, with the session kept there.
 #[cfg(feature = "beta")]
-fn endpoint_with(_var: impl Fn(&str) -> Option<String>) -> Endpoint {
-    production()
+pub(crate) fn endpoint_in(var: impl Fn(&str) -> Option<String>, data_dir: &std::path::Path) -> Endpoint {
+    endpoint_with(var, kept_issuer(data_dir))
+}
+
+/// A development build's: as [`endpoint_with`] says. It follows no kept
+/// session (it never manages Zeron.app's engine).
+#[cfg(not(feature = "beta"))]
+pub(crate) fn endpoint_in(var: impl Fn(&str) -> Option<String>, _data_dir: &std::path::Path) -> Endpoint {
+    endpoint_with(var)
+}
+
+/// The edge and sign-in client that issued a session: what a kept one says
+/// of itself.
+#[cfg(any(feature = "beta", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct Issuer {
+    edge: String,
+    client: Option<String>,
+}
+
+/// The issuer the session kept in `data_dir` names (`session.json`'s
+/// `edgeUrl` and `workosClientId`), if it names one: a session kept before
+/// the engine wrote them, or none, doesn't.
+#[cfg(any(feature = "beta", test))]
+fn kept_issuer(data_dir: &std::path::Path) -> Option<Issuer> {
+    let raw = std::fs::read_to_string(data_dir.join("session.json")).ok()?;
+    let session: Json = serde_json::from_str(&raw).ok()?;
+    let said = |key: &str| {
+        let value = session.get(key)?.as_str()?.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    };
+    Some(Issuer { edge: said("edgeUrl")?, client: said("workosClientId") })
+}
+
+/// The beta's: production's, or the edge the engine's own variables name, as
+/// `zeron` reads them, or else the one that issued the session `kept` (see
+/// the top of this file). An edge alone keeps production's client, or the
+/// session's where it's that edge's, and production's port. Nothing of
+/// staging's is built into it (`STAGING` isn't), and the development
+/// variables reach nothing.
+#[cfg(feature = "beta")]
+fn endpoint_with(var: impl Fn(&str) -> Option<String>, kept: Option<Issuer>) -> Endpoint {
+    let bare = |url: &str| url.trim().trim_end_matches('/').to_owned();
+    let edge = var("ZERON_EDGE_URL").or_else(|| kept.as_ref().map(|kept| kept.edge.clone()));
+    let edge = bare(edge.as_deref().unwrap_or(PRODUCTION.edge));
+    let kept_here = kept.filter(|kept| bare(&kept.edge) == edge);
+    let client = var("ZERON_WORKOS_CLIENT_ID").or_else(|| kept_here.and_then(|kept| kept.client));
+    let client = client.as_deref().unwrap_or(PRODUCTION.client).trim().to_owned();
+    let port = var("ZERON_CALLBACK_PORT").and_then(|p| p.trim().parse().ok());
+    let port = port.unwrap_or(PRODUCTION.port);
+    let custom = (edge.as_str(), client.as_str(), port)
+        != (PRODUCTION.edge, PRODUCTION.client, PRODUCTION.port);
+    Endpoint {
+        name: if custom { "custom" } else { PRODUCTION.name },
+        edge,
+        client,
+        port,
+    }
 }
 
 /// A development build's: staging's by default, or as the variables say.
@@ -157,6 +242,7 @@ fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
 }
 
 /// Production's edge, sign-in client and loopback port.
+#[cfg(test)]
 pub fn production() -> Endpoint {
     Endpoint {
         name: PRODUCTION.name,
@@ -183,15 +269,103 @@ mod endpoint_tests {
 
     #[cfg(feature = "beta")]
     #[test]
-    fn a_beta_build_is_production_only() {
+    fn a_beta_build_is_production_unless_the_engines_variables_say() {
+        // Staging's development variables reach nothing.
         for vars in [staging_vars as fn(&str) -> Option<String>, |_: &str| None] {
-            let at = endpoint_with(vars);
+            let at = endpoint_with(vars, None);
             assert_eq!(
                 (at.name, at.edge.as_str(), at.client.as_str(), at.port),
                 ("production", "https://edge.zeron.sh", "client_01KWD0EAKZKD50YCQJNYSRE4BY", 27641)
             );
         }
-        assert_eq!(endpoint().edge, "https://edge.zeron.sh");
+        // `zeron`'s own (self-hosting): the engine this app starts keeps
+        // the session `zeron` signed in to there.
+        let at = endpoint_with(
+            |key| match key {
+                "ZERON_EDGE_URL" => Some("https://edge.example.com/".into()),
+                "ZERON_WORKOS_CLIENT_ID" => Some("client_self_hosted".into()),
+                "ZERON_CALLBACK_PORT" => Some("27700".into()),
+                _ => None,
+            },
+            None,
+        );
+        assert_eq!(at.name, "custom");
+        assert_eq!(at.edge, "https://edge.example.com");
+        assert_eq!(at.client, "client_self_hosted");
+        assert_eq!(at.port, 27700);
+        // An edge alone keeps production's client and port, as the engine does.
+        let at = endpoint_with(edge_only("https://edge.example.com"), None);
+        assert_eq!(at.name, "custom");
+        assert_eq!(at.client, PRODUCTION.client);
+        assert_eq!(at.port, PRODUCTION.port);
+        // Production's, named: production.
+        let at = endpoint_with(edge_only("https://edge.zeron.sh/"), None);
+        assert_eq!(at.name, "production");
+    }
+
+    #[cfg(feature = "beta")]
+    fn edge_only(edge: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |key| (key == "ZERON_EDGE_URL").then(|| edge.into())
+    }
+
+    /// An app opened from the Dock or Finder has none of the shell's
+    /// variables: it follows the edge that issued the session kept, so a
+    /// self-hosted one isn't handed to production.
+    #[cfg(feature = "beta")]
+    #[test]
+    fn a_beta_build_follows_the_edge_that_issued_the_kept_session() {
+        let kept = || Some(Issuer { edge: "https://edge.example.com/".into(), client: Some("client_self_hosted".into()) });
+        let at = endpoint_with(|_| None, kept());
+        assert_eq!(
+            (at.name, at.edge.as_str(), at.client.as_str(), at.port),
+            ("custom", "https://edge.example.com", "client_self_hosted", PRODUCTION.port)
+        );
+        // The variables come first, as for `zeron`: another edge named there
+        // keeps none of the session's.
+        let at = endpoint_with(edge_only("https://edge.other.example"), kept());
+        assert_eq!((at.edge.as_str(), at.client.as_str()), ("https://edge.other.example", PRODUCTION.client));
+        // The same edge named there keeps the session's client, unless one is
+        // named too.
+        let at = endpoint_with(edge_only("https://edge.example.com"), kept());
+        assert_eq!(at.client, "client_self_hosted");
+        let at = endpoint_with(
+            |key| match key {
+                "ZERON_WORKOS_CLIENT_ID" => Some("client_named".into()),
+                "ZERON_CALLBACK_PORT" => Some("27700".into()),
+                _ => None,
+            },
+            kept(),
+        );
+        assert_eq!((at.edge.as_str(), at.client.as_str(), at.port), ("https://edge.example.com", "client_named", 27700));
+        // A session that names no client keeps production's.
+        let at = endpoint_with(|_| None, Some(Issuer { edge: "https://edge.example.com".into(), client: None }));
+        assert_eq!(at.client, PRODUCTION.client);
+        // Production's session: production, as with none.
+        let prod = Some(Issuer { edge: PRODUCTION.edge.into(), client: Some(PRODUCTION.client.into()) });
+        assert_eq!(endpoint_with(|_| None, prod).name, "production");
+    }
+
+    /// What a kept session says issued it: `session.json`'s `edgeUrl` and
+    /// `workosClientId`, as the engine writes them.
+    #[test]
+    fn a_kept_session_names_its_issuer() {
+        let dir = std::env::temp_dir().join(format!("zgx-kept-issuer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("session.json");
+        assert_eq!(kept_issuer(&dir), None, "no session");
+        std::fs::write(&session, r#"{"refreshToken":"r","user":{"id":"u","email":"e@example.com"}}"#).unwrap();
+        assert_eq!(kept_issuer(&dir), None, "a session from before it said");
+        std::fs::write(&session, r#"{"refreshToken":"r","edgeUrl":" https://edge.example.com\n","workosClientId":"client_self_hosted"}"#).unwrap();
+        assert_eq!(
+            kept_issuer(&dir),
+            Some(Issuer { edge: "https://edge.example.com".into(), client: Some("client_self_hosted".into()) })
+        );
+        std::fs::write(&session, r#"{"refreshToken":"r","edgeUrl":"https://edge.example.com","workosClientId":""}"#).unwrap();
+        assert_eq!(kept_issuer(&dir).and_then(|issuer| issuer.client), None, "an empty client says none");
+        std::fs::write(&session, "not json").unwrap();
+        assert_eq!(kept_issuer(&dir), None, "unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(not(feature = "beta"))]

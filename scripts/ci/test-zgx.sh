@@ -5,6 +5,10 @@
 #   scripts/ci/test-zgx.sh rust      cargo test --bin zeron-zgx (its unit tests,
 #                                    src/plugins/*_tests.rs among them), the
 #                                    known ones skipped by exact name
+#   scripts/ci/test-zgx.sh rust-beta the same with --features beta: the build
+#                                    every package script makes (Zeron.app), whose
+#                                    own tests (#[cfg(feature = "beta")]) the
+#                                    other runs never reach
 #   scripts/ci/test-zgx.sh tests     cargo test --test '*' (apps/zgx/tests/*.rs,
 #                                    the app's integration tests), every binary
 #                                    run however others fail (--no-fail-fast),
@@ -19,13 +23,15 @@ known="$root/scripts/ci/zgx-known-failures.txt"
 listed() { sed -n "s/^$1: //p" "$known"; }
 
 case "${1:-}" in
-  rust)
+  rust | rust-beta)
+    features=()
+    if [ "$1" = rust-beta ]; then features=(--features beta); fi
     skips=()
     while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed rust)
     cd "$root/apps/zgx"
     # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
     # calls unbound.)
-    exec cargo test --locked --bin zeron-zgx -- --exact ${skips[@]+"${skips[@]}"}
+    exec cargo test --locked ${features[@]+"${features[@]}"} --bin zeron-zgx -- --exact ${skips[@]+"${skips[@]}"}
     ;;
   tests)
     skips=()
@@ -62,7 +68,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "usage: $0 rust | tests | ui [zgx]" >&2
+    echo "usage: $0 rust | rust-beta | tests | ui [zgx]" >&2
     exit 2
     ;;
 esac
