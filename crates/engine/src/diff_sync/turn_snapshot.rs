@@ -366,7 +366,7 @@ async fn snapshot_git(
     args: &[&str],
     stdin: Option<Vec<u8>>,
 ) -> std::io::Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = crate::repos::git_command();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
