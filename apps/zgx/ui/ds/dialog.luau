@@ -268,10 +268,10 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 		-- What it asks, scrolling when the window is too short for it all.
 		-- (Inset by a focus ring's reach inside the scroll, and drawn back out
 		-- by as much, so a field's ring isn't clipped and the fields stay
-		-- where they were.)
+		-- where they were. The column stretches it: full width of its own, it
+		-- would be the column's, the margins not counted, its content short.)
 		if #children > 0
 			then ui.scroll {
-				w_full = true,
 				-- (As tall as what's in it, up to what the window leaves once
 				-- its words, its buttons and its margins are placed.)
 				h = content_height,
