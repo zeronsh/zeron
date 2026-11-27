@@ -267,6 +267,35 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
 end
 
+test("the settings search shortcut and clear button sit evenly inside the field", function()
+	local app = open()
+	local search = "#settings-search"
+	local input = search .. ' >> role:textbox "Search settings"'
+	local clear = search .. ' >> role:button "Clear"'
+	local shortcut = if app:has(search .. ' >> "Command F"') then search .. ' >> "Command F"' else search .. ' >> "Ctrl F"'
+	local function even(target: string)
+		-- The field spans the top of the search column; its textbox fills
+		-- the height inside the border, even when results appear below it.
+		local x, y, w = box(app, search)
+		local _, iy, _, ih = box(app, input)
+		local tx, ty, tw, th = box(app, target)
+		expect(tw > 0 and th > 0).to_be(true)
+		local right = x + w - tx - tw
+		expect(right).to_be(ty - y)
+		expect(ty - iy).to_be(iy + ih - ty - th)
+	end
+
+	even(shortcut)
+	app:type(input, "d")
+	app:frames(4)
+	even(clear)
+	app:click(clear)
+	app:frames(4)
+	expect(app:text(input)).to_be("")
+	expect(app:tree(input)).to_contain("focused")
+	even(shortcut)
+end)
+
 test("Profile, too narrow for two columns, centres the card over groups at the page's measure", function()
 	local app = open("Account")
 	-- The narrowest main window (760 wide).

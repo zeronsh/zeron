@@ -41,7 +41,14 @@ return function(props: Props): Node
 		trailing = ui.row {
 			gap = "$space.1",
 			items = "center",
-			pr = "$space.1",
+			-- The frame already leaves room for its clear button. The
+			-- shorter caps need half the height difference at their end.
+			pr = function()
+				if props.shortcut and value:get() == "" then
+					return ui.raw((control.FIELD_BUTTON_H[size] - control.SMALL_CAP_H) / 2, "even inset around the shortcut")
+				end
+				return "$space.1"
+			end,
 			if props.results
 				then ui.show(function()
 					return value:get() ~= ""
@@ -71,6 +78,9 @@ return function(props: Props): Node
 		escape_clears = true,
 		inputmode = "search",
 		trailing = trailing,
+		trailing_hidden = function()
+			return if value:get() == "" then props.shortcut == nil else props.results == nil
+		end,
 		size = size,
 		rounded = if props.shape == "pill" then "$radius.full" else nil,
 		quiet = props.quiet,
