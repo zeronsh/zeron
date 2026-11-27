@@ -1691,7 +1691,12 @@ async fn stale_prompt_complete_never_settles_a_newer_turn() {
     // Grok-style `_meta` usage on the response is captured.
     assert!(events.contains(&AgentEvent::Usage {
         input_tokens: 9,
-        output_tokens: 4
+        output_tokens: 4,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        reasoning_tokens: None,
+        cost_usd: None,
+        model: None
     }));
 }
 

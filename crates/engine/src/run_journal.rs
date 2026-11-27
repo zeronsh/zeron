@@ -230,6 +230,15 @@ impl RunJournal {
         self.shared.lock()
     }
 
+    /// The token usage ledger beside the journals directory
+    /// (`{data_dir}/usage-events.jsonl`).
+    pub fn usage_ledger_path(&self) -> PathBuf {
+        self.dir
+            .parent()
+            .unwrap_or(self.dir.as_path())
+            .join("usage-events.jsonl")
+    }
+
     fn path_for(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.jsonl", sanitize_id(chat_id)))
     }

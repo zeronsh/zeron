@@ -1332,11 +1332,27 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_label: Option<String>,
     },
-    /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
+    /// Provider-reported token usage for one response or turn, depending on
+    /// the harness. The engine writes these to its usage ledger; never
+    /// persisted to docs. Cache, reasoning and cost fields are additive:
+    /// providers report different subsets of them.
     #[serde(rename_all = "camelCase")]
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<u64>,
+        /// Cost as the provider reported it, never a price-table estimate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        /// The model this usage belongs to when the harness says it on the
+        /// usage itself. The engine falls back to the run's requested model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per

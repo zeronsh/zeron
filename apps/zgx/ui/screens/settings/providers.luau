@@ -24,6 +24,7 @@ local registry = require("@account/registry")
 local add_agent = require("@app/screens/settings/add_agent")
 local sign_in_terminal = require("@app/screens/settings/sign_in_terminal")
 local cloud = require("@account/cloud")
+local usage_sheet = require("@app/screens/settings/usage_sheet")
 
 local M = {}
 
@@ -175,6 +176,11 @@ local function go(v: string)
 	end
 end
 local nav = { go = go, device = device_name }
+
+-- The all-providers usage sheet over this page. It follows the same device
+-- choice, so Cloud and another computer are read in place rather than only
+-- this Mac.
+local usage_open = require("@app/screens/settings/usage_open")
 
 local function by_id(a: agents.Agent): string
 	return a.id
@@ -983,7 +989,19 @@ local function agents_page(): Node
 		-- Agents are per device: which one's (a choice once there's more
 		-- than this one).
 		-- (The same choice as Plugins': screens/settings/devices.)
-		trail = devices_page.picker(shown_device, choose_device, cloud_choice),
+		trail = ui.row {
+			gap = "$space.2",
+			items = "center",
+			ds.Button {
+				ui.t("settings.providers.usage.open"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					usage_open:set(true)
+				end,
+			},
+			devices_page.picker(shown_device, choose_device, cloud_choice),
+		},
 		-- (At the top right, on the title's line, as Plugins' is.)
 		trail_top = true,
 		ui.presence(kind, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),

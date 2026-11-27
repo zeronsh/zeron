@@ -390,6 +390,9 @@ pub mod methods {
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
+    /// `{from?, to?, bucket?}` → the device's engine-owned token usage
+    /// ledger aggregated for analytics. Times are Unix seconds.
+    pub const GET_USAGE_SUMMARY: &str = "GetUsageSummary";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     /// `{harness, provider, key}`: an API key for one model provider of an

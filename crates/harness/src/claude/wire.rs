@@ -279,6 +279,10 @@ pub(crate) struct ResultFrame {
     pub errors: Vec<Value>,
     #[serde(default)]
     pub usage: UsageBody,
+    /// The turn's cost as Claude Code itself reports it. Subscription usage
+    /// often has none; absent is never estimated.
+    #[serde(default, rename = "total_cost_usd")]
+    pub total_cost_usd: Option<f64>,
     #[serde(default)]
     pub session_id: Option<String>,
     /// Set on API failures the CLI still files under `subtype: "success"`
@@ -316,6 +320,15 @@ pub(crate) struct UsageBody {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    /// Anthropic folds thinking into output; newer CLI shapes break it out
+    /// here (`output_tokens_details.thinking_tokens`). Keep the raw object:
+    /// the field is young enough that shape tolerance beats another struct.
+    #[serde(default)]
+    pub output_tokens_details: serde_json::Value,
 }
 
 /// A CLI→client control request (`can_use_tool` is the one we act on).

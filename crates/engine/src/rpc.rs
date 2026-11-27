@@ -596,6 +596,18 @@ struct ListAgentAccountsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GetUsageSummaryParams {
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    /// `hour`, `day` (default) or `week`.
+    #[serde(default)]
+    bucket: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentAccountParams {
     harness: HarnessId,
     account_id: String,
@@ -2936,6 +2948,7 @@ fn forwardable(method: &str) -> bool {
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
+            | methods::GET_USAGE_SUMMARY
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
             | methods::RENAME_AGENT_ACCOUNT
@@ -6278,6 +6291,15 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
+            }
+            methods::GET_USAGE_SUMMARY => {
+                let p: GetUsageSummaryParams = parse_params(params)?;
+                let bucket = match p.bucket.as_deref().unwrap_or("day") {
+                    "hour" => 3_600,
+                    "week" => 7 * 86_400,
+                    _ => 86_400,
+                };
+                RpcReply::value(&self.sessions.usage_summary(p.from, p.to, bucket))
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
                 self.voice.retire();

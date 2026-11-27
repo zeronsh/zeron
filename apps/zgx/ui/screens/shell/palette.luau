@@ -25,6 +25,7 @@ local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
+local usage_open = require("@app/screens/settings/usage_open")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -508,6 +509,20 @@ local function root(): { Item }
 		keywords = "reload refresh scripts ui window",
 		run = function()
 			host.invoke("app.reload_interface")
+		end,
+	})
+	-- Usage is a surface over Providers rather than a settings page of its
+	-- own: navigate there first, then open the sheet by its shared state.
+	table.insert(out, {
+		id = "g-usage",
+		label = locale.s("shell.palette.usage"),
+		section = locale.s("shell.palette.go_to"),
+		scope = "settings",
+		icon = "fast-tier",
+		keywords = "limits quota tokens providers accounts usage",
+		verb = locale.s("shell.palette.open"),
+		run = function()
+			usage_open:set(true)
 		end,
 	})
 	-- Where settings go: each of its pages.

@@ -1154,6 +1154,11 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
         "usage" => vec![AgentEvent::Usage {
             input_tokens: frame.get("input").and_then(Value::as_u64).unwrap_or(0),
             output_tokens: frame.get("output").and_then(Value::as_u64).unwrap_or(0),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            cost_usd: None,
+            model: frame.get("model").and_then(Value::as_str).map(str::to_owned),
         }],
         "turn" => {
             let status = frame.get("status").and_then(Value::as_str).unwrap_or("");

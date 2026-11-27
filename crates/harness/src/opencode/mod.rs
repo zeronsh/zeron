@@ -2353,7 +2353,7 @@ async fn run_session(session: Session) {
     // A stop the server never acknowledged: the turn may still be running,
     // so the runtime is torn down and the stop reported only once it is gone.
     let mut stop_teardown = false;
-    let mut pending_usage: Option<AgentEvent> = None;
+    let mut pending_usage: PendingUsage = HashMap::new();
     let mut done_sent = false;
 
     // Post-abort grace: the abort endpoint promised an idle; if it never
@@ -2371,13 +2371,14 @@ async fn run_session(session: Session) {
                 continue $label;
             }
             turn.active = false;
-            if let Some(usage) = pending_usage.take()
+            if let Some(usage) = pending_usage_event(&pending_usage)
                 && !interrupt_requested
                 && !stopping
                 && !send(&event_tx, usage).await
             {
                 break $label;
             }
+            pending_usage.clear();
             if interrupt_requested || stopping {
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
@@ -3669,6 +3670,112 @@ type RequestInput = Box<
         + Sync,
 >;
 
+/// One assistant message's provider-reported usage. `message.updated` can
+/// repeat a message as it settles, so the turn keeps the latest row per
+/// message id and sums distinct messages at idle: each step's tokens count
+/// once, never once per update and never only the last step.
+#[derive(Default, Clone)]
+struct UsageStep {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    reasoning: u64,
+    cost: Option<f64>,
+    model: Option<String>,
+}
+
+type PendingUsage = HashMap<String, UsageStep>;
+
+fn usage_step(info: &Value) -> Option<UsageStep> {
+    let tokens = info.get("tokens")?;
+    let count = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| tokens.get(*key).and_then(Value::as_u64))
+            .unwrap_or(0)
+    };
+    let step = UsageStep {
+        input: count(&["input"]),
+        output: count(&["output"]),
+        cache_read: tokens
+            .get("cache")
+            .and_then(|cache| cache.get("read"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_creation: tokens
+            .get("cache")
+            .and_then(|cache| cache.get("write"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        reasoning: count(&["reasoning"]),
+        cost: info
+            .get("cost")
+            .and_then(Value::as_f64)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0),
+        model: info
+            .get("modelID")
+            .and_then(Value::as_str)
+            .or_else(|| info.get("model").and_then(Value::as_str))
+            .or_else(|| {
+                info.get("model")
+                    .and_then(|model| model.get("id"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_owned),
+    };
+    (step.input > 0
+        || step.output > 0
+        || step.cache_read > 0
+        || step.cache_creation > 0
+        || step.reasoning > 0
+        || step.cost.is_some_and(|cost| cost > 0.0))
+    .then_some(step)
+}
+
+fn pending_usage_event(steps: &PendingUsage) -> Option<AgentEvent> {
+    if steps.is_empty() {
+        return None;
+    }
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut cache_read = 0u64;
+    let mut cache_creation = 0u64;
+    let mut reasoning = 0u64;
+    let mut cost = 0f64;
+    let mut any_cost = false;
+    let mut model: Option<&str> = None;
+    let mut mixed_models = false;
+    for step in steps.values() {
+        input = input.saturating_add(step.input);
+        output = output.saturating_add(step.output);
+        cache_read = cache_read.saturating_add(step.cache_read);
+        cache_creation = cache_creation.saturating_add(step.cache_creation);
+        reasoning = reasoning.saturating_add(step.reasoning);
+        if let Some(step_cost) = step.cost {
+            cost += step_cost;
+            any_cost = true;
+        }
+        match (model, step.model.as_deref()) {
+            (None, some) => model = some,
+            (Some(one), Some(other)) if one != other => mixed_models = true,
+            _ => {}
+        }
+    }
+    Some(AgentEvent::Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_input_tokens: (cache_read > 0).then_some(cache_read),
+        cache_creation_input_tokens: (cache_creation > 0).then_some(cache_creation),
+        reasoning_tokens: (reasoning > 0).then_some(reasoning),
+        cost_usd: any_cost.then_some(cost),
+        model: if mixed_models {
+            None
+        } else {
+            model.map(str::to_owned)
+        },
+    })
+}
+
 struct BusCtx<'a> {
     event: &'a Value,
     session_id: &'a str,
@@ -3681,7 +3788,7 @@ struct BusCtx<'a> {
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
     unbound_children: &'a mut HashMap<String, String>,
     turn: &'a mut TurnState,
-    pending_usage: &'a mut Option<AgentEvent>,
+    pending_usage: &'a mut PendingUsage,
     context_windows: &'a HashMap<String, u64>,
     /// Permission/question ids already handled (a reconnect re-lists them).
     seen_requests: &'a mut std::collections::HashSet<String>,
@@ -3967,23 +4074,18 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     .assistant_messages
                     .entry(message.to_owned())
                     .or_insert(role == "assistant");
-                // Token usage rides the assistant message; the last one
-                // before idle wins, emitted right before Done.
+                // Token usage rides the assistant message. The turn keeps the
+                // latest row per message and emits the steps' sum before Done.
                 if role == "assistant"
-                    && let Some(tokens) = info.get("tokens")
+                    && info.get("tokens").is_some()
                 {
                     if let Some(usage) = context_usage_event(info, context_windows)
                         && !send(event_tx, usage).await
                     {
                         return BusOutcome::ConsumerGone;
                     }
-                    let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-                    let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
-                    if input > 0 || output > 0 {
-                        *pending_usage = Some(AgentEvent::Usage {
-                            input_tokens: input,
-                            output_tokens: output,
-                        });
+                    if let Some(step) = usage_step(info) {
+                        pending_usage.insert(message.to_owned(), step);
                     }
                 }
                 let events = replay_pending(main_feed, message, true, turn);

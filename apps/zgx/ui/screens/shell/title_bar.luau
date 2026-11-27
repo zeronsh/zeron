@@ -12,6 +12,7 @@ local route = require("@app/screens/shell/route")
 local fit = require("@app/screens/shell/fit")
 local boundary = require("@app/screens/shell/boundary")
 local locale = require("@ds/locale")
+local usage_open = require("@app/screens/settings/usage_open")
 
 -- The actions' last width, kept across a reload of the scripts.
 local actions_width = ui.state("shell_titlebar_actions_w", 0)
@@ -138,6 +139,17 @@ return function(props: Props): Node
 				),
 			}
 		),
+		ds.IconButton {
+			label = ui.t("shell.palette.usage"),
+			tooltip_side = "bottom",
+			w = size,
+			h = size,
+			tone = "bar",
+			on_click = function()
+				usage_open:set(true)
+			end,
+			ds.Icon { name = "fast-tier", size = 16 },
+		},
 		ui.show(
 			function(): boolean
 				-- (A plugin's page has a panel of its own too.)

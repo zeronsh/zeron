@@ -541,6 +541,35 @@ agent_stub.target = function(device: string?)
 	log(`agents.target:{device or ""}`)
 	agents.now:set(agents_of(device))
 end
+agent_stub.watch_device = function(key: string)
+	log(`agents.watch_device:{key}`)
+end
+agent_stub.refresh_device = function(key: string)
+	log(`agents.refresh_device:{key}`)
+end
+-- Token analytics the Usage sheet reads. A test fills
+-- `settings_stub_usage_summary` with the engine's summary shape.
+local token_summary = ui.state("settings_stub_usage_summary", {
+	totals = {},
+	buckets = {},
+	byHarness = {},
+	byModel = {},
+	byAccount = {},
+	coverage = {},
+} :: any)
+agent_stub.usage_summary = function(key: string, _from: number, _to: number, _bucket: string): any
+	log(`agents.usage_summary:{key}`)
+	return {
+		await = function(_self: any): any
+			return token_summary:peek()
+		end,
+		after = function(_self: any, ok: ((any) -> ())?)
+			if ok then
+				ok(token_summary:peek())
+			end
+		end,
+	}
+end
 -- A sign-in here is Claude's that asks for a code pasted back (no loopback
 -- port free); the code finishes it with an account, or Cancel gives it up.
 local function set_login(id: string, login: string, account: any?)

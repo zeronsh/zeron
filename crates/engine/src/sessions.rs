@@ -315,6 +315,7 @@ struct Inner {
     /// Per chat: who has its transcript open now, and when the last left.
     viewers: Arc<Viewers>,
     journal: Arc<RunJournal>,
+    usage_ledger: crate::usage_ledger::UsageLedger,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
     /// doc-host reference each other through Arcs, so this back-edge must be
@@ -552,6 +553,7 @@ impl SessionsEngine {
                 ipc_token_file: Mutex::new(None),
                 mcp_endpoint: Mutex::new(None),
                 viewers: Arc::default(),
+                usage_ledger: crate::usage_ledger::UsageLedger::new(journal.usage_ledger_path()),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -680,6 +682,17 @@ impl SessionsEngine {
     /// and a parent woken by its children's reports couldn't answer them).
     async fn ipc_port_ready(&self, limit: std::time::Duration) {
         self.inner.ipc_port_ready(limit).await;
+    }
+
+    /// Aggregate this device's engine-owned token usage ledger
+    /// (`usage-events.jsonl`). `from`/`to` are Unix seconds, `[from, to)`.
+    pub fn usage_summary(
+        &self,
+        from: Option<i64>,
+        to: Option<i64>,
+        bucket_seconds: i64,
+    ) -> serde_json::Value {
+        self.inner.usage_ledger.summary(from, to, bucket_seconds)
     }
 
     /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
@@ -2922,6 +2935,72 @@ impl Inner {
         })
     }
 
+    /// The usage leaf inside an event, however many subagent wrappers it has.
+    fn usage_leaf(event: &AgentEvent) -> Option<(u64, u64, Option<u64>, Option<u64>, Option<u64>, Option<f64>, Option<String>)> {
+        match event {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                reasoning_tokens,
+                cost_usd,
+                model,
+            } => Some((
+                *input_tokens,
+                *output_tokens,
+                *cache_read_input_tokens,
+                *cache_creation_input_tokens,
+                *reasoning_tokens,
+                *cost_usd,
+                model.clone(),
+            )),
+            AgentEvent::Subagent { event, .. } => Self::usage_leaf(event),
+            _ => None,
+        }
+    }
+
+    /// Write one provider-reported usage event to the engine-owned ledger.
+    /// Best effort: analytics must never make the run itself fail.
+    fn record_usage(&self, chat_id: &str, event: &AgentEvent, seq: u64) {
+        let Some((input, output, cache_read, cache_creation, reasoning, cost, event_model)) =
+            Self::usage_leaf(event)
+        else {
+            return;
+        };
+        // No account attribution yet: a run carries only credential material,
+        // not the stable account row it came from, and a hash of a rotating
+        // token would be both weak identity and unnecessary secret-derived
+        // data at rest. The ledger schema leaves room for a real account id.
+        let (harness, request_model) = lock(&self.runs)
+            .get(chat_id)
+            .map(|run| {
+                (
+                    run.runtime_config.harness_id.as_str().to_owned(),
+                    run.runtime_config.request.model.clone(),
+                )
+            })
+            .unwrap_or_else(|| ("unknown".into(), None));
+        let row = crate::usage_ledger::UsageRecord {
+            at: chrono::Utc::now().timestamp(),
+            device_id: self.device_id.clone(),
+            chat_id: chat_id.to_owned(),
+            harness,
+            model: event_model.or(request_model),
+            account_key: None,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+            reasoning_tokens: reasoning,
+            cost_usd: cost,
+            journal_seq: (seq > 0).then_some(seq),
+        };
+        if let Err(err) = self.usage_ledger.append(&row) {
+            tracing::warn!(chat = %chat_id, error = %err, "usage ledger append failed");
+        }
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// Sanitize before ANY journal/publish path, including nested subagent events.
     async fn prepare_generated_image(
@@ -3068,6 +3147,7 @@ impl Inner {
                 0
             }
         };
+        self.record_usage(chat_id, event, seq);
         // The journal now closes the turn a Stop marked (see
         // `SessionsEngine::note_user_stop`).
         if matches!(event, AgentEvent::Done { .. }) {

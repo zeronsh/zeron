@@ -5231,6 +5231,11 @@ fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> 
     (input.is_some() || output.is_some()).then(|| AgentEvent::Usage {
         input_tokens: input.unwrap_or(0),
         output_tokens: output.unwrap_or(0),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        reasoning_tokens: None,
+        cost_usd: None,
+        model: None,
     })
 }
 

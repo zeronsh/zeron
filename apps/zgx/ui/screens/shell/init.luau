@@ -45,6 +45,7 @@ local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
+local usage_sheet = require("@app/screens/settings/usage_sheet")
 
 local TITLE_H = 38
 
@@ -711,6 +712,8 @@ return function(): Node
 		-- What's said for a moment (a plugin's toast, a notice): over
 		-- everything, once for the window.
 		ds.toast.Host {},
+		-- Usage over whatever is showing: opening it must not leave the chat.
+		usage_sheet.global(),
 		-- A link's context menu (ds/menu_at: a span has no box to hang
 		-- one from), once for the window.
 		MenuAt.Host {},
