@@ -187,6 +187,33 @@ test("an update waiting says why in the engine's words, or its own", function()
 	expect(app:has('"Waiting for the current run"')).to_be(true)
 end)
 
+test("a ready restart counts only this device's running chats", function()
+	local app = mount("updates_fixture.luau")
+	app:resize(900, 700)
+	local function chat(id: string, device: string): any
+		return { id = id, device = device, status = "working", title = id }
+	end
+	app:set_state("sessions", {
+		state = "ready",
+		here = "mac",
+		devices = {},
+		projects = {},
+		chats = { chat("a", "mac"), chat("b", "phone"), chat("c", "phone") },
+		archived = {},
+		places = { pinned = {}, sections = {} },
+		places_ready = true,
+	})
+	local ready = row("here", "Zeron", "zeron", "restart")
+	ready.kind = "zeron"
+	ready.phase = "ready"
+	app:set_state("updates", { rows = { ready } })
+	app:frames(10)
+	app:click("#updates-button")
+	app:frames(10)
+	expect(app:has('"Stops 1 running chat, which picks up again after"')).to_be(true)
+	expect(app:has('"Stops 3 running chats, which pick up again after"')).to_be(false)
+end)
+
 test("a Mac another device updated offers to reopen on the new version", function()
 	local app = mount("updates_fixture.luau")
 	app:resize(900, 700)
