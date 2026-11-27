@@ -253,8 +253,8 @@ ui.shared("agent_icons", {} :: { [string]: string }):set({
 local model = {
 	here = "mac",
 	devices = {
-		{ id = "mac", name = "MacBook Pro", platform = "macos", here = true },
-		{ id = "box", name = "devbox", platform = "linux", here = false },
+		{ id = "mac", name = "MacBook Pro", platform = "macos", here = true, composes = true },
+		{ id = "box", name = "devbox", platform = "linux", here = false, composes = true },
 	} :: { any },
 	projects = {
 		{ id = "atlas", name = "Atlas", device = "mac", path = "/work/atlas", git = true },
@@ -648,11 +648,49 @@ projects_stub.folders = function(device: string, path: string?): any
 			entries = { { name = "folders", is_dir = true, is_repo = false }, { name = "run", is_dir = false, is_repo = false } },
 		})
 	end
+	-- (Code: a folder holding several repositories, among them.)
+	if at == "/Users/me/code" then
+		return answer({
+			path = at,
+			truncated = false,
+			entries = {
+				{ name = "acme", is_dir = true, is_repo = false },
+				{ name = "zephyr", is_dir = true, is_repo = true },
+			},
+		})
+	end
+	if at == "/Users/me/code/acme" then
+		return answer({
+			path = at,
+			truncated = false,
+			entries = {
+				{ name = "api", is_dir = true, is_repo = true },
+				{ name = "packages", is_dir = true, is_repo = false },
+				{ name = "web", is_dir = true, is_repo = true },
+				{ name = "worker", is_dir = true, is_repo = true },
+				{ name = "AGENTS.md", is_dir = false, is_repo = false },
+			},
+		})
+	end
 	-- (A drive with a project in it already.)
 	if at == "/work" then
 		return answer({ path = at, truncated = false, entries = { { name = "atlas", is_dir = true, is_repo = true } } })
 	end
 	return answer({ path = at, truncated = false, entries = { { name = "zephyr", is_dir = true, is_repo = true } } })
+end
+-- Acme's repositories, as its host lists them for a worktree of it.
+chat_store.repositories = function(path: string, _device: string?): any
+	if path ~= "/Users/me/code/acme" then
+		return answer({ repo = true, list = {} })
+	end
+	return answer({
+		repo = false,
+		list = {
+			{ path = "api", branch = "main" },
+			{ path = "web", branch = "main" },
+			{ path = "worker", branch = "develop" },
+		},
+	})
 end
 projects_stub.drives = function(device: string): any
 	note(`drives:{device}`)
@@ -685,18 +723,171 @@ projects_stub.clone = function(device: string, url: string, parent: string): any
 	return answer({ path = `{parent}/{name}`, name = name })
 end
 local made = 0
-projects_stub.create = function(device: string, path: string, git: boolean, repo: string?): any
+projects_stub.create = function(device: string, path: string, git: boolean, repo: string?, named: string?): any
 	-- (A Cloud project's repository after it.)
-	note(`create:{device}:{path}:{tostring(git)}{if repo then `:{repo}` else ""}`)
+	note(`create:{device}:{path}:{tostring(git)}{if repo then `:{repo}` else ""}{if named then `:{named}` else ""}`)
 	made += 1
 	local id = `new{made}`
 	ui.after(0, function()
-		local name = string.match(path, "([^/\\]+)$") or path
+		local name = named or string.match(path, "([^/\\]+)$") or path
 		table.insert(model.projects, { id = id, name = name, device = device, path = path, git = git, github = repo })
 		publish()
 	end)
 	return answer(id)
 end
+-- The device's repositories (@account/projects), as its host finds them:
+-- this Mac's, newest worked-in first (one with no commit yet); the box's,
+-- a few. A project of repositories (`fixture.composed_project`) includes
+-- three of them, one gone from its place; Atlas is one repository.
+local function library_of(device: string): { any }
+	local function at(ago_h: number): number
+		return (NOW - ago_h * HOUR) * 1000
+	end
+	if device == "box" then
+		return {
+			{ path = "/home/me/src/borealis", name = "borealis", branch = "main", github = "northwind/borealis", touched = at(3) },
+			{ path = "/home/me/src/ingest", name = "ingest", branch = "main", github = "northwind/ingest", touched = at(30) },
+		}
+	end
+	return {
+		{ path = "/Users/me/code/api", name = "api", branch = "main", github = "acme/api", touched = at(0.2) },
+		{ path = "/Users/me/work/web-app", name = "web-app", branch = "develop", github = "acme/web-app", touched = at(1) },
+		{ path = "/Users/me/code/design-system", name = "design-system", branch = "main", github = "acme/design-system", touched = at(5) },
+		{ path = "/work/atlas", name = "atlas", branch = "main", github = "acme/atlas", touched = at(9), kept = true },
+		{ path = "/Users/me/code/infra", name = "infra", branch = "main", github = "acme/infra", touched = at(26) },
+		{ path = "/Users/me/code/zephyr", name = "zephyr", branch = "main", touched = at(50) },
+		{ path = "/Users/me/notes", name = "notes", branch = "main", touched = at(80) },
+		{ path = "/Users/me/code/playground", name = "playground", empty = true, branch = "main", touched = at(120), kept = true },
+		{ path = "/Users/me/dotfiles", name = "dotfiles", branch = "master", github = "me/dotfiles", touched = at(400) },
+	}
+end
+local libraries: { [string]: { any } } = {}
+local function library(device: string): { any }
+	if not libraries[device] then
+		libraries[device] = library_of(device)
+	end
+	return libraries[device]
+end
+projects_stub.local_repositories = function(device: string, _refresh: boolean?): any
+	note(`local_repositories:{device}`)
+	return answer({
+		list = table.clone(library(device)),
+		parent = if device == "box" then "/home/me/src" else "/Users/me/code",
+		home = HOMES[device],
+		publish = device == "mac",
+		truncated = false,
+	})
+end
+-- What a project of repositories includes, by its folder.
+local included: { [string]: { any } } = {
+	["/Users/me/.zeron/projects/Acme"] = {
+		{ path = "api", branch = "main", location = "/Users/me/code/api", github = "acme/api" },
+		{ path = "docs", empty = true, missing = true, location = "/Users/me/code/docs" },
+		{ path = "web", branch = "develop", location = "/Users/me/work/web-app", github = "acme/web-app" },
+	},
+}
+projects_stub.repositories = function(device: string, path: string): any
+	note(`repositories:{device}:{path}`)
+	if path == "/Users/me/code/acme" then
+		return chat_store.repositories(path)
+	end
+	local inc = included[path]
+	if not inc then
+		return answer({ repo = true, list = {} })
+	end
+	local list = {}
+	for _, r in inc do
+		table.insert(list, table.clone(r))
+	end
+	return answer({ repo = false, list = list })
+end
+local function name_of(path: string): string
+	return string.match(path, "([^/\\]+)$") or path
+end
+projects_stub.set_repositories = function(device: string, path: string, members: { any }): any
+	local names = {}
+	local next = {}
+	for _, m in members do
+		local name = m.name or name_of(m.path)
+		table.insert(names, name)
+		local known: any = nil
+		for _, r in library(device) do
+			if r.path == m.path then
+				known = r
+			end
+		end
+		table.insert(next, { path = name, location = m.path, branch = known and known.branch, github = known and known.github, empty = if known then known.empty else true, missing = known == nil or nil })
+	end
+	note(`set_repositories:{device}:{path}:{table.concat(names, ",")}`)
+	included[path] = next
+	return projects_stub.repositories(device, path)
+end
+projects_stub.compose = function(device: string, name: string, members: { any }): any
+	local paths = {}
+	for _, m in members do
+		table.insert(paths, name_of(m.path))
+	end
+	note(`compose:{device}:{name}:{table.concat(paths, ",")}`)
+	local folder = `{HOMES[device]}/.zeron/projects/{name}`
+	projects_stub.set_repositories(device, folder, members)
+	return answer({ path = folder })
+end
+projects_stub.new_repository = function(device: string, ask: any): any
+	note(`new_repository:{device}:{ask.name}:{ask.parent or "-"}:{tostring(ask.empty == true)}:{tostring(ask.publish == true)}`)
+	if ask.name == "taken" then
+		return answer({ refused = `Already exists: /Users/me/code/taken` })
+	end
+	local parent = ask.parent or (if device == "box" then "/home/me/src" else "/Users/me/code")
+	local repo = { path = `{parent}/{ask.name}`, name = ask.name, branch = "main", empty = ask.empty == true or nil, touched = NOW * 1000, kept = true, github = if ask.publish then `me/{ask.name}` else nil }
+	table.insert(library(device), 1, repo)
+	return answer({ repository = table.clone(repo) })
+end
+projects_stub.forget_repository = function(device: string, path: string): any
+	note(`forget_repository:{device}:{path}`)
+	local lib = library(device)
+	for i, r in lib do
+		if r.path == path then
+			table.remove(lib, i)
+			break
+		end
+	end
+	return answer(nil)
+end
+projects_stub.add_repository = function(device: string, path: string): any
+	note(`add_repository:{device}:{path}`)
+	if not string.find(path, "repo", 1, true) then
+		return answer({ refused = `Not a git repository: {path}` })
+	end
+	local repo = { path = path, name = name_of(path), branch = "main", kept = true, touched = NOW * 1000 }
+	table.insert(library(device), 1, repo)
+	return answer({ path = path, name = repo.name })
+end
+local function composed_project()
+	for _, p in model.projects do
+		if p.id == "acme" then
+			return
+		end
+	end
+	table.insert(model.projects, { id = "acme", name = "Acme", device = "mac", path = "/Users/me/.zeron/projects/Acme", git = false })
+	publish()
+end
+ui.command {
+	id = "fixture.composed_project",
+	title = "Fixture: a project of repositories from anywhere",
+	run = composed_project,
+}
+-- (Its Edit project open on Repositories, for the captures.)
+ui.command {
+	id = "fixture.edit_repositories",
+	title = "Fixture: Edit project's Repositories of that project",
+	run = function()
+		composed_project()
+		ui.after(0, function()
+			require("@app/screens/shell/sidebar").edit_project("acme", { tab = "repositories" })
+		end)
+	end,
+}
+
 -- A project's icon (@account/projects): no repository artwork here (the
 -- initials show), a picture's size as the host reads it, the upload
 -- answered with an edge URL, and that URL's file the picture itself.

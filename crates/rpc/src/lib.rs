@@ -290,6 +290,27 @@ pub mod methods {
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
+    /// The git repositories inside a project folder that isn't one itself
+    /// (`{ path }` → `ProjectRepositories`): what a worktree of the whole
+    /// project can check out (`capabilities::PROJECT_WORKTREES_V1`).
+    pub const LIST_PROJECT_REPOSITORIES: &str = "ListProjectRepositories";
+    /// A new project whose folder includes repositories from anywhere on
+    /// its device: `{name, repositories: ProjectMember[], parent?}` →
+    /// `ComposedProject` (its folder, to add as a project). Its folder goes
+    /// in `parent`, else `~/.zeron/projects` (`capabilities::COMPOSED_PROJECTS_V1`).
+    pub const COMPOSE_PROJECT: &str = "ComposeProject";
+    /// The repositories a project's folder includes from elsewhere, exactly:
+    /// `{path, repositories: ProjectMember[]}` → `ProjectRepositories`.
+    /// Links in the folder, never the repositories, are made and removed.
+    pub const SET_PROJECT_REPOSITORIES: &str = "SetProjectRepositories";
+    /// The device's repositories, found and kept: `{refresh?}` →
+    /// `LocalRepositories`.
+    pub const LIST_LOCAL_REPOSITORIES: &str = "ListLocalRepositories";
+    /// A new repository on the device: `{name, parent?, empty?, publish?:
+    /// {private}}` → `CreatedRepository`.
+    pub const CREATE_LOCAL_REPOSITORY: &str = "CreateLocalRepository";
+    /// Stop listing a repository (nothing on disk changes): `{path}` → `{}`.
+    pub const FORGET_LOCAL_REPOSITORY: &str = "ForgetLocalRepository";
     // Project Actions are private state on the device that owns the project.
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";

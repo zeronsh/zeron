@@ -405,6 +405,7 @@ end)
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a promise of `{ status, stdout, stderr }`, as the window's | `commands` |
 | `zeron.fetch(url, { method, headers, body, timeout })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`) | `network` |
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
+| `zeron.repositories(folder)` | a promise of the git repositories in one of those folders (or a folder in one) that holds several rather than being one: `{ { path, linked } }`, each path `/`-separated within it, `linked` for a worktree (a project worktree's own). Its subfolders, and one level into a plain one; never dot folders or `node_modules` | `sessions.read` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |

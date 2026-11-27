@@ -870,6 +870,19 @@ pub struct WorktreeSpec {
     /// wire compatibility with clients that only request worktree creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// A project folder holding several repositories (not one itself): the
+    /// repositories to check out, by their `/`-separated paths in it
+    /// ([`crate::ProjectRepository::path`]). The host makes one folder laid
+    /// out like the project, with a worktree of each on one shared
+    /// `zeron/<name>` branch, and runs there. Empty: `repo_path` is the
+    /// repository, as before.
+    ///
+    /// Only for a host that answers `ListProjectRepositories`
+    /// ([`crate::capabilities::PROJECT_WORKTREES_V1`]): an older one ignores
+    /// the field and would try to branch the folder itself, so a sender asks
+    /// first and offers this only on an answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
 }
 
 /// The session-scoped singleton id for the live plan/todo chip. ACP plan
@@ -1586,14 +1599,36 @@ mod tests {
                 repo_path: "/repos/comet".into(),
                 base: "main".into(),
                 space_id: Some("space-1".into()),
+                repositories: Vec::new(),
             }),
             ..req
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["worktree"]["repoPath"], "/repos/comet");
         assert_eq!(json["worktree"]["spaceId"], "space-1");
+        // A single repository's spec reads exactly as it did before
+        // project worktrees: no `repositories` key for an older host.
+        assert!(json["worktree"].get("repositories").is_none());
         let round: RunRequest = serde_json::from_value(json).unwrap();
         assert_eq!(round.worktree, req.worktree);
+    }
+
+    #[test]
+    fn worktree_spec_names_a_project_s_repositories() {
+        let spec: WorktreeSpec = serde_json::from_value(serde_json::json!({
+            "repoPath": "/work/acme",
+            "base": "HEAD",
+            "repositories": ["api", "packages/web"],
+        }))
+        .unwrap();
+        assert_eq!(spec.repositories, ["api", "packages/web"]);
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["repositories"][1], "packages/web");
+        // Older senders' specs still parse, naming none.
+        let old: WorktreeSpec =
+            serde_json::from_value(serde_json::json!({ "repoPath": "/r", "base": "main" }))
+                .unwrap();
+        assert!(old.repositories.is_empty());
     }
 
     /// Credential-broker secrets ride `RunRequest::env` from the host to the

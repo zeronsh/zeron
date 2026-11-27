@@ -393,6 +393,7 @@ function M.send_first(id: string, text: string, picks: { [string]: any }?, place
 		if place then
 			req.project, req.branch, req.cwd = place.project, place.branch, place.cwd
 			req.worktree = place.worktree or nil
+			req.repositories = if place.worktree then place.repositories else nil
 		end
 		store.send(req :: any):after(function()
 			settle(true, nil)

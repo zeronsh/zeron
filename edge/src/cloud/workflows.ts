@@ -25,6 +25,7 @@ import {
   RESTART_ENGINE_COMMAND,
   START_ENGINE_COMMAND,
   STOP_ENGINE_COMMAND,
+  encodeCloudRepos,
   installCommand,
   type SessionEnv
 } from "./install-script";
@@ -242,7 +243,9 @@ const sessionEnv = (p: ProvisionParams): SessionEnv => ({
   ZERON_CLOUD_CHAT: p.chatId,
   ZERON_CLOUD_REPO: p.project.cloneUrl,
   ZERON_CLOUD_PATH: p.project.path,
-  ZERON_CLOUD_BRANCH: p.project.defaultBranch
+  ZERON_CLOUD_BRANCH: p.project.defaultBranch,
+  // A project of several repositories: each one at its folder under the path.
+  ...(p.project.repos ? { ZERON_CLOUD_REPOS: encodeCloudRepos(p.project.repos) } : {})
 });
 
 /**

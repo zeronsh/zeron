@@ -38,6 +38,7 @@ local control = require("@self/control")
 local FadeText = require("@self/fade_text")
 local Tile = require("@self/tile")
 local Dropdown = require("@self/dropdown")
+local RepositoryChoice = require("@self/repository_choice")
 local ModelPicker = require("@self/model_picker")
 local Switch = require("@self/switch")
 local Menu = require("@self/menu")
@@ -113,6 +114,17 @@ export type Fixed = {
 	emoji: string?,
 	cloud: boolean?,
 	reach: string?,
+}
+-- A worktree of a whole project's repositories (see `repositories`).
+export type Repositories = {
+	offered: () -> boolean,
+	active: () -> boolean,
+	loading: (() -> boolean)?,
+	list: () -> { RepositoryChoice.Row },
+	chosen: () -> { string },
+	toggle: (path: string) -> (),
+	all: (on: boolean) -> (),
+	hint: (() -> string?)?,
 }
 export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
@@ -191,6 +203,12 @@ export type Props = {
 	-- What the branches' list says with none to show (still loading, none
 	-- found, none matching what is searched for).
 	branches_empty: ((query: string) -> Dropdown.Empty)?,
+	-- A project folder holding several repositories (no git of its own):
+	-- which of them a worktree of the whole project checks out. While
+	-- `offered`, the panel offers a worktree there too; while `active` (a
+	-- worktree picked), it lists them to choose from in place of branches,
+	-- and the chip counts those chosen.
+	repositories: Repositories?,
 	-- Where an existing chat works, fixed (its branch, live, whether its
 	-- folder is a worktree, and its project's name, hue and artwork): the
 	-- chip says so, and its panel shows where it works with nothing to
@@ -699,7 +717,8 @@ local function work_in(
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
 	reach: State<string?>?,
-	reach_default: (() -> string?)?
+	reach_default: (() -> string?)?,
+	repositories: Repositories?
 ): Node
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
@@ -785,12 +804,16 @@ local function work_in(
 			return false
 		end
 		-- A checkout is a project's: with none, no row; nor in a folder with
-		-- no git, with only itself to work in; nor on Cloud, whose machine
+		-- no git, with only itself to work in (unless it holds repositories:
+		-- a worktree of the whole project); nor on Cloud, whose machine
 		-- checks the repository out on its own.
 		table.insert(
 			rows,
 			ui.show(function(): boolean
-				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
+				local folder_of_repositories = repositories ~= nil and repositories.offered()
+				return (project == nil or project:get() ~= NO_PROJECT)
+					and (not plain() or folder_of_repositories)
+					and not on_cloud(device, devices)
 			end, submenu(corridor, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
@@ -2413,9 +2436,19 @@ return ui.component(function(props: Props): Node
 						props.device,
 						props.devices :: any,
 						props.reach,
-						props.reach_default
+						props.reach_default,
+						props.repositories
 					)
 					else nil
+			end
+			-- A worktree of a whole project's repositories: chosen in the
+			-- panel in place of branches (a folder with no git has none).
+			local repositories = props.repositories
+			local function of_repositories(): boolean
+				return repositories ~= nil and repositories.active()
+			end
+			local function folder_of_repositories(): boolean
+				return repositories ~= nil and repositories.offered()
 			end
 			-- In a project, its refs: the branch chip, its search and its
 			-- branches. With none, no refs to pick: the chip says so (a folder,
@@ -2443,6 +2476,10 @@ return ui.component(function(props: Props): Node
 			-- still coming), else "No ref".
 			local branch_state = props.branch :: State<string?>
 			local function branch_name(): string
+				-- (A project's worktree: how many repositories it holds.)
+				if repositories and of_repositories() then
+					return locale.s("ds.composer.repositories.count", { n = #repositories.chosen() })
+				end
 				local v = branch_state:get()
 				for _, item in list_of(props.branches) :: { Dropdown.Item } do
 					if item.value == v then
@@ -2458,7 +2495,7 @@ return ui.component(function(props: Props): Node
 					return "cloud"
 				end
 				local chosen = chosen_project()
-				if chosen and chosen.plain then
+				if chosen and chosen.plain and not of_repositories() then
 					return nil
 				end
 				return if checkout and checkout:get() == "local" then nil else "worktree"
@@ -2509,10 +2546,23 @@ return ui.component(function(props: Props): Node
 				search = locale.s("ds.composer.branch.search"),
 				items = (props.branches or {}) :: any,
 				empty = props.branches_empty,
-				list_when = in_project,
-				width = 280,
+				-- (A folder of repositories has no branches of its own.)
+				list_when = function(): boolean
+					return in_project() and not folder_of_repositories()
+				end,
+				width = if repositories then 300 else 280,
 				corridor = picker_corridor,
 				head = head_node(),
+				extra = if repositories
+					then RepositoryChoice {
+						list = repositories.list,
+						loading = repositories.loading,
+						on_toggle = repositories.toggle,
+						on_all = repositories.all,
+						hint = repositories.hint,
+					}
+					else nil,
+				extra_when = if repositories then of_repositories else nil,
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
 						device = chosen_device,

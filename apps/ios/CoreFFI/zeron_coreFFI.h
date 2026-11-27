@@ -488,9 +488,19 @@ void uniffi_zeron_mobile_fn_method_coreclient_close_session(uint64_t ptr, RustBu
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_cloud_models(uint64_t ptr, RustBuffer harness
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_COMPOSE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_COMPOSE_PROJECT
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_compose_project(uint64_t ptr, RustBuffer device_id, RustBuffer name, RustBuffer repository_paths
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CONNECTIVITY
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CONNECTIVITY
 RustBuffer uniffi_zeron_mobile_fn_method_coreclient_connectivity(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_LOCAL_REPOSITORY
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_LOCAL_REPOSITORY
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_create_local_repository(uint64_t ptr, RustBuffer device_id, RustBuffer name, RustBuffer parent, int8_t empty, RustBuffer publish
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_PROJECT
@@ -563,9 +573,19 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_folders(uint64_t ptr, Rus
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_harnesses(uint64_t ptr, RustBuffer device_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_LOCAL_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_LOCAL_REPOSITORIES
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_local_repositories(uint64_t ptr, RustBuffer device_id, int8_t refresh
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_MODELS
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_models(uint64_t ptr, RustBuffer device_id, RustBuffer harness
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_list_project_repositories(uint64_t ptr, RustBuffer device_id, RustBuffer path
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_LIST_REFS
@@ -706,6 +726,11 @@ RustBuffer uniffi_zeron_mobile_fn_method_coreclient_session_row(uint64_t ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_NETWORK_ONLINE
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_NETWORK_ONLINE
 void uniffi_zeron_mobile_fn_method_coreclient_set_network_online(uint64_t ptr, int8_t online, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_PROJECT_REPOSITORIES
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_project_repositories(uint64_t ptr, RustBuffer device_id, RustBuffer path, RustBuffer members
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_SECTION_COLLAPSED
@@ -1729,6 +1754,11 @@ uint32_t uniffi_zeron_mobile_fn_func_project_color_count(RustCallStatus *_Nonnul
 uint32_t uniffi_zeron_mobile_fn_func_project_color_index(RustBuffer space_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+RustBuffer uniffi_zeron_mobile_fn_func_project_worktree_first_choice(RustBuffer listing, RustBuffer remembered, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_REASONING_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_REASONING_LABEL
 RustBuffer uniffi_zeron_mobile_fn_func_reasoning_label(RustBuffer level, RustCallStatus *_Nonnull out_status
@@ -2148,6 +2178,12 @@ uint16_t uniffi_zeron_mobile_checksum_func_project_color_index(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_PROJECT_WORKTREE_FIRST_CHOICE
+uint16_t uniffi_zeron_mobile_checksum_func_project_worktree_first_choice(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_REASONING_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_REASONING_LABEL
 uint16_t uniffi_zeron_mobile_checksum_func_reasoning_label(void
@@ -2268,9 +2304,21 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_cloud_models(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_COMPOSE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_COMPOSE_PROJECT
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_compose_project(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CONNECTIVITY
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CONNECTIVITY
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_connectivity(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CREATE_LOCAL_REPOSITORY
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CREATE_LOCAL_REPOSITORY
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_create_local_repository(void
     
 );
 #endif
@@ -2358,9 +2406,21 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_LOCAL_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_LOCAL_REPOSITORIES
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_local_repositories(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_MODELS
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_models(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_LIST_PROJECT_REPOSITORIES
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_list_project_repositories(void
     
 );
 #endif
@@ -2529,6 +2589,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_session_row(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_NETWORK_ONLINE
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_NETWORK_ONLINE
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_network_online(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_PROJECT_REPOSITORIES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_PROJECT_REPOSITORIES
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_project_repositories(void
     
 );
 #endif

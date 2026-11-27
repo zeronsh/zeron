@@ -24,6 +24,26 @@
 --                                       promise; nil when it can't be had)
 --   projects.picture_size(path)         a picture's { w, h }, to crop it
 --
+-- A project of repositories from anywhere on its device, and the device's
+-- repositories (a host saying `composed-projects-v1`; see M.composes):
+--
+--   projects.repositories(device, path) its repositories: { repo, truncated,
+--                                       list = { { path, branch?, empty?,
+--                                       location?, missing?, github? } } }
+--   projects.compose(device, name, repositories, parent?)  a new folder
+--                                       including them: { path }
+--                                       (`repositories`: { { path, name? } })
+--   projects.set_repositories(device, path, repositories)  what the project
+--                                       includes now, listed as above
+--   projects.local_repositories(device, refresh?)  { list = { { path, name,
+--                                       branch?, empty?, github?, touched?,
+--                                       kept? } }, parent, publish, truncated }
+--   projects.new_repository(device, { name, parent?, empty?, publish?,
+--                                       private? })  { repository, warning? }
+--   projects.forget_repository(device, path)
+--   projects.add_repository(device, path)  { path, name }
+--   projects.composes(device)           whether its host does all that
+--
 -- `device` is a device's id.
 
 local sessions = require("@account/sessions")
@@ -59,30 +79,39 @@ function M.clone(device: string, url: string, parent: string): any
 end
 -- (`repo`: a Cloud project's GitHub repository, `owner/name`: it has no
 -- folder to read one from.)
-function M.create(device: string, path: string, git: boolean, repo: string?): any
-	return ui.call("projects.create", { device = device, path = path, git = git, repo = repo })
+function M.create(device: string, path: string, git: boolean, repo: string?, name: string?): any
+	return ui.call("projects.create", { device = device, path = path, git = git, repo = repo, name = name })
 end
-function M.delete(id: string): any
-	return ui.call("projects.delete", id)
+function M.repositories(device: string, path: string): any
+	return ui.call("projects.repositories", with(device, { path = path }))
 end
-function M.artwork(p: { id: string, device: string, path: string }, done: (src: string?) -> ())
-	ui.call("files.artwork", { target = { space = p.id, device = p.device, root = p.path } }):after(function(found: any)
-		done(if type(found) == "table" then found.src else nil)
-	end, function()
-		done(nil)
-	end)
+function M.compose(device: string, name: string, repositories: { any }, parent: string?): any
+	return ui.call("projects.compose", with(device, { name = name, repositories = repositories, parent = parent }))
 end
-function M.upload_icon(path: string, crop: { x: number, y: number, side: number }): any
-	return ui.call("account.upload_image", { path = path, x = crop.x, y = crop.y, side = crop.side })
+function M.set_repositories(device: string, path: string, repositories: { any }): any
+	return ui.call("projects.set_repositories", with(device, { path = path, repositories = repositories }))
 end
-function M.forget_icon(url: string)
-	ui.call("account.delete_image", { url = url }):after(function() end, function() end)
+function M.local_repositories(device: string, refresh: boolean?): any
+	return ui.call("projects.local", with(device, { refresh = refresh == true }))
 end
-function M.icon_file(url: string): any
-	return ui.call("account.photo_file", { url = url })
+function M.new_repository(device: string, ask: { [string]: any }): any
+	return ui.call("projects.new_repository", with(device, ask))
 end
-function M.picture_size(path: string): any
-	return ui.call("account.photo_size", { path = path })
+function M.forget_repository(device: string, path: string): any
+	return ui.call("projects.forget_repository", with(device, { path = path }))
+end
+function M.add_repository(device: string, path: string): any
+	return ui.call("projects.add_repository", with(device, { path = path }))
+end
+-- Whether `device`'s host composes projects and manages its repositories
+-- (it says `composed-projects-v1`); Cloud's machines never do.
+function M.composes(device: string): boolean
+	for _, d in sessions.devices:get() do
+		if d.id == device then
+			return d.composes == true and d.cloud ~= true
+		end
+	end
+	return false
 end
 
 return M

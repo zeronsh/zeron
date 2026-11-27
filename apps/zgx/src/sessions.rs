@@ -1334,6 +1334,14 @@ impl Sessions {
                 if let Some(version) = d["version"].as_str().filter(|v| !v.is_empty()) {
                     fields.push(("version", Value::from(version)));
                 }
+                // Its host composes projects of repositories from anywhere
+                // on it and manages its repositories.
+                let says = |capability: &str| {
+                    d["capabilities"].as_array().into_iter().flatten().any(|c| c.as_str() == Some(capability))
+                };
+                if says("composed-projects-v1") {
+                    fields.push(("composes", Value::Bool(true)));
+                }
                 Some(Value::record(fields))
             })
             .collect();
@@ -1574,6 +1582,20 @@ impl Sessions {
         }
         if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
             params["cloudReach"] = Json::from(reach);
+        }
+        // A project of several repositories: those chosen, each where it goes
+        // in the project and the GitHub repository Cloud clones there.
+        if let Some(chosen) = args
+            .field("repositories")
+            .and_then(|v| serde_json::from_str::<Json>(&v.to_json()).ok())
+            .and_then(|v| v.as_array().cloned())
+            .filter(|list| !list.is_empty())
+        {
+            let list: Vec<Json> = chosen
+                .iter()
+                .filter_map(|r| Some(json!({ "path": r["path"].as_str()?, "github": r["github"].as_str()? })))
+                .collect();
+            params["cloudRepositories"] = Json::Array(list);
         }
         if let Some(config) = args
             .field("config")

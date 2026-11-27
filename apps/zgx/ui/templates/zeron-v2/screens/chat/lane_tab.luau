@@ -631,6 +631,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		device = device,
 		devices = devices,
 		checkout = checkout,
+		repositories = where.repositories,
 		branch = branch,
 		branches = where.branches,
 		branches_empty = where.branches_empty,

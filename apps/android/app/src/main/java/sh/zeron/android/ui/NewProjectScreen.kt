@@ -3,6 +3,7 @@ package sh.zeron.android.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,7 +22,10 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -52,7 +56,9 @@ import uniffi.zeron_core.FolderListing
 
 /**
  * Create a project (a device + folder pair): pick a host, browse its folders
- * over the device relay (git repos badged), and use the current folder.
+ * over the device relay (git repos badged), and use the current folder. Or,
+ * in Repositories, a project of repositories from anywhere on the host
+ * ([ComposeRepositories]).
  * [onCreated] gets the new project's id (the new-session page selects it).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -75,6 +81,8 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
         var creating by remember { mutableStateOf(false) }
         var generation by remember { mutableIntStateOf(0) }
         var hostMenu by remember { mutableStateOf(false) }
+        // Folder (browse to one) or Repositories (from anywhere on the host).
+        var repositoriesMode by remember { mutableStateOf(false) }
 
         fun load(at: String?) {
             val d = device ?: return
@@ -122,7 +130,7 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text(name.ifEmpty { "New project" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    title = { Text(if (repositoriesMode) "New project" else name.ifEmpty { "New project" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = onDismiss, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
                     actions = {
                         Box(Modifier.padding(end = 8.dp)) {
@@ -142,7 +150,30 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
             },
             containerColor = MaterialTheme.colorScheme.background,
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
+            Column(Modifier.fillMaxSize().padding(padding)) {
+            if (hosts.isNotEmpty()) {
+                SingleChoiceSegmentedButtonRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 12.dp).testTag("new-project-mode"),
+                ) {
+                    listOf(false to "Folder", true to "Repositories").forEachIndexed { i, (value, label) ->
+                        SegmentedButton(
+                            selected = repositoriesMode == value,
+                            onClick = { repositoriesMode = value },
+                            shape = SegmentedButtonDefaults.itemShape(i, 2),
+                            icon = {},
+                        ) { Text(label) }
+                    }
+                }
+            }
+            val chosenDevice = device
+            if (repositoriesMode && chosenDevice != null) {
+                ComposeRepositories(client, chosenDevice) { id ->
+                    onCreated(id)
+                    onDismiss()
+                }
+                return@Column
+            }
+            Box(Modifier.fillMaxSize()) {
                 if (hosts.isEmpty()) {
                     Text(
                         "No desktop devices yet — open Zeron on a computer to add one.",
@@ -175,6 +206,35 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // A folder holding several repositories: that its worktrees can
+                    // check them out together (docs/reference/project-worktrees.md).
+                    // (As its host finds them: the count a worktree of it offers.)
+                    var repositories by remember { mutableStateOf(0) }
+                    LaunchedEffect(device?.id, current?.path) {
+                        repositories = 0
+                        val d = device ?: return@LaunchedEffect
+                        val at = current?.path ?: return@LaunchedEffect
+                        val found = runCatching { client?.listProjectRepositories(d.id, at) }.getOrNull()
+                        repositories = if (found == null || found.isRepo) 0 else found.repositories.size
+                    }
+                    if (repositories >= 2 && !loading) {
+                        Column(
+                            Modifier.testTag("folder-repositories"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                ZIcon(ZIcons.Worktree, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                Text("Holds $repositories repositories", style = MaterialTheme.typography.titleSmall)
+                            }
+                            Text(
+                                "New worktrees check them out together, on one branch.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                     status?.let {
                         Text(
                             it,
@@ -196,6 +256,7 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
                         if (creating) LoadingIndicator(Modifier.size(20.dp)) else Text("Use “${name.ifEmpty { current?.path ?: "folder" }}”")
                     }
                 }
+            }
             }
         }
     }

@@ -33,6 +33,57 @@ return function(zeron: any, Repo: any, words: any)
 	local ChangesView = require("./changes")(zeron, Repo, words)
 	local HistoryView, CommitView = require("./history")(zeron, Repo, words)
 
+	-- Which of a folder's repositories the tab shows, as a chip, for a chat
+	-- whose folder holds several rather than being one (a project's, or a
+	-- worktree of a project's): a click lists them, each with its branch
+	-- and how many files changed there.
+	local function repo_switcher(m: any): Node
+		local value = ui.use_state(nil :: string?)
+		ui.effect(function()
+			local now = m.repo:get()
+			if value:peek() ~= now then
+				value:set(now)
+			end
+		end)
+		local items = ui.computed(function(): { any }
+			local out: { any } = {}
+			for _, r in m.repos:get() or {} do
+				table.insert(out, {
+					value = r.path,
+					label = r.path,
+					icon = "folder",
+					description = r.branch,
+					tag = if (r.changed or 0) > 0 then zeron.s("repos.changed", { n = r.changed }) else nil,
+				})
+			end
+			return out
+		end)
+		return ui.show(function(): boolean
+			local list = m.repos:get()
+			return list ~= nil and #list > 0
+		end, ui.row {
+			id = "git-repository",
+			shrink = 1,
+			min_w = 0,
+			Dropdown {
+				value = value,
+				items = items,
+				tone = "chip",
+				icon = "folder",
+				search = zeron.t("repos.search"),
+				label = zeron.s("repos.label"),
+				width = 300,
+				placement = { side = "bottom", align = "end", offset = 4 },
+				on_open = function()
+					m.find_repos()
+				end,
+				on_choose = function(chosen: string)
+					m.choose_repo(chosen)
+				end,
+			},
+		})
+	end
+
 	-- The branch the checkout is on, as a chip; a click lists the others
 	-- (local first, then the remote's not here yet), and New branch.
 	local function branch_switcher(m: any): Node
@@ -415,6 +466,7 @@ return function(zeron: any, Repo: any, words: any)
 				shrink = 0,
 				gap = "$space.1",
 				items = "center",
+				repo_switcher(m),
 				branch_switcher(m),
 				more_menu(m),
 			},

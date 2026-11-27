@@ -50,6 +50,18 @@ pub mod capabilities {
     /// such a host until its bytes are stored; older hosts get them over the
     /// peer link, as they always did.
     pub const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
+    /// The host lists the repositories inside a project folder that isn't
+    /// one itself (`ListProjectRepositories`) and makes a worktree of
+    /// several at once for a run (`WorktreeSpec::repositories`): one folder
+    /// laid out like the project, every repository on one branch. Older
+    /// hosts refuse the listing, so the option never shows for them.
+    pub const PROJECT_WORKTREES_V1: &str = "project-worktrees-v1";
+    /// The host composes projects of repositories from anywhere on it
+    /// (`ComposeProject`, `SetProjectRepositories`) and manages its
+    /// repositories (`ListLocalRepositories`, `CreateLocalRepository`,
+    /// `ForgetLocalRepository`). Older hosts refuse those methods, so a
+    /// client offers them only to a host saying this.
+    pub const COMPOSED_PROJECTS_V1: &str = "composed-projects-v1";
 
     /// This device's agents delegate in the background (Settings → General).
     /// A device set up later follows the account's others by it; advertised
@@ -71,6 +83,8 @@ pub mod capabilities {
         ZGX_INTERFACE_V1,
         UPDATE_ABILITY_V1,
         ATTACHMENT_STORE_V1,
+        PROJECT_WORKTREES_V1,
+        COMPOSED_PROJECTS_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -192,6 +206,8 @@ mod tests {
                     "zgx-interface-v1",
                     "update-ability-v1",
                     "attachment-store-v1",
+                    "project-worktrees-v1",
+                    "composed-projects-v1",
                     "voice-client-media-v1"
                 ],
             })

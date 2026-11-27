@@ -270,6 +270,16 @@ local function service(id: string): any
 		return op("folders", {})
 	end
 
+	-- The git repositories in `folder` (one of this device's chats' or
+	-- projects' folders, or in one; "sessions.read"), for a folder that
+	-- holds several rather than being one: a promise of { { path, linked } },
+	-- each `/`-separated within it, `linked` for a worktree of one (a
+	-- project worktree's own). Looked for as a project's worktree checks
+	-- them out: its subfolders, and one level into a plain one.
+	function M.repositories(folder: string): any
+		return op("repositories", { folder = folder })
+	end
+
 	-- A program its manifest names ("commands"), as you, on this device:
 	-- a promise of { status, stdout, stderr }.
 	function M.run(program: string, args: { string }?, opts: { cwd: string?, stdin: string?, timeout: number?, env: { [string]: string }? }?): any

@@ -747,3 +747,87 @@ fn delegation_lists_its_children_as_subagents_and_answers_them_in_their_own_chat
     // Waiting, the parent can be stopped (which ends its subagents).
     assert!(session.composer().live.can_interrupt);
 }
+
+/// A project folder holding several repositories: the demo lists Acme's,
+/// one with no commit, and its first worktree starts with the others; a
+/// repository's own folder says it is one.
+#[test]
+fn a_folder_of_repositories_lists_them_for_a_project_worktree() {
+    let (client, _dir) = demo(DemoOptions::default());
+    let acme = client
+        .workspace()
+        .projects
+        .iter()
+        .find(|p| p.id == "space-acme")
+        .cloned()
+        .expect("Acme is among the demo's projects");
+    assert!(!acme.git_detected, "a folder with no git of its own");
+    let listing = zeron_client::runtime::shared()
+        .block_on(client.list_project_repositories(&acme.device_id, &acme.path))
+        .unwrap();
+    assert!(!listing.is_repo);
+    let paths: Vec<_> = listing.repositories.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, ["api", "packages/ui", "scratch", "web"]);
+    assert_eq!(listing.first_choice(None), ["api", "packages/ui", "web"]);
+    let repo = zeron_client::runtime::shared()
+        .block_on(client.list_project_repositories(&acme.device_id, "/Users/dev/zeron"))
+        .unwrap();
+    assert!(repo.is_repo && repo.repositories.is_empty());
+}
+
+#[test]
+fn repositories_from_anywhere_become_one_named_project() {
+    let (client, _dir) = demo(DemoOptions::default());
+    let rt = zeron_client::runtime::shared();
+    let mac = client
+        .workspace()
+        .projects
+        .iter()
+        .find(|p| p.id == "space-acme")
+        .map(|p| p.device_id.clone())
+        .expect("Acme's computer");
+    let library = rt
+        .block_on(client.list_local_repositories(&mac, false))
+        .unwrap();
+    assert_eq!(
+        library.repositories[0].name, "api",
+        "newest worked-in first"
+    );
+    assert!(library.can_publish);
+    // A new one, listed first.
+    let made = rt
+        .block_on(client.create_local_repository(&mac, "billing service", None, false, Some(true)))
+        .unwrap();
+    assert_eq!(made.repository.name, "billing-service");
+    assert_eq!(
+        made.repository.github.as_deref(),
+        Some("dev/billing-service")
+    );
+    let members: Vec<zeron_proto::ProjectMember> = ["/Users/dev/acme/api", &made.repository.path]
+        .iter()
+        .map(|path| zeron_proto::ProjectMember {
+            path: path.to_string(),
+            name: None,
+        })
+        .collect();
+    let id = rt
+        .block_on(client.compose_project(&mac, "Billing", &members))
+        .unwrap();
+    let project = client
+        .workspace()
+        .projects
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .expect("the new project");
+    assert_eq!(project.name, "Billing");
+    let held = rt
+        .block_on(client.list_project_repositories(&mac, &project.path))
+        .unwrap();
+    let names: Vec<_> = held.repositories.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(names, ["api", "billing-service"]);
+    assert_eq!(
+        held.repositories[0].location.as_deref(),
+        Some("/Users/dev/acme/api")
+    );
+}

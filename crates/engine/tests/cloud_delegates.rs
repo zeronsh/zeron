@@ -104,6 +104,7 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
         repo: Some("acme/app".into()),
         path: Some("/home/user/app".into()),
         branch: None,
+        repos: Vec::new(),
     }));
     let (edge_url, seen) = edge().await;
     let dir = tempfile::tempdir().unwrap();

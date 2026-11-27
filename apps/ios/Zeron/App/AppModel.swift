@@ -967,13 +967,98 @@ final class AppModel {
         (try? await client?.githubBranches(repo: repo)) ?? []
     }
 
-    /// The worktree a new session starts in. Only a git project can make one:
-    /// the pick outlives a switch to a plain folder (where its chip is hidden)
-    /// and the host would refuse the run, so there it's left for the next git
-    /// project rather than sent.
+    /// The repositories in a project folder that isn't one itself, for a
+    /// worktree of the whole project. Nil when there's nothing to choose
+    /// from: a repository, no project, or a host too old to list them (its
+    /// folder then runs in place, as before).
+    func projectRepositories(projectId: String) async -> ProjectRepositories? {
+        guard let client, let p = rawProjects.first(where: { $0.id == projectId }), !p.gitDetected, !p.isCloud else { return nil }
+        guard let listing = try? await client.listProjectRepositories(deviceId: p.deviceId, path: p.path),
+              !listing.isRepo, listing.repositories.contains(where: \.hasCommits)
+        else { return nil }
+        return listing
+    }
+
+    /// How many repositories a folder on `deviceId` holds (not being one
+    /// itself), as its host lists them for a worktree of the whole project:
+    /// for New Project's note. 0 for a repository, or a host too old to say.
+    /// The repositories on a computer (found in its home, and those made or
+    /// cloned there), newest worked-in first. Throws for a host too old to
+    /// list them, or one that's offline.
+    func localRepositories(deviceId: String, refresh: Bool = false) async throws -> LocalRepositories {
+        guard let client else { throw CoreError.Closed }
+        return try await client.listLocalRepositories(deviceId: deviceId, refresh: refresh)
+    }
+
+    /// A project of the repositories at `paths` on `deviceId`, each staying
+    /// where it is, named `name`. Its id.
+    func composeProject(deviceId: String, name: String, paths: [String]) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        let id = try await client.composeProject(deviceId: deviceId, name: name, repositoryPaths: paths)
+        refreshWorkspace()
+        return id
+    }
+
+    /// A new repository on `deviceId`, where most of its repositories are.
+    func createRepository(deviceId: String, name: String, empty: Bool, publish: Bool?) async throws -> CreatedRepository {
+        guard let client else { throw CoreError.Closed }
+        return try await client.createLocalRepository(deviceId: deviceId, name: name, parent: nil, empty: empty, publish: publish)
+    }
+
+    /// What a host's refusal says, in a sentence.
+    static func says(_ error: Error) -> String {
+        if let core = error as? CoreError {
+            switch core {
+            case let .HostUnavailable(message): return message.isEmpty ? "The computer isn't connected right now." : message
+            case let .HostError(message), let .NotFound(message), let .InvalidArgument(message), let .Unsupported(message), let .Network(message):
+                return message.isEmpty ? "Something went wrong." : message
+            default: break
+            }
+        }
+        return error.localizedDescription
+    }
+
+    func folderRepositories(deviceId: String, path: String) async -> Int {
+        guard let client, let listing = try? await client.listProjectRepositories(deviceId: deviceId, path: path), !listing.isRepo else { return 0 }
+        return listing.repositories.count
+    }
+
+    /// The repositories last chosen for each project's worktree, by project
+    /// id: the next new session there starts from them.
+    private static let rememberedRepositoriesKey = "app.projectRepositories"
+
+    /// (The demo's, for this launch only: each starts as a fresh demo does.)
+    private var demoRepositories: [String: [String]] = [:]
+
+    func rememberedRepositories(projectId: String) -> [String]? {
+        if isDemo { return demoRepositories[projectId] }
+        return (UserDefaults.standard.dictionary(forKey: Self.rememberedRepositoriesKey) as? [String: [String]])?[projectId]
+    }
+
+    func rememberRepositories(_ paths: [String], projectId: String) {
+        if isDemo {
+            demoRepositories[projectId] = paths
+            return
+        }
+        var all = (UserDefaults.standard.dictionary(forKey: Self.rememberedRepositoriesKey) as? [String: [String]]) ?? [:]
+        all[projectId] = paths
+        UserDefaults.standard.set(all, forKey: Self.rememberedRepositoriesKey)
+    }
+
+    /// The worktree a new session starts in. A git project makes one off the
+    /// picked branch. A folder holding several repositories makes one of the
+    /// whole project, checking out those chosen (`draft.repositories`, set
+    /// only once its host listed them). Anywhere else the pick outlives a
+    /// switch to a plain folder (where its chip is hidden) and the host would
+    /// refuse the run, so there it's left for the next git project rather
+    /// than sent.
     static func worktreeSpec(draft: NewSessionDraft, project: ProjectView?) -> WorktreeSpec? {
-        guard draft.worktree, let project, project.gitDetected else { return nil }
-        return WorktreeSpec(repoPath: project.path, base: draft.branch ?? "HEAD", spaceId: project.id)
+        guard draft.worktree, let project else { return nil }
+        if project.gitDetected {
+            return WorktreeSpec(repoPath: project.path, base: draft.branch ?? "HEAD", spaceId: project.id, repositories: [])
+        }
+        guard let repositories = draft.repositories, !repositories.isEmpty else { return nil }
+        return WorktreeSpec(repoPath: project.path, base: "HEAD", spaceId: project.id, repositories: repositories)
     }
 
     /// Create the chat, open it, and send the first message.

@@ -677,3 +677,64 @@ async fn a_commit_in_your_checkout_runs_its_hooks_and_reading_runs_none() {
     assert_ne!(refused["ok"], true, "{refused}");
     assert_eq!(git(&repo, &["log", "-1", "--format=%s"]).trim(), "Second");
 }
+
+/// A chat whose folder holds several repositories rather than being one (a
+/// project's, or a worktree of a project's): the tab's switcher lists them,
+/// each with its branch and how many files changed, and every question is
+/// then asked of one of them, a turn's start noted for each.
+#[tokio::test]
+async fn a_folder_of_repositories_is_asked_one_repository_at_a_time() {
+    let f = fixture().await;
+    let project = f.scratch.path().join("acme");
+    std::fs::create_dir_all(&project).unwrap();
+    write(&project, "AGENTS.md", "shared\n");
+    let mut repos = Vec::new();
+    for (name, branch) in [("api", "main"), ("packages/web", "develop")] {
+        let at = project.join(name);
+        std::fs::create_dir_all(&at).unwrap();
+        git(&at, &["init", "-q", "-b", branch]);
+        git(&at, &["config", "user.name", "Ada"]);
+        git(&at, &["config", "user.email", "ada@example.com"]);
+        git(&at, &["config", "commit.gpgsign", "false"]);
+        write(&at, "README.md", "hello\n");
+        git(&at, &["add", "-A"]);
+        git(&at, &["commit", "-q", "-m", "First"]);
+        repos.push(at);
+    }
+    write(&repos[1], "README.md", "hello\nagain\n");
+    write(&repos[1], "new.txt", "new\n");
+
+    // The folder itself: no repository.
+    let refused = f.ask("status", json!({ "cwd": cwd(&project) })).await;
+    assert!(refused.to_string().contains("not_a_repo"), "{refused}");
+    let found = f.ok("repositories", json!({ "cwd": cwd(&project) })).await;
+    assert_eq!(found["repo"], false, "{found}");
+    let list = found["list"].as_array().unwrap();
+    assert_eq!(list.len(), 2, "{found}");
+    assert_eq!(list[0]["path"], "api");
+    assert_eq!(list[0]["branch"], "main");
+    assert_eq!(list[0]["changed"], 0);
+    assert_eq!(list[1]["path"], "packages/web");
+    assert_eq!(list[1]["branch"], "develop");
+    assert_eq!(list[1]["changed"], 2, "{found}");
+
+    // A repository's own folder lists none of its own.
+    let inside = f.ok("repositories", json!({ "cwd": cwd(&repos[0]) })).await;
+    assert_eq!(inside["repo"], true, "{inside}");
+
+    // A turn's start is noted for each, and its changes read per repository.
+    let web = cwd(&repos[1]);
+    f.ok("turn_start", json!({ "cwd": cwd(&project), "chat": "chat-acme" })).await;
+    write(&repos[1], "later.txt", "after the turn began\n");
+    let turn = f.ok("changes", json!({ "cwd": web, "scope": "turn", "chat": "chat-acme" })).await;
+    let files = by_path(&turn["files"]);
+    assert!(files.contains_key("later.txt"), "{turn}");
+    assert!(!files.contains_key("new.txt"), "before the turn: {turn}");
+    let api = f.ok("changes", json!({ "cwd": cwd(&repos[0]), "scope": "turn", "chat": "chat-acme" })).await;
+    assert!(api["files"].as_array().is_none_or(Vec::is_empty), "{api}");
+
+    // Never a folder outside this device's chats and projects.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = f.ask("repositories", json!({ "cwd": cwd(elsewhere.path()) })).await;
+    assert!(outside.to_string().contains("not_a_checkout") || outside["ok"] != true, "{outside}");
+}

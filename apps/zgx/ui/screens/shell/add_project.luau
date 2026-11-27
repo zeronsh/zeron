@@ -59,6 +59,29 @@ end
 type Item = any
 type Page = any
 
+-- How many repositories each folder browsed holds, by `device|path`, as
+-- its host lists them for a worktree of the whole project (`chat.repositories`).
+local holds = ui.state("shell_add_project_holds", {} :: { [string]: number })
+local function ask_repositories(device: string, path: string)
+	local key = `{device}|{path}`
+	if holds:peek()[key] ~= nil then
+		return
+	end
+	local store = require("@app/screens/chat/store")
+	local here = sessions.now:peek().here
+	local ok, answer = pcall(store.repositories, path, if device ~= here then device else nil)
+	if not ok or answer == nil then
+		return
+	end
+	answer:after(function(found: any)
+		local n = 0
+		if type(found) == "table" and not found.repo then
+			n = #(found.list or {})
+		end
+		holds:set_key({ key }, n)
+	end, function() end)
+end
+
 -- The engine's refusal, as the flow says it (production's own words).
 local function says(err: any, path: string?): string
 	local text = if type(err) == "string" then err elseif type(err) == "table" and err.message then tostring(err.message) else locale.s("shell.add_project.something_went_wrong")
@@ -106,6 +129,26 @@ function M.add(device: string, path: string, git: boolean, repo: string?)
 		end
 	end, function(err: any)
 		toast.show { title = locale.s("shell.add_project.couldnt_add"), body = says(err, path), tone = "danger" }
+	end)
+end
+
+-- A new folder as a project on `device`, named `name` (a project of
+-- repositories just composed there): the window lands in a new chat in it
+-- once it arrives. `done(err?)` once it's asked for.
+function M.add_named(device: string, path: string, name: string, done: ((err: any?) -> ())?)
+	projects.create(device, path, false, nil, name):after(function(id: any)
+		if type(id) == "string" then
+			arriving:set(id)
+		end
+		if done then
+			done(nil)
+		end
+	end, function(err: any)
+		if done then
+			done(err)
+		else
+			toast.show { title = locale.s("shell.add_project.couldnt_add"), body = says(err, path), tone = "danger" }
+		end
 	end)
 end
 
@@ -407,12 +450,23 @@ folder_page = function(device: string, path: string?, title: string, git: boolea
 			local out: { Item } = {}
 			if here then
 				local at = here :: string
+				-- A folder holding several repositories (and not one itself): a
+				-- project whose worktrees can check them out together, said as
+				-- it's added — as its host finds them, the composer's count
+				-- (docs/reference/project-worktrees.md). A host too old to say,
+				-- or a folder of fewer than two: its path, as before.
+				if not git then
+					ask_repositories(device, at)
+				end
 				table.insert(out, {
 					id = "add-here",
 					label = locale.s("shell.add_project.add_this_folder"),
 					section = locale.s("shell.add_project.add"),
 					icon = "plus",
-					hint = at,
+					hint = function(): string
+						local n = if git then nil else holds:get()[`{device}|{at}`]
+						return if n and n >= 2 then locale.s("shell.add_project.holds_repositories", { n = n }) else at
+					end,
 					verb = locale.s("shell.add_project.add_project"),
 					run = function()
 						M.add(device, at, git)
@@ -706,6 +760,60 @@ local function locations_page(device: string, name: string): Page
 				end,
 			}
 		end
+		-- Beside its places, a project of repositories from anywhere on
+		-- it, a new repository, or one cloned (a host that does those).
+		local function starts(): { Item }
+			if not projects.composes(device) then
+				return {}
+			end
+			local function leave()
+				view.palette:set(false)
+				M.shown:set(false)
+				M.hosted:set(false)
+			end
+			-- A repository made or cloned is a project at once.
+			local function as_project(r: any)
+				M.add(device, r.path, true)
+			end
+			return {
+				{
+					id = `compose:{device}`,
+					label = locale.s("shell.add_project.compose"),
+					section = locale.s("shell.add_project.start"),
+					icon = "widget",
+					hint = locale.s("shell.add_project.compose_hint"),
+					verb = locale.s("shell.add_project.open"),
+					run = function()
+						leave()
+						require("@app/screens/shell/compose_project").open(device)
+					end,
+				},
+				{
+					id = `new-repository:{device}`,
+					label = locale.s("shell.add_project.new_repository"),
+					section = locale.s("shell.add_project.start"),
+					icon = "plus",
+					hint = locale.s("shell.add_project.new_repository_hint"),
+					verb = locale.s("shell.add_project.open"),
+					run = function()
+						leave()
+						require("@app/screens/shell/repositories").open_new(device, as_project)
+					end,
+				},
+				{
+					id = `clone-repository:{device}`,
+					label = locale.s("shell.add_project.clone_repository"),
+					section = locale.s("shell.add_project.start"),
+					icon = "download",
+					hint = locale.s("shell.add_project.clone_repository_hint"),
+					verb = locale.s("shell.add_project.open"),
+					run = function()
+						leave()
+						require("@app/screens/shell/repositories").open_clone(device, as_project)
+					end,
+				},
+			}
+		end
 		projects.drives(device):after(function(drives: any)
 			local out: { Item } = { home() }
 			for _, d in (if type(drives) == "table" then drives else {}) do
@@ -724,10 +832,17 @@ local function locations_page(device: string, name: string): Page
 					})
 				end
 			end
+			for _, item in starts() do
+				table.insert(out, item)
+			end
 			done(out)
 		end, function()
 			-- (Its drives unknown: Home alone, as production.)
-			done({ home() })
+			local out: { Item } = { home() }
+			for _, item in starts() do
+				table.insert(out, item)
+			end
+			done(out)
 		end)
 	end
 	return page

@@ -259,6 +259,10 @@ export interface SessionProject {
   readonly cloneUrl: string;
   readonly path: string;
   readonly defaultBranch: string;
+  /** A project of several repositories: every one (the first is the one
+   * above), each cloned at `dir` under `path`. Absent: that one alone, at
+   * `path`. */
+  readonly repos?: readonly { readonly dir: string; readonly cloneUrl: string; readonly defaultBranch: string }[];
 }
 
 export interface ProvisionParams {
@@ -337,6 +341,67 @@ interface SessionRepo extends RepoInput {
   readonly path: string;
 }
 
+/** One repository of a project of several, and its folder in the project
+ * (`api`, `packages/ui`). */
+export interface ProjectRepoInput extends RepoInput {
+  readonly dir: string;
+}
+
+/** A session of a project of several repositories: each one at its folder
+ * (`repos`, 2..=16), all in one folder named `folder` (the project's). */
+export interface ProjectInput {
+  readonly repos: readonly ProjectRepoInput[];
+  readonly folder: string;
+}
+
+/** The most repositories one session clones. */
+export const MAX_SESSION_REPOS = 16;
+/** A repository's folder in its project: one or two plain names. */
+const DIR_SEGMENT_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const isProjectDir = (dir: unknown): dir is string =>
+  typeof dir === "string" &&
+  dir.split("/").length <= 2 &&
+  dir.split("/").every((part) => DIR_SEGMENT_RE.test(part) && part !== "." && part !== "..");
+const isProjectFolder = (folder: unknown): folder is string =>
+  typeof folder === "string" && DIR_SEGMENT_RE.test(folder) && folder !== "." && folder !== "..";
+
+/** `repo` as a session takes it: a GitHub repository cloned over https. */
+const isRepoInput = (repo: unknown): repo is RepoInput => {
+  if (typeof repo !== "object" || repo === null) return false;
+  const { fullName, cloneUrl, defaultBranch } = repo as Record<string, unknown>;
+  return (
+    typeof fullName === "string" &&
+    FULL_NAME_RE.test(fullName) &&
+    !fullName.split("/").some((part) => part === "." || part === "..") &&
+    typeof cloneUrl === "string" &&
+    isRepoUrl(cloneUrl) &&
+    typeof defaultBranch === "string" &&
+    isBranch(defaultBranch)
+  );
+};
+
+/**
+ * `{repos, folder}` of a session of several repositories, checked: 2..=16
+ * repositories, each like `repo` with a folder of its own (one or two plain
+ * names, none inside another's), and the folder one plain name. `undefined`
+ * when it isn't one.
+ */
+export const checkProjectInput = (repos: unknown, folder: unknown): ProjectInput | undefined => {
+  if (!Array.isArray(repos) || repos.length < 2 || repos.length > MAX_SESSION_REPOS || !isProjectFolder(folder)) {
+    return undefined;
+  }
+  const out: ProjectRepoInput[] = [];
+  for (const repo of repos as unknown[]) {
+    if (!isRepoInput(repo)) return undefined;
+    const { dir } = repo as unknown as Record<string, unknown>;
+    if (!isProjectDir(dir)) return undefined;
+    const inside = (outer: string, inner: string) => inner === outer || inner.startsWith(`${outer}/`);
+    if (out.some((other) => inside(other.dir, dir) || inside(dir, other.dir))) return undefined;
+    out.push({ fullName: repo.fullName, cloneUrl: repo.cloneUrl, defaultBranch: repo.defaultBranch, dir });
+  }
+  return { repos: out, folder };
+};
+
 /** Per-user billing view for the operator export. */
 export interface CloudBillingRow extends MonthUsage {
   readonly orgId?: string;
@@ -390,7 +455,12 @@ interface SessionRecord {
   chatId: string;
   /** The project (on whichever device) the chat belongs to. */
   spaceId: string;
+  /** The repository it clones; of a project of several, the first of
+   * `repos`, and `path` the folder that holds them all. */
   repo: SessionRepo;
+  /** A project of several repositories: every one, each cloned at its
+   * `dir` under `repo.path`. Absent: `repo` alone. */
+  repos?: ProjectRepoInput[];
   /** The branch the session starts from (picked in the composer); absent =
    * the repository's default branch. */
   baseBranch?: string;
@@ -1191,7 +1261,9 @@ export class CloudAccount extends DurableObject<Env> {
 
   /**
    * A chat runs on Cloud: give it its own machine, cloning `repo` (its
-   * project's GitHub repository) into `/home/user/{name}`. Idempotent per
+   * project's GitHub repository) into `/home/user/{name}` — or, for a project
+   * of several repositories (`project`), each of them at its folder in
+   * `/home/user/{folder}` (`repo` is then the first of them). Idempotent per
    * chat — a retried create returns the same session (and so the same host
    * device id for the chat row).
    */
@@ -1203,7 +1275,8 @@ export class CloudAccount extends DurableObject<Env> {
     edgeUrl: string,
     baseBranch?: string,
     parentChatId?: string,
-    reach: RunnerReach = this.acct.reach ?? "devices"
+    reach: RunnerReach = this.acct.reach ?? "devices",
+    project?: { readonly repos?: unknown; readonly folder?: unknown }
   ): Promise<CloudResult<CloudSessionView>> {
     const off = this.accountOf(caller);
     if (off) return off;
@@ -1222,19 +1295,20 @@ export class CloudAccount extends DurableObject<Env> {
     if (live >= this.maxSessions()) {
       return fail(429, "too_many_sessions", `You have ${live} Cloud chats. Delete some to start another.`);
     }
-    const name = typeof repo?.fullName === "string" ? repo.fullName.split("/")[1] : undefined;
+    // Of a project of several repositories: all of them, or none.
+    const several = project === undefined ? undefined : checkProjectInput(project.repos, project.folder);
+    if (project !== undefined && !several) {
+      return fail(
+        400,
+        "bad_request",
+        `Expected repos: 2 to ${MAX_SESSION_REPOS} of {fullName, cloneUrl (https), defaultBranch, dir}, each in a folder of its own, and folder.`
+      );
+    }
+    if (several) repo = several.repos[0]!;
+    const name = several ? several.folder : typeof repo?.fullName === "string" ? repo.fullName.split("/")[1] : undefined;
     const root = (this.env.CLOUD_PROJECTS_ROOT ?? CLOUD_PROJECTS_ROOT).replace(/\/+$/, "");
     const path = name ? `${root}/${name}` : "";
-    if (
-      !name ||
-      !FULL_NAME_RE.test(repo.fullName) ||
-      repo.fullName.split("/").some((part) => part === "." || part === "..") ||
-      typeof repo.cloneUrl !== "string" ||
-      !isRepoUrl(repo.cloneUrl) ||
-      typeof repo.defaultBranch !== "string" ||
-      !isBranch(repo.defaultBranch) ||
-      !isCheckoutPath(path)
-    ) {
+    if (!name || !isRepoInput(repo) || !isCheckoutPath(path)) {
       return fail(400, "bad_request", "Expected repo {fullName, cloneUrl (https), defaultBranch}.");
     }
     const providerName = activeProviderName(this.env);
@@ -1248,6 +1322,7 @@ export class CloudAccount extends DurableObject<Env> {
       chatId,
       spaceId,
       repo: { fullName: repo.fullName, cloneUrl: repo.cloneUrl, defaultBranch: repo.defaultBranch, path },
+      ...(several ? { repos: several.repos.map((r) => ({ ...r })) } : {}),
       ...(baseBranch !== undefined ? { baseBranch } : {}),
       deviceId: newCloudDeviceId(),
       createdAt: now,
@@ -1399,7 +1474,9 @@ export class CloudAccount extends DurableObject<Env> {
           branch ?? parent.baseBranch,
           parentChatId,
           // A delegate reaches what its parent does, whatever it asks.
-          parent.reach ?? "devices"
+          parent.reach ?? "devices",
+          // ... and clones what its parent did, laid out the same way.
+          parent.repos ? { repos: parent.repos, folder: parent.repo.path.split("/").pop() } : undefined
         );
     if (!started.ok) return started;
     const s = this.sessions.get(chatId);
@@ -1570,7 +1647,12 @@ export class CloudAccount extends DurableObject<Env> {
       provider,
       enrollCode: code,
       edgeUrl,
-      project: { cloneUrl: project.cloneUrl, path: project.path, defaultBranch: s.baseBranch ?? project.defaultBranch },
+      project: {
+        cloneUrl: project.cloneUrl,
+        path: project.path,
+        defaultBranch: s.baseBranch ?? project.defaultBranch,
+        ...(s.repos ? { repos: s.repos.map(({ dir, cloneUrl, defaultBranch }) => ({ dir, cloneUrl, defaultBranch })) } : {})
+      },
       ...(sandboxId ? { sandboxId } : {}),
       // A retried session keeps its own size; a new one takes the account's.
       ...(machine ? { machine } : {})
@@ -2012,6 +2094,16 @@ export class CloudAccount extends DurableObject<Env> {
   async repoOfDevice(caller: CloudCaller, deviceId: string): Promise<string | undefined> {
     if (!this.matches(caller)) return undefined;
     return this.sessionByDevice(deviceId)?.repo.fullName;
+  }
+
+  /** Every repository a Cloud machine's chat works in (`owner/name`): its
+   * one, or each of a project of several. A runner's GitHub grants are bound
+   * to these. Empty for a device that isn't one of this account's. */
+  async reposOfDevice(caller: CloudCaller, deviceId: string): Promise<string[]> {
+    if (!this.matches(caller)) return [];
+    const s = this.sessionByDevice(deviceId);
+    if (!s) return [];
+    return s.repos ? s.repos.map((r) => r.fullName) : [s.repo.fullName];
   }
 
   /** `POST /runner/wake-timing` (runner bearer, already verified): the engine's

@@ -106,10 +106,12 @@ export type Request = {
 	access: string?,
 	plan: boolean?,
 	-- A chat just made (sessions.create): its first message, run in `cwd`,
-	-- in a new worktree of it when `worktree`.
+	-- in a new worktree of it when `worktree` (of the project's
+	-- `repositories`, their paths in it, for a folder holding several).
 	fresh: boolean?,
 	cwd: string?,
 	worktree: boolean?,
+	repositories: { string }?,
 	-- Its id (store.new_id), when the page shows it before it's sent.
 	message_id: string?,
 }
@@ -227,6 +229,18 @@ export type Ref = { name: string, current: boolean, worktree: string? }
 -- this one): a promise of its refs, the current first.
 function M.refs(path: string, device: string?): any
 	return ui.call("chat.refs", { path = path, device = device })
+end
+
+-- A repository in a project folder that isn't one itself: its path there
+-- (`packages/web`), the branch checked out, and `empty` when it has no
+-- commit to branch from.
+export type Repository = { path: string, branch: string?, empty: boolean?, missing: boolean?, location: string?, github: string? }
+-- A project folder's repositories (at `path`, on `device` when that isn't
+-- this one), for a worktree of the whole project: a promise of `{ repo,
+-- list }` (`repo`: the folder is a repository itself, and lists none). An
+-- engine from before project worktrees refuses it.
+function M.repositories(path: string, device: string?): any
+	return ui.call("chat.repositories", { path = path, device = device })
 end
 
 -- The clipboard's picture written out as a PNG to send (src/pasted.rs): a

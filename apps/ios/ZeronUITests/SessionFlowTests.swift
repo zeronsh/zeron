@@ -429,6 +429,139 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "picked-clone")
     }
 
+    /// A project folder holding several repositories (the demo's Acme): its
+    /// checkout chip opens the sheet choosing the folder or a worktree of
+    /// the whole project, and which repositories that worktree checks out.
+    func testAFolderOfRepositoriesChoosesAWorktreeOfThem() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let acme = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Acme'")).firstMatch
+        XCTAssertTrue(acme.waitForExistence(timeout: 5))
+        acme.tap()
+        let chip = app.buttons["composer-chip-repositories"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "a folder of repositories offers its checkout")
+        XCTAssertFalse(app.buttons["composer-chip-branch"].exists, "no branches of its own")
+        // (The chips scroll: brought into view for the picture, dragged
+        // without a fling.)
+        func bringChipsIntoView() {
+            let host = app.buttons["composer-chip-host"]
+            guard host.isHittable else { return }
+            let start = host.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        bringChipsIntoView()
+        snapshot(app, "repositories-chip-folder")
+        chip.tap()
+        let mode = app.segmentedControls["repositories-mode"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 5))
+        mode.buttons["New worktree"].tap()
+        XCTAssertTrue(app.staticTexts["3 of 3"].waitForExistence(timeout: 2), "all of a few chosen at first")
+        let scratch = app.buttons["repository-row-scratch"]
+        XCTAssertTrue(scratch.waitForExistence(timeout: 5))
+        XCTAssertFalse(scratch.isEnabled, "no commit: can't be chosen")
+        snapshot(app, "repositories-sheet")
+        app.buttons["repository-row-packages/ui"].tap()
+        XCTAssertTrue(app.staticTexts["2 of 3"].waitForExistence(timeout: 2))
+        snapshot(app, "repositories-sheet-chosen")
+        app.buttons["repositories-close"].tap()
+        let counted = NSPredicate(format: "label CONTAINS '2 repositories'")
+        expectation(for: counted, evaluatedWith: chip)
+        waitForExpectations(timeout: 5)
+        bringChipsIntoView()
+        snapshot(app, "repositories-chip-worktree")
+    }
+
+    /// New Project on a folder holding several repositories (the demo's
+    /// acme) says how many it holds, as its host finds them; used, the new
+    /// session offers a worktree of them.
+    func testANewProjectHoldingRepositoriesSaysSo() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let newProject = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New Project'")).firstMatch
+        XCTAssertTrue(newProject.waitForExistence(timeout: 5))
+        newProject.tap()
+        onTheMac(app)
+        let acme = app.staticTexts["acme"]
+        XCTAssertTrue(acme.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["folder-repositories"].exists, "home isn't a folder of repositories")
+        acme.tap()
+        let note = app.staticTexts["folder-repositories"]
+        XCTAssertTrue(note.waitForExistence(timeout: 10))
+        XCTAssertTrue(note.label.contains("Holds 4 repositories"), note.label)
+        snapshot(app, "new-project-repositories")
+        app.buttons["use-folder"].tap()
+        let chip = app.buttons["composer-chip-repositories"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "its new session offers its checkout")
+        // (The chips scroll: brought into view for the picture, without a fling.)
+        let host = app.buttons["composer-chip-host"]
+        if host.isHittable {
+            let start = host.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        snapshot(app, "new-project-session")
+    }
+
+    /// New Project, on the Mac (the first host listed may be another).
+    private func openNewProject(_ app: XCUIApplication) {
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let newProject = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New Project'")).firstMatch
+        XCTAssertTrue(newProject.waitForExistence(timeout: 5))
+        newProject.tap()
+        onTheMac(app)
+    }
+
+    private func onTheMac(_ app: XCUIApplication) {
+        let device = app.buttons["new-project-device"]
+        XCTAssertTrue(device.waitForExistence(timeout: 5))
+        if !device.label.hasPrefix("MacBook Pro") {
+            device.tap()
+            let mac = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'MacBook Pro'")).firstMatch
+            XCTAssertTrue(mac.waitForExistence(timeout: 5))
+            mac.tap()
+        }
+    }
+
+    func testRepositoriesFromAnywhereBecomeOneProject() {
+        let app = launch(["-route", "new"])
+        openNewProject(app)
+        app.segmentedControls["new-project-mode"].buttons["Repositories"].tap()
+        let api = app.cells["compose-repository-api"]
+        XCTAssertTrue(api.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.cells["compose-repository-web"].exists)
+        let create = app.buttons["compose-create"]
+        XCTAssertFalse(create.isEnabled, "nothing chosen yet")
+        api.tap()
+        app.cells["compose-repository-web"].tap()
+        XCTAssertTrue(create.label.contains("2 Repositories"), create.label)
+        // Both acme's: the name it gets unless another is typed.
+        XCTAssertEqual(app.textFields["compose-name"].placeholderValue, "acme")
+        snapshot(app, "compose-repositories")
+        // A new one, made on the way and chosen.
+        app.cells["compose-new-repository"].tap()
+        let name = app.textFields["new-repository-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.typeText("billing")
+        snapshot(app, "compose-new-repository")
+        app.buttons["new-repository-create"].tap()
+        let made = app.cells["compose-repository-billing"]
+        XCTAssertTrue(made.waitForExistence(timeout: 10))
+        XCTAssertTrue(create.label.contains("3 Repositories"), create.label)
+        let field = app.textFields["compose-name"]
+        field.tap()
+        field.typeText("Billing")
+        create.tap()
+        // Its new session, in the project of the three.
+        let chip = app.buttons["composer-chip-project"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        XCTAssertTrue(chip.label.contains("Billing"), chip.label)
+    }
+
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
         let expand = app.buttons["Expand"].firstMatch

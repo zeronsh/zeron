@@ -1,0 +1,72 @@
+# Project worktrees
+
+A project's folder doesn't have to be one git repository. (Nor does it need to hold its repositories: see [projects of repositories](composed-projects.md), made from repositories anywhere on a device.) A folder that holds several, and isn't one itself, can be checked out whole: a new chat in a **worktree** of such a project gets one folder laid out like the project, with a worktree of each repository chosen in it, all on one branch.
+
+```text
+~/work/acme/                      ~/.zeron/worktrees/acme/swift-otter/
+  AGENTS.md                         AGENTS.md        → link to ~/work/acme/AGENTS.md
+  api/        (repository)          api/             worktree, zeron/swift-otter
+  web/        (repository)          web/             worktree, zeron/swift-otter
+  docs/       (repository)                           (not chosen: left out)
+  packages/   (plain folder)        packages/        a real folder
+    ui/       (repository)            ui/            worktree, zeron/swift-otter
+    README.md                         README.md      → link
+```
+
+## Adding such a project
+
+A folder of repositories is added like any folder (New project → a device → its folders → **Add this folder**). Inside one, the Add this folder row says how many repositories it holds ("Holds 3 repositories"), as its host finds them: the same count a worktree of it offers. iOS and Android's New Project says so too, over the folder's path ("Holds 4 repositories · New worktrees check them out together, on one branch"). A repository's own folder, or a host too old to list them, shows the path as before.
+
+## Choosing repositories
+
+In the composer's **Work in** panel, a project folder holding repositories offers **Checkout → Worktree** as a repository does. With a worktree picked, the panel lists the repositories in place of branches: each one's path in the project and its current branch, a check on each chosen. **All** / **None** sit beside the count.
+
+- **At first**, every repository is chosen when there are 8 or fewer, and none when there are more (a folder of dozens of clones isn't checked out whole by accident).
+- **Remembered** per project on this device: the next new chat in that project starts from the last choice.
+- **Not choosable:** a repository with no commit yet (there is nothing to branch from). It's listed, dimmed, with "No commits yet".
+- **None chosen:** the chat can't start, and the composer says so.
+
+The chip under the composer reads *device › project › N repositories* behind the worktree glyph. A **Local checkout** of the same project runs in its folder, as any plain folder does.
+
+## Where the repositories are found
+
+The project folder's own subfolders, and one level further inside a plain subfolder (`packages/ui` above). Never dot folders, `node_modules`, linked worktrees or submodules (each belongs to another repository), nor a symbolic link (it may lead out of the project), except a link the project's `.zeron-project.json` names: a repository it includes from elsewhere on its device ([projects of repositories](composed-projects.md)). Its worktree is made from where it really is. At most 64 are listed.
+
+The host device looks, when asked (`ListProjectRepositories`): nothing is stored in the workspace registry, so a repository cloned into the folder shows up in the next new chat.
+
+## What the host makes
+
+When the chat's first run is drained on the host (`WorktreeSpec::repositories`):
+
+1. **A folder is claimed** under the worktree location (Settings → General → Worktrees; `~/.zeron/worktrees` by default): `<location>/<project folder name>/<name>`, with a generated name that no chosen repository has a `zeron/<name>` branch for. The folder is claimed by creating it, so two chats starting at once never share one.
+2. **The project's own entries are linked** into it: files and plain folders, so the agent reads the project as it is (`AGENTS.md`, shared scripts). A folder that holds a repository is created instead, and its other entries linked. Repositories not chosen are left out, never linked: the agent would change the originals. Editing a linked file changes the original for every chat. On Windows, a link that can't be created (no permission to create symbolic links) is skipped.
+3. **Each chosen repository gets a worktree** at its own path, on the shared `zeron/<name>` branch, off its current commit. A run whose base ref names a branch a repository has starts that repository from it instead.
+4. **All or nothing:** if any repository can't be checked out (a hook refuses, a lock), every worktree already made is removed along with its branch, then the folder, and the run fails naming the repository. The project's own folder and the originals behind the links are never touched.
+
+The chat runs in the new folder, and its row records it (`cwd`) and the shared branch. The project's **setup Action** (*Run automatically on worktree creation*) runs once in the folder, with `ZERON_PROJECT_ROOT` set to the project and `ZERON_WORKTREE_PATH` set to the folder. A retried first run reuses the chat's worktree.
+
+Once the chat has a title, every repository still on `zeron/<name>` is renamed to one branch named after it, the same name in each. A name already taken in any of them gets the folder's suffix in all of them. A repository whose branch was switched in the meantime is left alone. If one rename fails, those already renamed are put back.
+
+`DeleteWorktree` on the folder removes each repository's worktree (deleting its `zeron/…` branch) and then the folder. Only the links are removed, never their originals. A folder holding no worktree is refused. As with single-repository worktrees, archiving or deleting a chat doesn't remove its worktree.
+
+## The Git panel
+
+A chat whose folder holds several repositories (a project worktree, or a local checkout of such a project) shows one of them in the panel's Git tabs, with a **repository chip** beside the branch chip. It starts on the repository last shown for that chat, otherwise the first one with changes, otherwise the first. Changes, History, staging, commit, push and branch switching all act on the repository shown. Choosing another in the chip switches the tab to it. The chip's list shows each repository's branch and how many files changed there. **Last turn** is recorded for each repository separately as a turn starts.
+
+Plugins can find the same repositories with `zeron.repositories(folder)` in their service (`sessions.read`, and only within this device's chats' and projects' folders).
+
+## Cloud
+
+A chat in such a project can run on Cloud too, on a machine of its own that clones the chosen repositories (each needs a GitHub repository Cloud reaches) into one folder laid out like the project.
+
+- **Asked for** with `CreateChat {cloud: true, cloudRepositories: [{path, github}]}`: each repository's path in the project (`api`, `packages/ui`, one or two plain names, none inside another) and its GitHub `owner/name`, 2 to 16 of them. The creating engine looks each one up in the repositories Cloud reaches; one it can't reach fails the create, naming it. One repository named is a session of that repository alone, as before; none, the project's own `githubRepo`.
+- **The session** (`POST /cloud/{org}/sessions`) carries them as `repos: [{fullName, cloneUrl, defaultBranch, dir}]` with `folder`, the project's folder name (other characters than letters, digits, `.`, `_` and `-` become `-`). `repo` is the first of them, so an edge from before such sessions starts a session of that one. The machine's folder is `/home/user/<folder>`; the session lists the first repository as its `repo` and that folder as its `path`. Delegates of the chat clone the same repositories the same way.
+- **The machine** gets them as `ZERON_CLOUD_REPOS`: `dir=cloneUrl@defaultBranch` per repository, comma separated. It clones each at its path in the folder (blobless, as a single repository is), then puts it on the session's `zeron/cloud-<id>` branch: from what the session pushed of it (a fresh machine for a chat that already ran), else the branch the chat started from where that repository has it, else its default branch. Every repository must clone for the checkout to be ready: the first that can't fails it, naming it, and the next boot clones only what is still missing (those cloned are kept). The folder itself is not a repository, and the project's own other files are not copied.
+- **GitHub access:** the machine asks for a grant (an App installation token for one repository) per repository, and the edge grants a machine only the repositories of its own session. Git uses each one's token for that repository alone: `credential.https://github.com.useHttpPath` is set and the credential store holds one line per repository path (with and without `.git`). `gh` keeps one token for github.com, the first repository's, so `gh` reaches the others only where that token does.
+- **Older parts:** a single-repository session is sent, provisioned and credentialed exactly as before. A machine whose engine predates `ZERON_CLOUD_REPOS` clones the first repository alone, into the folder.
+
+## Compatibility
+
+- **Older hosts** (a device on a version before project worktrees) refuse `ListProjectRepositories`. The composer then offers no worktree for such a folder and runs in it, as before. A worktree spec naming repositories is only ever sent after the host has listed them (`capabilities::PROJECT_WORKTREES_V1`).
+- **Wire and storage:** `WorktreeSpec::repositories` is additive, serde-defaulted and omitted when empty, so single-repository worktrees are sent exactly as before. No registry, session-document or SQLite schema changes.
+- **iOS and Android** start them too. For a folder of repositories, the new-session composer shows a checkout chip ("Project folder" / "3 repositories") that opens a **Checkout** sheet: Project folder or New worktree, then the repositories, each with its branch, a check while chosen, All / None and the same hint. The first choice is the core's (`project_worktree_first_choice`, the same rule as the desktop's), remembered per project on the device. With none chosen, the session can't start and says why. Hosts too old to list repositories offer no such worktree, as on the desktop.

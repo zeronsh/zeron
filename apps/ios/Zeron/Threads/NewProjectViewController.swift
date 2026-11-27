@@ -1,7 +1,9 @@
 import UIKit
 
 /// Create a project (a device + folder pair): pick a host, browse its folders
-/// over the device relay (git repos badged), and use the current folder.
+/// over the device relay (git repos badged), and use the current folder. Or,
+/// in Repositories, a project of repositories from anywhere on the host
+/// (ComposeRepositoriesController).
 final class NewProjectViewController: UIViewController, UICollectionViewDelegate {
     private let app: AppModel
     private var device: HostOption?
@@ -11,7 +13,14 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private let status = UILabel()
+    /// A folder holding several repositories: that its worktrees can check
+    /// them out together (docs/reference/project-worktrees.md).
+    private let repositoriesNote = UILabel()
     private let useButton = UIButton(type: .system)
+    private var bottom: UIStackView!
+    /// Folder or Repositories, in the title's place.
+    private let mode = UISegmentedControl(items: ["Folder", "Repositories"])
+    private var compose: ComposeRepositoriesController?
 
     /// Called with the new project's id (the new-session canvas selects it).
     var onCreated: ((String) -> Void)?
@@ -70,7 +79,11 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         status.textColor = Palette.secondary
         status.numberOfLines = 2
         status.textAlignment = .center
-        let bottom = UIStackView(arrangedSubviews: [status, useButton])
+        repositoriesNote.numberOfLines = 0
+        repositoriesNote.textAlignment = .center
+        repositoriesNote.isHidden = true
+        repositoriesNote.accessibilityIdentifier = "folder-repositories"
+        bottom = UIStackView(arrangedSubviews: [repositoriesNote, status, useButton])
         bottom.axis = .vertical
         bottom.spacing = 8
         bottom.translatesAutoresizingMaskIntoConstraints = false
@@ -90,9 +103,42 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
                 self?.device = h
                 self?.navigationItem.rightBarButtonItem?.title = h.name
                 self?.load(nil)
+                self?.showMode()
             }
         }))
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "new-project-device"
+        mode.selectedSegmentIndex = 0
+        mode.accessibilityIdentifier = "new-project-mode"
+        mode.setTitleTextAttributes([.font: Fonts.ui(.sansMedium, 13)], for: .normal)
+        mode.addAction(UIAction { [weak self] _ in
+            UISelectionFeedbackGenerator().selectionChanged()
+            self?.showMode()
+        }, for: .valueChanged)
+        navigationItem.titleView = mode
         load(nil)
+    }
+
+    /// The folder browser, or (Repositories) a project of repositories from
+    /// anywhere on the device, made afresh for each device.
+    private func showMode() {
+        compose?.willMove(toParent: nil)
+        compose?.view.removeFromSuperview()
+        compose?.removeFromParent()
+        compose = nil
+        let repositories = mode.selectedSegmentIndex == 1
+        collectionView.isHidden = repositories
+        bottom.isHidden = repositories
+        guard repositories, let device else { return }
+        let child = ComposeRepositoriesController(app: app, device: device) { [weak self] id in
+            self?.onCreated?(id)
+            self?.dismiss(animated: true)
+        }
+        addChild(child)
+        child.view.frame = view.bounds
+        child.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(child.view)
+        child.didMove(toParent: self)
+        compose = child
     }
 
     private var loadGeneration = 0
@@ -131,15 +177,38 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             var s = NSDiffableDataSourceSnapshot<Int, String>()
             s.appendSections([0])
             s.appendItems(items)
-            await dataSource.apply(s, animatingDifferences: false)
+            // (Reloaded whole: rows are keyed by name, and a folder of the same
+            // name elsewhere — a repository here, not there — must not keep
+            // the last folder's look.)
+            await dataSource.applySnapshotUsingReloadData(s)
             let name = (listing.path as NSString).lastPathComponent
             var c = useButton.configuration
             c?.title = "Use “\(name.isEmpty ? listing.path : name)”"
             useButton.configuration = c
             useButton.isEnabled = true
             status.text = listing.path
-            title = name.isEmpty ? "New Project" : name
+            // (As its host finds them: the count a worktree of it offers.)
+            showRepositories(0)
+            let count = await app.folderRepositories(deviceId: device.id, path: listing.path)
+            guard generation == loadGeneration else { return }
+            showRepositories(count)
         }
+    }
+
+    /// "Holds 3 repositories…" over the path, for a folder holding two or
+    /// more; nothing otherwise.
+    private func showRepositories(_ count: Int) {
+        guard count >= 2 else {
+            repositoriesNote.isHidden = true
+            return
+        }
+        let glyph = NSTextAttachment(image: BranchIcon.sized(13)?.withTintColor(Palette.accent, renderingMode: .alwaysOriginal) ?? UIImage())
+        glyph.bounds = CGRect(x: 0, y: -2, width: 13, height: 13)
+        let note = NSMutableAttributedString(attachment: glyph)
+        note.append(NSAttributedString(string: "  Holds \(count) repositories", attributes: [.font: Fonts.ui(.sansMedium, 14), .foregroundColor: Palette.text]))
+        note.append(NSAttributedString(string: "\nNew worktrees check them out together, on one branch.", attributes: [.font: Fonts.ui(.sans, 13), .foregroundColor: Palette.secondary]))
+        repositoriesNote.attributedText = note
+        repositoriesNote.isHidden = false
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {

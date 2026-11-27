@@ -1144,7 +1144,7 @@ local function Composer(): Node
 			slide_to = chat_id
 			route.open_session(chat_id)
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek() })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek(), repositories = plan.clones })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
@@ -1212,6 +1212,7 @@ local function Composer(): Node
 				T.sent_here(req.message_id :: string)
 				req.cwd = plan.cwd
 				req.worktree = plan.worktree
+				req.repositories = plan.repositories
 				-- Opened first, then sent: the host shows a prompt at once
 				-- only for the chat it has open, so the new page has your
 				-- message from its first frame, sending, rather than nothing
@@ -1421,6 +1422,7 @@ local function Composer(): Node
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
+			repositories = where.repositories,
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,

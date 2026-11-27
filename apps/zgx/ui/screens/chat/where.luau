@@ -23,12 +23,20 @@
 --   the project's current branch.
 -- - Remembered: the last device (never Cloud: chosen afresh), and the last
 --   project on each device, Cloud's too.
+-- - Repositories: a project folder that isn't a repository but holds some
+--   (`ListProjectRepositories`, forwarded to its device) can make a worktree
+--   of the whole project: one folder laid out like it, a worktree of each
+--   repository chosen on one branch (crates/engine repos/project_worktrees).
+--   All are chosen at first when there are 8 or fewer, else none until some
+--   are; the choice is remembered per project. One with no commit can't be
+--   chosen. A host too old to list them offers none, and runs in place.
 -- - Sent: a local checkout runs in the project's folder (or, for a ref
 --   checked out in a worktree of its own, in that worktree), the ref named
 --   on the chat; a worktree is made off the ref as the run starts (HEAD if
 --   the refs never came). A folder with no git runs in place, whichever
---   checkout was picked. On Cloud, the chat is made there (`cloud`) and runs
---   in its machine's checkout.
+--   checkout was picked, unless it holds repositories: a worktree of the
+--   project then, of those chosen (none chosen: it can't start). On Cloud,
+--   the chat is made there (`cloud`) and runs in its machine's checkout.
 --
 -- `Where.bind { device, project, checkout, branch, active, slot?, remember? }`
 -- (in a component): the composer's choices, and while `active` (a new chat,
@@ -57,6 +65,13 @@ M.remembered = ui.persist("chat_where", {
 	device = nil :: string?,
 	projects = {} :: { [string]: string },
 })
+-- The repositories last chosen for a worktree of each project holding
+-- several, by project id (their paths in it), kept across launches.
+M.remembered_repositories = ui.persist("chat_where_repositories", {} :: { [string]: { string } })
+-- At most this many are chosen for a project's first worktree: all of a
+-- few, none of many (a folder of dozens of clones isn't checked out whole
+-- by accident).
+M.ALL_UP_TO = 8
 
 export type Choices = {
 	device: State<string?>,
@@ -84,6 +99,13 @@ export type Plan = {
 	cwd: string?,
 	-- A worktree made off `branch` (HEAD with none) as it starts.
 	worktree: boolean,
+	-- On Cloud, a project of repositories: those its machine clones, each
+	-- at its path in the project (`{ path, github }`).
+	clones: { { path: string, github: string } }?,
+	-- With `worktree`, in a project folder holding several repositories:
+	-- the ones checked out (their paths in it), in one worktree of the
+	-- whole project.
+	repositories: { string }?,
 	-- On a Cloud machine of its own, cloning the project's repository.
 	cloud: boolean?,
 }
@@ -107,6 +129,37 @@ end
 
 -- The refs loaded: for which project (and where), how it went, the list.
 type Refs = { key: string, state: "idle" | "loading" | "ready" | "error" | "away", list: { store.Ref } }
+-- A project folder's repositories, loaded as its refs are: "ready" with
+-- what it holds (none, for a repository or a folder of none); "error" for a
+-- host that couldn't say (or is too old to be asked: no worktree of the
+-- project offered then).
+type Repositories = { key: string, state: "idle" | "loading" | "ready" | "error" | "away", list: { store.Repository } }
+
+-- The repositories a project's worktree starts with: those remembered for
+-- it that can still be chosen, else all of a few (`M.ALL_UP_TO`), else none.
+function M.first_choice(list: { store.Repository }, remembered: { string }?): { string }
+	local can: { [string]: boolean } = {}
+	local all: { string } = {}
+	for _, r in list do
+		if not r.empty then
+			can[r.path] = true
+			table.insert(all, r.path)
+		end
+	end
+	if remembered then
+		local kept: { string } = {}
+		for _, path in remembered do
+			if can[path] then
+				table.insert(kept, path)
+			end
+		end
+		-- (Remembered as none: none again.)
+		if #kept > 0 or #remembered == 0 then
+			return kept
+		end
+	end
+	return if #all <= M.ALL_UP_TO then all else {}
+end
 
 function M.bind(c: Choices)
 	-- Presence is judged as time passes, not only as the sessions change.
@@ -176,11 +229,16 @@ function M.bind(c: Choices)
 	local function on_cloud(): boolean
 		return c.device:get() == M.CLOUD
 	end
+	-- Whether Cloud can clone some of a project of repositories' (known once
+	-- its repositories are listed: set below).
+	local cloneable: (p: sessions.Project?) -> boolean = function()
+		return false
+	end
 	local function on_device(device: string?): { sessions.Project }
 		local out = {}
 		for _, p in sessions.projects:get() do
 			-- (On Cloud: those it can open, on whichever device.)
-			if if device == M.CLOUD then cloud_repo(p) ~= nil else p.device == device then
+			if if device == M.CLOUD then (cloud_repo(p) ~= nil or cloneable(p)) else p.device == device then
 				table.insert(out, p)
 			end
 		end
@@ -297,7 +355,7 @@ function M.bind(c: Choices)
 			return
 		end
 		-- (On Cloud, a project Cloud can open stays there.)
-		if c.device:peek() == M.CLOUD and cloud_repo(p) then
+		if c.device:peek() == M.CLOUD and (cloud_repo(p) or cloneable(p)) then
 			return
 		end
 		if p and p.device ~= c.device:peek() and device_row(p.device) then
@@ -562,6 +620,235 @@ function M.bind(c: Choices)
 		return { title = ui.t("chat.where.branches_empty.none"), hint = ui.t("chat.where.branches_empty.none_hint") }
 	end
 
+	-- A project folder's repositories, from where it is: loaded as the
+	-- project (or where it is) changes, for a folder with no git of its own.
+	local repositories = ui.state(
+		if c.slot then `chat_where_repositories.{c.slot}` else "chat_where_repositories",
+		{ key = "", state = "idle", list = {} } :: Repositories
+	)
+	-- The ones chosen for its worktree (their paths), and for which project:
+	-- seeded as its list comes (`M.first_choice`), remembered as changed.
+	local chosen = ui.state(
+		if c.slot then `chat_where_chosen.{c.slot}` else "chat_where_chosen",
+		{ key = "", paths = {} :: { string } }
+	)
+	local repositories_asked: string? = nil
+	ui.effect(function()
+		local id = c.project:get()
+		if not c.active() then
+			return
+		end
+		local p = project_row(id)
+		-- (Only a folder with no git; a project living on Cloud is one
+		-- repository. On Cloud, its repositories are what the machine clones.)
+		if not p or p.git or lives_on_cloud(p) then
+			if repositories:peek().key ~= "" then
+				repositories:set { key = "", state = "idle", list = {} }
+			end
+			return
+		end
+		local d = device_row(p.device)
+		local key = `{p.id}|{p.device}|{p.path}`
+		if d and not online(d) then
+			if repositories:peek().key ~= key or repositories:peek().state ~= "away" then
+				repositories:set { key = key, state = "away", list = {} }
+			end
+			return
+		end
+		local was = repositories:peek()
+		if was.key == key and (was.state == "ready" or was.state == "error" or (was.state == "loading" and repositories_asked == key)) then
+			return
+		end
+		repositories_asked = key
+		repositories:set { key = key, state = "loading", list = if was.key == key then was.list else {} }
+		local here = sessions.now:peek().here
+		local ok, answer = pcall(store.repositories, p.path, if p.device ~= here then p.device else nil)
+		if not ok or answer == nil then
+			repositories:set { key = key, state = "error", list = {} }
+			return
+		end
+		answer:after(function(found: any)
+			if repositories:peek().key ~= key then
+				return
+			end
+			-- (A folder that turned out to be a repository: none of its own.)
+			local list = if type(found) == "table" and not found.repo then found.list or {} else {}
+			repositories:set { key = key, state = "ready", list = list }
+		end, function()
+			if repositories:peek().key == key then
+				repositories:set { key = key, state = "error", list = {} }
+			end
+		end)
+	end)
+	-- Seeded for each project as its list comes.
+	ui.effect(function()
+		local r = repositories:get()
+		if r.state ~= "ready" or chosen:peek().key == r.key then
+			return
+		end
+		local id = string.match(r.key, "^([^|]+)") or ""
+		chosen:set { key = r.key, paths = M.first_choice(r.list, M.remembered_repositories:peek()[id]) }
+	end)
+	-- Whether the project chosen holds repositories a worktree of it can
+	-- check out (and its host can make one).
+	local function holds_repositories(): boolean
+		local p = project_row(c.project:get())
+		local r = repositories:get()
+		if not p or p.git or on_cloud() or r.state ~= "ready" then
+			return false
+		end
+		if r.key ~= `{p.id}|{p.device}|{p.path}` then
+			return false
+		end
+		for _, repo in r.list do
+			if not repo.empty then
+				return true
+			end
+		end
+		return false
+	end
+	-- Whether Cloud can clone a repository of the project's: one on GitHub
+	-- that Cloud reaches.
+	local function cloud_clones(repo: any): boolean
+		return repo.github ~= nil and cloud.reaches(repo.github) ~= nil
+	end
+	-- On Cloud, a project of repositories (a folder of them, or one composed
+	-- of them): its machine clones those chosen, laid out like the project.
+	cloneable = function(p: sessions.Project?): boolean
+		local r = repositories:get()
+		if not p or p.git or p.github or lives_on_cloud(p) or r.state ~= "ready" then
+			return false
+		end
+		if r.key ~= `{p.id}|{p.device}|{p.path}` then
+			return false
+		end
+		for _, repo in r.list do
+			if not repo.empty and cloud_clones(repo) then
+				return true
+			end
+		end
+		return false
+	end
+	local function cloud_of_repositories(): boolean
+		return on_cloud() and cloneable(project_row(c.project:get()))
+	end
+	-- One a choice can include where it runs.
+	local function choosable(repo: any): boolean
+		if repo.empty then
+			return false
+		end
+		return if on_cloud() then cloud_clones(repo) else true
+	end
+	local function chosen_paths(): { string }
+		local r = repositories:get()
+		local now = chosen:get()
+		if now.key ~= r.key then
+			local can = {}
+			for _, repo in r.list do
+				if choosable(repo) then
+					table.insert(can, repo)
+				end
+			end
+			return M.first_choice(can, nil)
+		end
+		-- (In the list's order, whichever order they were picked in.)
+		local picked: { [string]: boolean } = {}
+		for _, path in now.paths do
+			picked[path] = true
+		end
+		local out: { string } = {}
+		for _, repo in r.list do
+			if picked[repo.path] and choosable(repo) then
+				table.insert(out, repo.path)
+			end
+		end
+		return out
+	end
+	-- Chosen now: `paths`, for the project shown, and remembered for it.
+	local function choose(paths: { string })
+		local r = repositories:peek()
+		if r.state ~= "ready" then
+			return
+		end
+		chosen:set { key = r.key, paths = paths }
+		local id = string.match(r.key, "^([^|]+)")
+		if id and c.remember ~= false then
+			M.remembered_repositories:set_key({ id }, paths)
+		end
+	end
+	-- What the composer lists of them, and does with a choice.
+	local project_repositories = {
+		-- Whether the project holds repositories to choose from.
+		offered = function(): boolean
+			return holds_repositories() or cloud_of_repositories()
+		end,
+		-- Whether its worktree is the project's (a worktree picked there), or
+		-- Cloud's machine clones its repositories.
+		active = function(): boolean
+			return (c.checkout:get() == "worktree" and holds_repositories()) or cloud_of_repositories()
+		end,
+		loading = function(): boolean
+			return repositories:get().state == "loading"
+		end,
+		list = function(): { any }
+			local picked: { [string]: boolean } = {}
+			for _, path in chosen_paths() do
+				picked[path] = true
+			end
+			local out = {}
+			for _, repo in repositories:get().list do
+				table.insert(out, {
+					path = repo.path,
+					branch = repo.branch,
+					chosen = picked[repo.path] == true,
+					disabled = not choosable(repo) or nil,
+					-- (Gone from where the project includes it from.)
+					missing = repo.missing or nil,
+					-- (On Cloud: one it can't clone.)
+					uncloned = (on_cloud() and not repo.empty and not cloud_clones(repo)) or nil,
+				})
+			end
+			return out
+		end,
+		chosen = chosen_paths,
+		toggle = function(path: string)
+			local now = chosen_paths()
+			local next: { string } = {}
+			local found = false
+			for _, p in now do
+				if p == path then
+					found = true
+				else
+					table.insert(next, p)
+				end
+			end
+			if not found then
+				for _, repo in repositories:peek().list do
+					if repo.path == path and choosable(repo) then
+						table.insert(next, path)
+					end
+				end
+			end
+			choose(next)
+		end,
+		-- On Cloud, what its machine does with them.
+		hint = function(): string?
+			return if on_cloud() then ui.t("ds.composer.repositories.cloud_hint"):get() else nil
+		end,
+		-- Every one (true), or none.
+		all = function(on: boolean)
+			local next: { string } = {}
+			if on then
+				for _, repo in repositories:peek().list do
+					if choosable(repo) then
+						table.insert(next, repo.path)
+					end
+				end
+			end
+			choose(next)
+		end,
+	}
+
 	-- Why a new chat can't start where it's set to, if it can't.
 	local blocked = ui.computed(function(): string?
 		if not c.active() then
@@ -577,6 +864,9 @@ function M.bind(c: Choices)
 		if on_cloud() and (id == nil or id == M.NO_PROJECT) then
 			return ui.t("chat.where.blocked.cloud_needs_project"):get()
 		end
+		if project_repositories.active() and #chosen_paths() == 0 then
+			return ui.t("chat.where.blocked.no_repositories"):get()
+		end
 		return nil
 	end)
 	-- What a send does, from the choices as they stand.
@@ -591,10 +881,32 @@ function M.bind(c: Choices)
 		if c.device:peek() == M.CLOUD and cloud_repo(p) then
 			return { project = p.id, device = nil, branch = name, cwd = nil, worktree = false, cloud = true }
 		end
+		-- On Cloud, a project of repositories: its machine clones those
+		-- chosen, each where it is in the project.
+		if c.device:peek() == M.CLOUD and cloud_of_repositories() then
+			local wanted: { [string]: boolean } = {}
+			for _, path in chosen_paths() do
+				wanted[path] = true
+			end
+			local clones = {}
+			for _, repo in repositories:peek().list do
+				if wanted[repo.path] then
+					table.insert(clones, { path = repo.path, github = repo.github })
+				end
+			end
+			return { project = p.id, device = nil, branch = name, cwd = nil, worktree = false, cloud = true, clones = clones }
+		end
 		-- (Only a repository can make a worktree: in a plain folder the host
-		-- would refuse the run, so the pick waits for the next repository.)
+		-- would refuse the run, so the pick waits for the next repository;
+		-- in one holding repositories, a worktree of the whole project.)
 		if c.checkout:peek() == "worktree" and p.git then
 			return { project = p.id, device = p.device, branch = name, cwd = p.path, worktree = true }
+		end
+		if c.checkout:peek() == "worktree" and holds_repositories() then
+			local paths = chosen_paths()
+			if #paths > 0 then
+				return { project = p.id, device = p.device, branch = nil, cwd = p.path, worktree = true, repositories = paths }
+			end
 		end
 		-- A local checkout: the folder as it is; a ref checked out in a
 		-- worktree of its own runs there.
@@ -614,6 +926,7 @@ function M.bind(c: Choices)
 		blocked = blocked,
 		plan = plan,
 		refs = refs,
+		repositories = project_repositories,
 	}
 end
 

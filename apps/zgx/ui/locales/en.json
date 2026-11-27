@@ -669,6 +669,20 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
+      },
+      "repositories": {
+        "heading": "Repositories",
+        "count": "{n, plural, one {# repository} other {# repositories}}",
+        "chosen": "{chosen} of {total}",
+        "all": "All",
+        "none": "None",
+        "no_commits": "No commits yet",
+        "loading": "Looking for repositories…",
+        "hint": "Each gets a worktree on one new branch, in a folder laid out like the project.",
+        "label": "Repositories in the worktree",
+        "missing": "Not found",
+        "not_on_github": "Not on GitHub",
+        "cloud_hint": "Cloud's machine clones each into a folder laid out like the project, all on one new branch."
       }
     },
     "markdown": {
@@ -2600,6 +2614,35 @@
         "notice_enable": "An agent asks to turn on {name}",
         "notice_disable": "An agent asks to turn off {name}"
       }
+    },
+    "repositories": {
+      "title": "Repositories",
+      "terms": "repositories repos git clone new repository github local folders",
+      "description": "The git repositories on your computers.",
+      "new": "New repository",
+      "new_terms": "create init make repository github",
+      "clone": "Clone repository",
+      "clone_terms": "clone git url address download",
+      "forgotten": "{name} won't be listed",
+      "forgotten_body": "It stays where it is on disk. Add it again from New project or a project's Repositories.",
+      "couldnt_forget": "Couldn't forget it",
+      "added_to": "{name} added to {project}",
+      "couldnt_add": "Couldn't add it to the project",
+      "in_projects": "In {names}",
+      "chat": "New chat in it",
+      "show": "Show in folder",
+      "couldnt_show": "Couldn't show it",
+      "copy_path": "Copy path",
+      "add_to": "Add to project",
+      "forget": "Forget",
+      "more_for": "More for {name}",
+      "offline_body": "Its repositories show here once it's back.",
+      "old_body": "{device} runs a version of Zeron that can't list its repositories yet.",
+      "none_body": "None were found in its home folder. Make one, or clone one.",
+      "footer": "{n, plural, one {# repository.} other {# repositories.}} Found up to four folders deep in home (never in dependencies or build output), and kept when added, cloned or made here.",
+      "device": "Computer",
+      "find": "Find a repository",
+      "refresh": "Look again"
     }
   },
   "common": {
@@ -2738,6 +2781,11 @@
             "save_gone": "This project was removed on another device.",
             "save_offline": "Zeron on this computer isn't responding. Try again in a moment.",
             "unavailable": "Image icons aren't available for your account yet. Choose an emoji or a color instead."
+          },
+          "tabs": "Project settings",
+          "tab": {
+            "general": "General",
+            "repositories": "Repositories"
           }
         }
       },
@@ -2776,7 +2824,9 @@
         "settings": "Settings",
         "update_watch": "The update watch",
         "search": "Search",
-        "new_project": "New project"
+        "new_project": "New project",
+        "compose_project": "New project from repositories",
+        "repositories": "New repository"
       }
     },
     "title_bar": {
@@ -2917,7 +2967,15 @@
       "private": "Private",
       "on_device": "On {device}",
       "from_github": "From GitHub",
-      "add_cloud_project": "Add project"
+      "add_cloud_project": "Add project",
+      "holds_repositories": "{n, plural, one {Holds # repository} other {Holds # repositories}}",
+      "start": "Start from",
+      "compose": "Repositories…",
+      "compose_hint": "Several, from anywhere on it, in one project",
+      "new_repository": "New repository…",
+      "new_repository_hint": "Made here, with a first commit",
+      "clone_repository": "Clone repository…",
+      "clone_repository_hint": "From its address"
     },
     "updates": {
       "available": "Update available",
@@ -2988,6 +3046,107 @@
       "waiting_on_chat": "Another chat",
       "stop_delegated": "Stop subagents",
       "stop_delegated_failed": "Couldn't stop the subagents"
+    },
+    "repositories": {
+      "error": {
+        "unknown": "Something went wrong.",
+        "offline": "The device isn't connected right now."
+      },
+      "no_commits": "No commits yet",
+      "detached": "Detached",
+      "failed": {
+        "title": "Couldn't list its repositories",
+        "retry": "Try again"
+      },
+      "none": {
+        "title": "No repositories found",
+        "all_in": "Every repository found is in it already",
+        "body": "Make one, clone one, or type the path of one that's somewhere else."
+      },
+      "new": "New repository",
+      "clone": "Clone repository",
+      "new_short": "New",
+      "clone_short": "Clone",
+      "unmatched": "Nothing matches “{query}”",
+      "unmatched_body": "Type a path (~/code/api) to use a repository that isn't listed.",
+      "path": {
+        "title": "Use the repository at {path}",
+        "add": "Use this repository"
+      },
+      "label": "Repositories",
+      "search": "Search repositories",
+      "search_placeholder": "Search, or type a path",
+      "found": "{n, plural, =0 {None found} one {# repository} other {# repositories}}",
+      "chosen": "{n, plural, one {# chosen} other {# chosen}}",
+      "looking": "Looking for more…",
+      "clear": "Clear",
+      "new_form": {
+        "name": "Name",
+        "name_placeholder": "my-repository",
+        "where_hint": "Letters, digits, dots, dashes and underscores.",
+        "at": "Made at {path}",
+        "unnamed": "Name it with letters, digits, dots, dashes or underscores.",
+        "location": "Location",
+        "readme": "Start with a README",
+        "readme_hint": "Its first commit, on main: worktrees branch from it.",
+        "publish": "Also create it on GitHub",
+        "publish_hint": "With the GitHub CLI signed in on this device, as its origin.",
+        "visibility": "Visibility",
+        "private": "Private",
+        "public": "Public",
+        "go": "Create repository"
+      },
+      "made_but": "{name} was created",
+      "clone_form": {
+        "url": "Address",
+        "hint": "An HTTPS or SSH address, as git clone takes it.",
+        "no_url": "Paste the repository's address.",
+        "go": "Clone",
+        "into": "Cloned into {path}"
+      },
+      "new_title": "New repository",
+      "clone_title": "Clone repository",
+      "new_description": "A git repository on {device}.",
+      "clone_description": "A copy of a repository on {device}."
+    },
+    "compose": {
+      "title": "New project",
+      "description": "Repositories from anywhere on {device}, each staying where it is.",
+      "name": "Name",
+      "name_placeholder": "Project name",
+      "folder_hint": "Its own folder, with a link to each repository.",
+      "folder": "Its folder: {path}",
+      "repositories": "Repositories",
+      "back": "Repositories",
+      "create": "Create project",
+      "create_n": "{n, plural, one {Create project with # repository} other {Create project with # repositories}}"
+    },
+    "project_repositories": {
+      "add": "Add",
+      "add_n": "{n, plural, one {Add # repository} other {Add # repositories}}",
+      "in_folder": "In the project's folder",
+      "missing": "Not found at {path}",
+      "adding": "Added on save · {path}",
+      "remove": "Take {name} out of the project",
+      "remove_tip": "Take out of the project (the repository stays)",
+      "none": "No repositories yet",
+      "none_body": "Add repositories from anywhere on its device to work on them together.",
+      "heading": "{n, plural, =0 {Repositories} one {# repository} other {# repositories}}",
+      "save_hint": "Saved with the project. Taking one out removes its link, never the repository.",
+      "hint": "New worktrees of the project check out the ones you choose, on one branch.",
+      "back": "Repositories",
+      "back_to_add": "Add repositories",
+      "failed": "Couldn't read its repositories",
+      "cloud": "A Cloud project is one repository",
+      "cloud_body": "Its sessions clone {repo} on machines of their own.",
+      "offline": "{device} is offline",
+      "offline_body": "Its repositories show here once it's back.",
+      "old": "Update Zeron on {device}",
+      "old_body": "{device} runs a version that can't add repositories to a project yet.",
+      "one": "This project is one repository",
+      "one_body": "To work across several, make a project of it and others. This one stays as it is.",
+      "combine": "Combine with other repositories…",
+      "couldnt_save": "Couldn't change its repositories: {why}"
     }
   },
   "onboarding": {
@@ -3217,7 +3376,8 @@
       },
       "blocked": {
         "project_gone": "That project is no longer there. Pick another, or none.",
-        "cloud_needs_project": "Cloud chats work in a project. Pick one Cloud can open."
+        "cloud_needs_project": "Cloud chats work in a project. Pick one Cloud can open.",
+        "no_repositories": "Choose at least one repository for the worktree."
       }
     },
     "composer": {

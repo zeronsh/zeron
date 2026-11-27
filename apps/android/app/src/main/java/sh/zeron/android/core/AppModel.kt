@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.zeron_core.ConnectivityState
+import uniffi.zeron_core.ProjectRepositories
 import uniffi.zeron_core.ProjectView
 import uniffi.zeron_core.SendState
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -740,6 +741,37 @@ class AppModel(private val app: Application) {
         return chatId
     }
 
+    /**
+     * The repositories in a project folder that isn't one itself, for a
+     * worktree of the whole project. Null when there's nothing to choose
+     * from: a repository, a Cloud project, or a host too old to list them
+     * (its folder then runs in place, as before).
+     */
+    suspend fun projectRepositories(projectId: String): ProjectRepositories? {
+        val client = _client.value ?: return null
+        val project = _workspace.value?.projects?.firstOrNull { it.id == projectId } ?: return null
+        if (project.gitDetected || project.isCloud) return null
+        val listing = runCatching { client.listProjectRepositories(project.deviceId, project.path) }.getOrNull() ?: return null
+        return listing.takeIf { !it.isRepo && it.repositories.any { r -> r.hasCommits } }
+    }
+
+    /** The repositories last chosen for a project's worktree: the next new session there starts from them. */
+    /** (The demo's, for this launch only: each starts as a fresh demo does.) */
+    private val demoRepositories = HashMap<String, List<String>>()
+
+    fun rememberedRepositories(projectId: String): List<String>? {
+        if (isDemo) return demoRepositories[projectId]
+        return settings.getString("repositories.$projectId", null)?.let { saved -> if (saved.isEmpty()) emptyList() else saved.split('\n') }
+    }
+
+    fun rememberRepositories(paths: List<String>, projectId: String) {
+        if (isDemo) {
+            demoRepositories[projectId] = paths
+            return
+        }
+        settings.edit().putString("repositories.$projectId", paths.joinToString("\n")).apply()
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -753,7 +785,7 @@ class AppModel(private val app: Application) {
             val chatId = client.createSession(NewSession(target, config, if (draft.worktree) null else draft.branch, null, null))
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
-            val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
+            val worktree = project?.let { worktreeSpec(draft, it.path, it.id, it.gitDetected) }
             handle.send(SendRequest(text, attachments, worktree, BusyPolicy.QUEUE))
             noteDeliveryActivity()
             refreshWorkspace()
@@ -808,4 +840,21 @@ data class NewSessionDraft(
     val worktree: Boolean = false,
     /** Run on its own Cloud machine (a project whose repository Cloud reaches). */
     val cloud: Boolean = false,
+    /** A project folder holding several repositories: those its worktree checks out (their paths in it). */
+    val repositories: List<String>? = null,
 )
+
+/**
+ * The worktree a new session starts in. A git project makes one off the
+ * picked branch. A folder holding several repositories makes one of the
+ * whole project, checking out those chosen (`draft.repositories`, set only
+ * once its host listed them). Anywhere else the pick outlives a switch to a
+ * plain folder (where its chip is hidden) and the host would refuse the run,
+ * so there it's left for the next git project rather than sent.
+ */
+fun worktreeSpec(draft: NewSessionDraft, path: String, projectId: String, gitDetected: Boolean): WorktreeSpec? {
+    if (!draft.worktree) return null
+    if (gitDetected) return WorktreeSpec(path, draft.branch ?: "HEAD", projectId, emptyList())
+    val repositories = draft.repositories?.takeIf { it.isNotEmpty() } ?: return null
+    return WorktreeSpec(path, "HEAD", projectId, repositories)
+}

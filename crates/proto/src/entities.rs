@@ -881,6 +881,181 @@ pub struct Worktree {
     pub checkout_id: Option<String>,
 }
 
+/// One git repository inside a project folder that isn't a repository
+/// itself (`ListProjectRepositories`): what a worktree of the project can
+/// check out ([`crate::WorktreeSpec::repositories`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepository {
+    /// Where it is in the folder, `/`-separated (`api`, `packages/web`):
+    /// also where its worktree goes in the project's worktree.
+    pub path: String,
+    /// The branch checked out there; `None` when detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// False for a repository with no commit yet: nothing to branch from,
+    /// so it can't be checked out.
+    #[serde(default)]
+    pub has_commits: bool,
+    /// A linked worktree (listed only in a project's worktree, where each
+    /// repository is one); never offered from a project's own folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
+    /// Where the repository really is, for one the project includes from
+    /// elsewhere on its device (`SetProjectRepositories`): absolute. `None`
+    /// for one in the project's folder itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// An included repository that's no longer at its `location` (moved or
+    /// deleted): listed so it can be found again or taken out, never
+    /// checked out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+    /// The GitHub repository (`owner/name`) of its `origin`, when it has one:
+    /// what a Cloud session of the project clones in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+}
+
+/// One repository a project includes, as `SetProjectRepositories` and
+/// `ComposeProject` are asked for it: a repository anywhere on the
+/// project's device (`path`, absolute or `~/…`), and the name it goes by in
+/// the project (its folder's own name when absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMember {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `ComposeProject`'s answer: the project's new folder on its device, to add
+/// as a project (`createSpace`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposedProject {
+    pub path: String,
+    pub repositories: ProjectRepositories,
+}
+
+/// A git repository on a device (`ListLocalRepositories`): found under its
+/// home, or added, cloned or created there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepository {
+    /// Absolute.
+    pub path: String,
+    /// Its folder's name.
+    pub name: String,
+    /// The branch checked out; `None` when detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub has_commits: bool,
+    /// `owner/name` of its `origin` on GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    /// When it was last worked in (its git index or HEAD last changed), in
+    /// ms since the epoch: the list's order, newest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_at: Option<i64>,
+    /// Kept in the device's list on purpose (added, cloned or created
+    /// through Zeron), not only found.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
+}
+
+/// `ListLocalRepositories`' answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepositories {
+    /// Newest first.
+    #[serde(default)]
+    pub repositories: Vec<LocalRepository>,
+    /// Where a new repository goes unless another folder is chosen: where
+    /// most of the device's repositories are, else a usual code folder,
+    /// else home.
+    #[serde(default)]
+    pub default_parent: String,
+    /// The device's home folder (paths under it read `~/…`).
+    #[serde(default)]
+    pub home: String,
+    /// The device's GitHub CLI is signed in: a new repository can be made
+    /// on GitHub too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_publish: bool,
+    /// The look through the device stopped short (time or count).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// `CreateLocalRepository`'s answer: the repository made, and what didn't
+/// go as asked (`warning`: no first commit without a git identity, or no
+/// GitHub copy) though the repository is there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedRepository {
+    pub repository: LocalRepository,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// `ListProjectRepositories`' answer for a folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepositories {
+    /// The folder is itself inside a repository: its worktrees are that
+    /// repository's, and `repositories` is empty.
+    #[serde(default)]
+    pub is_repo: bool,
+    /// The repositories found, by path.
+    #[serde(default)]
+    pub repositories: Vec<ProjectRepository>,
+    /// More were there than are listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// A project's first worktree checks out every repository when it holds this
+/// many or fewer, and none (until some are chosen) when it holds more: a
+/// folder of dozens of clones isn't checked out whole by accident.
+pub const PROJECT_WORKTREE_ALL_UP_TO: usize = 8;
+
+impl ProjectRepositories {
+    /// The repositories that can be checked out (each with a commit to
+    /// branch from), by path.
+    pub fn choosable(&self) -> Vec<String> {
+        self.repositories
+            .iter()
+            .filter(|r| r.has_commits && !r.linked && !r.missing)
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
+    /// The repositories a new worktree of the project starts with: those
+    /// `remembered` for it (its last choice) that can still be chosen, else
+    /// every one when there are [`PROJECT_WORKTREE_ALL_UP_TO`] or fewer,
+    /// else none. A choice remembered as none stays none. In list order.
+    pub fn first_choice(&self, remembered: Option<&[String]>) -> Vec<String> {
+        let all = self.choosable();
+        if let Some(remembered) = remembered {
+            let kept: Vec<String> = all
+                .iter()
+                .filter(|path| remembered.contains(path))
+                .cloned()
+                .collect();
+            if !kept.is_empty() || remembered.is_empty() {
+                return kept;
+            }
+        }
+        if all.len() <= PROJECT_WORKTREE_ALL_UP_TO {
+            all
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderEntry {
@@ -2302,6 +2477,43 @@ mod tests {
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn a_project_s_first_worktree_choice() {
+        let repo = |path: &str, has_commits: bool| ProjectRepository {
+            path: path.into(),
+            branch: Some("main".into()),
+            has_commits,
+            ..Default::default()
+        };
+        let few = ProjectRepositories {
+            is_repo: false,
+            repositories: vec![repo("api", true), repo("empty", false), repo("web", true)],
+            truncated: false,
+        };
+        // All of a few, never one with no commit.
+        assert_eq!(few.first_choice(None), ["api", "web"]);
+        // The last choice, as far as it still stands; none stays none.
+        assert_eq!(few.first_choice(Some(&["web".into(), "gone".into()])), ["web"]);
+        assert!(few.first_choice(Some(&[])).is_empty());
+        // A choice of which none stands any more: as if never made.
+        assert_eq!(few.first_choice(Some(&["gone".into()])), ["api", "web"]);
+        // None of many.
+        let many = ProjectRepositories {
+            is_repo: false,
+            repositories: (0..=PROJECT_WORKTREE_ALL_UP_TO)
+                .map(|i| repo(&format!("r{i}"), true))
+                .collect(),
+            truncated: false,
+        };
+        assert!(many.first_choice(None).is_empty());
+        let listing: ProjectRepositories = serde_json::from_value(serde_json::json!({
+            "isRepo": false,
+            "repositories": [{ "path": "api", "branch": "main", "hasCommits": true }],
+        }))
+        .unwrap();
+        assert_eq!(listing.choosable(), ["api"]);
     }
 
     #[test]

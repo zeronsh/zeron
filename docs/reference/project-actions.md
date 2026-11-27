@@ -52,7 +52,7 @@ The main title-bar segment remembers the last successfully started Action for th
 
 ## Worktree setup
 
-Only creation of a new worktree can start the setup Action. Reusing an existing worktree and using the main checkout do not run setup again.
+Only creation of a new worktree can start the setup Action. Reusing an existing worktree and using the main checkout do not run setup again. A [project worktree](project-worktrees.md) (several repositories checked out as one folder) runs setup once, in that folder.
 
 For desktop sends, the worktree directive rides the durable queued `Run` command. The owning engine creates the worktree and starts setup while draining that command, before dispatching the first agent turn. Setup runs with the new worktree as its cwd and always receives both `ZERON_PROJECT_ROOT` and `ZERON_WORKTREE_PATH`.
 

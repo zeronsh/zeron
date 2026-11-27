@@ -340,6 +340,7 @@ fn on_a_cloud_machine() {
         repo: None,
         path: None,
         branch: None,
+        repos: Vec::new(),
     }));
 }
 

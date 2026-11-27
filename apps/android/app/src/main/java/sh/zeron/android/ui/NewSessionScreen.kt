@@ -17,6 +17,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -35,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import androidx.compose.ui.focus.FocusRequester
@@ -135,6 +138,25 @@ fun NewSessionScreen(
             draft = draft.copy(hostId = (hosts.firstOrNull { it.online } ?: hosts.firstOrNull())?.id)
         }
     }
+    // A folder holding several repositories (no git of its own): its
+    // repositories, asked of its host as it's picked; the draft's choice
+    // starts from the one last made there (else all of a few, none of many).
+    var repositories by remember { mutableStateOf<Pair<String, uniffi.zeron_core.ProjectRepositories>?>(null) }
+    LaunchedEffect(project?.id, runsOnCloud) {
+        val p = project
+        if (p == null || p.gitDetected || runsOnCloud) {
+            repositories = null
+            return@LaunchedEffect
+        }
+        if (repositories?.first == p.id) return@LaunchedEffect
+        repositories = null
+        draft = draft.copy(repositories = null)
+        val listing = model.projectRepositories(p.id) ?: return@LaunchedEffect
+        if (draft.projectId != p.id) return@LaunchedEffect
+        repositories = p.id to listing
+        draft = draft.copy(repositories = uniffi.zeron_core.projectWorktreeFirstChoice(listing, model.rememberedRepositories(p.id)))
+    }
+    val holdsRepositories = project != null && !runsOnCloud && repositories?.first == project.id
     val deviceId = project?.deviceId ?: draft.hostId ?: ""
     // Cloud runs the agents it has accounts for (Claude Code, Codex), listed by the edge.
     val modelsKey = if (runsOnCloud) CLOUD_MODELS else deviceId
@@ -202,6 +224,11 @@ fun NewSessionScreen(
     fun create() {
         model.lastDraft = draft
         if (runsOnCloud) return createOnCloud()
+        // A worktree of a folder of repositories needs at least one of them.
+        if (holdsRepositories && draft.worktree && draft.repositories.isNullOrEmpty()) {
+            scope.launch { snackbar.showSnackbar("Choose at least one repository for the worktree.") }
+            return
+        }
         val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
         if (id != null) {
             created = true
@@ -284,6 +311,11 @@ fun NewSessionScreen(
                     CloudBranchChip(model, draft, project.githubRepo!!) { draft = it }
                 } else if (project != null && project.gitDetected) {
                     BranchChip(model, draft, project.deviceId, project.path) { draft = it }
+                } else if (project != null && holdsRepositories) {
+                    RepositoriesChip(draft, project, repositories!!.second) { worktree, chosen ->
+                        draft = draft.copy(worktree = worktree, repositories = chosen)
+                        model.rememberRepositories(chosen, project.id)
+                    }
                 }
                 ModelChip(
                     draft,
@@ -653,5 +685,178 @@ private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -
         ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
             MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
         })))
+    }
+}
+
+/**
+ * A folder holding several repositories: where its session works — the
+ * folder as it is, or a new worktree of the whole project (one folder laid
+ * out like it, a worktree of each repository chosen, all on one branch).
+ * The chip says which ("Project folder", "3 repositories"); a tap opens the
+ * sheet choosing.
+ */
+@Composable
+private fun RepositoriesChip(
+    draft: sh.zeron.android.core.NewSessionDraft,
+    project: uniffi.zeron_core.ProjectView,
+    listing: uniffi.zeron_core.ProjectRepositories,
+    onChange: (worktree: Boolean, chosen: List<String>) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val n = draft.repositories?.size ?: 0
+    ContextChip(
+        if (!draft.worktree) "Project folder" else if (n == 1) "1 repository" else "$n repositories",
+        leading = { ZIcon(if (draft.worktree) ZIcons.Worktree else ZIcons.Folder, null, Modifier.size(16.dp)) },
+        onClick = { open = true },
+    )
+    if (open) RepositorySheet(project, listing, draft.worktree, draft.repositories.orEmpty(), onDismiss = { open = false }, onChange = onChange)
+}
+
+/**
+ * The checkout sheet: the folder or a new worktree (a segmented choice),
+ * then the repositories that worktree checks out — each with its branch, a
+ * check while chosen, one with no commit dimmed — All / None, and what the
+ * worktree is. Every change is the draft's at once.
+ */
+@Composable
+private fun RepositorySheet(
+    project: uniffi.zeron_core.ProjectView,
+    listing: uniffi.zeron_core.ProjectRepositories,
+    worktree: Boolean,
+    chosen: List<String>,
+    onDismiss: () -> Unit,
+    onChange: (worktree: Boolean, chosen: List<String>) -> Unit,
+) {
+    val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var isWorktree by remember { mutableStateOf(worktree) }
+    var picked by remember { mutableStateOf(chosen) }
+    val choosable = remember(listing) { listing.repositories.filter { it.hasCommits }.map { it.path } }
+    fun change(nextWorktree: Boolean, nextPicked: List<String>) {
+        isWorktree = nextWorktree
+        // (In the list's order, whichever order they were picked in.)
+        picked = choosable.filter { it in nextPicked }
+        onChange(isWorktree, picked)
+    }
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheet,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        androidx.compose.foundation.lazy.LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+            item("title") {
+                Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp)) {
+                    Text("Checkout", style = MaterialTheme.typography.headlineSmallEmphasized)
+                    Text(
+                        "${project.groupName} · ${project.deviceName ?: "Host"}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item("mode") {
+                androidx.compose.material3.SingleChoiceSegmentedButtonRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 20.dp).testTag("repositories-mode"),
+                ) {
+                    listOf(false to "Project folder", true to "New worktree").forEachIndexed { i, (value, label) ->
+                        SegmentedButton(
+                            selected = isWorktree == value,
+                            onClick = { change(value, picked) },
+                            shape = androidx.compose.material3.SegmentedButtonDefaults.itemShape(i, 2),
+                            icon = {},
+                        ) { Text(label) }
+                    }
+                }
+            }
+            item("heading") {
+                androidx.compose.foundation.layout.Row(
+                    Modifier.fillMaxWidth().padding(start = 28.dp, end = 16.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Repositories",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${picked.size} of ${choosable.size}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isWorktree) 1f else 0.4f),
+                        modifier = Modifier.testTag("repositories-count"),
+                    )
+                    if (isWorktree && choosable.size > 1) {
+                        val every = picked.size == choosable.size
+                        androidx.compose.material3.TextButton(onClick = { change(true, if (every) emptyList() else choosable) }) {
+                            Text(if (every) "None" else "All")
+                        }
+                    } else {
+                        Spacer(Modifier.size(width = 16.dp, height = 48.dp))
+                    }
+                }
+            }
+            listing.repositories.forEachIndexed { i, r ->
+                item(r.path) {
+                    val on = r.path in picked
+                    val live = isWorktree && r.hasCommits
+                    androidx.compose.material3.SegmentedListItem(
+                        onClick = { if (live) change(true, if (on) picked - r.path else picked + r.path) },
+                        enabled = live,
+                        shapes = segmentedShapes(i, listing.repositories.size),
+                        colors = androidx.compose.material3.ListItemDefaults.segmentedColors(
+                            containerColor = if (on && isWorktree) MaterialTheme.colorScheme.secondaryContainer else cardColor(),
+                        ),
+                        leadingContent = {
+                            // (On a chosen row the tile stands on the surface, not the row's
+                            // own colour; one that can't be chosen is as quiet as its words.)
+                            Box(Modifier.alpha(if (r.hasCommits) 1f else 0.5f)) {
+                                IconTile(
+                                    ZIcons.Folder,
+                                    container = if (on && isWorktree) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.secondaryContainer,
+                                )
+                            }
+                        },
+                        supportingContent = {
+                            Text(
+                                if (r.hasCommits) r.branch ?: "Detached" else "No commits yet",
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                        },
+                        trailingContent = {
+                            if (on) {
+                                Box(
+                                    Modifier.size(28.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = if (isWorktree) 1f else 0.38f)),
+                                    contentAlignment = Alignment.Center,
+                                ) { ZIcon(ZIcons.Check, "Chosen", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+                            }
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                            .padding(bottom = androidx.compose.material3.ListItemDefaults.SegmentedGap)
+                            .testTag("repository-row-${r.path}"),
+                    ) {
+                        Text(
+                            r.path,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            item("hint") {
+                Text(
+                    when {
+                        !isWorktree -> "Works in the project's own folder, as it is."
+                        picked.isEmpty() -> "Choose at least one repository for the worktree."
+                        else -> "Each gets a worktree on one new branch, in a folder laid out like the project."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isWorktree && picked.isEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 28.dp, end = 28.dp, top = 12.dp),
+                )
+            }
+        }
     }
 }

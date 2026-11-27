@@ -44,7 +44,10 @@
 //!   `{data_dir}/cloud/git-credentials` (0600) wired once via
 //!   `git config --global credential.https://github.com.helper`, and
 //!   `~/.config/gh/hosts.yml` for `gh` (only when absent or already
-//!   Zeron-managed). Refreshed in the background ~10 min before expiry. Never
+//!   Zeron-managed). A session of several repositories gets a grant per
+//!   repository, and the store a line per repository path, git asking by path
+//!   (`credential.https://github.com.useHttpPath`); `gh` keeps the first
+//!   one's. Refreshed in the background ~10 min before expiry. Never
 //!   `GH_TOKEN`/`GITHUB_TOKEN`: a run's environment is fixed at spawn, `gh`
 //!   prefers it over hosts.yml, and the token expires within the hour, so a
 //!   warm session's `gh` would start failing while `git push` kept working.
@@ -328,6 +331,11 @@ pub struct BrokerConfig {
     /// The session repository as `owner/name`: `github` grants are minted
     /// for its owner's App installation. `None` = no GitHub grant at all.
     pub github_repo: Option<String>,
+    /// A session of a project of several repositories: the others
+    /// (`owner/name`), each with a `github` grant of its own, and git told to
+    /// use each one's token for it alone (`credential.useHttpPath`). Empty:
+    /// `github_repo` alone, one token for github.com.
+    pub other_github_repos: Vec<String>,
     /// Where the other agents keep their logins.
     pub agents: AgentPaths,
     /// Credential variables (a [`CloudDelivery::Env`] name) the engine's own
@@ -451,6 +459,9 @@ impl BrokerConfig {
                 .unwrap_or_else(|| "https://api.github.com".into()),
             github_repo: crate::runner::session()
                 .and_then(crate::runner::CloudSession::github_repo),
+            other_github_repos: crate::runner::session()
+                .map(crate::runner::CloudSession::other_github_repos)
+                .unwrap_or_default(),
             home,
         }
     }
@@ -468,6 +479,9 @@ struct Inner {
     tokens: Arc<dyn zeron_rpc::TokenSource>,
     http: reqwest::Client,
     cache: Mutex<HashMap<VaultProvider, Cached>>,
+    /// The `github` grants of a session's other repositories
+    /// ([`BrokerConfig::other_github_repos`]), by `owner/name` as configured.
+    other_github: Mutex<HashMap<String, Cached>>,
     /// One grant request in flight per device: the vault's replay fence
     /// rejects a `ts` that isn't above the last accepted one, so concurrent
     /// signed requests could race each other into `stale`.
@@ -538,6 +552,7 @@ impl CredentialBroker {
                 tokens,
                 http: crate::runner::http_client(),
                 cache: Mutex::new(HashMap::new()),
+                other_github: Mutex::new(HashMap::new()),
                 grant_gate: tokio::sync::Mutex::new(()),
                 files: tokio::sync::Mutex::new(FileState::default()),
                 git_identity: tokio::sync::Mutex::new(None),
@@ -585,6 +600,7 @@ impl CredentialBroker {
     /// wait on one round trip after another. A grant it finds cached within
     /// [`RUN_REVALIDATE`] is used as it is.
     async fn prime_for_first_run(&self) {
+        self.other_github_grants(GRANT_SLACK, None).await;
         if let Some(grant) = self.github_grant().await {
             let _ = self.git_identity(&grant).await;
         }
@@ -910,6 +926,130 @@ impl CredentialBroker {
         }
     }
 
+    // -- the session's other GitHub repositories -----------------------------
+
+    /// The `github` grant of `repo`, one of the session's other repositories:
+    /// cached while valid `min_validity` longer (and, with `max_age`, no
+    /// older), else asked for — each repository's own, never another's.
+    async fn other_github_grant(
+        &self,
+        repo: &str,
+        min_validity: Duration,
+        max_age: Option<Duration>,
+    ) -> GrantOutcome {
+        let hit = || match lock(&self.inner.other_github).get(repo)? {
+            Cached::Granted { grant, at }
+                if grant.remaining_ms() > min_validity.as_millis() as i64
+                    && max_age.is_none_or(|max| at.elapsed() < max) =>
+            {
+                Some(GrantOutcome::Granted(grant.clone()))
+            }
+            Cached::Missing { at, reason } if at.elapsed() < MISSING_TTL => {
+                Some(GrantOutcome::NotConnected(reason.clone()))
+            }
+            _ => None,
+        };
+        if let Some(hit) = hit() {
+            return hit;
+        }
+        let _gate = self.inner.grant_gate.lock().await;
+        if let Some(hit) = hit() {
+            return hit;
+        }
+        let fetched = self.fetch_for(VaultProvider::Github, Some(repo)).await;
+        let mut cache = lock(&self.inner.other_github);
+        match fetched {
+            GrantOutcome::Granted(grant) => {
+                tracing::info!(
+                    repo,
+                    generation = grant.generation,
+                    expires_in_s = grant.remaining_ms() / 1000,
+                    "credentials: vault grant"
+                );
+                cache.insert(
+                    repo.to_owned(),
+                    Cached::Granted {
+                        grant: grant.clone(),
+                        at: Instant::now(),
+                    },
+                );
+                GrantOutcome::Granted(grant)
+            }
+            GrantOutcome::NotConnected(reason) => {
+                tracing::info!(repo, %reason, "credentials: no GitHub access");
+                cache.insert(
+                    repo.to_owned(),
+                    Cached::Missing {
+                        at: Instant::now(),
+                        reason: reason.clone(),
+                    },
+                );
+                GrantOutcome::NotConnected(reason)
+            }
+            GrantOutcome::Unavailable(reason) => {
+                if let Some(Cached::Granted { grant, .. }) = cache.get(repo)
+                    && grant.remaining_ms() > OFFLINE_MIN_VALIDITY.as_millis() as i64
+                {
+                    return GrantOutcome::Granted(grant.clone());
+                }
+                tracing::warn!(repo, %reason, "credentials: vault unreachable");
+                GrantOutcome::Unavailable(reason)
+            }
+        }
+    }
+
+    /// Every other repository's grant made current (see
+    /// [`Self::other_github_grant`]); why each one without a grant has none,
+    /// by `owner/name`.
+    async fn other_github_grants(
+        &self,
+        min_validity: Duration,
+        max_age: Option<Duration>,
+    ) -> Vec<(String, String)> {
+        let mut refused = Vec::new();
+        for repo in &self.inner.config.other_github_repos {
+            match self.other_github_grant(repo, min_validity, max_age).await {
+                GrantOutcome::Granted(_) => {}
+                GrantOutcome::NotConnected(reason) => {
+                    refused.push((
+                        repo.clone(),
+                        github_session_refusal(&reason).unwrap_or(reason),
+                    ));
+                }
+                GrantOutcome::Unavailable(reason) => refused.push((repo.clone(), reason)),
+            }
+        }
+        refused
+    }
+
+    /// Whether the refresher should ask again for `repo`'s grant: one nearing
+    /// expiry, or none for a while.
+    fn other_github_due(&self, repo: &str) -> bool {
+        match lock(&self.inner.other_github).get(repo) {
+            Some(Cached::Granted { grant, .. }) => {
+                grant.remaining_ms() <= REFRESH_AHEAD.as_millis() as i64
+            }
+            Some(Cached::Missing { at, .. }) => at.elapsed() >= GITHUB_PROBE_EVERY,
+            None => true,
+        }
+    }
+
+    /// The other repositories' grants git may still use, by `owner/name`.
+    fn other_github_tokens(&self) -> Vec<(String, String)> {
+        let cache = lock(&self.inner.other_github);
+        self.inner
+            .config
+            .other_github_repos
+            .iter()
+            .filter_map(|repo| match cache.get(repo)? {
+                Cached::Granted { grant, .. } if grant.remaining_ms() > 0 => {
+                    Some((repo.clone(), grant.access_token.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     async fn fetch(&self, provider: VaultProvider) -> GrantOutcome {
         // A GitHub grant is for the session repository's owner: without one
         // there is nothing to ask for.
@@ -924,6 +1064,12 @@ impl CredentialBroker {
             },
             _ => None,
         };
+        self.fetch_for(provider, repo).await
+    }
+
+    /// `POST /vault/{orgId}/grant` for `provider` (`repo`: a `github`
+    /// grant's repository).
+    async fn fetch_for(&self, provider: VaultProvider, repo: Option<&str>) -> GrantOutcome {
         let bearer = match self.inner.tokens.token().await {
             Ok(token) => token,
             Err(err) => return GrantOutcome::Unavailable(format!("no runner token: {err}")),
@@ -983,6 +1129,9 @@ impl CredentialBroker {
         // git config, so an agent that sets one of its own (the App's bot,
         // which its token belongs to) still commits as the user. Asked again
         // before a run, so a login disconnected since the last one stops it.
+        // A session of several repositories: the others' grants first, so the
+        // store written below holds every one's.
+        self.other_github_grants(GRANT_SLACK, None).await;
         match self.grant_for_run(VaultProvider::Github).await {
             GrantOutcome::Granted(grant) => {
                 self.sync_github_files(&grant).await;
@@ -1520,22 +1669,57 @@ impl CredentialBroker {
         let mut files = self.inner.files.lock().await;
         let config = &self.inner.config;
         let store = git_credentials_path(&config.data_dir);
-        let line = format!("https://x-access-token:{}@github.com\n", grant.access_token);
-        // Rewritten when it differs (a new token, or git's own `erase` after
-        // a rejected push emptied the store).
-        if std::fs::read_to_string(&store).ok().as_deref() != Some(line.as_str())
-            && let Err(err) = store
-                .parent()
-                .map_or(Ok(()), private_dir)
-                .map_err(crate::EngineError::from)
-                .and_then(|()| write_private_atomic(&store, line.as_bytes()))
-        {
-            tracing::warn!(error = %err, "credentials: failed to write git credentials");
-        }
+        let per_repository = !config.other_github_repos.is_empty();
+        let lines = if per_repository {
+            git_credential_lines(
+                config
+                    .github_repo
+                    .iter()
+                    .map(|repo| (repo.clone(), grant.access_token.clone()))
+                    .chain(self.other_github_tokens()),
+            )
+        } else {
+            format!("https://x-access-token:{}@github.com\n", grant.access_token)
+        };
+        write_git_store(&store, &lines);
         if !files.git_helper_configured {
-            files.git_helper_configured = configure_git_helper(&config.home, &store).await;
+            files.git_helper_configured =
+                configure_git_helper(&config.home, &store, per_repository).await;
         }
+        // (`gh` keeps one token for github.com: the session's first
+        // repository's.)
         write_gh_hosts(&config.home, grant);
+    }
+
+    /// A session of several repositories without its first one's grant:
+    /// git keeps the others'.
+    async fn sync_other_github_files(&self) {
+        let mut files = self.inner.files.lock().await;
+        let config = &self.inner.config;
+        let store = git_credentials_path(&config.data_dir);
+        let lines = git_credential_lines(self.other_github_tokens());
+        write_git_store(&store, &lines);
+        if !lines.is_empty() && !files.git_helper_configured {
+            files.git_helper_configured = configure_git_helper(&config.home, &store, true).await;
+        }
+    }
+
+    /// Make sure git can authenticate to each of a session's repositories
+    /// before cloning them (see [`Self::ensure_git_credentials`]). Why each
+    /// one without a grant has none, by lowercase `owner/name`.
+    pub async fn ensure_each_git_credentials(&self) -> HashMap<String, String> {
+        let mut refused: HashMap<String, String> = self
+            .other_github_grants(GRANT_SLACK, None)
+            .await
+            .into_iter()
+            .map(|(repo, reason)| (repo.to_ascii_lowercase(), reason))
+            .collect();
+        if let Err(reason) = self.ensure_git_credentials().await
+            && let Some(repo) = &self.inner.config.github_repo
+        {
+            refused.insert(repo.to_ascii_lowercase(), reason);
+        }
+        refused
     }
 
     /// The user's git identity from the grant's GitHub login: their name and
@@ -1581,6 +1765,15 @@ impl CredentialBroker {
     }
 
     async fn clear_github_files(&self) {
+        if !self.inner.config.other_github_repos.is_empty() {
+            self.sync_other_github_files().await;
+            let _files = self.inner.files.lock().await;
+            let hosts = gh_hosts_path(&self.inner.config.home);
+            if is_managed_hosts(&hosts) {
+                let _ = std::fs::remove_file(&hosts);
+            }
+            return;
+        }
         let _files = self.inner.files.lock().await;
         let store = git_credentials_path(&self.inner.config.data_dir);
         if store.exists() {
@@ -1610,6 +1803,19 @@ impl CredentialBroker {
                 due
             }
         };
+        // A session's other repositories: each re-granted ahead of expiry
+        // (or, without one, looked for every few minutes) on its own.
+        let others_due: Vec<&String> = self
+            .inner
+            .config
+            .other_github_repos
+            .iter()
+            .filter(|repo| self.other_github_due(repo))
+            .collect();
+        for repo in &others_due {
+            self.other_github_grant(repo, REFRESH_AHEAD, None).await;
+        }
+        let others_due = !others_due.is_empty();
         if github_due {
             match self
                 .grant_within(VaultProvider::Github, REFRESH_AHEAD, None)
@@ -1618,6 +1824,11 @@ impl CredentialBroker {
                 GrantOutcome::Granted(grant) => self.sync_github_files(&grant).await,
                 GrantOutcome::NotConnected(_) => self.clear_github_files().await,
                 GrantOutcome::Unavailable(_) => {}
+            }
+        } else if others_due {
+            match self.cached_grant(VaultProvider::Github) {
+                Some(grant) => self.sync_github_files(&grant).await,
+                None => self.sync_other_github_files().await,
             }
         }
         if let Some(grant) = self.cached_grant(VaultProvider::Claude)
@@ -3368,14 +3579,93 @@ fn ensure_claude_onboarded(file: &Path) {
 // git + gh
 // ---------------------------------------------------------------------------
 
+/// The git credential store's lines for a session of several repositories:
+/// each repository's own token for its path alone (git asks by path with
+/// `credential.useHttpPath`), with and without `.git`, as remotes spell it.
+fn git_credential_lines(tokens: impl IntoIterator<Item = (String, String)>) -> String {
+    let mut lines = String::new();
+    for (repo, token) in tokens {
+        for suffix in [".git", ""] {
+            lines.push_str(&format!(
+                "https://x-access-token:{token}@github.com/{repo}{suffix}\n"
+            ));
+        }
+    }
+    lines
+}
+
+/// Write the git credential store when it differs (a new token, or git's
+/// own `erase` after a rejected push emptied it); nothing to hold removes it.
+fn write_git_store(store: &Path, lines: &str) {
+    if lines.is_empty() {
+        if std::fs::remove_file(store).is_ok() {
+            tracing::info!("credentials: removed git credentials (no GitHub grant)");
+        }
+        return;
+    }
+    if std::fs::read_to_string(store).ok().as_deref() != Some(lines)
+        && let Err(err) = store
+            .parent()
+            .map_or(Ok(()), private_dir)
+            .map_err(crate::EngineError::from)
+            .and_then(|()| write_private_atomic(store, lines.as_bytes()))
+    {
+        tracing::warn!(error = %err, "credentials: failed to write git credentials");
+    }
+}
+
 /// `git config --global credential.https://github.com.helper "store --file=…"`
 /// (only when it differs). `HOME` is pinned so the "global" config is the
 /// broker's home. Returns whether the helper is in place.
 /// Wire the store as git's helper for github.com. An empty helper comes
 /// first: it resets the helper list, so a helper from the system config
 /// (Apple git's `osxkeychain`, a distro's libsecret or cache) never also
-/// stores — or prompts to store — the short-lived App token.
-async fn configure_git_helper(home: &Path, store: &Path) -> bool {
+/// stores — or prompts to store — the short-lived App token. `per_repository`
+/// (a session of several repositories, each with its own token): git also
+/// asks the store by repository path (`credential.…useHttpPath`).
+async fn configure_git_helper(home: &Path, store: &Path, per_repository: bool) -> bool {
+    if !configure_git_store_helper(home, store).await {
+        return false;
+    }
+    if !per_repository {
+        return true;
+    }
+    let key = "credential.https://github.com.useHttpPath";
+    let mut get = tokio::process::Command::new("git");
+    get.args(["config", "--global", "--get", key]);
+    let mut set = tokio::process::Command::new("git");
+    set.args(["config", "--global", key, "true"]);
+    for cmd in [&mut get, &mut set] {
+        cmd.env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
+    if let Ok(out) = get.output().await
+        && out.status.success()
+        && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    {
+        return true;
+    }
+    match set.output().await {
+        Ok(out) if out.status.success() => {
+            tracing::info!("credentials: git asks for github.com credentials per repository");
+            true
+        }
+        Ok(out) => {
+            tracing::warn!(stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "credentials: git config failed");
+            false
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "credentials: git is not runnable");
+            false
+        }
+    }
+}
+
+async fn configure_git_store_helper(home: &Path, store: &Path) -> bool {
     let key = "credential.https://github.com.helper";
     let value = format!("store --file=\"{}\"", store.display());
     let git = |args: &[&str]| {

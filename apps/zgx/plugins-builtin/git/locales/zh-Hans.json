@@ -109,6 +109,11 @@
     "no_match": "没有匹配“{query}”的分支",
     "current": "当前"
   },
+  "repos": {
+    "label": "仓库",
+    "search": "查找仓库…",
+    "changed": "{n} 处更改"
+  },
   "history": {
     "head": "{branch} 上的 {n} 个提交",
     "head_more": "{branch} 上最近的 {n} 个提交",
