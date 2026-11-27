@@ -22,6 +22,11 @@ pub enum SyncError {
     Auth(String),
     #[error("temporarily unavailable: {0}")]
     TemporarilyUnavailable(String),
+    /// The server read the request and refused what it carries (HTTP 400
+    /// or 413): sending the same thing again gets the same answer. Holds
+    /// the response body.
+    #[error("refused: {0}")]
+    Refused(String),
     #[error("client is shut down")]
     Closed,
 }

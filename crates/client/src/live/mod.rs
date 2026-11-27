@@ -175,11 +175,18 @@ impl RegistryTransport for RegistryHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
-            if !response.status().is_success() {
-                return Err(SyncError::Protocol(format!(
-                    "registry push http {}",
-                    response.status()
-                )));
+            let status = response.status();
+            if matches!(status.as_u16(), 400 | 413) {
+                // The room refused this batch; the body says why.
+                let body = response.text().await.unwrap_or_default();
+                return Err(SyncError::Refused(if body.is_empty() {
+                    format!("registry push http {status}")
+                } else {
+                    body
+                }));
+            }
+            if !status.is_success() {
+                return Err(SyncError::Protocol(format!("registry push http {status}")));
             }
             response.text().await.map_err(http_err)
         })

@@ -141,6 +141,13 @@ enum ServerFrame {
     Error {
         code: String,
         message: String,
+        /// The refused push's batch id (servers from 2026-11 on; older ones
+        /// never name it).
+        #[serde(default)]
+        batch: Option<String>,
+        /// No replay of that batch can succeed.
+        #[serde(default)]
+        permanent: bool,
     },
 }
 
@@ -939,6 +946,32 @@ impl Actor {
                             }
                         }
                     }
+                    Err(SyncError::Refused(body)) => {
+                        // The server refused this batch, not the network:
+                        // the batches behind it are unrelated writes, so go
+                        // on to them instead of stopping here (one refused
+                        // batch used to hold back every later write for as
+                        // long as the socket stayed down).
+                        stats.rejected.fetch_add(1, Relaxed);
+                        let refusal = serde_json::from_str::<serde_json::Value>(&body).ok();
+                        let named = refusal.as_ref().is_some_and(|r| {
+                            r["permanent"].as_bool() == Some(true)
+                                && r["batch"].as_str() == Some(batch.batch.as_str())
+                        });
+                        let reason = refusal
+                            .as_ref()
+                            .and_then(|r| r["message"].as_str().or(r["error"].as_str()))
+                            .unwrap_or(body.as_str())
+                            .to_owned();
+                        if named {
+                            if lock(&doc).reject_batch(&batch.batch, &reason) {
+                                let _ = events.send(RegistryEvent::Applied);
+                            }
+                        } else {
+                            tracing::warn!(batch = %batch.batch, reason = %reason, "registry: http push refused; skipping it");
+                            push_failed = true;
+                        }
+                    }
                     Err(err) => {
                         tracing::warn!(error = %err, "registry: http push failed; will retry");
                         push_failed = true;
@@ -1063,9 +1096,21 @@ impl Actor {
                 }
                 let _ = self.events.send(RegistryEvent::Applied);
             }
-            ServerFrame::Error { code, message } => {
+            ServerFrame::Error {
+                code,
+                message,
+                batch,
+                permanent,
+            } => {
                 self.stats.rejected.fetch_add(1, Relaxed);
-                tracing::warn!(code, message, "registry: server rejected a frame");
+                tracing::warn!(code, message, batch = ?batch, permanent, "registry: server rejected a frame");
+                // A batch the server can never accept would otherwise stay
+                // queued for good and be re-sent on every reconnect.
+                if let Some(batch) = batch.filter(|_| permanent) {
+                    if lock(&self.doc).reject_batch(&batch, &message) {
+                        let _ = self.events.send(RegistryEvent::Applied);
+                    }
+                }
             }
         }
         true

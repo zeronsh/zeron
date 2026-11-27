@@ -584,3 +584,210 @@ async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
 
     client.shutdown().await;
 }
+
+// ── writes the room refuses ─────────────────────────────────────────────────
+
+/// A session row whose agent left a shell running with an 11 KB heredoc as
+/// its command, listed again as its description: the row the room refused
+/// as too large (176 queued rewrites in the field incident).
+fn heredoc_session(chat: &str, at: i64) -> Session {
+    let heredoc = format!(
+        "cat > tests/settings.rs <<'EOF'\n{}EOF",
+        "// settings test line\n".repeat(530)
+    );
+    Session {
+        last_completed_turn: None,
+        last_turn_outcome: None,
+        terminal_activity: None,
+        running_subagents: 0,
+        background_tasks: vec![zeron_proto::BackgroundTask {
+            id: "bgsh".into(),
+            command: heredoc.clone(),
+            description: Some(heredoc),
+            started_at: ts(3_100),
+        }],
+        chat_id: chat.into(),
+        device_id: "dev-a".into(),
+        status: SessionStatus::Idle,
+        started_at: Some(ts(3_000)),
+        updated_at: ts(at),
+        waiting: None,
+        blocked_on_wait: false,
+    }
+}
+
+#[tokio::test]
+async fn a_session_with_a_long_background_command_syncs_and_nothing_is_refused() {
+    let server = MockRegistryServer::start().await;
+    server.set_legacy_refusals(true); // the room as deployed today
+    let doc = new_doc("dev-a");
+    {
+        let mut d = doc.lock().unwrap();
+        for i in 0..176 {
+            d.upsert_session(&heredoc_session("chat-1", 4_000 + i * 10_000))
+                .unwrap();
+        }
+    }
+    let client = RegistryClient::connect(&server.url(), doc.clone(), "dev-a")
+        .await
+        .expect("connects");
+    client.nudge();
+    wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
+    assert_eq!(server.refusals(), 0);
+    let row = server.row("sessions", "chat-1").expect("the session row arrived");
+    let command = row.fields["backgroundTasks"][0]["command"].as_str().unwrap();
+    assert!(command.starts_with("cat > tests/settings.rs") && command.len() <= 512);
+    let first = server.push_bytes();
+
+    // Nothing is left to re-send when the connection drops.
+    let mut events = client.events();
+    server.drop_all_connections();
+    wait_until(|| matches!(events.try_recv(), Ok(RegistryEvent::Disconnected))).await;
+    wait_until(|| client.stats().connected).await;
+    client.nudge();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let resent = server.push_bytes() - first;
+    eprintln!("176 heredoc session rewrites: {first} bytes pushed in all, {resent} bytes re-sent on reconnect");
+    assert_eq!(resent, 0);
+    client.shutdown().await;
+}
+
+async fn refused_batch_over_the_socket(legacy: bool) {
+    let server = MockRegistryServer::start().await;
+    server.refuse_id("poison");
+    server.set_legacy_refusals(legacy);
+    let doc = new_doc("dev-a");
+    {
+        let mut d = doc.lock().unwrap();
+        d.upsert_chat(&chat("poison", "dev-a")).unwrap();
+        d.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+        d.upsert_chat(&chat("chat-3", "dev-a")).unwrap();
+    }
+    let client = RegistryClient::connect(&server.url(), doc.clone(), "dev-a")
+        .await
+        .expect("connects");
+    client.nudge();
+    // The writes behind the refused one land either way.
+    wait_until(|| server.row("chats", "chat-3").is_some()).await;
+    assert!(server.row("chats", "chat-2").is_some());
+    assert!(server.row("chats", "poison").is_none());
+    if legacy {
+        // Unnamed refusal: the batch can't be told apart, so it stays queued
+        // (only it) and is re-sent on reconnect.
+        wait_until(|| doc.lock().unwrap().pending_len() == 1).await;
+        let before = server.refusals();
+        let mut events = client.events();
+        server.drop_all_connections();
+        wait_until(|| matches!(events.try_recv(), Ok(RegistryEvent::Disconnected))).await;
+        wait_until(|| server.refusals() == before + 1).await;
+        assert_eq!(doc.lock().unwrap().pending_len(), 1);
+    } else {
+        // Named and for good: retired, nothing left to re-send.
+        wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
+        assert_eq!(server.refusals(), 1);
+    }
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_batch_refused_for_good_over_the_socket_is_retired() {
+    refused_batch_over_the_socket(false).await;
+}
+
+#[tokio::test]
+async fn a_batch_refused_by_a_room_that_names_none_holds_back_nothing_else() {
+    refused_batch_over_the_socket(true).await;
+}
+
+/// HTTPS transport (no socket ever joins) whose room refuses every batch
+/// carrying row `poison`, the way the room answers an invalid op: a 400
+/// with a body, naming the batch only when `named`.
+struct RefusingTransport {
+    named: bool,
+    acked: Arc<Mutex<Vec<String>>>,
+}
+
+impl zeron_sync::registry::RegistryTransport for RefusingTransport {
+    fn fetch(
+        &self,
+        _since: u64,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        Box::pin(async {
+            Ok(r#"{"seq":0,"full":false,"gcFloor":0,"rows":[],"presence":{}}"#.to_string())
+        })
+    }
+
+    fn push(
+        &self,
+        body: String,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        let named = self.named;
+        let acked = self.acked.clone();
+        Box::pin(async move {
+            let v: serde_json::Value = serde_json::from_str(&body).expect("push body is json");
+            let batch = v["batch"].as_str().expect("batch id").to_owned();
+            let ids: Vec<String> = v["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| op["id"].as_str().unwrap().to_owned())
+                .collect();
+            if ids.iter().any(|id| id == "poison") {
+                let refusal = if named {
+                    serde_json::json!({"error":"invalid_op","message":"chats/poison: bad id",
+                        "batch": batch, "permanent": true})
+                } else {
+                    serde_json::json!({"error":"invalid_op","message":"chats/poison: bad id"})
+                };
+                return Err(zeron_sync::SyncError::Refused(refusal.to_string()));
+            }
+            acked.lock().unwrap().extend(ids);
+            Ok(format!(r#"{{"batch":"{batch}","seq":1,"applied":1}}"#))
+        })
+    }
+}
+
+async fn refused_batch_over_https(named: bool) {
+    let acked = Arc::new(Mutex::new(Vec::new()));
+    let doc = new_doc("dev-a");
+    {
+        let mut d = doc.lock().unwrap();
+        // The refused batch is the oldest: it heads the queue.
+        d.upsert_chat(&chat("poison", "dev-a")).unwrap();
+        d.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+        d.upsert_chat(&chat("chat-3", "dev-a")).unwrap();
+    }
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(zeron_sync::StaticUrl("ws://127.0.0.1:1/ws".into())),
+        doc.clone(),
+        "dev-a",
+        zeron_sync::RegistryTuning::default(),
+        Arc::new(RefusingTransport {
+            named,
+            acked: acked.clone(),
+        }),
+    )
+    .await
+    .expect("transport clients construct immediately");
+    // Before, the cycle stopped at the refused head and nothing behind it
+    // was ever sent while the socket stayed down.
+    wait_until(|| acked.lock().unwrap().len() >= 2).await;
+    assert_eq!(acked.lock().unwrap()[..2], ["chat-2", "chat-3"]);
+    if named {
+        wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
+    } else {
+        wait_until(|| doc.lock().unwrap().pending_len() == 1).await;
+    }
+    assert!(client.stats().rejected >= 1);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn https_sync_continues_past_a_refused_batch() {
+    refused_batch_over_https(false).await;
+}
+
+#[tokio::test]
+async fn https_sync_retires_a_batch_refused_for_good() {
+    refused_batch_over_https(true).await;
+}

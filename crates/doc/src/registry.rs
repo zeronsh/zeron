@@ -47,6 +47,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
 mod cloud_agents;
 pub use cloud_agents::{CloudAgentChoice, CloudAgentChoices, KIND_CLOUD_AGENTS};
+mod op_budget;
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;
@@ -372,11 +373,16 @@ pub fn coalesce_ops(a: &RowOp, b: &RowOp) -> Option<RowOp> {
 /// batch) any op whose `JSON.stringify` is longer.
 pub const MAX_OP_BYTES: usize = 16 * 1024;
 
-/// Whether `op` passes the room's size check. serde_json's UTF-8 byte count
-/// is never below `JSON.stringify`'s UTF-16 length for the same value, so
-/// this errs toward "too large".
+/// Ops per pushed batch, under the room's cap of 500.
+const MAX_OPS_PER_BATCH: usize = 400;
+
+/// Whether `op` passes the room's size check, measured as the room does
+/// (`JSON.stringify` length in UTF-16 units). Numbers JS might print longer
+/// count at their longest, so this never says "fits" for an op the room
+/// refuses. Not UTF-8 bytes: those run up to 3× the room's measure for text
+/// outside Latin script, and would cut writes the room takes whole.
 fn fits_op_budget(op: &RowOp) -> bool {
-    serde_json::to_vec(op).is_ok_and(|bytes| bytes.len() <= MAX_OP_BYTES)
+    op_budget::surely_fits(op)
 }
 
 /// The `sessions` fields the room's push notifications switch on
@@ -812,6 +818,8 @@ impl RegistryDoc {
     /// this shrinks snapshots bloated before coalescing existed (178k
     /// batches → one op per touched row). The host persists the result.
     fn coalesce_loaded(&mut self) {
+        self.drop_never_accepted();
+        self.split_oversized_batches();
         let before = self.pending_ops_len();
         if self.coalesce_unsent() > 0 {
             tracing::info!(
@@ -821,6 +829,94 @@ impl RegistryDoc {
                 "registry: compacted queued writes on load"
             );
         }
+    }
+
+    /// Drop queued ops the room can never accept: over its size limit
+    /// ([`MAX_OP_BYTES`]) by its own measure, so every replay is refused,
+    /// and the batch with them. Older builds queued such ops (a session row
+    /// carrying long background commands); each one stayed queued forever,
+    /// was re-sent on every reconnect and stopped the HTTPS fallback at the
+    /// first. Nothing else is dropped, and the rest keep their order.
+    fn drop_never_accepted(&mut self) {
+        let mut dropped: Vec<RowOp> = Vec::new();
+        for batch in &mut self.pending {
+            batch.ops.retain(|op| match op_budget::never_accepted(op) {
+                Some(bytes) => {
+                    tracing::warn!(
+                        kind = %op.kind,
+                        id = %op.id,
+                        bytes,
+                        limit = MAX_OP_BYTES,
+                        batch = %batch.batch,
+                        "registry: dropping a queued write the room refuses as too large"
+                    );
+                    dropped.push(op.clone());
+                    false
+                }
+                None => true,
+            });
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        self.pending.retain(|b| !b.ops.is_empty());
+        self.touch_ops(&dropped);
+        self.generation += 1;
+    }
+
+    /// Split queued batches too big to send (older builds capped only the op
+    /// count) into ones that fit, in order, each under a fresh id.
+    fn split_oversized_batches(&mut self) {
+        if !self
+            .pending
+            .iter()
+            .any(|b| !b.in_flight && op_budget::batch_too_big(&b.ops, MAX_OPS_PER_BATCH))
+        {
+            return;
+        }
+        for b in std::mem::take(&mut self.pending) {
+            if b.in_flight || !op_budget::batch_too_big(&b.ops, MAX_OPS_PER_BATCH) {
+                self.pending.push(b);
+                continue;
+            }
+            let chunks = op_budget::chunk_groups(op_budget::split_pieces(b.ops), MAX_OPS_PER_BATCH);
+            tracing::warn!(
+                batch = %b.batch,
+                into = chunks.len(),
+                "registry: splitting a queued batch too big to send"
+            );
+            for ops in chunks {
+                let batch = format!("b-{}", self.next_hlc());
+                self.pending.push(PendingBatch {
+                    batch,
+                    ops,
+                    in_flight: false,
+                });
+            }
+        }
+        self.generation += 1;
+    }
+
+    /// The room refused `batch` for good (its error named it as permanent):
+    /// no replay can succeed, so stop queueing it. Returns whether it was
+    /// pending. Its ops are logged, so what was given up is on record.
+    pub fn reject_batch(&mut self, batch: &str, reason: &str) -> bool {
+        let Some(at) = self.pending.iter().position(|b| b.batch == batch) else {
+            return false;
+        };
+        let refused = self.pending.remove(at);
+        for op in &refused.ops {
+            tracing::warn!(
+                kind = %op.kind,
+                id = %op.id,
+                batch,
+                reason,
+                "registry: the room refused a queued write for good; dropped"
+            );
+        }
+        self.touch_ops(&refused.ops);
+        self.generation += 1;
+        true
     }
 
     // ── server frames ───────────────────────────────────────────────────────
@@ -980,7 +1076,7 @@ impl RegistryDoc {
         self.clock.next(Self::now_ms(), &device)
     }
 
-    fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
+    fn enqueue_ops(&mut self, ops: Vec<RowOp>) {
         if ops.is_empty() {
             return;
         }
@@ -993,6 +1089,9 @@ impl RegistryDoc {
             }
             return;
         }
+        // An op over the room's size limit is refused with its whole batch,
+        // on every replay, forever. Queue only ops that fit.
+        let groups: Vec<Vec<RowOp>> = ops.into_iter().map(op_budget::fit_op).collect();
         // The registry room rejects any batch over its op cap (500), and a
         // rejected batch is a PERMANENT wedge: error frames carry no batch
         // id, so the client can never retire it — it replays and fails on
@@ -1001,14 +1100,8 @@ impl RegistryDoc {
         // ≥250-chat space minted exactly such a batch. Chunk here so no
         // writer can ever produce one; chunks apply in order, each
         // atomically (only cross-chunk atomicity is given up).
-        const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
-        while !ops.is_empty() {
-            let tail = if ops.len() > MAX_OPS_PER_BATCH {
-                ops.split_off(MAX_OPS_PER_BATCH)
-            } else {
-                Vec::new()
-            };
+        for ops in op_budget::chunk_groups(groups, MAX_OPS_PER_BATCH) {
             // Batch ids only need device-lifetime uniqueness; the HLC of a
             // fresh tick provides exactly that without a rng dependency.
             let batch = format!("b-{}", self.next_hlc());
@@ -1017,7 +1110,6 @@ impl RegistryDoc {
                 ops,
                 in_flight: false,
             });
-            ops = tail;
         }
         self.coalesce_unsent();
     }
@@ -1953,9 +2045,12 @@ impl RegistryDoc {
             ("runningSubagents", json!(session.running_subagents)),
             (
                 "backgroundTasks",
-                serde_json::to_value(&session.background_tasks)?,
+                serde_json::to_value(synced_background_tasks(&session.background_tasks))?,
             ),
-            ("waiting", serde_json::to_value(&session.waiting)?),
+            (
+                "waiting",
+                serde_json::to_value(session.waiting.as_ref().map(synced_waiting))?,
+            ),
             ("blockedOnWait", json!(session.blocked_on_wait)),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
@@ -2194,6 +2289,46 @@ fn replay_row<'a>(
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
+
+/// How much of a background command a session row carries. The row is a
+/// status line for other devices, not the command's record: an agent's
+/// shell command can hold a whole heredoc (11 KB seen), which alone pushed
+/// the row past the room's op limit.
+pub const SYNCED_TASK_COMMAND_BYTES: usize = 512;
+/// The same for the agent's description of the command.
+pub const SYNCED_TASK_DESCRIPTION_BYTES: usize = 256;
+
+/// `tasks` as a session row syncs them: commands and descriptions cut to
+/// their caps, and a description that only repeats the command dropped.
+fn synced_background_tasks(tasks: &[zeron_proto::BackgroundTask]) -> Vec<zeron_proto::BackgroundTask> {
+    tasks
+        .iter()
+        .map(|task| {
+            let mut task = task.clone();
+            task.description = task
+                .description
+                .filter(|d| *d != task.command)
+                .map(|d| op_budget::cut_str(&d, SYNCED_TASK_DESCRIPTION_BYTES));
+            task.command = op_budget::cut_str(&task.command, SYNCED_TASK_COMMAND_BYTES);
+            task
+        })
+        .collect()
+}
+
+/// How much of each waited-on label a session row carries. A process's
+/// label is its description or, without one, its whole command, so the
+/// same heredoc that the background task's command is capped for came
+/// through here uncut.
+pub const SYNCED_WAITING_LABEL_BYTES: usize = SYNCED_TASK_COMMAND_BYTES;
+
+/// `waiting` as a session row syncs it: each label cut to its cap.
+fn synced_waiting(waiting: &zeron_proto::SessionWaiting) -> zeron_proto::SessionWaiting {
+    let mut waiting = waiting.clone();
+    for on in &mut waiting.on {
+        on.label = op_budget::cut_str(&on.label, SYNCED_WAITING_LABEL_BYTES);
+    }
+    waiting
+}
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
     entries
