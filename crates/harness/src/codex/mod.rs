@@ -1563,14 +1563,17 @@ fn command_request(
         | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
         | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
             Err(HarnessError::Protocol(format!(
-                "/{name} is not mapped in Zeron's Codex integration. Available commands: /compact and /review."
+                "/{name} only works in Codex's own terminal app. Here, Codex runs /compact and /review."
             )))
         }
         _ => Ok(None),
     }
 }
 
-async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
+/// The request that starts a turn for `turn/start` params: the native
+/// operation a leading command maps to, or the turn itself. An error is a
+/// prompt refused before it reaches Codex.
+fn turn_request(params: Value) -> Result<(&'static str, Value), HarnessError> {
     let text = params
         .pointer("/input/0/text")
         .and_then(Value::as_str)
@@ -1586,9 +1589,30 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
             "Codex commands cannot include skill selections; send them in a separate prompt".into(),
         ));
     }
-    let (method, params) = native.unwrap_or(("turn/start", params));
+    Ok(native.unwrap_or(("turn/start", params)))
+}
+
+async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
+    let (method, params) = turn_request(params)?;
+    send_turn_request(client, method, params).await
+}
+
+/// Send a request [`turn_request`] built; the started turn's id.
+async fn send_turn_request(
+    client: &RpcClient,
+    method: &str,
+    params: Value,
+) -> Result<String, HarnessError> {
     let started = client.request(method, params).await?;
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
+}
+
+/// What a refused prompt's turn says: the reason alone.
+fn refusal_text(error: HarnessError) -> String {
+    match error {
+        HarnessError::Protocol(reason) => reason,
+        other => other.to_string(),
+    }
 }
 
 /// What `thread/start` / `thread/resume` reports the thread runs with: the
@@ -2455,7 +2479,11 @@ async fn run_session(session: Session) {
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
                         current_native = false;
-                        if let Some((text, config)) = queued_steers.pop_front() {
+                        // A refused prompt (a command Zeron does not run) ends
+                        // its own turn at once, with no Codex turn to end
+                        // later: the message queued behind it goes now, or it
+                        // would wait for a turn end that never comes.
+                        while let Some((text, config)) = queued_steers.pop_front() {
                             if let Some(next) = config {
                                 live = *next;
                             }
@@ -2472,7 +2500,11 @@ async fn run_session(session: Session) {
                             {
                                 break 'main;
                             }
-                        } else if !steering_open {
+                            if !done_current {
+                                break;
+                            }
+                        }
+                        if done_current && !steering_open {
                             break 'main;
                         }
                     }
@@ -3056,7 +3088,38 @@ async fn steer_as_new_turn(
     assistant_message_id: &mut String,
     done_current: &mut bool,
 ) -> bool {
-    match start_turn(client, params).await {
+    let thread_id = params["threadId"].as_str().map(str::to_owned);
+    // A prompt refused before it reaches Codex (a command Zeron does not
+    // run, such as `/mcp`) is that message's whole turn: it opens and ends
+    // here, errored with the reason, and the runtime waits for the next
+    // one. Failing the delivery instead tore the runtime down with no Done
+    // for the message, which the engine still counted as running.
+    let (method, params) = match turn_request(params) {
+        Ok(request) => request,
+        Err(error) => {
+            *done_current = true;
+            let (prev, next) = rotate(assistant_message_id);
+            return send(
+                event_tx,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                },
+            )
+            .await
+                && send(
+                    event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(refusal_text(error)),
+                        session_id: thread_id,
+                    },
+                )
+                .await;
+        }
+    };
+    match send_turn_request(client, method, params).await {
         Ok(id) => {
             router.adopt_started(id);
             *done_current = false;

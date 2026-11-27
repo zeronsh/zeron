@@ -77,6 +77,19 @@ case "$first" in
   ;;
 
 
+*scenario:local-command*)
+  # A command the CLI runs itself (`/mcp`, live 2.1.326): a synthetic
+  # assistant frame and no stream events, then its replay and result.
+  id=$(uuid_of "$first")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$id\",\"state\":\"queued\"}"
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$id\",\"state\":\"started\"}"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-local"}'
+  emit '{"type":"assistant","message":{"id":"b3eaef8a","model":"<synthetic>","role":"assistant","stop_reason":"end_turn","type":"message","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"3 MCP servers: 1 connected. Use `/mcp` in the terminal for details."}]},"parent_tool_use_id":null,"session_id":"sess-local"}'
+  emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/mcp</command-name>\"},\"parent_tool_use_id\":null,\"session_id\":\"sess-local\",\"uuid\":\"$id\",\"isReplay\":true}"
+  emit '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"3 MCP servers: 1 connected. Use `/mcp` in the terminal for details.","usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-local"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$id\",\"state\":\"completed\"}"
+  ;;
+
 *scenario:happy*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Read"],"cwd":"/tmp","session_id":"sess-1"}'
   # Re-emitted init mid-run (background-task wakeup): must be deduped.

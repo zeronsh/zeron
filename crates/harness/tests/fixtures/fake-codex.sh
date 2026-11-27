@@ -180,6 +180,37 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-3","status":"completed"}}}'
   ;;
 
+*scenario:refused-command*)
+  # A terminal-only command (`/mcp`) sent between turns never reaches the
+  # app-server, and the runtime stays up for the message after it.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"first"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"turn/start"' && has "$next" 'after the refusal' || { fail_turn "$(rid "$next")" "refused command reached the app-server"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"still here"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+
+*scenario:refused-queue*)
+  # `/mcp` and a prompt queue behind a running turn. The refused command ends
+  # its own turn; the prompt behind it still starts when t-1 ends.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+  sleep 0.1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"turn/start"' && has "$next" 'queued behind the refusal' || { fail_turn "$(rid "$next")" "refused command reached the app-server"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"queued ran"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+
 *scenario:native-queue*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
