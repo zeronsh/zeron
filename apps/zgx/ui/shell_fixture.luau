@@ -1691,7 +1691,20 @@ ui.command { id = "fixture.project_icons", title = "Fixture: projects with icons
 	publish()
 end }
 
+local initial_chat = ui.shared("fixture.initial_chat", ""):peek()
+local initial = fixture_chats:peek()[initial_chat]
+if initial_chat ~= "" and initial and initial.session then
+	table.insert(model.chats, table.clone(initial.session))
+end
 publish()
+
+if initial_chat ~= "" then
+	local opened = ui.state("fixture_initial_chat_opened", false)
+	if not opened:peek() then
+		require("@app/screens/shell/route").open_session(initial_chat)
+		opened:set(true)
+	end
+end
 
 -- The plugins screen (what plugins ask of the shell: a tab in a panel, a
 -- link), as the app loads it beside the shell: on for the tests that need
