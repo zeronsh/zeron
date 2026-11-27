@@ -57,5 +57,9 @@ jobs:
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: core # saved by core-tests in ui-tests.yml
+          # zeron-voice builds transcribe.cpp (CMake) and CPAL (ALSA), as
+          # core-tests installs them.
+          apt-cache: core
+          apt-packages: libasound2-dev pkg-config cmake
       - name: Harness, engine, sync, update, doc and preview tests
         run: scripts/ci/test-core.sh
