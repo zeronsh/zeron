@@ -56,3 +56,40 @@ test("answered with none: the sidebar says so", function()
 	local app = open("fixture.no_sessions")
 	expect(app:has("#sidebar-empty")).to_be(true)
 end)
+
+-- (Settings' host calls the stub answers, in order.)
+local function asked(app: any, entry: string): boolean
+	for _, c in (app:state("settings_stub_calls") :: any) or {} do
+		if c == entry then
+			return true
+		end
+	end
+	return false
+end
+
+local function members(app: any)
+	app:command("shell.settings")
+	app:frames(20)
+	app:click(`#settings-nav >> role:tab "Members"`)
+	app:frames(30)
+end
+
+test("signed out: Members offers signing in, not a failure, and asks for no organization", function()
+	local app = open("settings_stub.signed_out")
+	members(app)
+	expect(shows(app, "#settings-page", "Sign in to see your team")).to_be(true)
+	expect(shows(app, "#settings-page", "Couldn't load your organization")).to_be(false)
+	expect(app:has(`#settings-page >> role:button "Sign in"`)).to_be(true)
+	expect(app:has(`#settings-page >> "Find someone"`)).to_be(false)
+	expect(asked(app, "account.orgs")).to_be(false)
+end)
+
+test("signed in while Members shows: its organization is asked for then", function()
+	local app = open("settings_stub.signed_out")
+	members(app)
+	app:command("settings_stub.sign_in")
+	app:frames(30)
+	expect(asked(app, "account.orgs")).to_be(true)
+	expect(shows(app, "#settings-page", "Sign in to see your team")).to_be(false)
+	expect(shows(app, "#settings-page", "Analytical Engines")).to_be(true)
+end)
