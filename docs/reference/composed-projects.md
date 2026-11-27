@@ -68,7 +68,9 @@ The host looks through home, up to four folders deep (`~/src/github.com/owner/re
 
 ## Cloud
 
-A Cloud session runs on a machine of its own, which clones its project's GitHub repository. A Cloud project is one repository, so its Edit project says so and offers nothing to change. See [project worktrees](project-worktrees.md#cloud) for how Cloud handles a project of several repositories.
+A new chat in a project of repositories can run on **Cloud** (Work in → Cloud), as a single repository's can. Cloud's machine clones each repository chosen into a folder laid out like the project, all on the session's branch, each with a GitHub token of its own. The composer's Work in panel lists the project's repositories on Cloud too. Those Cloud can't clone (not on GitHub, or out of the reach of your GitHub connection) are dimmed and read *Not on GitHub*, and its line says what the machine does. The same choice of repositories is remembered for the project. See [project worktrees → Cloud](project-worktrees.md#cloud) for what the machine does.
+
+A **Cloud project** (New project → Cloud) is one GitHub repository. Its Edit project says so and offers nothing to change.
 
 ## Compatibility
 
