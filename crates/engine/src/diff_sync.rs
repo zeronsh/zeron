@@ -1151,7 +1151,7 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     max_bytes: usize,
     snapshot: Option<&TreeSnapshot>,
 ) -> Result<Capture, EngineError> {
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = crate::repos::git_command();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1840,7 +1840,7 @@ async fn run_git_for_path_batch(
     fixed_args: &[OsString],
     paths: &[Vec<u8>],
 ) -> Result<(), EngineError> {
-    let mut command = tokio::process::Command::new("git");
+    let mut command = crate::repos::git_command();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

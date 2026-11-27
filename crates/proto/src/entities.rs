@@ -2025,7 +2025,8 @@ pub struct WaitingMessage {
     /// Still in this device's outbox, its files uploading.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
-    /// Why a held send stopped trying.
+    /// Why it stopped trying: a held send's upload gave up, or the chat's
+    /// host refused the run (until it is sent again or its time is up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
 }

@@ -889,7 +889,7 @@ struct Pending {
     paths: Vec<String>,
     /// "sending" or "failed".
     waiting: &'static str,
-    /// The command that sends it again, once it failed.
+    /// The command that sends it again, should it fail.
     retry: Option<Json>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
@@ -2689,8 +2689,12 @@ impl View {
             if let Some(view) = weak.upgrade()
                 && view.generation.get() == generation
             {
-                if let Some(open) = view.open.borrow_mut().as_mut() {
+                let followed = view.open.borrow_mut().as_mut().map(|open| {
                     open.waiting = item["items"].as_array().cloned().unwrap_or_default();
+                    (open.id.clone(), open.waiting.clone())
+                });
+                if let Some((chat, waiting)) = followed {
+                    view.follow_refused(&chat, &waiting);
                 }
                 view.publish_session();
             }
@@ -3397,13 +3401,16 @@ impl View {
             }
             None => command_with(&id, run.clone(), &transfers).await,
         };
+        // Kept with the prompt: its host may yet refuse it (`follow_refused`),
+        // and Retry sends this again.
+        if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+        {
+            p.retry = Some(run.clone());
+            p.transfers = transfers.clone();
+        }
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
-            if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
-                && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
-            {
-                p.transfers = transfers;
-            }
             self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
@@ -3481,6 +3488,26 @@ impl View {
                         });
                         changed = true;
                     }
+                }
+            }
+        }
+        if changed {
+            self.publish_messages();
+        }
+    }
+
+    /// The engine's word on sends shown here as on their way: one its chat's
+    /// host refused (its worktree couldn't be made, say) never reaches the
+    /// transcript, so it shows failed, to send again; one still going (sent
+    /// again meanwhile) shows sending. Sends in this device's outbox follow
+    /// `follow_held` instead.
+    fn follow_refused(&self, chat: &str, waiting: &[Json]) {
+        let mut changed = false;
+        if let Some(prompts) = self.pending.borrow_mut().get_mut(chat) {
+            for p in prompts.iter_mut().filter(|p| !p.held) {
+                if let Some(waiting) = engine_send_state(&p.id, waiting) {
+                    changed |= p.waiting != waiting;
+                    p.waiting = waiting;
                 }
             }
         }
@@ -7053,6 +7080,17 @@ fn todos(open: &Open) -> Value {
     Value::List(items.into())
 }
 
+/// How the engine's waiting messages say a send from here stands (not one in
+/// this device's outbox): "failed" when its chat's host refused it,
+/// "sending" while it's in the chat for its host to run, nothing when the
+/// engine doesn't list it.
+fn engine_send_state(message_id: &str, waiting: &[Json]) -> Option<&'static str> {
+    let w = waiting
+        .iter()
+        .find(|w| w["held"].as_bool() != Some(true) && w["messageId"].as_str() == Some(message_id))?;
+    Some(if w["failure"].is_string() { "failed" } else { "sending" })
+}
+
 /// How long a sent prompt reads "sending" with no turn to show for it, as
 /// the shipping app's grace before it calls a send undelivered.
 const SEND_GRACE_SECONDS: f64 = 60.;
@@ -7447,6 +7485,22 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A send its chat's host refused (a new chat whose worktree couldn't be
+    /// made) shows failed, not "Sending…" forever; sent again, it's sending;
+    /// outbox sends and unlisted ones are left to their own paths.
+    #[test]
+    fn a_send_its_host_refused_reads_failed() {
+        use super::engine_send_state;
+        use serde_json::json;
+        let refused = [json!({ "messageId": "m1", "failure": "git: hook failed" })];
+        assert_eq!(engine_send_state("m1", &refused), Some("failed"));
+        let again = [json!({ "messageId": "m1", "expiresAt": 1 })];
+        assert_eq!(engine_send_state("m1", &again), Some("sending"));
+        let held = [json!({ "messageId": "m1", "held": true, "failure": "upload" })];
+        assert_eq!(engine_send_state("m1", &held), None);
+        assert_eq!(engine_send_state("m2", &refused), None);
+    }
+
     /// A message's time reads as the shipping app's, on every platform: the
     /// formatting, and a real local time from `stamp` (Windows included,
     /// where it once was always missing and hid the message's hover strip).

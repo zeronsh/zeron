@@ -274,7 +274,7 @@ impl Repos {
 
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
     async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
-        let mut cmd = tokio::process::Command::new("git");
+        let mut cmd = git_command();
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -314,7 +314,7 @@ impl Repos {
         args: &[&str],
         cwd: Option<&Path>,
     ) -> Result<Option<String>, EngineError> {
-        let mut cmd = tokio::process::Command::new("git");
+        let mut cmd = git_command();
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -2662,6 +2662,19 @@ fn windows_git_worktree_path(path: &str) -> String {
         }
     }
     path
+}
+
+/// A `git` the engine runs for the user, on the user's own PATH. Git runs
+/// whatever their config names — hooks (`git lfs install`'s post-checkout
+/// calls `git-lfs`), filter drivers, credential helpers — and a Dock/launchd
+/// launch leaves the engine with launchd's bare PATH, where Homebrew and
+/// version-manager tools are missing. Without this, `git worktree add` in a
+/// repo with such a hook checks out the tree and then fails, so a new chat
+/// never starts. Same login-shell PATH the agents and `gh` already get.
+pub(crate) fn git_command() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    zeron_harness::compose_login_shell_path(&mut cmd);
+    cmd
 }
 
 #[cfg(test)]

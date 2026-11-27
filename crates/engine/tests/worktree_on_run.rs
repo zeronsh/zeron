@@ -608,3 +608,148 @@ async fn worktree_location_rejects_unlaunchable_windows_destinations() {
             .all(|branch| !branch.starts_with("zeron/"))
     );
 }
+
+/// A worktree whose checkout lands but whose `post-checkout` hook fails (a
+/// global `git lfs install` hook that can't find `git-lfs`, say) must not
+/// leave the send pending: the command resolves with git's own words, so
+/// the composer shows a failed send instead of "Sending…" forever.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_hook_failure_resolves_the_send() {
+    use std::os::unix::fs::PermissionsExt;
+    use zeron_doc::SessionCommandStatus;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let repo_dir = tmp_path.join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git(&repo_dir, &["init", "-b", "main"]);
+    git(&repo_dir, &["config", "user.email", "t@example.com"]);
+    git(&repo_dir, &["config", "user.name", "Test"]);
+    // Repo-local hooks win over any global core.hooksPath on the machine.
+    let hooks = repo_dir.join("test-hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    git(&repo_dir, &["config", "core.hooksPath", "test-hooks"]);
+    std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
+    git(&repo_dir, &["add", "README.md"]);
+    git(&repo_dir, &["commit", "-m", "init"]);
+    let hook = hooks.join("post-checkout");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'hook-tool was not found on your path' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo_path = repo_dir.to_string_lossy().to_string();
+
+    let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
+    let core = EngineCore::assemble(
+        &tmp_path.join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::SET_WORKTREE_SETTINGS,
+            serde_json::json!({
+                "useCustomDirectory": true,
+                "customDirectory": tmp_path.join("worktrees"),
+            }),
+        )
+        .await
+        .expect("choose worktree directory");
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": CHAT,
+                "deviceId": core.device_id,
+            }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+
+    let command = core
+        .doc_host
+        .queue_command(CHAT, run_payload("msg-wt-hook", &repo_path, None))
+        .expect("queue run command");
+    let resolved = || {
+        core.doc_host
+            .open(CHAT)
+            .ok()
+            .and_then(|h| h.doc().read_commands().ok())
+            .and_then(|commands| commands.into_iter().find(|c| c.id == command))
+            .filter(|c| c.status != SessionCommandStatus::Pending)
+    };
+    wait_for(|| resolved().is_some(), "the send to resolve").await;
+    let entry = resolved().unwrap();
+    assert_eq!(entry.status, SessionCommandStatus::Rejected);
+    let resolution = entry.resolution.unwrap_or_default();
+    assert!(
+        resolution.contains("hook-tool was not found"),
+        "the failure names git's reason: {resolution}"
+    );
+    assert!(cwds.lock().unwrap().is_empty(), "nothing ran");
+
+    // The composer learns it through the waiting messages: still not taken,
+    // and why.
+    let waiting = core.doc_host.waiting_messages(CHAT).unwrap();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].message_id.as_deref(), Some("msg-wt-hook"));
+    assert!(
+        waiting[0]
+            .failure
+            .as_deref()
+            .is_some_and(|f| f.contains("hook-tool was not found")),
+        "{waiting:?}"
+    );
+
+    // Sent again and refused again: one row for the message, the newest
+    // attempt's.
+    let again = core
+        .doc_host
+        .queue_command(CHAT, run_payload("msg-wt-hook", &repo_path, None))
+        .expect("queue the retry");
+    let retried = || {
+        core.doc_host
+            .open(CHAT)
+            .ok()
+            .and_then(|h| h.doc().read_commands().ok())
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|c| c.id == again && c.status != SessionCommandStatus::Pending)
+            })
+    };
+    wait_for(retried, "the retry to resolve").await;
+    let waiting = core.doc_host.waiting_messages(CHAT).unwrap();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].id, again);
+    assert!(waiting[0].failure.is_some());
+
+    // Once the hook passes, the retry runs and nothing waits any more.
+    std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-wt-hook", &repo_path, None))
+        .expect("queue the fixed retry");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "the fixed retry's turn",
+    )
+    .await;
+    assert!(
+        core.doc_host.waiting_messages(CHAT).unwrap().is_empty(),
+        "an attempt that went through retires the refused ones"
+    );
+
+    core.shutdown().await;
+}
