@@ -1144,6 +1144,23 @@ impl DocsStore {
         Ok(hit.is_some())
     }
 
+    /// The ids of the snapshots whose id starts with `prefix` (a chat's
+    /// subagents' docs, `{chat}--sub--{tool}`), in id order.
+    pub fn snapshot_ids_with_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        store_blocking(|| self.snapshot_ids_with_prefix_blocking(prefix))
+    }
+
+    fn snapshot_ids_with_prefix_blocking(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT doc_id FROM snapshots WHERE substr(doc_id, 1, length(?1)) = ?1 ORDER BY doc_id",
+        )?;
+        let ids = stmt
+            .query_map(params![prefix], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     /// The full command ledger — profile-import reads the source's claims so
     /// imported pending commands can never re-execute under the new profile.
     pub fn processed_commands(&self) -> Result<Vec<(String, i64)>, StoreError> {

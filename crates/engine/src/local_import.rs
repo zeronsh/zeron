@@ -18,6 +18,13 @@
 //!    legacy-uploads adoption already uses (`EngineProfile::claim_legacy_uploads_root`).
 //!    The marker file re-arms the root on every later synced boot.
 //!
+//! The same copy runs the other way for a device signed in with its chats
+//! kept on it (`keep-chats-local`): its local profile takes in what the
+//! account's synced profile holds ([`LocalImporter::from_account`]), so the
+//! chats come down with the switch. That direction records no marker (it
+//! must not stand for a local→synced import), and its uploads root is
+//! granted read-only on every such boot instead.
+//!
 //! Idempotence is structural: a chat/space whose row already exists in the
 //! target is skipped, so re-running after a partial import (or after new
 //! local work from a later signed-out stretch) imports only what's missing.
@@ -125,6 +132,9 @@ struct ImporterInner {
     target_journals: PathBuf,
     workspace: WorkspaceHost,
     uploads: Uploads,
+    /// Where it copies from: the local profile (`None`), or an account's
+    /// synced profile ([`LocalImporter::from_account`]).
+    source: Option<PathBuf>,
 }
 
 impl LocalImporter {
@@ -149,15 +159,43 @@ impl LocalImporter {
                 target_journals,
                 workspace,
                 uploads,
+                source: None,
+            }),
+        }
+    }
+
+    /// The same copy from account `(org_id, user_id)`'s synced profile into
+    /// this (local) one: a device signed in with its chats kept on it takes
+    /// in what the account holds. Its source's uploads root, read-only, is
+    /// the caller's to grant ([`Self::source_uploads`]).
+    pub fn from_account(&self, org_id: &str, user_id: &str) -> Self {
+        let root = crate::EngineProfile::synced(&self.inner.data_dir, org_id, user_id)
+            .store_root()
+            .to_path_buf();
+        Self {
+            inner: Arc::new(ImporterInner {
+                data_dir: self.inner.data_dir.clone(),
+                device_id: self.inner.device_id.clone(),
+                org_id: self.inner.org_id.clone(),
+                user_id: self.inner.user_id.clone(),
+                target_store: self.inner.target_store.clone(),
+                target_journals: self.inner.target_journals.clone(),
+                workspace: self.inner.workspace.clone(),
+                uploads: self.inner.uploads.clone(),
+                source: Some(root),
             }),
         }
     }
 
     fn source_root(&self) -> PathBuf {
-        self.inner.data_dir.join("profiles").join("local")
+        match &self.inner.source {
+            Some(root) => root.clone(),
+            None => self.inner.data_dir.join("profiles").join("local"),
+        }
     }
 
-    fn source_uploads(&self) -> PathBuf {
+    /// The source's uploads root (transcripts embed absolute paths under it).
+    pub fn source_uploads(&self) -> PathBuf {
         self.source_root().join("uploads")
     }
 
@@ -376,7 +414,11 @@ impl LocalImporter {
                 .uploads
                 .add_read_only_root(&self.source_uploads());
         }
-        if let Err(err) = self.record_import(imported_chats, imported_spaces) {
+        // (From an account: no marker, which stands for a local→synced
+        // import only.)
+        if self.inner.source.is_none()
+            && let Err(err) = self.record_import(imported_chats, imported_spaces)
+        {
             errors.push(format!("import marker: {err}"));
         }
 
@@ -392,6 +434,31 @@ impl LocalImporter {
         Ok(())
     }
 
+    /// One doc into the target in born-chat2 shape: copied where the target
+    /// has none; where it has its own copy (the same chat, worked on in both
+    /// profiles), the two merged, so neither side's messages are lost.
+    fn carry_doc(&self, source_store: &DocsStore, doc_id: &str) -> Result<(), EngineError> {
+        let Some(bytes) = source_store.load_snapshot(doc_id)? else {
+            return Ok(());
+        };
+        let bytes = match self.inner.target_store.load_snapshot(doc_id)? {
+            None => bytes,
+            Some(here) if here == bytes => return Ok(()),
+            Some(here) => {
+                let merge = |err: loro::LoroError| EngineError::Other(format!("doc {doc_id}: {err}"));
+                let doc = loro::LoroDoc::new();
+                doc.import(&here).map_err(merge)?;
+                doc.import(&bytes).map_err(merge)?;
+                doc.export(loro::ExportMode::Snapshot)
+                    .map_err(|err| EngineError::Other(format!("doc {doc_id}: {err}")))?
+            }
+        };
+        self.inner
+            .target_store
+            .save_snapshot_with_cursor(doc_id, &bytes, 0, CHAT2_DOC_EPOCH)?;
+        Ok(())
+    }
+
     /// Copy one chat: doc snapshot (born-chat2 shape), journal files, row.
     /// Returns whether a journal file was copied.
     fn import_chat(
@@ -402,15 +469,11 @@ impl LocalImporter {
     ) -> Result<bool, EngineError> {
         // Doc bytes may be absent (a chat row created but never opened) — the
         // row alone is still worth carrying; a doc materializes on first open.
-        if let Some(bytes) = source_store.load_snapshot(&chat.id)?
-            && !self.inner.target_store.has_snapshot(&chat.id)?
-        {
-            self.inner.target_store.save_snapshot_with_cursor(
-                &chat.id,
-                &bytes,
-                0,
-                CHAT2_DOC_EPOCH,
-            )?;
+        // Its subagents' docs (`{chat}--sub--{tool}`) come with it: they have
+        // no row of their own.
+        self.carry_doc(source_store, &chat.id)?;
+        for sub in source_store.snapshot_ids_with_prefix(&format!("{}--sub--", chat.id))? {
+            self.carry_doc(source_store, &sub)?;
         }
 
         let mut copied = false;

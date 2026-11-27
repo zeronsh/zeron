@@ -209,6 +209,9 @@ pub struct EngineCore {
     pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
+    /// Into this local profile, from a signed-in account's synced one
+    /// ([`local_import::LocalImporter::from_account`]): local runtimes only.
+    pub carry_down: Option<local_import::LocalImporter>,
     /// Plugins under `{data}/plugins/` (the plugins contract).
     pub plugins: plugins::Plugins,
     /// Managed external MCP servers (Vault + local store + OAuth + loopback gateway).
@@ -467,7 +470,7 @@ impl EngineCore {
             agent_accounts_config.codex_home.clone()
         };
         sessions.set_generated_images(uploads.clone(), codex_home.join("generated_images"));
-        let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
+        let importer = || {
             local_import::LocalImporter::new(
                 data_dir,
                 &device_id,
@@ -478,7 +481,9 @@ impl EngineCore {
                 workspace.clone(),
                 uploads.clone(),
             )
-        });
+        };
+        let local_import = (profile.scope() == WorkspaceScope::Synced).then(importer);
+        let carry_down = (profile.scope() == WorkspaceScope::Local).then(importer);
         // Logins started from another device publish their callback port to
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
@@ -549,6 +554,7 @@ impl EngineCore {
             harness_updates,
             device_id,
             local_import,
+            carry_down,
             plugins,
             mcp_servers,
             workspace_scope: profile.scope(),
@@ -1179,6 +1185,38 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
+        // Signed in with its chats kept on this device: the account's chats
+        // come down into the local profile (those not here yet), and their
+        // attachments stay readable where they are.
+        if let Some(importer) = core.carry_down.as_ref()
+            && auth.keeps_chats_local()
+        {
+            let state = auth.state();
+            if let (Some(user), Some(org_id)) = (state.user(), state.org_id()) {
+                let importer = importer.from_account(org_id, &user.id);
+                let uploads = importer.source_uploads();
+                if uploads.is_dir() {
+                    core.uploads.add_read_only_root(&uploads);
+                }
+                tokio::task::spawn_blocking(move || {
+                    let outcome = importer.run(|event| {
+                        if let local_import::ImportEvent::Summary {
+                            imported_chats,
+                            imported_spaces,
+                            errors,
+                            ..
+                        } = &event
+                        {
+                            tracing::info!(imported_chats, imported_spaces, errors = ?errors,
+                                "account chats brought down into the local profile");
+                        }
+                    });
+                    if let Err(err) = outcome {
+                        tracing::warn!(error = %err, "bringing account chats down failed");
+                    }
+                });
+            }
+        }
         // Agents' commits credit Zeron (always on Cloud, else per the
         // device's setting).
         core.registry

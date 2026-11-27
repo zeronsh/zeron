@@ -466,3 +466,209 @@ async fn later_local_work_imports_as_a_delta() {
     assert_eq!(skipped_chats, 2);
     synced.shutdown().await;
 }
+
+/// A signed-in device with its chats kept on it: the account's synced chats
+/// come down into the local profile, the same copy run the other way.
+#[tokio::test]
+async fn account_chats_come_down_into_the_local_profile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let account = dir.path().join("orgs").join("org1").join("user1");
+
+    // The account's synced profile, as signed-in work leaves it.
+    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    assert!(synced.carry_down.is_none(), "synced runtimes carry nothing down");
+    let device = synced.device_id.clone();
+    synced
+        .workspace
+        .create_space("space-1", &device, "/tmp/proj", Some("Project".into()), false)
+        .expect("create space");
+    synced
+        .workspace
+        .create_chat("chat-doc", Some("space-1"), None, None, None)
+        .expect("create chat");
+    synced
+        .workspace
+        .rename_chat("chat-doc", "Ship the release")
+        .expect("title");
+    synced
+        .workspace
+        .create_chat("chat-bare", Some("space-1"), None, None, None)
+        .expect("create bare chat");
+    let doc = SessionDoc::init("chat-doc").expect("init doc");
+    doc.push_message(&SessionMessageEntry {
+        id: "m1".into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text {
+            id: "t1".into(),
+            text: "hello from the account".into(),
+        }],
+        created_at: 1_700_000_000_000,
+        device_id: device.clone(),
+        status: None,
+        continuation_of: None,
+        duration_ms: None,
+    })
+    .expect("push message");
+    let bytes = doc.export_snapshot().expect("snapshot");
+    synced.shutdown().await;
+    drop(synced);
+    let store = zeron_sync::DocsStore::open(&account).expect("open synced store");
+    store
+        .save_snapshot_with_cursor("chat-doc", &bytes, 7, 2)
+        .expect("save doc");
+    drop(store);
+    let (journal, _) = journal_paths(&account.join("journals"), "chat-doc");
+    std::fs::create_dir_all(journal.parent().unwrap()).expect("journals dir");
+    std::fs::write(&journal, "{\"seq\":1,\"event\":{}}\n").expect("journal");
+
+    // The local profile takes them in.
+    let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    assert!(local.local_import.is_none());
+    let importer = local
+        .carry_down
+        .as_ref()
+        .expect("local runtimes carry down")
+        .from_account("org1", "user1");
+    assert_eq!(importer.source_uploads(), account.join("uploads"));
+    let mut events = Vec::new();
+    importer.run(|e| events.push(e)).expect("carry down");
+    assert_eq!(summary(&events), (2, 1, 0, 0));
+
+    let row = local
+        .workspace
+        .chat("chat-doc")
+        .expect("read")
+        .expect("chat came down");
+    assert_eq!(row.title.as_deref(), Some("Ship the release"));
+    assert_eq!(row.space_id.as_deref(), Some("space-1"));
+    assert!(local.workspace.chat("chat-bare").expect("read").is_some());
+    assert!(local.workspace.space("space-1").expect("read").is_some());
+    let local_store =
+        zeron_sync::DocsStore::open(dir.path().join("profiles").join("local")).expect("open");
+    assert_eq!(
+        local_store.load_snapshot("chat-doc").expect("load").expect("doc came down"),
+        bytes,
+        "the transcript comes down verbatim"
+    );
+    drop(local_store);
+    let (local_journal, _) = journal_paths(
+        &dir.path().join("profiles").join("local").join("journals"),
+        "chat-doc",
+    );
+    assert!(local_journal.is_file(), "journal came down");
+
+    // No local→synced marker: the account's later sign-in import still runs.
+    assert!(marker_grants_read_root(dir.path(), "org1", "user1").is_none());
+
+    // Again: nothing new to bring.
+    let mut events = Vec::new();
+    importer.run(|e| events.push(e)).expect("carry down again");
+    assert_eq!(summary(&events), (0, 0, 2, 1));
+
+    local.shutdown().await;
+}
+
+fn said(id: &str, text: &str, device: &str) -> SessionMessageEntry {
+    SessionMessageEntry {
+        id: id.into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text {
+            id: format!("{id}-t"),
+            text: text.into(),
+        }],
+        created_at: 1_700_000_000_000,
+        device_id: device.into(),
+        status: None,
+        continuation_of: None,
+        duration_ms: None,
+    }
+}
+
+/// A chat already on this device in an older copy (worked on before sign-in,
+/// and since) comes down merged, keeping both sides' messages; its subagents'
+/// docs, which have no rows, come with it.
+#[tokio::test]
+async fn a_chat_in_both_profiles_comes_down_merged_with_its_subagents() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let account = dir.path().join("orgs").join("org1").join("user1");
+    let local_root = dir.path().join("profiles").join("local");
+
+    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let device = synced.device_id.clone();
+    synced
+        .workspace
+        .create_space("space-1", &device, "/tmp/proj", Some("Project".into()), false)
+        .expect("create space");
+    synced
+        .workspace
+        .create_chat("chat-m", Some("space-1"), None, None, None)
+        .expect("create chat");
+    synced.shutdown().await;
+    drop(synced);
+
+    // One history, then two: the account's and this device's.
+    let base = SessionDoc::init("chat-m").expect("init");
+    base.push_message(&said("m0", "the start", &device))
+        .expect("m0");
+    let base = base.export_snapshot().expect("base");
+    let up = SessionDoc::init("chat-m").expect("init");
+    up.import(&base).expect("import base");
+    up.push_message(&said("m1", "said on the account", &device))
+        .expect("m1");
+    let here = SessionDoc::init("chat-m").expect("init");
+    here.import(&base).expect("import base");
+    here.push_message(&said("m2", "said on this device", &device))
+        .expect("m2");
+
+    let store = zeron_sync::DocsStore::open(&account).expect("open synced store");
+    store
+        .save_snapshot_with_cursor("chat-m", &up.export_snapshot().expect("up"), 9, 2)
+        .expect("save doc");
+    let sub = SessionDoc::init("chat-m--sub--toolu_1").expect("init sub");
+    sub.push_message(&said("s1", "a subagent's work", &device))
+        .expect("s1");
+    let sub = sub.export_snapshot().expect("sub");
+    store
+        .save_snapshot_with_cursor("chat-m--sub--toolu_1", &sub, 3, 2)
+        .expect("save sub");
+    drop(store);
+    std::fs::create_dir_all(&local_root).expect("local root");
+    let store = zeron_sync::DocsStore::open(&local_root).expect("open local store");
+    store
+        .save_snapshot_with_cursor("chat-m", &here.export_snapshot().expect("here"), 0, 2)
+        .expect("save local copy");
+    drop(store);
+
+    let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    let importer = local
+        .carry_down
+        .as_ref()
+        .expect("local runtimes carry down")
+        .from_account("org1", "user1");
+    let mut events = Vec::new();
+    importer.run(|e| events.push(e)).expect("carry down");
+    assert_eq!(summary(&events), (1, 1, 0, 0));
+    local.shutdown().await;
+    drop(local);
+
+    let store = zeron_sync::DocsStore::open(&local_root).expect("open local store");
+    let merged = SessionDoc::init("chat-m").expect("init");
+    merged
+        .import(&store.load_snapshot("chat-m").expect("load").expect("doc"))
+        .expect("import merged");
+    let mut ids: Vec<String> = merged
+        .read_entries()
+        .expect("entries")
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["m0", "m1", "m2"], "both sides' messages kept");
+    assert_eq!(
+        store
+            .load_snapshot("chat-m--sub--toolu_1")
+            .expect("load sub")
+            .expect("subagent doc came down"),
+        sub
+    );
+}
