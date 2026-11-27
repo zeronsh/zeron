@@ -1164,3 +1164,55 @@ test("the wallpaper's rows stand inline in one card, a hairline only between the
 	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(0)
 	expect(app:state("shell_wallpaper_image")).never.to_be_nil()
 end)
+
+-- Custom worktree location: the switch turns on ahead of the engine and
+-- shows the folder field, asking it nothing until a folder is committed;
+-- a refusal says the engine's own words.
+test("the worktree switch shows the folder field before the engine is asked", function()
+	local app = open()
+	local switch = `{PAGE} >> role:switch "Custom worktree location"`
+	app:scroll(PAGE, 600)
+	app:frames(4)
+	expect(app:tree(switch)).to_contain("unchecked")
+	app:click(switch)
+	app:frames(10)
+	-- On with no folder yet: the field is out, the engine still unasked.
+	expect(asked(app, "settings.engine:SetWorktreeSettings")).to_be(false)
+	expect(app:has(`{PAGE} >> role:textbox "Worktree folder"`)).to_be(true)
+	-- The folder's commit asks; the setting lands.
+	app:fill(`{PAGE} >> role:textbox "Worktree folder"`, "/tmp/wt")
+	app:key("Enter")
+	app:frames(10)
+	expect(asked(app, "settings.engine:SetWorktreeSettings")).to_be(true)
+	expect(shows(app, PAGE, "New worktrees go in /tmp/wt.")).to_be(true)
+	-- Refused: the engine's own message is what shows, not "went wrong".
+	app:command("settings_stub.refuse_next")
+	app:fill(`{PAGE} >> role:textbox "Worktree folder"`, "/elsewhere")
+	app:key("Enter")
+	app:frames(10)
+	expect(app:has('"refused"')).to_be(true)
+	expect(shows(app, PAGE, "something went wrong")).to_be(false)
+end)
+
+-- #1396: the picker offering a model whose agent can't title, the engine
+-- refusing the choice.
+test("the Thread naming picker offers only models of a title-capable agent", function()
+	local app = open("General")
+	app:set_state("chat.catalog", {
+		state = "ready",
+		harnesses = {
+			{ id = "claude-code", label = "Claude", titles = true },
+			{ id = "opencode", label = "OpenCode", titles = false },
+		},
+		models = {
+			{ value = "claude-code/opus", label = "Opus", harness = "claude-code" },
+			{ value = "opencode/big-pickle", label = "Big Pickle", harness = "opencode" },
+		},
+	})
+	app:frames(10)
+	app:click('role:button "Thread naming"')
+	app:frames(10)
+	expect(app:has('role:menuitem "Session agent"')).to_be(true)
+	expect(app:has('role:menuitem "Opus"')).to_be(true)
+	expect(app:has('role:menuitem ~"Big Pickle"')).to_be(false)
+end)

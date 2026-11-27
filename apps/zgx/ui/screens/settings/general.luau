@@ -60,13 +60,17 @@ local function engine(method: string, params: { [string]: any }?): any
 	return host.call("settings.engine", { method = method, params = params or {} })
 end
 
-local function says(word: string?): Message
+local function says(word: string?): string
 	if word == "outdated" then
-		return ui.t("settings.engine.outdated")
+		return ui.t("settings.engine.outdated"):get()
 	elseif word == "offline" then
-		return ui.t("settings.engine.offline")
+		return ui.t("settings.engine.offline"):get()
 	end
-	return ui.t("common.something_went_wrong")
+	-- Other words are the engine's own message ("Choose a worktree
+	-- folder"), said as it came; none, the plain fallback.
+	return if word == nil or word == "" or word == "failed" or word == "signed_out"
+		then ui.t("common.something_went_wrong"):get()
+		else word
 end
 
 local function load(name: string, method: string, into: State<any>)
@@ -88,7 +92,7 @@ local function set_keep_local(on: boolean)
 	-- The engine starts again on the other workspace; the window reconnects.
 	host.call("account.keep_chats_local", on):after(function() end, function(err: any)
 		keep_local:set(before)
-		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message), tone = "danger" }
 	end)
 end
 
@@ -113,7 +117,7 @@ local function change(name: string, into: State<any>, next: any, method: string,
 		end
 	end, function(err: any)
 		into:set(before)
-		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message), tone = "danger" }
 	end)
 end
 
@@ -170,11 +174,17 @@ local function naming(): Node
 			return out
 		end
 		local names: { [string]: string } = {}
+		local titles: { [string]: boolean } = {}
 		for _, h in catalog.harnesses do
 			names[h.id] = h.label
+			-- Only harnesses that can run title generation: the engine
+			-- refuses the rest (a model that can't title is no title model).
+			titles[h.id] = h.titles ~= false
 		end
 		for _, m in catalog.models do
-			table.insert(out, { value = m.value, label = m.label, description = names[m.harness] })
+			if titles[m.harness] ~= false then
+				table.insert(out, { value = m.value, label = m.label, description = names[m.harness] })
+			end
 		end
 		return out
 	end
@@ -206,7 +216,14 @@ end
 -- The worktree folder: off, worktrees go where Zeron puts them; on, under
 -- the folder typed (kept even while it's off).
 local folder = ui.state("settings_worktree_folder", "")
+-- The switch's say ahead of the engine's: on with no folder yet asks
+-- nothing of it (the engine only takes the setting with a folder).
+local enabled = ui.state("settings_worktree_on", nil :: boolean?)
 local function custom(): boolean
+	local on = enabled:get()
+	if on ~= nil then
+		return on
+	end
 	local w = worktrees:get()
 	return w ~= nil and w.settings.useCustomDirectory == true
 end
@@ -284,7 +301,7 @@ function M.view(): Node
 					label = ui.t("settings.general.keep_running.label"),
 					description = function()
 						if failed:get().background then
-							return says(failed:get().background):get()
+							return says(failed:get().background)
 						end
 						local b = background:get()
 						return if b == nil or b.keepRunningAfterQuit
@@ -325,7 +342,7 @@ function M.view(): Node
 					label = ui.t("settings.general.thread_naming.label"),
 					description = function()
 						if failed:get().titles then
-							return says(failed:get().titles):get()
+							return says(failed:get().titles)
 						end
 						return if title_value() == AUTO
 							then ui.t("settings.general.thread_naming.auto"):get()
@@ -365,7 +382,7 @@ function M.view(): Node
 					truncate = true,
 					description = function()
 						if failed:get().worktrees then
-							return says(failed:get().worktrees):get()
+							return says(failed:get().worktrees)
 						end
 						local w = worktrees:get()
 						if not w then
@@ -378,11 +395,19 @@ function M.view(): Node
 							then ui.t("settings.general.worktrees.in", { path = dir }):get()
 							else ui.t("settings.general.worktrees.in_zeron"):get()
 					end,
-					control = engine_switch(ui.t("settings.general.worktrees.label"), function()
-						local w = worktrees:get()
-						return if w then w.settings.useCustomDirectory == true else nil
-					end, function(on: boolean)
-						set_worktrees(on, if folder:peek() ~= "" then folder:peek() else nil)
+					control = engine_switch(ui.t("settings.general.worktrees.label"), custom, function(on: boolean)
+						local dir = folder:peek()
+						if on then
+							enabled:set(true)
+							-- Asked once a folder is there: the one kept, or the
+							-- field's commit below.
+							if dir ~= "" then
+								set_worktrees(true, dir)
+							end
+						else
+							enabled:set(nil)
+							set_worktrees(false, if dir ~= "" then dir else nil)
+						end
 					end, function()
 						local w = worktrees:get()
 						return w == nil or w.environmentOverride ~= nil
@@ -412,7 +437,7 @@ function M.view(): Node
 					label = ui.t("settings.general.commit_credit.label"),
 					description = function()
 						if failed:get().credit then
-							return says(failed:get().credit):get()
+							return says(failed:get().credit)
 						end
 						local c = credit:get()
 						if not c then

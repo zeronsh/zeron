@@ -43,6 +43,7 @@ pub const CLOUD_HARNESSES: &[&str] = &[
     "opencode",
     "antigravity",
     "muse",
+    "kimi",
 ];
 
 /// A Cloud session machine's own setup steps — started or woke, cloned the
@@ -468,6 +469,12 @@ pub enum VaultProvider {
     /// Muse Code's Meta sign-in: its long-lived access token, used until it
     /// expires (Muse mints its model keys from it).
     Muse,
+    /// A Kimi (Moonshot AI) sign-in: the token set `kimi login` writes,
+    /// uploaded from a laptop's sign-in; machines get its access token only.
+    Kimi,
+    /// The user's own Moonshot AI API key (Kimi Code's `MOONSHOT_API_KEY`,
+    /// also read as `KIMI_API_KEY`).
+    MoonshotKey,
 }
 
 impl VaultProvider {
@@ -475,7 +482,7 @@ impl VaultProvider {
         Self::ALL.into_iter().find(|p| p.as_str() == value)
     }
 
-    pub const ALL: [VaultProvider; 19] = [
+    pub const ALL: [VaultProvider; 21] = [
         VaultProvider::Codex,
         VaultProvider::Claude,
         VaultProvider::Github,
@@ -495,6 +502,8 @@ impl VaultProvider {
         VaultProvider::Nous,
         VaultProvider::Antigravity,
         VaultProvider::Muse,
+        VaultProvider::Kimi,
+        VaultProvider::MoonshotKey,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -518,6 +527,8 @@ impl VaultProvider {
             VaultProvider::Nous => "nous",
             VaultProvider::Antigravity => "antigravity",
             VaultProvider::Muse => "muse",
+            VaultProvider::Kimi => "kimi",
+            VaultProvider::MoonshotKey => "moonshot-key",
         }
     }
 
@@ -537,6 +548,7 @@ impl VaultProvider {
             VaultProvider::DeepseekKey => "DeepSeek",
             VaultProvider::AiGatewayKey => "Vercel AI Gateway",
             VaultProvider::MetaKey => "Meta",
+            VaultProvider::MoonshotKey => "Moonshot AI",
             VaultProvider::CursorKey => "Cursor",
             _ => return None,
         })
@@ -552,6 +564,7 @@ impl VaultProvider {
             VaultProvider::XaiKey => Some(VaultProvider::Grok),
             VaultProvider::GeminiKey => Some(VaultProvider::Antigravity),
             VaultProvider::MetaKey => Some(VaultProvider::Muse),
+            VaultProvider::MoonshotKey => Some(VaultProvider::Kimi),
             _ => None,
         }
     }

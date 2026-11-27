@@ -60,6 +60,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ModelProvider,
     ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
@@ -314,6 +315,65 @@ fn grok_spec() -> AcpAgentSpec {
         // always-approve. Grok advertises no session mode or config option
         // for either, and without one a session follows the user's own
         // `[ui] permission_mode`, so both are always sent.
+        access_modes: &[AccessMode::Auto, AccessMode::FullAccess],
+    }
+}
+
+fn kimi_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".local").join("bin").join("kimi"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/kimi"));
+    dirs.push(PathBuf::from("/usr/local/bin/kimi"));
+    dirs
+}
+
+/// Moonshot's Kimi Code (registry `kimi-code`): ACP `kimi acp`, npx package
+/// `@moonshot-ai/kimi-code`.
+fn kimi_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Kimi,
+        display_name: "Kimi Code",
+        executable: "kimi",
+        env_override: "KIMI_EXECUTABLE",
+        args: &["acp"],
+        npm_package: Some("@moonshot-ai/kimi-code@2.7.3"),
+        archive: None,
+        extra_paths: kimi_install_paths,
+        cli_executable: "kimi",
+        cli_extra_paths: kimi_install_paths,
+        install_hint: "kimi (searched PATH, the login shell's PATH, ~/.local/bin, \
+             /opt/homebrew/bin, /usr/local/bin, and fnm/nvm/volta/pnpm/bun \
+             install dirs; install with `npm install -g @moonshot-ai/kimi-code`; \
+             set KIMI_EXECUTABLE to override)",
+        models: || {
+            vec![Model {
+                default: false,
+                id: "kimi-for-coding".into(),
+                label: "Kimi for Coding".into(),
+                provider: Some(ModelProvider {
+                    id: "moonshot".into(),
+                    name: "Moonshot AI".into(),
+                }),
+                description: Some("Moonshot AI's coding model".into()),
+                reasoning_levels: vec![],
+                options: Vec::new(),
+            }]
+        },
+        steering_mode: SteeringMode::StepBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
         access_modes: &[AccessMode::Auto, AccessMode::FullAccess],
     }
 }
@@ -2359,6 +2419,11 @@ impl AcpHarness {
     /// Grok Build (`grok agent stdio`) — xAI's native ACP agent.
     pub fn grok() -> Self {
         Self::with_spec(grok_spec())
+    }
+
+    /// Moonshot's Kimi Code.
+    pub fn kimi() -> Self {
+        Self::with_spec(kimi_spec())
     }
 
     /// fx native ACP server.

@@ -1237,6 +1237,7 @@ local function component(props: Props): Node
 	local menu_lit = ui.use_state(0)
 	local menu_els: { any } = {}
 	local menu_rows: { Node } = {}
+	local row_whens: { () -> boolean } = {}
 	-- (`label`: its name's message key, read as it's drawn.)
 	type Row = {
 		label: string,
@@ -1248,6 +1249,7 @@ local function component(props: Props): Node
 	}
 	local function row(r: Row)
 		local i = #menu_rows + 1
+		row_whens[i] = r.when
 		menu_rows[i] = ui.show(r.when, ui.menu_item(Menu.lights(Menu.look({
 			label = locale.t(r.label),
 			on_click = r.on_click,
@@ -1361,6 +1363,20 @@ local function component(props: Props): Node
 	local function has_extras(): boolean
 		return #extras:get() > 0
 	end
+	-- The ⋯ button, there while the menu it opens would hold a row (a
+	-- preview of a markdown file at width has none). Plugin rows are
+	-- asked for once the menu opens, so a `more_menu` keeps it there.
+	local function menu_has_rows(): boolean
+		if props.more_menu ~= nil then
+			return true
+		end
+		for _, w in row_whens do
+			if w() then
+				return true
+			end
+		end
+		return has_extras()
+	end
 	local own_group = Menu.Group(menu_rows :: any)
 	local extras_list = ui.each(extras, function(item: Extra, i: number): Node
 		if item.heading then
@@ -1470,7 +1486,7 @@ local function component(props: Props): Node
 				if open_file then ui.show(openable, action("ds.file_viewer.open_in_editor", "arrow-up-right", open_file)) else nil,
 			}),
 			-- (The menu places its anchor, the ⋯ button.)
-			ui.show(has_file, ui.menu(Menu.panel {
+			ui.show(menu_has_rows, ui.menu(Menu.panel {
 				open = menu_open,
 				anchor = more,
 				placement = { side = "bottom", align = "end", offset = 4 },

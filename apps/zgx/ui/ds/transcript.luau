@@ -3096,6 +3096,7 @@ local KNOWN_HARNESSES: { [string]: { label: string, mark: Mark.Name } } = {
 	["hermes"] = { label = "Hermes", mark = "hermes" },
 	["antigravity"] = { label = "Antigravity", mark = "antigravity" },
 	["muse"] = { label = "Muse", mark = "muse" },
+	["kimi"] = { label = "Kimi Code", mark = "kimi" },
 	["mock"] = { label = "Mock", mark = "claude" },
 }
 

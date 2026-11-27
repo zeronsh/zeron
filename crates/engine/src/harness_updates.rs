@@ -503,6 +503,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--yes"]),
             manual_command: "hermes update",
         },
+        HarnessId::Kimi => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("@moonshot-ai/kimi-code"),
+            update_args: None,
+            manual_command: "npm install -g @moonshot-ai/kimi-code",
+        },
         HarnessId::Pi => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Npm("@earendil-works/pi-coding-agent"),

@@ -552,6 +552,7 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "hermes" => "hermes",
         "antigravity" => "antigravity",
         "muse" => "muse",
+        "kimi" => "kimi",
         _ => return None,
     })
 }

@@ -208,8 +208,13 @@ opt-level = 1
 opt-level = 3
 
 [profile.release]
-lto = "thin"
+# Ship stripped: the root workspace's release profile strips symbols too;
+# this workspace was missing it and shipped ~18 MB of symbol table.
+# Fat LTO in one codegen unit measures ~16% smaller than thin on the engine
+# (Cargo.toml); the same applies here.
+lto = "fat"
 codegen-units = 1
+strip = "symbols"
 
 [build-dependencies]
 # The Windows exe's icon (build.rs): the taskbar's, Explorer's, and the one

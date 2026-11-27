@@ -46,6 +46,7 @@ const CLOUD_HARNESSES: &[HarnessId] = &[
     HarnessId::Opencode,
     HarnessId::Antigravity,
     HarnessId::Muse,
+    HarnessId::Kimi,
 ];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 /// A device seen this recently is online (the app's sidebar says the same).

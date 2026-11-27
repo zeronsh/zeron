@@ -345,7 +345,14 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                     if error.to_ascii_lowercase().contains("unknown method") {
                         "outdated".into()
                     } else {
-                        engine::outcome(&error).into()
+                        match engine::outcome(&error) {
+                            // Offline and signed out are said in Zeron's
+                            // words; anything else is the engine's own
+                            // message ("Choose a worktree folder"), shown
+                            // as it came.
+                            word @ ("offline" | "signed_out") => word.into(),
+                            _ => error,
+                        }
                     }
                 })
         }

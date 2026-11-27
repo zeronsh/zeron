@@ -112,3 +112,37 @@ test("chimes: Task completed off keeps done quiet, the rest still ring", functio
 	publish(app, { chat("a", "input", "t2") })
 	expect(table.concat(played(app), ",")).to_be("request")
 end)
+
+-- #1438: "done" means the chat's tail is there to read — it follows its
+-- prefetch, and a tail that never lands still rings, bounded. (A test's
+-- timers run on frame time — `app:frames(n)` is its 60th of a second — so
+-- a wait of real seconds would blow past the bound: the wait's frames are
+-- the countdown.)
+test("chimes: done waits on the chat's tail, but not forever", function()
+	local app = mount("chimes_fixture.luau")
+	app:command("settings_stub.prefetch_hold")
+	publish(app, { chat("a", "working", nil) })
+	publish(app, { chat("a", "done", "t1") })
+	-- The finish stands (SETTLE, ~120 frames) while its tail is still
+	-- coming: no ring.
+	app:frames(160)
+	expect(#played(app)).to_be(0)
+	-- The tail in hand: it rings (its settle look is rescheduled — a
+	-- real-clock `ui.now()` gap the frame clock fills in ~120 more frames).
+	app:command("settings_stub.prefetch_done")
+	app:frames(140)
+	expect(table.concat(played(app), ",")).to_be("done")
+end)
+
+test("chimes: a tail that never lands still rings, bounded", function()
+	local app = mount("chimes_fixture.luau")
+	app:command("settings_stub.prefetch_hold")
+	publish(app, { chat("a", "working", nil) })
+	publish(app, { chat("a", "done", "t1") })
+	app:frames(160)
+	expect(#played(app)).to_be(0)
+	-- Past the settle plus the prefetch's bound (2 s + 4 s ≈ 360 frames):
+	-- the finish rings rather than being swallowed.
+	app:frames(240)
+	expect(table.concat(played(app), ",")).to_be("done")
+end)
