@@ -357,6 +357,9 @@ pub struct GitHubCli {
     store: Option<crate::change_request_store::ChangeRequestStore>,
     /// The active `gh` account and when it was read, keying the store.
     account: Arc<tokio::sync::Mutex<Option<(Instant, Option<String>)>>>,
+    /// Whether `GH_TOKEN` or `GITHUB_TOKEN` holds a token. Tests replace it so
+    /// they don't depend on the shell they run in.
+    token_in_env: fn() -> bool,
 }
 
 impl GitHubCli {
@@ -887,7 +890,14 @@ impl GitHubCli {
             pr_cache: Default::default(),
             store: None,
             account: Default::default(),
+            token_in_env,
         }
+    }
+
+    #[cfg(test)]
+    fn with_token_in_env(mut self, set: bool) -> Self {
+        self.token_in_env = if set { || true } else { || false };
+        self
     }
 
     /// Keep the board's first pages in `data_dir`, so it opens at once.
@@ -903,10 +913,7 @@ impl GitHubCli {
     /// `None` when it can't be told — including a token in the environment,
     /// which may belong to another account — and then nothing is stored.
     async fn store_account(&self) -> Option<String> {
-        if ["GH_TOKEN", "GITHUB_TOKEN"]
-            .iter()
-            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
-        {
+        if (self.token_in_env)() {
             return None;
         }
         let mut account = self.account.lock().await;
@@ -1249,6 +1256,12 @@ fn github_request() -> ProcessRequest {
         timeout: GITHUB_TIMEOUT,
         output_limit: GITHUB_OUTPUT_LIMIT,
     }
+}
+
+fn token_in_env() -> bool {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 impl Default for GitHubCli {
@@ -3537,6 +3550,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_token_in_the_environment_keeps_pr_pages_off_disk() {
+        let page = |title: &str| {
+            command_success(search_response(vec![search_pull_request(
+                "acme/zeron",
+                1,
+                title,
+                "OPEN",
+                "UNKNOWN",
+                "2026-08-10T09:30:00Z",
+                "2026-08-19T12:00:00Z",
+                false,
+                None,
+            )]))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let runner = FakeProcessRunner::with_responses([page("first"), page("second")]);
+        let filter = zeron_proto::ChangeRequestFilter::All;
+        let github = GitHubCli::with_runner(runner.clone())
+            .with_store(dir.path())
+            .with_token_in_env(true);
+        let first = github
+            .list_page("acme/zeron", filter, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(first.items[0].title, "first");
+        // Nothing was stored: a relaunch signed in as `me` still asks GitHub.
+        let relaunched = GitHubCli::with_runner(runner.clone())
+            .with_store(dir.path())
+            .with_token_in_env(false);
+        *relaunched.account.lock().await = Some((Instant::now(), Some("me".into())));
+        let stored = relaunched
+            .list_page("acme/zeron", filter, None, false, true)
+            .await
+            .unwrap();
+        assert_eq!(stored.items[0].title, "second");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2, "two searches and no account read");
+        assert!(requests.iter().all(|request| request.args[0] != "config"));
+    }
+
+    #[tokio::test]
     async fn pr_first_page_is_stored_on_disk_and_served_when_cached() {
         let page = |title: &str| {
             command_success(search_response(vec![search_pull_request(
@@ -3557,7 +3611,9 @@ mod tests {
             page("first"),
             page("refreshed"),
         ]);
-        let github = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        let github = GitHubCli::with_runner(runner.clone())
+            .with_store(dir.path())
+            .with_token_in_env(false);
         let filter = zeron_proto::ChangeRequestFilter::All;
         // Nothing stored yet: a cached read goes to GitHub and stores it.
         let first = github
@@ -3567,7 +3623,9 @@ mod tests {
         assert_eq!(first.items[0].title, "first");
         assert!(first.fetched_at.is_some());
         // A fresh engine (a relaunch) serves the stored page without GitHub.
-        let relaunched = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        let relaunched = GitHubCli::with_runner(runner.clone())
+            .with_store(dir.path())
+            .with_token_in_env(false);
         *relaunched.account.lock().await = Some((Instant::now(), Some("me".into())));
         let stored = relaunched
             .list_page("acme/zeron", filter, None, false, true)
@@ -4672,14 +4730,12 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         let list = serde_json::to_vec(&vec![pull_request(90, "OPEN", "acme", "feature/status", "2026-08-15T12:00:00Z")]).unwrap();
         let view = br#"{"reviewDecision":"REVIEW_REQUIRED","reviewRequests":[{"__typename":"User","login":"ada"}],"statusCheckRollup":[{"__typename":"CheckRun","name":"tests","status":"COMPLETED","conclusion":"FAILURE"}]}"#;
         let runner = FakeProcessRunner::with_responses([command_success(list), command_success(view.to_vec()), command_success("ada\n")]);
-        let github = GitHubCli::with_runner(runner.clone());
+        let github = GitHubCli::with_runner(runner.clone()).with_token_in_env(false);
         let summary = github.find_for_branch(&source).await.unwrap().unwrap();
         let signals = summary.signals.expect("signals");
         assert_eq!(signals.review_decision, zeron_proto::ChangeRequestReviewDecision::ReviewRequired);
         assert_eq!(signals.ci, zeron_proto::change_request_assessment::CiState::Failed);
-        if std::env::var_os("GH_TOKEN").is_none() && std::env::var_os("GITHUB_TOKEN").is_none() {
-            assert_eq!(signals.review_requested_of_viewer, Some(true), "requested of the signed-in account");
-        }
+        assert_eq!(signals.review_requested_of_viewer, Some(true), "requested of the signed-in account");
     }
 
     #[tokio::test]
