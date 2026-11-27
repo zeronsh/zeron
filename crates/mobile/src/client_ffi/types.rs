@@ -516,6 +516,17 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// A child its parent's agent delegated to (listed among the parent's
+    /// subagents, not its side chats).
+    pub delegated: bool,
+    /// What it waits on while `Waiting`, a line each ("Codex · Mac mini ·
+    /// Fix the parser"), first things first.
+    pub waiting_on: Vec<String>,
+    /// Waiting since (ms).
+    pub waiting_since_ms: Option<i64>,
+    /// A subagent it delegated to asks the person something (its row's
+    /// `indicator` reads `AwaitingInput` for it).
+    pub child_asks: bool,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
     /// Asleep until then (ms; the Activity view's Asleep). `None` when
@@ -565,6 +576,10 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            delegated: r.delegated,
+            waiting_on: r.waiting_on.clone(),
+            waiting_since_ms: r.waiting_since_ms,
+            child_asks: r.child_asks,
             room_gen: r.room_gen,
             sleep_until_ms: r.sleep_until_ms,
             woke_at_ms: r.woke_at_ms,

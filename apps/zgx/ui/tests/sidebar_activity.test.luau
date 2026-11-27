@@ -3,7 +3,7 @@
 -- list's foot, each opened by its title and kept so. A chat under way
 -- (running, or waiting on background work that will wake it) is in
 -- Working, and back at the top once it's done; Stop waiting releases a
--- wait. One put to sleep waits in Asleep, its corner counting down, and
+-- wait on a process, Stop subagents one on its subagents. One put to sleep waits in Asleep, its corner counting down, and
 -- shows the alarm once it wakes. (When it wakes, and that it syncs, are the
 -- engine's: its tests.) The view menu turns it on and off, opens its
 -- settings, and holds what it stands aside from out of reach. Off, the
@@ -105,6 +105,45 @@ test("Activity: a chat waiting on its tests is under way, and Stop waiting bring
 	-- Back in the list, over the shelf; the build still under way in it.
 	expect(top(app, "Write the docs") < top(app, "Working")).to_be(true)
 	expect(top(app, "Working") < top(app, "Fix the build")).to_be(true)
+end)
+
+test("Activity: a chat waiting on its subagents stays among Working, its row the size it was, and Stop ends them", function()
+	local app = open()
+	app:command("work")
+	settle(app)
+	app:click(`{SIDE} >> role:button "Working 2"`)
+	settle(app)
+	local function row(label: string): string
+		for line in app:tree(SIDE):gmatch("[^\n]+") do
+			if line:find(` button "{label}`, 1, true) then
+				return (line:match("(%-?%d+,%-?%d+ %d+x%d+)"))
+			end
+		end
+		error(`no "{label}"`)
+	end
+	local docs, build = row("Write the docs"), row("Fix the build")
+	-- Its turn ended into waiting on two subagents: nothing moves.
+	app:command("delegate")
+	settle(app)
+	expect(shows(app, "Waiting")).to_be(false)
+	expect(row("Write the docs")).to_be(docs)
+	expect(row("Fix the build")).to_be(build)
+	app:right_click(`{SIDE} >> role:button "Write the docs"`)
+	settle(app)
+	expect(app:has('"Stop waiting"')).to_be(false)
+	app:click('"Stop subagents"')
+	settle(app)
+	expect(app:state("calls")).to_contain("stop:a2")
+end)
+
+test("Activity: a subagent's approval is its parent's, out of the shelf", function()
+	local app = open()
+	app:command("delegate")
+	app:command("delegate_asks")
+	settle(app)
+	expect(shows(app, "Working 1")).to_be(true)
+	expect(shows(app, "Write the docs")).to_be(true)
+	expect(app:error()).to_be(nil)
 end)
 
 test("Activity: a chat that starts working folds into Working", function()

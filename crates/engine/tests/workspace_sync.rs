@@ -781,6 +781,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 started_at: Some(now),
                 updated_at: now,
                 waiting: None,
+                blocked_on_wait: false,
             })
             .unwrap();
         store

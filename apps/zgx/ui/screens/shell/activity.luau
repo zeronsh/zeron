@@ -1,9 +1,10 @@
 -- The Activity sidebar: one list of the chats that need you, the one that
 -- came back last at the top. A chat under way folds into Working (running,
--- or waiting on background work that will wake it), one put to sleep into
--- Asleep until its time or until it asks for you, and archived ones sit on
--- the Archived shelf. The three shelves stand at the list's end, folded
--- until opened.
+-- or waiting on work that will wake it: its subagents, on any device, or
+-- background work; one shelf, so a chat going between the two stays where
+-- it is), one put to sleep into Asleep until its time or until it asks for
+-- you, and archived ones sit on the Archived shelf. The three shelves stand
+-- at the list's end, folded until opened.
 --
 -- What a chat is doing and its sleep are the engine's (synced, the same on
 -- every device: `sessions.now`'s chats carry `status`, `waiting`,
@@ -18,6 +19,7 @@
 --   activity.working_shelf      chats under way fold into Working
 --   activity.archive_after      days idle before a chat is archived (0: never)
 --   activity.shelf(c, status)   "working", "asleep" or nil (the list)
+--   activity.waiting_on(c, names)  what it waits on, in a line
 --   activity.rank(c, shelf)     its place: higher, nearer the top
 --   activity.sleep(id, until)   asleep until `until` (Unix seconds)
 --   activity.wake(id)           awake now
@@ -56,6 +58,40 @@ function M.shelf(c: sessions.Chat, status: string?): string?
 		return "working"
 	end
 	return nil
+end
+
+-- What a waiting chat waits on, in a line (its hover card's): the first of it
+-- (a child chat's agent, its device where that's another one, its task), and
+-- how many more; led by for how long. `names`: devices by id.
+function M.waiting_on(c: sessions.Chat, names: { [string]: string }): string
+	local parts: { string } = {}
+	if c.waiting_since then
+		local waited = os.time() - c.waiting_since
+		table.insert(
+			parts,
+			if waited < 3600
+				then locale.s("time.short.minutes", { n = math.max(1, math.floor(waited / 60)) })
+				else locale.s("time.short.hours", { n = math.floor(waited / 3600) })
+		)
+	end
+	local first = (c.waiting or {})[1]
+	if not first then
+		-- (Mid-turn, blocked on another chat: what is its tool call's to say.)
+		table.insert(parts, locale.s("shell.activity.waiting_on_chat"))
+		return table.concat(parts, " · ")
+	end
+	if first.kind == "chat" then
+		if first.harness_name then
+			table.insert(parts, first.harness_name)
+		end
+		if first.device and first.device ~= c.device and names[first.device] then
+			table.insert(parts, names[first.device])
+		end
+	end
+	table.insert(parts, first.label)
+	local line = table.concat(parts, " · ")
+	local more = #(c.waiting :: { any }) - 1
+	return if more > 0 then locale.s("shell.activity.waiting_more", { first = line, n = more }) else line
 end
 
 -- Higher stands nearer the top: the list by when it last came back (its own

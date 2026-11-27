@@ -763,7 +763,23 @@
       "new_reply": "新回复",
       "display_failed": "无法显示此内容",
       "image_failed": "无法显示这张图片",
-      "visual_failed": "无法显示这个可视化"
+      "visual_failed": "无法显示这个可视化",
+      "delegated": {
+        "stopped": "已停止",
+        "open_chat": "打开 {title}",
+        "delegating": "{n, plural, other {正在委派给 # 个子代理}}",
+        "delegated": "{n, plural, other {已委派给 # 个子代理}}",
+        "starting": "{n, plural, other {正在启动 # 个对话}}",
+        "started": "{n, plural, other {已启动 # 个对话}}",
+        "messaging": "{n, plural, other {正在向 # 个对话发送消息}}",
+        "messaged": "{n, plural, other {已向 # 个对话发送消息}}",
+        "running": "{n, plural, other {# 个运行中}}",
+        "need_you": "{n, plural, other {# 个需要你处理}}",
+        "needs_approval": "需要批准",
+        "asks": "有问题",
+        "failed": "失败",
+        "untitled": "子代理"
+      }
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -1217,6 +1233,11 @@
         "on": "对话会继续进行，其他设备也能访问它们。",
         "off": "退出时，Zeron 会在对话完成后停止。",
         "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
+      },
+      "async_delegation": {
+        "label": "在后台委派",
+        "description": "代理将工作交给任意提供方或设备上的子代理，结束自己的回合，并在有结果时被唤醒。关闭后，代理会逐个等待。对每个对话的下一回合生效。",
+        "terms": "子代理, 编排, 等待, 异步"
       }
     },
     "engine": {
@@ -2364,7 +2385,7 @@
     },
     "voice": {
       "title": "语音",
-      "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
+      "terms": "语音 听写 麦克风 模型 speech dictation microphone model parakeet cohere",
       "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
       "couldnt": "语音无法完成此操作",
       "microphone": "麦克风",
@@ -2373,16 +2394,34 @@
       "dictation": {
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
-        "needs_download": "开启后将下载 {total} MB 的语音模型。",
-        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
+        "needs_download": "开启后将下载 {total} 的语音模型。"
       },
       "shortcut": {
         "label": "快捷键",
         "description": "按住说话,松开转写。"
       },
+      "keep": {
+        "label": "保持模型就绪",
+        "description": "就绪时，{name} 占用 {memory} 内存。释放后，会在你开始说话时重新加载。",
+        "instant": "立即释放",
+        "s15": "15 秒",
+        "m1": "1 分钟",
+        "m5": "5 分钟",
+        "m15": "15 分钟",
+        "h1": "1 小时",
+        "always": "始终"
+      },
       "model": {
-        "label": "语音模型",
-        "description": "Parakeet v3 · {total} MB",
+        "title": "语音模型",
+        "about": "{size} · {n} 种语言",
+        "unsupported": "这台电脑的处理器无法运行语音模型（需要 AVX2）。",
+        "downloading": "正在下载 · {done} / {total}",
+        "about_slow": "{size} · {n} 种语言 · 在这台电脑上较慢",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "下载",
+        "use": "使用",
+        "in_use": "使用中",
         "remove": "移除"
       }
     },
@@ -2944,7 +2983,11 @@
       },
       "stop_waiting": "停止等待",
       "stop_waiting_failed": "无法停止等待",
-      "wake_failed": "无法唤醒此会话"
+      "wake_failed": "无法唤醒此会话",
+      "waiting_more": "{first} 等另外 {n} 个",
+      "waiting_on_chat": "另一个对话",
+      "stop_delegated": "停止子代理",
+      "stop_delegated_failed": "无法停止子代理"
     }
   },
   "onboarding": {
@@ -3214,6 +3257,8 @@
       "hold": "按住听写",
       "hold_hint": "说话时请按住麦克风或快捷键。",
       "no_speech": "未识别到语音。草稿未更改。",
+      "late": "仍在转写",
+      "late_body": "文字转写完成后会插入草稿。按 Esc 停止。",
       "transcribing": "正在转写…",
       "starting": "正在启动…"
     },
@@ -3308,6 +3353,14 @@
       "setup_summary": "已设置 Cloud 机器",
       "woke_summary": "已唤醒 Cloud 机器",
       "unreachable": "已中断——无法连接到{host}"
+    },
+    "delegates": {
+      "allow": "允许一次",
+      "deny": "拒绝",
+      "answer": "在其对话中回答",
+      "other": "其他",
+      "failed": "无法回复该子代理",
+      "stop_failed": "无法停止该子代理"
     }
   },
   "panel": {

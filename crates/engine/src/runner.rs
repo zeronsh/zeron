@@ -601,6 +601,7 @@ fn setup_parts(
                 output_truncated: false,
                 output_lines: None,
                 review: None,
+                chats: Vec::new(),
             }
         })
         .collect()

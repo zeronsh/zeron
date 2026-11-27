@@ -45,11 +45,7 @@ pub(super) fn agents(tasks: Option<&[Value]>) -> Vec<zeron_proto::WaitingOn> {
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
                 .unwrap_or("Background agent");
-            Some(zeron_proto::WaitingOn {
-                id: id.to_owned(),
-                kind: zeron_proto::WaitingKind::Agent,
-                label: label.to_owned(),
-            })
+            Some(zeron_proto::WaitingOn::runtime(id.to_owned(), zeron_proto::WaitingKind::Agent, label.to_owned()))
         })
         .collect()
 }

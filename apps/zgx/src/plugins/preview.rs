@@ -70,6 +70,7 @@ pub const BLOCKED: &[&str] = &[
     "files.open_external",
     "chat.send",
     "chat.respond",
+    "chat.respond_child",
     "chat.queue",
     "chat.queue_edit",
     "chat.queue_finish",

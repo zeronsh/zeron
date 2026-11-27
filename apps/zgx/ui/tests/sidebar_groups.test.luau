@@ -172,3 +172,51 @@ test("a collapsed group still lists its sessions in a state, each leaving as it 
 	expect(shows(app, "Fix the build")).to_be(false)
 	expect(order(app)).to_be("b1,b2")
 end)
+
+test("a group taller than the list folds and opens around a session in a state far down it", function()
+	local app = open()
+	app:command("tall_atlas")
+	app:frames(30)
+	-- Atlas 45 (working) shows past the five; shown, all of Atlas: idle
+	-- ones past the list's foot before it, and after.
+	app:click(`{SIDE} >> role:button "Show 47 more"`)
+	app:frames(40)
+	expect(order(app):find("y44,y45,y46", 1, true)).never.to_be_nil()
+
+	-- Folded: as it closes, the rows out of sight stand in as one row
+	-- before Atlas 45 and another after it, each its own height. The 46
+	-- rows over it (Write the docs to Atlas 44) and the 6 under it (Atlas
+	-- 46 to 50, Show less) close together: the room over it is 46/6 of
+	-- the room under it at every frame it and Borealis both show.
+	local pitch = top(app, "Tidy the tests") - top(app, "Write the docs")
+	app:click(`{SIDE} >> role:button "Atlas"`)
+	local measured = 0
+	for _ = 1, 60 do
+		app:frames(1)
+		if shows(app, "Atlas 45") and shows(app, "Borealis") then
+			local over = top(app, "Atlas 45") - top(app, "Fix the build") - pitch
+			local under = top(app, "Borealis") - top(app, "Atlas 45") - pitch
+			if under >= pitch / 2 then
+				measured += 1
+				expect(`over {over}, under {under}: 46 to 6 {math.abs(over / under - 46 / 6) < 1}`).to_be(`over {over}, under {under}: 46 to 6 true`)
+			end
+		end
+	end
+	expect(measured > 0).to_be(true)
+	expect(shows(app, "Fix the build")).to_be(true)
+	expect(shows(app, "Atlas 45")).to_be(true)
+	expect(shows(app, "Write the docs")).to_be(false)
+	expect(shows(app, "Show less")).to_be(false)
+	expect(order(app)).to_be("a1,y45,b1,b2")
+	-- (Atlas 45 right under Fix the build, Borealis right under it.)
+	expect(top(app, "Atlas 45") - top(app, "Fix the build")).to_be(top(app, "Borealis") - top(app, "Atlas 45"))
+
+	-- Opened again: the same, and all of it back.
+	app:click(`{SIDE} >> role:button "Atlas"`)
+	for _ = 1, 60 do
+		app:frames(1)
+	end
+	expect(shows(app, "Write the docs")).to_be(true)
+	expect(order(app):find("y44,y45,y46", 1, true)).never.to_be_nil()
+	expect(top(app, "Write the docs") - top(app, "Fix the build")).to_be(top(app, "Tidy the tests") - top(app, "Write the docs"))
+end)

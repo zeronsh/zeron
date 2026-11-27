@@ -142,8 +142,8 @@ and opens either in the right pane.
 ## Tools
 
 Chat status uses the same shared derivation as the sidebar, including OSC 7501
-reports from chat-owned terminals. `status` is `working`, `awaitingInput`,
-`completed` (an unseen result), `errored`, or `idle`; `sessionStatus` retains the
+reports from chat-owned terminals. `status` is `working`, `waiting` (on what
+will wake it: `waitingOn`), `awaitingInput`, `completed` (an unseen result), `errored`, or `idle`; `sessionStatus` retains the
 native execution state. `statusStale` distinguishes expired live reports, and
 `terminalActivity` identifies a terminal's input reason or result. Native waits
 can return `interrupted`; a lost host is never interpreted as successful
@@ -171,6 +171,8 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `task_status`      | `ListDelegatedTasks` (background delegation only)          |
+| `cancel_task`      | `UpdateDelegatedTask cancel` (background delegation only)  |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 | `show_image`       | `PublishImage {chatId, name, data}` (origin chat only; the file base64, read by the MCP server from the agent's cwd) |
 
@@ -403,6 +405,13 @@ conversation between turns; it is refused while a turn is running.
   with its recent context and a note that earlier messages were omitted.
 - Later turns on the new provider resume its own session natively; switching
   back starts a fresh session there and replays again.
+
+## Delegating in the background
+
+Where the host has it on (Settings → General, on for new installations), a subagent's `create_chat` and `send_message`
+return a `taskId` at once (`mode: "wait"` blocks), the parent ends its turn into Waiting, and the engine wakes it with
+the results. An agent then works with its own children; other chats need `peer: true`. See
+[Delegating in the background](delegation.md). What follows describes it off.
 
 ## Parallel side chats
 

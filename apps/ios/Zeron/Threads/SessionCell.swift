@@ -37,6 +37,10 @@ struct SessionRowVM: Hashable {
     var waiting = false
     /// …on a process its agent said it waits on: Stop Waiting is offered.
     var canStopWaiting = false
+    /// The first thing it waits on, for its second line ("Codex · Build
+    /// box · Audit the parser"), and how many more ("+1 more" at its end).
+    var waitingOn: String?
+    var waitingMore = 0
     /// Asleep until then (Activity's Asleep).
     var sleepUntil: Date?
     /// Woke from sleep then, and not seen since.
@@ -68,6 +72,7 @@ final class SessionCell: UICollectionViewListCell {
     private let time = UILabel()
     private let status = StatusGlyph()
     private let prBadge = PRBadgeView()
+    private let more = UILabel()
     private var vm: SessionRowVM?
     /// The session open beside the sidebar (iPad): a quiet fill.
     var isCurrent = false { didSet { if isCurrent != oldValue { setNeedsUpdateConfiguration() } } }
@@ -78,7 +83,8 @@ final class SessionCell: UICollectionViewListCell {
         time.textAlignment = .right
         harness.contentMode = .scaleAspectFit
         harness.tintColor = Palette.text
-        for v in [harness, title, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
+        more.textAlignment = .right
+        for v in [harness, title, meta, time, status, prBadge, more] as [UIView] { contentView.addSubview(v) }
         var bg = UIBackgroundConfiguration.listCell()
         bg.backgroundColor = .clear
         backgroundConfiguration = bg
@@ -132,8 +138,13 @@ final class SessionCell: UICollectionViewListCell {
         let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
         tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
         let metaText = NSMutableAttributedString(attachment: tile)
-        metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
-        if let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
+        if let waitingOn = vm.waitingOn {
+            // Waiting on its subagents: what on, in place of project · branch.
+            metaText.append(NSAttributedString(string: "  Waiting on " + waitingOn, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
+        } else {
+            metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
+        }
+        if vm.waitingOn == nil, let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
             // Desktop line 3: git-branch icon + branch in the subline tone.
             let font = Fonts.ui(.sans, TypeScale.size(12.5))
             let side = (12 * TypeScale.factor).rounded()
@@ -150,6 +161,12 @@ final class SessionCell: UICollectionViewListCell {
         } else {
             prBadge.isHidden = true
         }
+        // "+1 more" where the PR badge would be (a long first line fades
+        // before it otherwise).
+        more.isHidden = vm.waitingOn == nil || vm.waitingMore == 0 || !prBadge.isHidden
+        more.text = "+\(vm.waitingMore) more"
+        more.font = Fonts.ui(.sansMedium, TypeScale.size(12.5))
+        more.textColor = StatusTone.time
         let corner = Self.corner(vm)
         if let corner {
             time.text = corner.word
@@ -201,6 +218,10 @@ final class SessionCell: UICollectionViewListCell {
             let size = prBadge.intrinsicContentSize
             prBadge.frame = CGRect(x: b.width - right - size.width, y: metaY + (metaH - size.height) / 2, width: size.width, height: size.height)
             metaRight = prBadge.frame.minX - 10
+        } else if !more.isHidden {
+            let w = ceil(more.sizeThatFits(CGSize(width: 120, height: metaH)).width)
+            more.frame = CGRect(x: b.width - right - w, y: metaY, width: w, height: metaH)
+            metaRight = more.frame.minX - 10
         }
         meta.frame = CGRect(x: x, y: metaY, width: max(0, metaRight - x), height: metaH)
     }

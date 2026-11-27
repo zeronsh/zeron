@@ -30,6 +30,7 @@
 local ds = require("@ds")
 local material = require("@ds/material")
 local auth = require("@account/auth")
+local activity = require("@app/screens/shell/activity")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
@@ -669,6 +670,17 @@ return function(): Node
 							here = function(): boolean
 								local _, here = device()
 								return here
+							end,
+							waiting = function(): string?
+								local c = chat()
+								if not c or c.status ~= "waiting" then
+									return nil
+								end
+								local names: { [string]: string } = {}
+								for _, d in sessions.devices:get() do
+									names[d.id] = d.name
+								end
+								return activity.waiting_on(c, names)
 							end,
 							project = function(): string?
 								local c = chat()

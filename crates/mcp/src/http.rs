@@ -754,6 +754,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                                 "instructions": crate::jsonrpc::instructions(
                                     tools.waits_on_background(),
                                     tools.side_chats_only(),
+                                    tools.delegation(),
                                 ),
                                 "ttlMs": TOOLS_TTL_MS,
                                 "cacheScope": "private",

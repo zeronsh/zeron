@@ -72,7 +72,7 @@ pub(crate) fn chat(id: &str, model: &str) -> Chat {
 
 pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneStatus>) -> Session {
     Session {
-        last_turn_outcome: outcome.map(|status| NativeTurnOutcome { status, finished_at: Utc::now() }),
+        last_turn_outcome: outcome.map(|status| NativeTurnOutcome { status, finished_at: Utc::now(), resumes: false }),
         terminal_activity: None,
         last_completed_turn: None,
         chat_id: chat.into(),
@@ -83,6 +83,7 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
         running_subagents: 0,
         background_tasks: Vec::new(),
         waiting: None,
+        blocked_on_wait: false,
     }
 }
 

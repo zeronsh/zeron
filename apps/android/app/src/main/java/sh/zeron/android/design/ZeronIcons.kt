@@ -54,6 +54,9 @@ object ZIcons {
     val Moon = R.drawable.zi_moon
     val Magic = R.drawable.zi_magic_stick_3
     val Info = R.drawable.zi_info_circle
+    /** The desktop's status glyphs: an approval asked (a shield with a question), a question asked. */
+    val StatusApproval = R.drawable.zi_status_approval
+    val StatusInput = R.drawable.zi_status_input
     val Logout = R.drawable.zi_logout_2
     val Offline = R.drawable.zi_wifi_off
     val Chat = R.drawable.zi_chat_round_line

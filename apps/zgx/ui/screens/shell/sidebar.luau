@@ -42,6 +42,9 @@ export type Props = {
 	island: boolean?,
 	-- Room left at its top for the title bar laid over it.
 	top: number?,
+	-- Whether the sidebar stands as a card with the window's 5-point gap
+	-- before it (v3's default; v2's sidebar runs flush to the window edge).
+	card: boolean?,
 }
 
 -- What the sidebar and its rail share: the view options (Zeron's Organize,
@@ -294,6 +297,26 @@ local NO_PROJECT = "none"
 -- question.
 local asks = ui.shared("chat.asks", {} :: { [string]: string })
 local ASKED: { [string]: string } = { approval = "approval", question = "input" }
+-- A chat whose subagent asks to be allowed something: that's the person's to
+-- give, and the subagent's own chat isn't listed, so its parent says so. So
+-- does one at rest for a question (at work, it answers what it can itself).
+local function asked_under(c: sessions.Chat, asked: { [string]: string }): string?
+	if next(asked) == nil then
+		return nil
+	end
+	local found: string? = nil
+	for _, child in sessions.children(c.id) do
+		local ask = asked[child.id]
+		if child.child_kind == "subagent" and ask then
+			if ask == "approval" then
+				return "approval"
+			elseif c.status == nil or c.status == "done" or c.status == "waiting" then
+				found = "input"
+			end
+		end
+	end
+	return found
+end
 
 -- Which sessions show, as a plugin allowed to change how the sidebar shows
 -- asks (`sidebar.filter`, the plugin system's to grant): nil, all of them;
@@ -536,7 +559,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 		local group = (c.project and by[c.project]) or loose
 		-- (Waiting on you beats working: an approval, then a question.)
-		local status = ASKED[asked[c.id] or ""] or c.status
+		local status = ASKED[asked[c.id] or ""] or asked_under(c, asked) or c.status
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
 		-- on, and its place; asleep, its corner says when it wakes. Off, none
@@ -1246,6 +1269,34 @@ local function stop_waiting_entry(chats: { sessions.Chat }): any
 		end,
 	}
 end
+-- Waiting on its subagents: Stop ends them, and it.
+local function stop_delegated_entry(chats: { sessions.Chat }): any
+	local waiting: { string } = {}
+	for _, c in chats do
+		if c.status == "waiting" then
+			for _, w in c.waiting or {} do
+				if w.kind == "chat" then
+					table.insert(waiting, c.id)
+					break
+				end
+			end
+		end
+	end
+	if #waiting == 0 then
+		return false
+	end
+	return {
+		label = locale.s("shell.activity.stop_delegated"),
+		icon = "stop",
+		on_select = function()
+			for _, id in waiting do
+				sessions.stop(id):after(function() end, function()
+					ds.toast.show { title = locale.s("shell.activity.stop_delegated_failed"), tone = "danger" }
+				end)
+			end
+		end,
+	}
+end
 -- Deleting asks once more (Zeron's "Delete session?"), once it knows what
 -- goes with them, to say so.
 local function ask_delete(ids: { string })
@@ -1324,6 +1375,7 @@ local function menu_of(wanted: { string }): { any }?
 		},
 		not side and activity.on:peek() and sleep_entry(chats),
 		stop_waiting_entry(chats),
+		stop_delegated_entry(chats),
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
@@ -1678,6 +1730,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if not props.island then
 		M.card:set(nil)
 	end
+	local card = not props.island and props.card ~= false
 	local bar = ds.Sidebar {
 		compact = shared.compact,
 		organize = shared.organize :: any,
@@ -1687,8 +1740,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		places = shared.places :: any,
 		width = shared.width,
 		default_width = fit.SIDEBAR_DEFAULT,
-		shown = if props.island then nil else view.sidebar_shown,
-		before = if props.island then nil else 5,
+		shown = if card then view.sidebar_shown else nil,
+		before = if card then 5 else nil,
 		-- (Its edge double-clicked: the chat and the panel split again, as
 		-- Zeron's `reset_panel_widths`.)
 		on_reset = function()
@@ -1709,7 +1762,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
-		card = not props.island,
+		card = card,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
@@ -1771,7 +1824,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if props.island then
 		return bar
 	end
-	return ui.div {
+	local holder: { [any]: any } = {
 		id = "shell-sidebar",
 		hook = "shell.sidebar",
 		h_full = true,
@@ -1781,18 +1834,23 @@ M.Sidebar = ui.component(function(props: Props): Node
 		-- going only with its last 5 points, so the card's left edge stands
 		-- still as it folds and comes back. It once closed on the sidebar's
 		-- clock, the whole card sliding 5 points.)
-		pl = function(): number
-			local shown = view.sidebar_shown:get()
-			return ui.raw(math.min(5, shown), "the window's gap before its card")
-		end,
-		-- (That gap's top moves the window, as the bar beside it does.)
-		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
-		bar,
-		rename_dialog(),
-		delete_dialog(),
-		sleep_dialog(),
-		project_dialogs(),
+		pl = if card
+			then function(): number
+				local shown = view.sidebar_shown:get()
+				return ui.raw(math.min(5, shown), "the window's gap before its card")
+			end
+			else nil,
 	}
+	if card then
+		-- (That gap's top moves the window, as the bar beside it does.)
+		table.insert(holder, ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true })
+	end
+	table.insert(holder, bar)
+	table.insert(holder, rename_dialog())
+	table.insert(holder, delete_dialog())
+	table.insert(holder, sleep_dialog())
+	table.insert(holder, project_dialogs())
+	return ui.div(holder)
 end)
 
 -- A project's name and icon edited (Edit project…), from its header's menu

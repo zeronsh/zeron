@@ -28,7 +28,8 @@
 -- running is ours: a row a task or terminal, how long it has run, Stop at
 -- its end, Stop all in the header. The chat's subagents run in the same
 -- tab (`kind = "agent"`): a row with its title that opens it
--- (`on_open_task`), no Stop; those done fold behind "N finished", and the
+-- (`on_open_task`), with a Stop where it can be stopped alone (`stops`) and
+-- what it asks, answered, under it (`ask`); those done fold behind "N finished", and the
 -- header counts what runs and leads with an agent's name over a command's.
 -- A list longer than the deck's cap scrolls, its edges fading as there is
 -- more past them.
@@ -47,6 +48,7 @@ local control = require("@self/control")
 local cargo = require("@self/composer_cargo")
 local locale = require("@self/locale")
 local Grid = require("@self/grid")
+local SelectionMenu = require("@self/selection_menu")
 
 local M = {}
 
@@ -85,7 +87,19 @@ export type Task = {
 	ended: string?,
 	-- A subagent that ended badly: its mark says so.
 	failed: boolean?,
+	-- A subagent at work that isn't simply running: it waits on work of its
+	-- own, or asks the person something.
+	state: ("waiting" | "input" | "approval")?,
+	-- A subagent that can be stopped on its own (a chat's).
+	stops: boolean?,
+	-- What a subagent asks the person, under its row: what it would run, its
+	-- words, and its answers (each an `id` that comes to `on_answer_task`):
+	-- a question's options each a choice on its own, else buttons at the
+	-- row's end, as an approval's are. `id`: another ask of its, another id.
+	ask: Ask?,
 }
+export type Answer = { id: string, label: string, primary: boolean? }
+export type Ask = { id: string?, words: string?, code: string?, options: boolean?, answers: { Answer } }
 export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 -- Something to know about the chat (a context nearly full, a rate limit, a
 -- server that failed to start): how serious, what it is, a word more, and
@@ -147,6 +161,8 @@ export type Props = {
 	-- A subagent's row opens it (a tab of the panel). Its row is a plain
 	-- listing without this.
 	on_open_task: ((id: string) -> ())?,
+	-- A subagent's question or approval, answered on its row.
+	on_answer_task: ((task: string, answer: string) -> ())?,
 	-- Which tray is open; the dock keeps its own when not given.
 	open: State<Tray?>?,
 	-- Short of room: rows lose their thumbnails, actions become glyphs.
@@ -1156,11 +1172,134 @@ end
 -- A running task or terminal: its glyph, its name, a word on it, how long,
 -- and Stop. A subagent's is its mark (working, or how it ended), its title
 -- and, ended, how; with `on_open_task` the whole row opens it, and it has no
--- Stop (the host stops a process, not a subagent).
+-- Stop, unless it's a chat of its own (`stops`): the host stops those, not
+-- a subagent of the chat's own runtime.
 -- A command as one line: its line breaks as spaces (a script of several
 -- lines would otherwise stand as several rows in a one-line slot).
 local function one_line(text: string): string
 	return (string.gsub(string.gsub(text, "%s*[\r\n]+%s*", " "), "^%s+", ""))
+end
+
+-- What a subagent asks, under its row: as the composer's own ask reads
+-- (ds/composer_ask), at the tray's size. What it would run in its face, on
+-- the code's wash; its words; and its answers, an approval's where an
+-- approval's always are, a question's options in a wrapping line of their
+-- own. An answer pressed holds (the others out of reach) until its chat
+-- moves on, or a moment passes and it hasn't.
+local ASK_HOLD = 4000
+local function ask_card(t: Task, asked: () -> Ask?, props: Props): Node
+	local held = ui.use_state(nil :: string?)
+	local letting_go: (() -> ())? = nil
+	ui.on_cleanup(function()
+		if letting_go then
+			letting_go()
+		end
+	end)
+	local function pick(id: string)
+		if not props.on_answer_task or held:peek() then
+			return
+		end
+		-- ("open" answers nothing: there's nothing to wait on.)
+		if id ~= "open" then
+			held:set(id)
+			letting_go = ui.after(ASK_HOLD, function()
+				letting_go = nil
+				held:set(nil)
+			end)
+		end
+		props.on_answer_task(t.id, id)
+	end
+	local function ask(): Ask
+		return asked() or { answers = {} }
+	end
+	local first = ask()
+	local answers = ui.computed(function(): { Answer }
+		return ask().answers
+	end)
+	local function answer(x: Answer, choice: boolean): Node
+		return Button {
+			x.label,
+			size = "sm",
+			shape = "pill",
+			tone = if x.primary then "primary" elseif choice and x.id ~= "open" then "secondary" else "ghost",
+			h = 24,
+			px = "$zeron.space.snug",
+			max_w = "100%",
+			text_size = "$font.size.xs",
+			disabled = function(): boolean
+				return held:get() ~= nil
+			end,
+			busy = function(): boolean
+				return held:get() == x.id
+			end,
+			on_click = function()
+				pick(x.id)
+			end,
+		}
+	end
+	return ui.column {
+		hook = false,
+		w_full = true,
+		pl = ui.raw(34, "under the row's words: its inset, the glyph and the gap"),
+		pr = "$space.2",
+		pb = "$space.2",
+		gap = "$space.2",
+		if first.code
+			then ui.column {
+				w_full = true,
+				px = "$zeron.space.snug",
+				py = "$zeron.space.tight",
+				rounded = "$zeron.composer.tray.row_radius",
+				bg = "$zeron.code.wash",
+				border = 1,
+				border_color = "$zeron.prose.code.edge",
+				SelectionMenu {
+					w_full = true,
+					ui.text {
+						function(): string
+							return ask().code or ""
+						end,
+						literal = true,
+						wrap = true,
+						font = "$font.mono",
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.primary",
+					},
+				},
+			}
+			else nil,
+		if first.words
+			then ui.text {
+				function(): string
+					return ask().words or ""
+				end,
+				literal = true,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = if first.code then "$text.tertiary" else "$text.primary",
+			}
+			else nil,
+		ui.row {
+			w_full = true,
+			gap = "$space.1",
+			wrap = first.options == true,
+			items = "center",
+			justify = if first.options then nil else "end",
+			-- (A ghost's words, not its box, on the edge the rest share.)
+			ui.each(answers, function(x: Answer): Node
+				return answer(x, first.options == true)
+			end, {
+				key = function(x: Answer): string
+					return x.id
+				end,
+				row = true,
+				gap = "$space.1",
+				wrap = first.options == true,
+			}),
+		},
+	}
 end
 
 local function task_row(t: Task, row: State<Task>, now: State<number>, props: Props, height: number): Node
@@ -1206,9 +1345,12 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			if agent
 				then ui.switch(function(): string
 					local r = row:get()
-					return if not r.ended then "working" elseif r.failed then "failed" else "done"
+					return if not r.ended then r.state or "working" elseif r.failed then "failed" else "done"
 				end, {
 					working = status.StatusIcon { kind = "working", size = 14 },
+					waiting = status.StatusIcon { kind = "waiting", size = 14 },
+					input = status.StatusIcon { kind = "input", size = 14 },
+					approval = status.StatusIcon { kind = "approval", size = 14 },
 					done = status.StatusIcon { kind = "done", size = 14 },
 					failed = status.StatusIcon { kind = "failed", size = 14 },
 				})
@@ -1246,12 +1388,13 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			color = "$text.tertiary",
 		},
 	}
-	if not agent then
+	if not agent or t.stops then
 		table.insert(
 			parts,
 			ui.show(
 				function()
-					return not ended()
+					local r = row:get()
+					return r.ended == nil and (not agent or r.stops == true)
 				end,
 				IconButton {
 					icon = "stop",
@@ -1264,7 +1407,8 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 							props.on_stop_task(t.id)
 						end
 					end,
-				}
+				},
+				if agent then ui.div { w = 6, shrink = 0 } else nil
 			)
 		)
 	else
@@ -1274,7 +1418,32 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 	for _, c in parts do
 		table.insert(p, c)
 	end
-	return ui.row(p)
+	if not agent then
+		return ui.row(p)
+	end
+	-- What it asks, under its words, for as long as it asks.
+	local function asked(): Ask?
+		local r = row:get()
+		return if r.ended then nil else r.ask
+	end
+	local shown_ask = ui.computed(function(): string?
+		local a = asked()
+		return if a then a.id or "" else nil
+	end)
+	return ui.column {
+		w_full = true,
+		ui.row(p),
+		-- (Another ask in the same row, a new card: what was pressed on the
+		-- last isn't still pressed.)
+		ui.presence(function(): string?
+			return shown_ask:get()
+		end, function(): Node
+			return ask_card(t, asked, props)
+		end, {
+			w_full = true,
+			enter = motion.transition { opacity = { 0, 1 }, y = { -4, 0 }, duration = 200, ease = "outCubic" },
+		}),
+	}
 end
 
 -- An alert: its tone's glyph in its ink, what it is, a word more, its
@@ -1959,11 +2128,32 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			-- Subagents: the right panel's side chat's glyph; what runs, the
 			-- command line's.
 			local glyph_name: Icon.Name = if agents then "side-chat" else "terminal"
+			local function asking(): string
+				if agents then
+					for _, t in running() do
+						if t.state == "approval" or t.state == "input" then
+							return t.state
+						end
+					end
+				end
+				return "none"
+			end
+			-- (In its own head, its rows show what asks: said once.)
+			local function mark(size: number, head: boolean): Node
+				return ui.switch(function(): string
+					return if head and open:get() == id then "none" else asking()
+				end, {
+					none = Icon { name = glyph_name, size = size },
+					approval = status.StatusIcon { kind = "approval", size = size },
+					input = status.StatusIcon { kind = "input", size = size },
+				})
+			end
 			local name_key = if agents then "ds.composer_dock.subagents" else "ds.composer_dock.running"
 			table.insert(tabs, {
 				id = id,
-				glyph = Icon { name = glyph_name, size = 16 },
-				pill_glyph = Icon { name = glyph_name, size = 14 },
+				-- (One of them asking for you: that, until it's answered.)
+				glyph = mark(16, true),
+				pill_glyph = mark(14, false),
 				-- (Nothing running, the tab held open: what finished.)
 				title = function(): string
 					return if #running() > 0 or agents then name_key else "ds.composer_dock.finished"

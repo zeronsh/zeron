@@ -2828,7 +2828,22 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			for f in seen do
 				if t < f.h.at + f.h.delay + f.h.dur then
 					local kept: { Item } = {}
-					local run, inside, rest, rest_chain = 0, false, 0, nil :: { Fold }?
+					local run, inside, rest, rest_chain, rest_place = 0, false, 0, nil :: { Fold }?, nil :: string?
+					-- (A row not of `f` among them ends a run of them, and more
+					-- may follow it: a session in a state, kept as its place
+					-- folds. Each run stands in as a row of its own: its own
+					-- key, its own height. The count leads the key: a fold's key
+					-- can end in a name of the person's, like `device:mac:2`,
+					-- but never starts with a digit.)
+					local spans = 0
+					local function stand_in()
+						spans += 1
+						local h = rest
+						table.insert(kept, { kind = "rest", key = if spans == 1 then `rest:{f.key}` else `rest:{spans}:{f.key}`, place = rest_place :: string, chain = rest_chain :: { Fold }, base = function(): number
+							return h
+						end })
+						inside, rest, rest_chain, rest_place = false, 0, nil, nil
+					end
 					for _, it in items do
 						local holds = table.find(it.chain, f) ~= nil
 						if holds and run >= view then
@@ -2842,14 +2857,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 									end
 								end
 								rest_chain = upto
+								rest_place = it.place
 							end
 							inside = true
 						else
 							if inside and not holds then
-								table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = it.place, chain = rest_chain :: { Fold }, base = function(): number
-									return rest
-								end })
-								inside = false
+								stand_in()
 							end
 							if holds then
 								run += it.base()
@@ -2858,9 +2871,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						end
 					end
 					if inside then
-						table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = "regular", chain = rest_chain :: { Fold }, base = function(): number
-							return rest
-						end })
+						stand_in()
 					end
 					items = kept
 				end

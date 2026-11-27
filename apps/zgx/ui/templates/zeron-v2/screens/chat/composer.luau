@@ -1539,11 +1539,28 @@ local function Composer(): Node
 					lanes.open_task(id, ref)
 				end
 			end,
+			-- What a subagent asks, answered on its row.
+			on_answer_task = function(ref: string, answer: string)
+				local id = session_id:peek()
+				if id then
+					lanes.answer_task(id, ref, answer, function()
+						own_notice:set { tone = "danger", key = "chat.delegates.failed", dismissable = true }
+					end)
+				end
+			end,
 			-- Stop on a background process: its host stops it, and its row
 			-- goes as the session stops listing it (production's tray).
 			on_stop_task = function(task: string)
 				local id = session_id:peek()
 				if not id then
+					return
+				end
+				-- A child chat's: its turn's Stop, wherever it runs.
+				local child = lanes.child_of(task)
+				if child then
+					sessions.stop(child):after(function() end, function()
+						own_notice:set { tone = "danger", key = "chat.delegates.stop_failed", dismissable = true }
+					end)
 					return
 				end
 				store.stop_task(id, task):after(function() end, function()
