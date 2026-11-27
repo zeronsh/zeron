@@ -484,15 +484,7 @@ final class SessionFlowTests: XCTestCase {
         let newProject = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New Project'")).firstMatch
         XCTAssertTrue(newProject.waitForExistence(timeout: 5))
         newProject.tap()
-        // (On the Mac, where acme is: the first host listed may be another.)
-        let device = app.navigationBars.buttons.matching(NSPredicate(format: "NOT (label ==[c] 'close')")).firstMatch
-        XCTAssertTrue(device.waitForExistence(timeout: 5))
-        if !device.label.hasPrefix("MacBook Pro") {
-            device.tap()
-            let mac = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'MacBook Pro'")).firstMatch
-            XCTAssertTrue(mac.waitForExistence(timeout: 5))
-            mac.tap()
-        }
+        onTheMac(app)
         let acme = app.staticTexts["acme"]
         XCTAssertTrue(acme.waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["folder-repositories"].exists, "home isn't a folder of repositories")
@@ -511,6 +503,63 @@ final class SessionFlowTests: XCTestCase {
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         snapshot(app, "new-project-session")
+    }
+
+    /// New Project, on the Mac (the first host listed may be another).
+    private func openNewProject(_ app: XCUIApplication) {
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let newProject = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'New Project'")).firstMatch
+        XCTAssertTrue(newProject.waitForExistence(timeout: 5))
+        newProject.tap()
+        onTheMac(app)
+    }
+
+    private func onTheMac(_ app: XCUIApplication) {
+        let device = app.buttons["new-project-device"]
+        XCTAssertTrue(device.waitForExistence(timeout: 5))
+        if !device.label.hasPrefix("MacBook Pro") {
+            device.tap()
+            let mac = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'MacBook Pro'")).firstMatch
+            XCTAssertTrue(mac.waitForExistence(timeout: 5))
+            mac.tap()
+        }
+    }
+
+    func testRepositoriesFromAnywhereBecomeOneProject() {
+        let app = launch(["-route", "new"])
+        openNewProject(app)
+        app.segmentedControls["new-project-mode"].buttons["Repositories"].tap()
+        let api = app.cells["compose-repository-api"]
+        XCTAssertTrue(api.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.cells["compose-repository-web"].exists)
+        let create = app.buttons["compose-create"]
+        XCTAssertFalse(create.isEnabled, "nothing chosen yet")
+        api.tap()
+        app.cells["compose-repository-web"].tap()
+        XCTAssertTrue(create.label.contains("2 Repositories"), create.label)
+        // Both acme's: the name it gets unless another is typed.
+        XCTAssertEqual(app.textFields["compose-name"].placeholderValue, "acme")
+        snapshot(app, "compose-repositories")
+        // A new one, made on the way and chosen.
+        app.cells["compose-new-repository"].tap()
+        let name = app.textFields["new-repository-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.typeText("billing")
+        snapshot(app, "compose-new-repository")
+        app.buttons["new-repository-create"].tap()
+        let made = app.cells["compose-repository-billing"]
+        XCTAssertTrue(made.waitForExistence(timeout: 10))
+        XCTAssertTrue(create.label.contains("3 Repositories"), create.label)
+        let field = app.textFields["compose-name"]
+        field.tap()
+        field.typeText("Billing")
+        create.tap()
+        // Its new session, in the project of the three.
+        let chip = app.buttons["composer-chip-project"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        XCTAssertTrue(chip.label.contains("Billing"), chip.label)
     }
 
     func testToolGroupExpandsAndShowsDetail() {

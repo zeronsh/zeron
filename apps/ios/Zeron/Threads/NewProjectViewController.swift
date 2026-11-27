@@ -106,6 +106,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
                 self?.showMode()
             }
         }))
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "new-project-device"
         mode.selectedSegmentIndex = 0
         mode.accessibilityIdentifier = "new-project-mode"
         mode.setTitleTextAttributes([.font: Fonts.ui(.sansMedium, 13)], for: .normal)
