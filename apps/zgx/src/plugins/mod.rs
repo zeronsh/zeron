@@ -1307,7 +1307,7 @@ fn filter_by(want: &[Plugin], items: &[Item]) -> Value {
 pub(crate) fn forget_state(host: &ScriptHost, id: &str) {
     host.forget_state(&format!("plugin:{id}"));
     // (Where the host had no storage set, its folder as zgx names it.)
-    if let Some(dir) = zgx_script::app_data_dir(crate::APP_ID) {
+    if let Some(dir) = zgx_script::app_data_dir(crate::app_id()) {
         let _ = std::fs::remove_dir_all(dir.join("script-state").join(format!("plugin%3A{id}")));
     }
 }

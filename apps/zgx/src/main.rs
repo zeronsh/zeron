@@ -52,6 +52,7 @@ mod haptics;
 mod heap;
 mod images;
 mod intro_handoff;
+mod instance;
 mod links;
 mod pasted;
 mod math;
@@ -163,6 +164,49 @@ use zgx_script::{ScriptHost, Shared, Value};
 /// development builds', which are staging's.
 const APP_ID: &str = if cfg!(feature = "beta") { "zeron" } else { "zeron-zgx" };
 
+const NATIVE_APP_ID: &str = "sh.zeron.app";
+
+fn app_ids(instance: Option<&str>) -> Option<(String, String)> {
+    let Some(instance) = instance else {
+        return Some((APP_ID.into(), NATIVE_APP_ID.into()));
+    };
+
+    let valid = instance.len() == 36
+        && instance.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if !valid {
+        return None;
+    }
+
+    let instance = instance.to_ascii_lowercase();
+    let native_suffix = instance.replace('-', "_");
+    Some((
+        format!("{APP_ID}-{instance}"),
+        format!("{NATIVE_APP_ID}.instance_{native_suffix}"),
+    ))
+}
+
+fn active_app_ids() -> &'static (String, String) {
+    static IDS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+    IDS.get_or_init(|| {
+        let instance = std::env::var_os("ZERON_INSTANCE_ID");
+        let instance = instance
+            .as_ref()
+            .map(|id| id.to_str().expect("ZERON_INSTANCE_ID must be a UUID"));
+        app_ids(instance).expect("ZERON_INSTANCE_ID must be a UUID")
+    })
+}
+
+fn app_id() -> &'static str {
+    &active_app_ids().0
+}
+
 /// Setup's window, in points: room for a step and its footer, no more.
 const ONBOARDING_SIZE: (f64, f64) = (680., 500.);
 
@@ -206,6 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if argv.get(1).map(String::as_str) == Some("terminal-bridge") {
         std::process::exit(terminal::bridge(&argv[2..]));
     }
+    instance::initialize()?;
     // This launch as it started, for Reload Zeron (src/relaunch.rs), before
     // anything below sets a variable; started by one, the launch it
     // replaces waited out first.
@@ -353,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // delivered to the app as Zeron.app's are (src/links.rs).
     if cfg!(feature = "beta") {
         application = application
-            .application_id("sh.zeron.app")?
+            .application_id(active_app_ids().1.as_str())?
             .on_application_event(|event, _| {
                 if let zgx_desktop::ApplicationEvent::OpenUrls(urls) = event {
                     for url in urls {
@@ -567,7 +612,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // (A beta: the sidebar as it was in the app it replaces.)
     if cfg!(feature = "beta") {
         let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
-        let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
+        let state = zgx_script::app_data_dir(app_id()).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
     let live = plugins::prepare_live();
@@ -592,7 +637,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
 /// Where finishing setup on this Mac is remembered: a launch signed in
 /// opens the main window once it's there.
 fn onboarded_marker() -> Option<PathBuf> {
-    zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("onboarded"))
+    zgx_script::app_data_dir(app_id()).map(|dir| dir.join("onboarded"))
 }
 
 fn onboarded() -> bool {
@@ -604,7 +649,7 @@ static WELCOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 
 /// Where that welcome having been seen on this computer is remembered.
 fn welcomed_marker() -> Option<PathBuf> {
-    zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("welcomed"))
+    zgx_script::app_data_dir(app_id()).map(|dir| dir.join("welcomed"))
 }
 
 fn welcomed() -> bool {
@@ -679,7 +724,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // A long chat's heap, past 32 MB, collected aiming for 150% of what's in
     // use rather than Luau's double: its rows' nodes, which the collector
     // can't see the size of, go sooner (zgx #1837, the carry it replaces).
-    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
+    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(app_id()).large_heap_goal(150), &lent);
     // The network, for `ui.fetch` and remote images: the app's scripts, and
     // plugins granted "network" (zgx's own transport; a plugin without the
     // grant reaches none).
@@ -1451,5 +1496,40 @@ mod welcome_tests {
         assert_eq!(opening(true, false, false, false), Opening::Setup);
         assert_eq!(opening(true, true, false, true), Opening::Welcome);
         assert_eq!(opening(true, true, true, true), Opening::Main);
+    }
+}
+
+#[cfg(test)]
+mod app_id_tests {
+    use super::{APP_ID, NATIVE_APP_ID, app_ids};
+
+    #[test]
+    fn normal_launch_uses_existing_ids() {
+        assert_eq!(app_ids(None), Some((APP_ID.into(), NATIVE_APP_ID.into())));
+    }
+
+    #[test]
+    fn scoped_ids_use_the_canonical_uuid() {
+        let id = "E4102D9E-96A3-4E26-9DCD-FCFB28CD06FC";
+        let expected_script_id = format!("{APP_ID}-e4102d9e-96a3-4e26-9dcd-fcfb28cd06fc");
+        let expected_native_id = "sh.zeron.app.instance_e4102d9e_96a3_4e26_9dcd_fcfb28cd06fc";
+
+        let ids = app_ids(Some(id)).unwrap();
+        assert_eq!(ids.0, expected_script_id);
+        assert_eq!(ids.1, expected_native_id);
+        assert_eq!(app_ids(Some(&id.to_ascii_lowercase())), Some(ids.clone()));
+        assert_ne!(app_ids(Some("e4102d9e-96a3-4e26-9dcd-fcfb28cd06fd")), Some(ids));
+    }
+
+    #[test]
+    fn invalid_instance_ids_have_no_namespace() {
+        for id in [
+            "",
+            "../plugins",
+            "e4102d9e/96a3-4e26-9dcd-fcfb28cd06fc",
+            "e4102d9g-96a3-4e26-9dcd-fcfb28cd06fc",
+        ] {
+            assert_eq!(app_ids(Some(id)), None);
+        }
     }
 }

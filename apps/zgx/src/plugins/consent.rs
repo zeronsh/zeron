@@ -241,7 +241,7 @@ fn options() -> WindowOptions {
 }
 
 fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on: Rc<RefCell<On>>, slot: Rc<RefCell<Option<Shared>>>, seen: Seen) -> ScriptHost {
-    let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("consent.luau")).app_id(crate::APP_ID);
+    let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("consent.luau")).app_id(crate::app_id());
     host.window_chrome(cx.window_info.titlebar_area.clone(), cx.window_info.controls.clone());
     host.window_zoom(&cx.ui);
     crate::transparency::install(cx, &host);

@@ -466,6 +466,56 @@ mod tests {
         assert!(!needs_restart(None, true, true));
     }
 
+    #[test]
+    fn staging_uses_the_requested_engine_endpoint() {
+        let home = Path::new("/Users/someone");
+        let staging = |port: &str, data: &str| {
+            Config::staging(
+                |key| match key {
+                    "ZERON_ZGX_ENGINE_PORT" => Some(port.into()),
+                    "ZERON_ZGX_ENGINE_DATA" => Some(data.into()),
+                    "ZERON_IPC_PORT" => Some("27654".into()),
+                    "ZERON_DATA_DIR" => Some("~/.zeron".into()),
+                    _ => None,
+                },
+                home,
+                "https://staging.zeron.sh",
+                "staging-client",
+                27872,
+            )
+        };
+
+        let config = staging("27873", "~/plugin-dev").unwrap();
+        assert_eq!(config.port, 27873);
+        assert_eq!(config.data_dir, home.join("plugin-dev"));
+        assert!(staging("27654", "~/plugin-dev").is_err());
+        assert!(staging("27873", "~/.zeron").is_err());
+    }
+
+    #[test]
+    fn beta_uses_the_requested_engine_endpoint() {
+        let home = Path::new("/Users/someone");
+        let prod = crate::auth::production();
+        let config = Config::zeron_app(
+            |key| match key {
+                "ZERON_IPC_PORT" => Some("27700".into()),
+                "ZERON_DATA_DIR" => Some("/tmp/plugin-dev".into()),
+                "ZERON_ZGX_ENGINE_PORT" => Some("27871".into()),
+                "ZERON_ZGX_ENGINE_DATA" => Some("~/.zeron-staging".into()),
+                _ => None,
+            },
+            home,
+            None,
+            &prod.edge,
+            &prod.client,
+            prod.port,
+        )
+        .unwrap();
+
+        assert_eq!(config.port, 27700);
+        assert_eq!(config.data_dir, Path::new("/tmp/plugin-dev"));
+    }
+
     /// A development build never touches the production engine: its port,
     /// today's data dir or the one it was renamed from.
     #[cfg(not(feature = "beta"))]

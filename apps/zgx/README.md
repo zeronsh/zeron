@@ -99,6 +99,42 @@ writes the page there, for a test rig). See `src/engine/manager.rs`.
 (`src/chat.rs`), to run a chat without a paid one; `ZERON_MOCK_DELAY_MS`
 and `ZERON_MOCK_REPEAT` on the engine it starts pace and lengthen its replies.
 
+### An isolated desktop launch
+
+Set `ZERON_ISOLATED=1` to start a separate Zeron desktop instance. The launch
+uses a unique instance UUID, its own data directory, and its own IPC port. For
+a fresh launch, first clear any instance selection inherited from another
+Zeron process. Conflicting settings cause the launch to fail.
+
+On POSIX, for example:
+
+```sh
+unset ZERON_INSTANCE_ID ZERON_DATA_DIR ZERON_IPC_PORT
+unset ZERON_ZGX_ENGINE_DATA ZERON_ZGX_ENGINE_PORT
+ZERON_ISOLATED=1 cargo run --release -- main
+```
+
+The app prints `export` lines for `ZERON_DATA_DIR` and `ZERON_IPC_PORT`.
+Copy those lines into another terminal before running CLI commands there:
+
+```sh
+export ZERON_DATA_DIR='(copy the printed value)'
+export ZERON_IPC_PORT='(copy the printed value)'
+zeron status
+```
+
+Set the same two variables in an MCP client's environment to make it connect
+to this instance. For scripts or other clients, instance metadata is in
+`.zeron-instances/<uuid>/instance.json`, beside the default data directory.
+It contains the instance `id` and `port`. On Windows, this metadata is under
+`%LOCALAPPDATA%`.
+
+The instance keeps its data on disk in its own data directory. This mode gives
+the instance separate Zeron state and a separate engine endpoint. It does not
+run the engine or its agents in an operating-system sandbox.
+On macOS, isolated instances do not send native notifications because macOS
+can deliver a notification click to the regular app.
+
 This is a Cargo workspace of its own (not a member of the root workspace). zgx
 builds against patched crates (`winit`, `wgpu-hal`, `accesskit_*`), and a git
 dependency does not carry a patch, so `Cargo.toml` repeats zgx's. Keeping it

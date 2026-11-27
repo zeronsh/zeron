@@ -194,7 +194,7 @@ fn host(
     generation: Rc<Cell<u64>>,
     last: Last,
 ) -> ScriptHost {
-    let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("template_consent.luau")).app_id(crate::APP_ID);
+    let host = ScriptHost::new(&cx.ui.runtime, crate::ui_dir().join("template_consent.luau")).app_id(crate::app_id());
     host.window_chrome(cx.window_info.titlebar_area.clone(), cx.window_info.controls.clone());
     host.window_zoom(&cx.ui);
     crate::transparency::install(cx, &host);

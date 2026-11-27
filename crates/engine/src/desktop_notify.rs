@@ -42,6 +42,10 @@ const DONE_SETTLE: chrono::Duration = chrono::Duration::seconds(2);
 /// This process shows desktop banners: engines assembled from now on post
 /// them (and advertise [`zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1`]).
 pub fn enable() {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("ZERON_INSTANCE_ID").is_some() {
+        return;
+    }
     ENABLED.store(true, Ordering::SeqCst);
 }
 
