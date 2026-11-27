@@ -59,6 +59,10 @@ fn is_internal_diagnostic(message: &str) -> bool {
     message.contains("[ede_diagnostic]")
 }
 
+/// The reply a `/clear` turn gets: the CLI streams nothing for it, and the
+/// transcript keeps the old messages the agent no longer sees.
+const CONTEXT_CLEARED: &str = "Context cleared. Claude no longer sees the messages above.";
+
 const CONTEXT_FULL: &str =
     "The conversation no longer fits the model's context window. Run /compact or start a new chat.";
 
@@ -1610,6 +1614,17 @@ impl Normalizer {
                 out.push(done);
                 out
             }
+
+            // `/clear`: an empty context from here, said where the reply goes.
+            Frame::ConversationReset => vec![
+                AgentEvent::ContextUsage {
+                    tokens: Some(0),
+                    window: None,
+                },
+                AgentEvent::TextDelta {
+                    text: CONTEXT_CLEARED.to_owned(),
+                },
+            ],
 
             // Control frames are handled by the run loop, not normalized.
             Frame::ControlRequest(_)
@@ -3290,6 +3305,46 @@ mod tests {
             false,
         );
         assert_eq!(retry(&mut norm, 3).len(), 2);
+    }
+
+    /// `/clear`'s frames as CLI 2.1.331 writes them: the reset, a new init,
+    /// the replayed command and an empty `local_command` result.
+    #[test]
+    fn a_cleared_conversation_says_so_and_empties_the_context() {
+        let mut norm = Normalizer::new();
+        let mut events = Vec::new();
+        for line in [
+            r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"old"}"#,
+            r#"{"type":"conversation_reset","new_conversation_id":"new","uuid":"new","trigger":"clear","user_message_uuid":"u1","session_id":"old"}"#,
+            r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"new"}"#,
+            r#"{"type":"user","uuid":"u1","isReplay":true,"session_id":"new","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","local_command":"clear","session_id":"new","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{}}"#,
+        ] {
+            events.extend(norm.normalize(crate::claude::wire::parse_frame(line).unwrap(), false));
+        }
+        let shown: Vec<_> = events
+            .iter()
+            .filter(|e| !matches!(e, AgentEvent::SessionStarted { .. } | AgentEvent::Usage { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                AgentEvent::ContextUsage {
+                    tokens: Some(0),
+                    window: None
+                },
+                AgentEvent::TextDelta {
+                    text: CONTEXT_CLEARED.into()
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: Some(String::new()),
+                    error: None,
+                    session_id: Some("new".into()),
+                },
+            ]
+        );
     }
 
     #[test]

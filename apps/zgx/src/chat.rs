@@ -1558,8 +1558,11 @@ impl Chats {
                     let mut slot = view.open.borrow_mut();
                     let Some(open) = slot.as_mut() else { continue };
                     let now = me.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
+                    // (A turn too short for the watch to show it working
+                    // still moves its outcome.)
                     let changed = now["status"] != open.session_seen["status"]
-                        || now["startedAt"] != open.session_seen["startedAt"];
+                        || now["startedAt"] != open.session_seen["startedAt"]
+                        || now["lastTurnOutcome"] != open.session_seen["lastTurnOutcome"];
                     open.session_seen = now;
                     changed
                 };
@@ -3084,9 +3087,19 @@ impl View {
                 // through the machine coming up, as its reply's does
                 // (`from_its_send`), never again from the machine's start.
                 let cloud = chats.chat(&open.id).is_some_and(|c| on_cloud(&c));
+                // Its turn already ended with no reply row (a command the
+                // agent runs itself, as Claude's `/clear`, in under a second):
+                // nothing is on its way, and no later change would repaint a
+                // "sending" left up by the grace. (`seconds` drops the
+                // fraction, hence the second's slack, as for `turn`.)
+                let ended = !running
+                    && seconds(&session["lastTurnOutcome"]["finishedAt"])
+                        .is_some_and(|at| at as f64 + 1. >= sent);
                 let waiting = match turn {
                     Some(turn) if running && turn + 1. >= sent => Some(("working", if cloud { sent.min(turn) } else { turn })),
-                    _ if running || fresh || awaited => Some(("sending", sent)),
+                    _ if awaited => Some(("sending", sent)),
+                    _ if ended => None,
+                    _ if running || fresh => Some(("sending", sent)),
                     _ => None,
                 };
                 // (Zeron's own wake is nobody's send: nothing to say of it until

@@ -21,6 +21,11 @@ pub(crate) enum Frame {
     ControlResponse(ControlResponseFrame),
     /// Where the CLI has taken one of our stdin user messages.
     CommandLifecycle(CommandLifecycleFrame),
+    /// `{"type":"conversation_reset","trigger":"clear",…}` (live-verified
+    /// 2.1.331): the CLI's own `/clear` (aliases `/reset`, `/new`) dropped
+    /// the conversation for a new one. Its turn then ends with a `result`
+    /// under the new session id: a `local_command`, nothing streamed.
+    ConversationReset,
     /// control_cancel_request / anything unknown.
     Other,
 }
@@ -431,6 +436,7 @@ fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
         "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
         "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
+        "conversation_reset" => Frame::ConversationReset,
         _ => Frame::Other,
     };
     Ok(frame)
