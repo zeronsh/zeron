@@ -144,6 +144,8 @@ mod long_thread_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
+mod text_scale_tests;
+#[cfg(test)]
 mod i18n_tests;
 mod updates;
 #[cfg(test)]
