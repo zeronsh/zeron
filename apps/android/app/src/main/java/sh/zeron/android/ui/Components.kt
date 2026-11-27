@@ -36,6 +36,7 @@ import sh.zeron.android.design.ProjectColors
 import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.projectColorIndex
+import kotlinx.coroutines.launch
 
 /**
  * Grouped-list corners (Android 16 settings style): the group's outer
@@ -173,6 +174,46 @@ fun segmentedShapes(index: Int, count: Int): androidx.compose.material3.ListItem
     } else {
         androidx.compose.material3.ListItemDefaults.segmentedShapes(index, count)
     }
+
+/**
+ * A swipe row's state that always starts settled. `rememberSwipeToDismissBoxState` is
+ * `rememberSaveable`, and a LazyColumn keeps the saved state of every item that left the list
+ * under its key. A row swiped to pin moves to Pinned before `reset()` finishes, so its old key
+ * keeps "dismissed"; when the row comes back under that key, the restored state fires
+ * `onDismiss` at once, the row toggles again and moves to the other group, which restores *its*
+ * stale state, and so on: the list flashes between the two forever.
+ */
+@Composable
+fun rememberSwipeRowState(): androidx.compose.material3.SwipeToDismissBoxState {
+    val threshold = androidx.compose.material3.SwipeToDismissBoxDefaults.positionalThreshold
+    return androidx.compose.runtime.remember {
+        androidx.compose.material3.SwipeToDismissBoxState(androidx.compose.material3.SwipeToDismissBoxValue.Settled, threshold)
+    }
+}
+
+/**
+ * A stable `onDismiss` for [androidx.compose.material3.SwipeToDismissBox]. The box keys its
+ * LaunchedEffect on `onDismiss` too, so an inline lambda (a new instance on every
+ * recomposition) re-fires the dismissal on every frame of `reset()`'s animation; each call
+ * starts a new `reset()` that cancels the previous one, so the row never settles and a
+ * pin/unpin toggle writes on every frame. This keeps one callback for the row's lifetime,
+ * always runs the latest action, and settles the row after it.
+ */
+@Composable
+fun rememberSwipeDismiss(
+    state: androidx.compose.material3.SwipeToDismissBoxState,
+    onDismiss: (androidx.compose.material3.SwipeToDismissBoxValue) -> Unit,
+): (androidx.compose.material3.SwipeToDismissBoxValue) -> Unit {
+    val latest = androidx.compose.runtime.rememberUpdatedState(onDismiss)
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    return androidx.compose.runtime.remember(state) {
+        { direction: androidx.compose.material3.SwipeToDismissBoxValue ->
+            latest.value(direction)
+            scope.launch { state.reset() }
+            Unit
+        }
+    }
+}
 
 /** Inside a full-screen dialog: status and navigation bar icons that read on the page (dark on light). */
 @Composable

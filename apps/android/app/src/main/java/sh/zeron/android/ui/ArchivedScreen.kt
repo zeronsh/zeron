@@ -24,7 +24,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -81,7 +80,7 @@ fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ArchivedRow(model: AppModel, row: SessionRow, index: Int, count: Int, onOpen: (String) -> Unit) {
-    val state = rememberSwipeToDismissBoxState()
+    val state = rememberSwipeRowState()
     val shape = segmentedShapes(index, count).shape
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
