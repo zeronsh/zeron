@@ -349,14 +349,14 @@ pub fn install(host: &ScriptHost) {
     host.async_action("mcp.upsert", move |args| {
         let m = m.clone();
         let params = normalize_upsert_body(value_json(&args));
-        async move {
-            crate::plugins::preview::refuse("mcp.upsert")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.upsert"); async move {
+            allowed?;
             let reply = engine::get().call("UpsertMcpServer", params).await?;
             if reply.is_object() {
                 m.take_snapshot(reply.clone());
             }
             Ok(json_value(&reply))
-        }
+        } }
     });
 
     let m = mcp.clone();
@@ -364,8 +364,8 @@ pub fn install(host: &ScriptHost) {
         let m = m.clone();
         let id = args.field("id").map(text).unwrap_or_default();
         let enabled = matches!(args.field("enabled"), Some(Value::Bool(true)));
-        async move {
-            crate::plugins::preview::refuse("mcp.set_enabled")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.set_enabled"); async move {
+            allowed?;
             let reply = engine::get()
                 .call(
                     "SetMcpServerEnabled",
@@ -376,7 +376,7 @@ pub fn install(host: &ScriptHost) {
                 m.take_snapshot(reply.clone());
             }
             Ok(json_value(&reply))
-        }
+        } }
     });
 
     let m = mcp.clone();
@@ -386,8 +386,8 @@ pub fn install(host: &ScriptHost) {
             Some(v) => text(&v),
             None => text(&args),
         };
-        async move {
-            crate::plugins::preview::refuse("mcp.delete")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.delete"); async move {
+            allowed?;
             let reply = engine::get()
                 .call("DeleteMcpServer", json!({ "id": id }))
                 .await?;
@@ -396,7 +396,7 @@ pub fn install(host: &ScriptHost) {
                 m.take_snapshot(reply.clone());
             }
             Ok(json_value(&reply))
-        }
+        } }
     });
 
     // The person's answer to what an agent asked (only this app can give
@@ -406,8 +406,8 @@ pub fn install(host: &ScriptHost) {
         let m = m.clone();
         let id = args.field("id").map(|v| text(&v)).unwrap_or_default();
         let approve = matches!(args.field("approve"), Some(Value::Bool(true)));
-        async move {
-            crate::plugins::preview::refuse("mcp.resolve_request")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.resolve_request"); async move {
+            allowed?;
             let reply = engine::get()
                 .call("ResolveMcpRequest", json!({ "id": id, "approve": approve }))
                 .await?;
@@ -418,7 +418,7 @@ pub fn install(host: &ScriptHost) {
                 m.take_snapshot(snapshot);
             }
             Ok(json_value(&reply))
-        }
+        } }
     });
 
     let m = mcp.clone();
@@ -428,8 +428,8 @@ pub fn install(host: &ScriptHost) {
             Some(v) => text(&v),
             None => text(&args),
         };
-        async move {
-            crate::plugins::preview::refuse("mcp.disconnect_auth")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.disconnect_auth"); async move {
+            allowed?;
             let reply = engine::get()
                 .call("DisconnectMcpAuth", json!({ "id": id }))
                 .await?;
@@ -438,7 +438,7 @@ pub fn install(host: &ScriptHost) {
                 m.take_snapshot(reply.clone());
             }
             Ok(json_value(&reply))
-        }
+        } }
     });
 
     let m = mcp.clone();
@@ -450,8 +450,8 @@ pub fn install(host: &ScriptHost) {
             .or_else(|| args.field("flow_id"))
             .map(text)
             .filter(|s| !s.is_empty());
-        async move {
-            crate::plugins::preview::refuse("mcp.cancel_auth")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.cancel_auth"); async move {
+            allowed?;
             let stored_flow = if !id.is_empty() {
                 m.clear_auth(&id)
             } else {
@@ -464,7 +464,7 @@ pub fn install(host: &ScriptHost) {
                     .await;
             }
             Ok(Value::Nil)
-        }
+        } }
     });
 
     let m = mcp;
@@ -486,8 +486,8 @@ pub fn install(host: &ScriptHost) {
             .filter(|s| !s.is_empty());
         let scopes = string_list_field(&args, "scopes");
 
-        async move {
-            crate::plugins::preview::refuse("mcp.start_auth")?;
+        { let allowed = crate::plugins::preview::refuse("mcp.start_auth"); async move {
+            allowed?;
             let mut params = serde_json::Map::new();
             params.insert("id".to_string(), json!(id));
             if let Some(cid) = client_id {
@@ -594,7 +594,7 @@ pub fn install(host: &ScriptHost) {
             );
             m.spawn_poll(id, flow_id, generation);
             Ok(json_value(&reply))
-        }
+        } }
     });
 }
 

@@ -17,11 +17,14 @@ const MAX_BYTES: u64 = 512 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn install(host: &ScriptHost) {
-    host.async_action("favicon.fetch", |arg| async move {
-        let url = arg.field("url").map(crate::auth::text).unwrap_or_default();
+    host.async_action("favicon.fetch", |arg| {
         // A request of the host's own would carry out what a preview put in
-        // its URL. No icon, as for a page without one.
-        if crate::plugins::preview::current().is_some() {
+        // its URL. No icon, as for a page without one. (Decided as it's
+        // asked, not as its future first runs.)
+        let previewing = crate::plugins::preview::current().is_some();
+        async move {
+        let url = arg.field("url").map(crate::auth::text).unwrap_or_default();
+        if previewing {
             return Ok(Value::Nil);
         }
         if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
@@ -39,6 +42,7 @@ pub fn install(host: &ScriptHost) {
             Some(Ok(path)) => Value::from(path.to_string_lossy().as_ref()),
             _ => Value::Nil,
         })
+        }
     });
 }
 

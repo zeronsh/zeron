@@ -30,7 +30,7 @@ pub fn install(host: &ScriptHost) {
         let snapshot = call("ListProjectActions", json!({ "spaceId": space }), &arg).await?;
         Ok(value(&snapshot_for_script(&snapshot)))
     });
-    host.async_action("home.save_action", |arg| async move { crate::plugins::preview::refuse("home.save_action")?;
+    host.async_action("home.save_action", |arg| { let allowed = crate::plugins::preview::refuse("home.save_action"); async move { allowed?;
         let space = field(&arg, "space").ok_or("no project")?;
         let draft = json!({
             "name": field(&arg, "name").unwrap_or_default(),
@@ -45,14 +45,14 @@ pub fn install(host: &ScriptHost) {
         });
         let snapshot = call("UpsertProjectAction", params, &arg).await?;
         Ok(value(&snapshot_for_script(&snapshot)))
-    });
+    } });
     host.async_action("home.delete_action", |arg| async move {
         let space = field(&arg, "space").ok_or("no project")?;
         let id = field(&arg, "id").ok_or("no action")?;
         let snapshot = call("DeleteProjectAction", json!({ "spaceId": space, "actionId": id }), &arg).await?;
         Ok(value(&snapshot_for_script(&snapshot)))
     });
-    host.async_action("home.run_action", |arg| async move { crate::plugins::preview::refuse("home.run_action")?;
+    host.async_action("home.run_action", |arg| { let allowed = crate::plugins::preview::refuse("home.run_action"); async move { allowed?;
         let space = field(&arg, "space").ok_or("no project")?;
         let chat = field(&arg, "chat").ok_or("no session")?;
         let id = field(&arg, "id").ok_or("no action")?;
@@ -61,7 +61,7 @@ pub fn install(host: &ScriptHost) {
         let run = call("RunProjectAction", params, &arg).await?;
         let terminal = run["terminal"]["id"].as_str().ok_or("The action's terminal didn't open.")?;
         Ok(Value::from(terminal))
-    });
+    } });
 }
 
 /// `method` on the session's device (through the relay when it's another).

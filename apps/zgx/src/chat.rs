@@ -1367,8 +1367,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move {
-            crate::plugins::preview::refuse("chat.send")?;
+        { let allowed = crate::plugins::preview::refuse("chat.send"); async move {
+            allowed?;
             let first = req.field("fresh").is_some_and(Value::truthy);
             let id = req.field("session").map(text).unwrap_or_default();
             let sent = v.send(req).await;
@@ -1386,7 +1386,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 }
             }
             sent.map(|_| Value::Nil).map_err(String::from)
-        }
+        } }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -1404,13 +1404,16 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
-        async move { crate::plugins::preview::refuse("chat.respond")?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.respond"); async move { allowed?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) } }
     });
     // A child's approval, answered on the chat that delegated to it.
-    host.async_action("chat.respond_child", |args| async move {
-        crate::plugins::preview::refuse("chat.respond_child")?;
-        let chats = CHATS.with(Rc::clone);
-        chats.respond_child(args).await.map(|_| Value::Nil).map_err(String::from)
+    host.async_action("chat.respond_child", |args| {
+        let allowed = crate::plugins::preview::refuse("chat.respond_child");
+        async move {
+            allowed?;
+            let chats = CHATS.with(Rc::clone);
+            chats.respond_child(args).await.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
@@ -1424,17 +1427,18 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         // (Its model and effort are a preview's to change; what an agent may
         // do unasked isn't.)
         let access = args.field("access").is_some();
-        async move { if access { crate::plugins::preview::refuse("chat.configure")?; } v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
+        let allowed = if access { crate::plugins::preview::refuse("chat.configure") } else { Ok(()) };
+        async move { allowed?; v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
         let v = v.clone();
-        async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.queue"); async move { allowed?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) } }
     });
     let pick = which.clone();
     host.async_action("chat.retry", move |args| {
         let v = pick(&args);
-        async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.retry"); async move { allowed?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) } }
     });
     // A send in this device's outbox (still uploading, or stopped) taken out
     // for good: `{ id, item, message? }` → whether it was there to take
@@ -1442,17 +1446,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.remove_held", move |args| {
         let v = pick(&args);
-        async move { crate::plugins::preview::refuse("chat.remove_held")?; v.remove_held(args).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.remove_held"); async move { allowed?; v.remove_held(args).await.map_err(String::from) } }
     });
     let pick = which.clone();
     host.async_action("chat.queue_edit", move |args| {
         let v = pick(&args);
-        async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.queue_edit"); async move { allowed?; v.begin_edit(args).await.map_err(String::from) } }
     });
     let pick = which.clone();
     host.async_action("chat.queue_finish", move |args| {
         let v = pick(&args);
-        async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
+        { let allowed = crate::plugins::preview::refuse("chat.queue_finish"); async move { allowed?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) } }
     });
     // A project's branches, from git where it is (the shipping app's
     // `ensure_refs`): `{ path, device? }`, the device only when it isn't this

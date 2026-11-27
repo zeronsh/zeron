@@ -784,10 +784,10 @@ fn delete_action(host: &ScriptHost, a: Rc<Sessions>) {
     host.async_action("sessions.delete", move |id| {
         let a = a.clone();
         let params = json!({ "op": "deleteChat", "chatId": text(&id) });
-        async move {
-            crate::plugins::preview::refuse("sessions.delete")?;
+        { let allowed = crate::plugins::preview::refuse("sessions.delete"); async move {
+            allowed?;
             a.mutate(params).await.map_err(String::from)
-        }
+        } }
     });
     // What a delete takes with it, for "Delete session?" to say: read from
     // every chat known, archived ones too (the lists show none of those).
@@ -930,8 +930,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("sessions.remove_device", move |id| {
         let id = text(&id);
         let params = json!({ "op": "removeDevice", "deviceId": id });
-        async move {
-            crate::plugins::preview::refuse("sessions.remove_device")?;
+        { let allowed = crate::plugins::preview::refuse("sessions.remove_device"); async move {
+            allowed?;
             if id.trim().is_empty() {
                 return Err("invalid".to_string());
             }
@@ -939,7 +939,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 Ok(_) => Ok(Value::Nil),
                 Err(error) => Err(removal_refused(&error).to_string()),
             }
-        }
+        } }
     });
     // A session's Zeron conversation link (production's links.rs): its id
     // and its workspace's locator, the same hash, so either app opens it.
