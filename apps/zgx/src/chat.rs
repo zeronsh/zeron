@@ -1407,10 +1407,13 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         { let allowed = crate::plugins::preview::refuse("chat.respond"); async move { allowed?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) } }
     });
     // A child's approval, answered on the chat that delegated to it.
-    host.async_action("chat.respond_child", |args| async move {
-        crate::plugins::preview::refuse("chat.respond_child")?;
-        let chats = CHATS.with(Rc::clone);
-        chats.respond_child(args).await.map(|_| Value::Nil).map_err(String::from)
+    host.async_action("chat.respond_child", |args| {
+        let allowed = crate::plugins::preview::refuse("chat.respond_child");
+        async move {
+            allowed?;
+            let chats = CHATS.with(Rc::clone);
+            chats.respond_child(args).await.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
