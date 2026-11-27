@@ -66,6 +66,8 @@ const CLOUD_ID_RE = /^cloud-[A-Za-z0-9-]{1,100}$/;
 const B64URL_RE = /^[A-Za-z0-9_-]{1,256}$/;
 /** Runner bodies are a few ids, a code/key and a signature. */
 const MAX_RUNNER_BODY = 4096;
+/** A new session's body: its repositories (up to 16) and its pick. */
+const MAX_SESSION_BODY = 16_384;
 const MAX_COUNT = 100_000;
 
 type CloudEnv = Pick<
@@ -557,7 +559,8 @@ export const handleCloudRoute = async (
     if (rest.length === 1 && request.method === "POST") {
       if (!cloudAvailable(env)) return unavailable();
       if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
-      const body = await readJsonBody(request, MAX_RUNNER_BODY);
+      // (A project of several repositories names up to 16 of them.)
+      const body = await readJsonBody(request, auth.kind === "runner" ? MAX_RUNNER_BODY : MAX_SESSION_BODY);
       if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
       if (auth.kind === "runner") {
         // A delegate: the project and repository are the parent's.
@@ -576,7 +579,7 @@ export const handleCloudRoute = async (
         }
         return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config, childKind));
       }
-      const { chatId, spaceId, repo, branch, reach } = body;
+      const { chatId, spaceId, repo, branch, reach, repos, folder } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
       if (typeof spaceId !== "string" || !ID_RE.test(spaceId)) return jsonError(400, "bad_request", "Bad spaceId.");
       // The repository (the project's GitHub origin) and the branch the
@@ -587,7 +590,12 @@ export const handleCloudRoute = async (
       }
       // What it reaches: the composer's pick, or the account's default.
       if (reach !== undefined && !isRunnerReach(reach)) return jsonError(400, "bad_request", BAD_REACH);
-      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, reach));
+      // A project of several repositories: each one (`repo` is the first)
+      // at its folder in `folder`; the DO validates them.
+      const project = repos === undefined && folder === undefined ? undefined : { repos, folder };
+      return sessionRpc(() =>
+        stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch, undefined, reach, project)
+      );
     }
     const chatId = rest[1];
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");

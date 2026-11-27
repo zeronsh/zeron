@@ -99,6 +99,9 @@ export type Plan = {
 	cwd: string?,
 	-- A worktree made off `branch` (HEAD with none) as it starts.
 	worktree: boolean,
+	-- On Cloud, a project of repositories: those its machine clones, each
+	-- at its path in the project (`{ path, github }`).
+	clones: { { path: string, github: string } }?,
 	-- With `worktree`, in a project folder holding several repositories:
 	-- the ones checked out (their paths in it), in one worktree of the
 	-- whole project.
@@ -226,11 +229,16 @@ function M.bind(c: Choices)
 	local function on_cloud(): boolean
 		return c.device:get() == M.CLOUD
 	end
+	-- Whether Cloud can clone some of a project of repositories' (known once
+	-- its repositories are listed: set below).
+	local cloneable: (p: sessions.Project?) -> boolean = function()
+		return false
+	end
 	local function on_device(device: string?): { sessions.Project }
 		local out = {}
 		for _, p in sessions.projects:get() do
 			-- (On Cloud: those it can open, on whichever device.)
-			if if device == M.CLOUD then cloud_repo(p) ~= nil else p.device == device then
+			if if device == M.CLOUD then (cloud_repo(p) ~= nil or cloneable(p)) else p.device == device then
 				table.insert(out, p)
 			end
 		end
@@ -347,7 +355,7 @@ function M.bind(c: Choices)
 			return
 		end
 		-- (On Cloud, a project Cloud can open stays there.)
-		if c.device:peek() == M.CLOUD and cloud_repo(p) then
+		if c.device:peek() == M.CLOUD and (cloud_repo(p) or cloneable(p)) then
 			return
 		end
 		if p and p.device ~= c.device:peek() and device_row(p.device) then
@@ -631,9 +639,9 @@ function M.bind(c: Choices)
 			return
 		end
 		local p = project_row(id)
-		-- (Only a folder with no git, never on Cloud: its machine clones one
-		-- repository.)
-		if not p or p.git or on_cloud() then
+		-- (Only a folder with no git; a project living on Cloud is one
+		-- repository. On Cloud, its repositories are what the machine clones.)
+		if not p or p.git or lives_on_cloud(p) then
 			if repositories:peek().key ~= "" then
 				repositories:set { key = "", state = "idle", list = {} }
 			end
@@ -699,11 +707,49 @@ function M.bind(c: Choices)
 		end
 		return false
 	end
+	-- Whether Cloud can clone a repository of the project's: one on GitHub
+	-- that Cloud reaches.
+	local function cloud_clones(repo: any): boolean
+		return repo.github ~= nil and cloud.reaches(repo.github) ~= nil
+	end
+	-- On Cloud, a project of repositories (a folder of them, or one composed
+	-- of them): its machine clones those chosen, laid out like the project.
+	cloneable = function(p: sessions.Project?): boolean
+		local r = repositories:get()
+		if not p or p.git or p.github or lives_on_cloud(p) or r.state ~= "ready" then
+			return false
+		end
+		if r.key ~= `{p.id}|{p.device}|{p.path}` then
+			return false
+		end
+		for _, repo in r.list do
+			if not repo.empty and cloud_clones(repo) then
+				return true
+			end
+		end
+		return false
+	end
+	local function cloud_of_repositories(): boolean
+		return on_cloud() and cloneable(project_row(c.project:get()))
+	end
+	-- One a choice can include where it runs.
+	local function choosable(repo: any): boolean
+		if repo.empty then
+			return false
+		end
+		return if on_cloud() then cloud_clones(repo) else true
+	end
 	local function chosen_paths(): { string }
 		local r = repositories:get()
 		local now = chosen:get()
 		if now.key ~= r.key then
-			return M.first_choice(r.list, nil)
+			local can = {}
+			for _, repo in r.list do
+				if choosable(repo) then
+					table.insert(can, repo)
+				end
+			end
+			return M.first_choice(can, nil)
 		end
 		-- (In the list's order, whichever order they were picked in.)
 		local picked: { [string]: boolean } = {}
@@ -712,7 +758,7 @@ function M.bind(c: Choices)
 		end
 		local out: { string } = {}
 		for _, repo in r.list do
-			if picked[repo.path] and not repo.empty then
+			if picked[repo.path] and choosable(repo) then
 				table.insert(out, repo.path)
 			end
 		end
@@ -733,10 +779,13 @@ function M.bind(c: Choices)
 	-- What the composer lists of them, and does with a choice.
 	local project_repositories = {
 		-- Whether the project holds repositories to choose from.
-		offered = holds_repositories,
-		-- Whether its worktree is the project's (a worktree picked there).
+		offered = function(): boolean
+			return holds_repositories() or cloud_of_repositories()
+		end,
+		-- Whether its worktree is the project's (a worktree picked there), or
+		-- Cloud's machine clones its repositories.
 		active = function(): boolean
-			return c.checkout:get() == "worktree" and holds_repositories()
+			return (c.checkout:get() == "worktree" and holds_repositories()) or cloud_of_repositories()
 		end,
 		loading = function(): boolean
 			return repositories:get().state == "loading"
@@ -752,9 +801,11 @@ function M.bind(c: Choices)
 					path = repo.path,
 					branch = repo.branch,
 					chosen = picked[repo.path] == true,
-					disabled = repo.empty or nil,
+					disabled = not choosable(repo) or nil,
 					-- (Gone from where the project includes it from.)
 					missing = repo.missing or nil,
+					-- (On Cloud: one it can't clone.)
+					uncloned = (on_cloud() and not repo.empty and not cloud_clones(repo)) or nil,
 				})
 			end
 			return out
@@ -773,19 +824,23 @@ function M.bind(c: Choices)
 			end
 			if not found then
 				for _, repo in repositories:peek().list do
-					if repo.path == path and not repo.empty then
+					if repo.path == path and choosable(repo) then
 						table.insert(next, path)
 					end
 				end
 			end
 			choose(next)
 		end,
+		-- On Cloud, what its machine does with them.
+		hint = function(): string?
+			return if on_cloud() then ui.t("ds.composer.repositories.cloud_hint"):get() else nil
+		end,
 		-- Every one (true), or none.
 		all = function(on: boolean)
 			local next: { string } = {}
 			if on then
 				for _, repo in repositories:peek().list do
-					if not repo.empty then
+					if choosable(repo) then
 						table.insert(next, repo.path)
 					end
 				end
@@ -825,6 +880,21 @@ function M.bind(c: Choices)
 		-- repository (its folder comes back as the chat is made).
 		if c.device:peek() == M.CLOUD and cloud_repo(p) then
 			return { project = p.id, device = nil, branch = name, cwd = nil, worktree = false, cloud = true }
+		end
+		-- On Cloud, a project of repositories: its machine clones those
+		-- chosen, each where it is in the project.
+		if c.device:peek() == M.CLOUD and cloud_of_repositories() then
+			local wanted: { [string]: boolean } = {}
+			for _, path in chosen_paths() do
+				wanted[path] = true
+			end
+			local clones = {}
+			for _, repo in repositories:peek().list do
+				if wanted[repo.path] then
+					table.insert(clones, { path = repo.path, github = repo.github })
+				end
+			end
+			return { project = p.id, device = nil, branch = name, cwd = nil, worktree = false, cloud = true, clones = clones }
 		end
 		-- (Only a repository can make a worktree: in a plain folder the host
 		-- would refuse the run, so the pick waits for the next repository;

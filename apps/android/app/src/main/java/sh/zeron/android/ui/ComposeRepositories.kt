@@ -111,6 +111,10 @@ fun ComposeRepositories(client: CoreClient?, device: DeviceView, onCreated: (Str
                     onValueChange = { name = it },
                     label = { Text("Name") },
                     placeholder = { Text(suggested.ifEmpty { "Project name" }) },
+                    // (Unfocused, a placeholder doesn't show: the name it gets, said.)
+                    supportingText = if (name.isBlank() && suggested.isNotEmpty()) {
+                        { Text("Named “$suggested” unless you name it") }
+                    } else null,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).testTag("compose-name"),

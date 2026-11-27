@@ -680,7 +680,9 @@
         "loading": "Looking for repositories…",
         "hint": "Each gets a worktree on one new branch, in a folder laid out like the project.",
         "label": "Repositories in the worktree",
-        "missing": "Not found"
+        "missing": "Not found",
+        "not_on_github": "Not on GitHub",
+        "cloud_hint": "Cloud's machine clones each into a folder laid out like the project, all on one new branch."
       }
     },
     "markdown": {

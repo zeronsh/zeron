@@ -60,7 +60,8 @@ Zeron's Boat account reaches it).
 Projects stay where they are: a space on the computer whose folder it is, whose owner stamps
 `githubRepo` (`owner/name` of the folder's `origin`) next to `gitDetected`, so every device can
 offer Cloud without asking that computer. A Cloud session's chat row is `{spaceId: <the
-project>, deviceId: <session device>, cwd: /home/user/{repo}}`. Device lists hide session
+project>, deviceId: <session device>, cwd: /home/user/{repo}}` (`/home/user/{folder}` for a
+project of several repositories, docs/reference/project-worktrees.md "Cloud"). Device lists hide session
 devices. Catalog requests aimed at a Cloud device (`ListHarnesses`, `ListModels`; the picker
 aims at the logical device while Cloud is picked) are answered by the asking engine from its own
 catalog restricted to Codex + Claude Code, so opening a composer never wakes a sandbox.
@@ -69,15 +70,17 @@ catalog restricted to Codex + Claude Code, so opening a composer never wakes a s
 
 1. **Create.** When a chat is created with Cloud picked (`createChat {cloud: true}`), the
    creating engine looks the project's `githubRepo` up in the repositories Cloud reaches and
-   calls `POST /cloud/{org}/sessions {chatId, spaceId, repo, branch?}` (idempotent per chat),
+   calls `POST /cloud/{org}/sessions {chatId, spaceId, repo, branch?}` (idempotent per chat;
+   a project of several repositories adds `repos` and `folder`, `repo` being the first),
    which mints the session device id, claims its device room for the user and starts the
    ProvisionWorkflow; the chat row is written with that device as host and the machine's
    checkout as cwd. The first send queues in the chat doc as usual and is executed once the
    engine is up.
 2. **Provision.** Sandbox created with the enrollment and the project
    (`ZERON_CLOUD_ACCOUNT`, `ZERON_CLOUD_CHAT`, `ZERON_CLOUD_REPO`, `ZERON_CLOUD_PATH`,
-   `ZERON_CLOUD_BRANCH`) in its per-sandbox env; the engine installs, enrolls, clones the
-   repository with its GitHub grant (public repositories need none) and only then drains the
+   `ZERON_CLOUD_BRANCH`, and `ZERON_CLOUD_REPOS` for a project of several repositories) in its
+   per-sandbox env; the engine installs, enrolls, clones the repository (or each of them) with
+   its GitHub grant (public repositories need none) and only then drains the
    chat's commands. With `CLOUD_TEMPLATE` set, sandboxes start from that named snapshot (engine
    pre-installed, no identity) instead of installing.
 3. **Sleep.** After `CLOUD_IDLE_MINUTES` without activity (no turn running, no one doing anything on it)
@@ -750,7 +753,8 @@ The standard GitHub App model: sessions act as the App, never as the user.
 
 - Each **user token** (device flow) stays in the vault. It lists the user's repositories for
   the device menu's Cloud row and proves which App installations the user can reach.
-- A `github` grant names the session repository (`repo: "owner/name"`, required). The vault
+- A `github` grant names the session repository (`repo: "owner/name"`, required; a session of
+  several repositories asks for each one's, and a runner is granted only its own session's). The vault
   lists `/user/installations` with the user token, picks the installation on `owner` (not
   suspended), reads the repository with the user token, and mints `POST
   /app/installations/{id}/access_tokens` with an RS256 App JWT (`GITHUB_APP_PRIVATE_KEY`, `iss` =
@@ -908,7 +912,8 @@ refresh contract changes is caught within a day, before users' grants start fail
   token) is left alone. The first run of an agent whose CLI the machine lacks installs it (once;
   a failed install is retried after ten minutes). GitHub grants (App installation tokens for the session
   repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
-  wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
+  wired as git's `credential.https://github.com.helper`; a session of several repositories holds a
+  line per repository path, with `credential.https://github.com.useHttpPath` set) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
   `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the
   journal or logs. On platform `cloud` only the built-in agents are registered: nothing else

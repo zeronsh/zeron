@@ -89,6 +89,79 @@ describe("account", () => {
   });
 });
 
+describe("a project of several repositories", () => {
+  const API = { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", defaultBranch: "main", dir: "api" };
+  const UI = { fullName: "acme/ui", cloneUrl: "https://github.com/acme/ui.git", defaultBranch: "trunk", dir: "packages/ui" };
+  const several = (u: TestUser, chatId: string, spaceId: string, body: Record<string, unknown>) =>
+    call("POST", `/cloud/${u.orgId}/sessions`, userBearer(u), { chatId, spaceId, repo: { ...API, dir: undefined }, ...body });
+
+  it("clones each one at its folder in one, and grants the machine GitHub access to each", async () => {
+    const u = newUser();
+    const { spaceId } = await enableCloud(u);
+    const bad: Record<string, unknown>[] = [
+      { repos: [API, UI] }, // no folder
+      { repos: [API], folder: "shop" }, // one is `repo`
+      { repos: [API, { ...UI, dir: "../etc" }], folder: "shop" },
+      { repos: [API, { ...UI, dir: "a/b/c" }], folder: "shop" },
+      { repos: [API, { ...UI, dir: "." }], folder: "shop" },
+      { repos: [API, { ...UI, dir: "api" }], folder: "shop" },
+      { repos: [API, { ...UI, dir: "api/inner" }], folder: "shop" },
+      { repos: [API, { ...UI, cloneUrl: "git@github.com:acme/ui" }], folder: "shop" },
+      { repos: [API, { ...UI, fullName: "acme/.." }], folder: "shop" },
+      { repos: [API, { ...UI, defaultBranch: "bad..branch" }], folder: "shop" },
+      { repos: [API, UI], folder: "../shop" },
+      { repos: [API, UI], folder: "a/b" },
+      { repos: Array.from({ length: 17 }, (_, i) => ({ ...API, dir: `r${i}` })), folder: "shop" },
+      { repos: "api", folder: "shop" }
+    ];
+    for (const [ix, body] of bad.entries()) {
+      expect((await several(u, `chat-bad-${ix}`, spaceId, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    const res = await several(u, "chat-several", spaceId, { repos: [API, UI], folder: "shop", branch: "feature/x" });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const created = (await res.json()) as SessionView;
+    // Listed as before: the first repository, and the folder that holds them.
+    expect(created).toMatchObject({ chatId: "chat-several", repo: "acme/api", path: "/home/user/shop" });
+    const sandbox = await sandboxFor(created.deviceId);
+    expect(sandbox.env).toMatchObject({
+      ZERON_CLOUD_REPO: "https://github.com/acme/api.git",
+      ZERON_CLOUD_PATH: "/home/user/shop",
+      ZERON_CLOUD_BRANCH: "feature/x",
+      ZERON_CLOUD_REPOS: "api=https://github.com/acme/api.git@main,packages/ui=https://github.com/acme/ui.git@trunk"
+    });
+    // A session of one repository names no others.
+    const other = newUser();
+    const one = (await (await createSession(other, "chat-one", (await enableCloud(other)).spaceId)).json()) as SessionView;
+    expect((await sandboxFor(one.deviceId)).env.ZERON_CLOUD_REPOS).toBeUndefined();
+
+    // Its machine may get GitHub access to each of its repositories, and
+    // nothing else the user's GitHub reaches.
+    const key = await runnerKey();
+    expect((await enroll(u, created.deviceId, await enrollCodeFor(created.deviceId), key.publicKey)).status).toBe(200);
+    await waitForSession(u, "chat-several", "ready");
+    const bearer = `Bearer ${await runnerToken(u, created.deviceId, key)}`;
+    const github = { provider: "github", deviceId: created.deviceId, ts: Date.now(), sig: "c2ln" };
+    for (const repo of ["acme/api", "ACME/UI"]) {
+      expect((await call("POST", "/vault/org1/grant", bearer, { ...github, repo })).status, repo).toBe(200);
+    }
+    for (const repo of ["acme/app", "acme/other"]) {
+      expect((await call("POST", "/vault/org1/grant", bearer, { ...github, repo })).status, repo).toBe(403);
+    }
+    expect((await vaultCalls("grant")).at(-1)!.args[1]).toMatchObject({ provider: "github", repo: "ACME/UI" });
+
+    // A delegate of it clones the same repositories, laid out the same way.
+    const child = await call("POST", `/cloud/${u.orgId}/sessions`, bearer, {
+      chatId: `child-${crypto.randomUUID().slice(0, 8)}`,
+      parentChatId: "chat-several",
+      config: { harness: "codex" }
+    });
+    expect(child.status, await child.clone().text()).toBe(200);
+    const delegate = (await child.json()) as SessionView;
+    expect(delegate).toMatchObject({ repo: "acme/api", path: "/home/user/shop" });
+    expect((await sandboxFor(delegate.deviceId)).env.ZERON_CLOUD_REPOS).toBe(sandbox.env.ZERON_CLOUD_REPOS);
+  });
+});
+
 describe("models", () => {
   it("lists Cloud's models for each agent, Cloud on or off", async () => {
     const u = newUser();

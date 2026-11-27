@@ -534,6 +534,8 @@ return {
 	["ds.composer.repositories.none"] = "None",
 	["ds.composer.repositories.no_commits"] = "No commits yet",
 	["ds.composer.repositories.missing"] = "Not found",
+	["ds.composer.repositories.not_on_github"] = "Not on GitHub",
+	["ds.composer.repositories.cloud_hint"] = "Cloud's machine clones each into a folder laid out like the project, all on one new branch.",
 	["ds.composer.repositories.loading"] = "Looking for repositories…",
 	["ds.composer.repositories.hint"] = "Each gets a worktree on one new branch, in a folder laid out like the project.",
 	["ds.composer.repositories.label"] = "Repositories in the worktree",

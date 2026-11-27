@@ -24,9 +24,11 @@
 //!   every 60 s, feeding the CloudAccount DO's per-session idle sleep and disk
 //!   levels ([`crate::cloud_disk`]).
 //! - **Session**: every Cloud session runs in its own sandbox, provisioned with
-//!   `ZERON_CLOUD_{ACCOUNT,CHAT,REPO,PATH,BRANCH}` (persisted to
-//!   `cloud-session.json` for restarts). At boot it clones the project's
-//!   repository and checks out the session's branch ([`prepare_checkout`]);
+//!   `ZERON_CLOUD_{ACCOUNT,CHAT,REPO,PATH,BRANCH}` (and `ZERON_CLOUD_REPOS` for
+//!   a project of several repositories; persisted to `cloud-session.json`
+//!   for restarts). At boot it clones the project's repository (or each of
+//!   them, at its folder) and checks out the session's branch
+//!   ([`prepare_checkout`]);
 //!   runs wait for that, showing its steps live ([`setup_snapshot`]); its
 //!   device row carries the `cloud-session`
 //!   capability so device lists show the account's one Cloud device instead.
@@ -66,6 +68,83 @@ pub struct CloudSession {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A project of several repositories (`ZERON_CLOUD_REPOS`): every one
+    /// of them (`repo` is the first), each cloned at its folder under
+    /// `path`. Empty: `repo` alone, cloned at `path`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<CloudRepo>,
+}
+
+/// One repository of a session of several: cloned from `url` at `dir` (its
+/// folder in the project, `api` or `packages/ui`) under the session's path;
+/// `branch` is its default branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudRepo {
+    pub dir: String,
+    pub url: String,
+    pub branch: String,
+}
+
+/// A repository's folder in a project of several: one or two plain
+/// `/`-separated names (`api`, `packages/ui`), never `.` or `..`.
+pub fn is_repository_dir(dir: &str) -> bool {
+    let segments: Vec<&str> = dir.split('/').collect();
+    (1..=2).contains(&segments.len())
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 100
+                && *segment != "."
+                && *segment != ".."
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+}
+
+/// `ZERON_CLOUD_REPOS`: `dir=cloneUrl@defaultBranch` entries, comma
+/// separated (none of the three holds a comma; a URL holds no `@`). `Err`
+/// names the first entry that isn't one; folders are unique, none inside
+/// another.
+pub fn parse_cloud_repos(raw: &str) -> Result<Vec<CloudRepo>, String> {
+    let plain = |value: &str| {
+        !value.is_empty()
+            && !value.contains("..")
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':'))
+    };
+    let mut repos: Vec<CloudRepo> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let parsed = entry.split_once('=').and_then(|(dir, rest)| {
+            let (url, branch) = rest.rsplit_once('@')?;
+            let ok = is_repository_dir(dir)
+                && url.starts_with("https://")
+                && plain(url)
+                && plain(branch)
+                && !branch.contains(':');
+            ok.then(|| CloudRepo {
+                dir: dir.into(),
+                url: url.into(),
+                branch: branch.into(),
+            })
+        });
+        let Some(repo) = parsed else {
+            return Err(format!("not dir=cloneUrl@branch: {entry:?}"));
+        };
+        let inside = |outer: &str, inner: &str| {
+            inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        if let Some(other) = repos
+            .iter()
+            .find(|other| inside(&other.dir, &repo.dir) || inside(&repo.dir, &other.dir))
+        {
+            return Err(format!("{} and {} overlap", other.dir, repo.dir));
+        }
+        repos.push(repo);
+    }
+    Ok(repos)
 }
 
 impl CloudSession {
@@ -75,12 +154,21 @@ impl CloudSession {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
+        let repos = match get("ZERON_CLOUD_REPOS").map(|raw| parse_cloud_repos(&raw)) {
+            Some(Ok(repos)) => repos,
+            Some(Err(error)) => {
+                tracing::error!(%error, "runner: ZERON_CLOUD_REPOS unreadable; cloning ZERON_CLOUD_REPO alone");
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
         Some(Self {
             account: get("ZERON_CLOUD_ACCOUNT")?,
             chat_id: get("ZERON_CLOUD_CHAT")?,
             repo: get("ZERON_CLOUD_REPO"),
             path: get("ZERON_CLOUD_PATH"),
             branch: get("ZERON_CLOUD_BRANCH"),
+            repos,
         })
     }
 
@@ -127,6 +215,20 @@ impl CloudSession {
     /// vault grant names), when it is a github.com repository.
     pub fn github_repo(&self) -> Option<String> {
         github_full_name(self.repo.as_deref()?)
+    }
+
+    /// The session's other GitHub repositories (`owner/name`), of a project
+    /// of several: each gets a `github` grant of its own.
+    pub fn other_github_repos(&self) -> Vec<String> {
+        let first = self.github_repo();
+        let mut others: Vec<String> = Vec::new();
+        for name in self.repos.iter().filter_map(|r| github_full_name(&r.url)) {
+            let known = |seen: &String| seen.eq_ignore_ascii_case(&name);
+            if !first.as_ref().is_some_and(known) && !others.iter().any(known) {
+                others.push(name);
+            }
+        }
+        others
     }
 }
 
@@ -188,6 +290,12 @@ async fn prepare_checkout_with(
         }
     }
     let _finished = Finished;
+    if !session.repos.is_empty() {
+        let Some(path) = session.path.as_deref() else {
+            return Ok(());
+        };
+        return prepare_checkouts(session, Path::new(path), credentials, retry_base).await;
+    }
     let (Some(repo), Some(path)) = (session.repo.as_deref(), session.path.as_deref()) else {
         return Ok(());
     };
@@ -228,37 +336,16 @@ async fn prepare_checkout_with(
             return Err(err.into());
         }
     }
-    let mut delay = retry_base;
-    let mut last = String::new();
-    for attempt in 1..=4 {
-        let mut clone = tokio::process::Command::new("git");
-        // Blobless: every commit and tree, but only the files the checkout
-        // needs (older ones come when something asks for them). A Cloud
-        // machine reaches GitHub far slower than anything else, and a whole
-        // history (a few hundred MB) took half an hour.
-        clone.args(["clone", "--filter=blob:none", "--progress"]);
-        if let Some(branch) = session.branch.as_deref() {
-            clone.args(["--branch", branch]);
-        }
-        clone.arg("--").arg(repo).arg(path);
-        clone.env("GIT_TERMINAL_PROMPT", "0").kill_on_drop(true);
-        match run_clone(clone, clone_step, &full_name).await {
-            Ok(()) => {
-                last.clear();
-                break;
-            }
-            Err(error) => last = error,
-        }
-        // A half-written clone would make the next attempt fail on the
-        // existing directory; it never held anything of the user's.
-        let _ = std::fs::remove_dir_all(path);
-        tracing::warn!(attempt, error = %last, "runner: cloning the session's repository failed");
-        if attempt < 4 {
-            tokio::time::sleep(delay).await;
-            delay *= 2;
-        }
-    }
-    if !last.is_empty() {
+    if let Err(last) = clone_with_retries(
+        repo,
+        path,
+        session.branch.as_deref(),
+        clone_step,
+        &full_name,
+        retry_base,
+    )
+    .await
+    {
         let github = no_credentials
             .map(|reason| format!(" (no GitHub access: {reason})"))
             .unwrap_or_default();
@@ -289,23 +376,11 @@ async fn prepare_checkout_with(
             None => format!("git checkout -B {branch}"),
         }),
     );
-    let checkout = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["checkout", "-B", &branch])
-        .args(pushed.as_deref())
-        .kill_on_drop(true)
-        .output()
-        .await;
-    match checkout {
-        Ok(out) if out.status.success() => {
+    match checkout_branch(path, &branch, pushed.as_deref()).await {
+        Ok(()) => {
             finish_step(branch_step, format!("Checked out {branch}"), None, true);
         }
-        failed => {
-            let error = match failed {
-                Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                Err(err) => err.to_string(),
-            };
+        Err(error) => {
             tracing::warn!(branch, error = %error,
                 "runner: couldn't create the session branch; staying on the default branch");
             finish_step(
@@ -320,8 +395,145 @@ async fn prepare_checkout_with(
     Ok(())
 }
 
+/// [`prepare_checkout`] for a project of several repositories: the folder
+/// `root` holds each one at its own folder (`api`, `packages/ui`), as the
+/// project lays them out, each on the session branch. Every repository must
+/// clone for the checkout to be ready: the first that can't fails it,
+/// naming it. Those already cloned stay and are kept by the next boot, which
+/// clones only what is still missing.
+///
+/// Each repository's session branch starts from what the session pushed of
+/// it (a fresh machine for a chat that already ran), else the branch the
+/// session started from where that repository has it, else its default.
+async fn prepare_checkouts(
+    session: &CloudSession,
+    root: &Path,
+    credentials: Option<&crate::credentials::CredentialBroker>,
+    retry_base: Duration,
+) -> Result<(), EngineError> {
+    let repos = &session.repos;
+    let missing: Vec<&CloudRepo> = repos
+        .iter()
+        .filter(|repo| !root.join(&repo.dir).join(".git").exists())
+        .collect();
+    if missing.is_empty() {
+        // The disk survived a stop: this boot is a wake.
+        record_setup("wake", "Woke the machine".into());
+        if let Some(version) = crate::wake_trace::updated_to() {
+            record_setup("update", format!("Updated Zeron to {version}"));
+        }
+        return Ok(());
+    }
+    record_setup("start", "Started a machine".into());
+    let name = |repo: &CloudRepo| github_full_name(&repo.url).unwrap_or_else(|| repo.url.clone());
+    let commands: Vec<String> = missing
+        .iter()
+        .map(|repo| {
+            format!(
+                "git clone --filter=blob:none {} {}",
+                repo.url,
+                root.join(&repo.dir).display()
+            )
+        })
+        .collect();
+    let what = match missing.as_slice() {
+        [one] => name(one),
+        several => format!("{} repositories", several.len()),
+    };
+    let clone_step = begin_step(
+        "clone",
+        format!("Cloning {what}"),
+        Some(commands.join("\n")),
+    );
+    let clone_started = std::time::Instant::now();
+    // Why a repository has no GitHub access, by `owner/name` (lowercase).
+    let no_credentials = match credentials {
+        Some(broker) => broker.ensure_each_git_credentials().await,
+        None => Default::default(),
+    };
+    let branch = session.session_branch();
+    let mut checked_out: Vec<&str> = Vec::new();
+    let mut not_checked_out: Vec<String> = Vec::new();
+    for (ix, repo) in missing.iter().enumerate() {
+        let full_name = name(repo);
+        let path = root.join(&repo.dir);
+        let label = match missing.len() {
+            1 => full_name.clone(),
+            n => format!("{full_name}, {} of {n}", ix + 1),
+        };
+        progress_step(clone_step, format!("Cloning {label}"));
+        let cloned = match path.parent().map(std::fs::create_dir_all) {
+            Some(Err(err)) => Err(err.to_string()),
+            _ => clone_with_retries(&repo.url, &path, None, clone_step, &label, retry_base).await,
+        };
+        if let Err(last) = cloned {
+            let github = no_credentials
+                .get(&full_name.to_ascii_lowercase())
+                .map(|reason| format!(" (no GitHub access: {reason})"))
+                .unwrap_or_default();
+            let message = format!("couldn't clone {full_name} at {}: {last}{github}", repo.dir);
+            finish_step(
+                clone_step,
+                format!("Couldn't clone {full_name}"),
+                Some(message.clone()),
+                false,
+            );
+            return Err(EngineError::Other(message));
+        }
+        // On the session branch at once: a boot cut short later leaves no
+        // clone without it.
+        let mut base = None;
+        for candidate in [
+            Some(branch.as_str()),
+            session.branch.as_deref(),
+            Some(&repo.branch),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            base = remote_branch(&path, candidate).await;
+            if base.is_some() {
+                break;
+            }
+        }
+        match checkout_branch(&path, &branch, base.as_deref()).await {
+            Ok(()) => checked_out.push(&repo.dir),
+            Err(error) => {
+                tracing::warn!(branch, dir = repo.dir, error = %error,
+                    "runner: couldn't create the session branch; staying on the default branch");
+                not_checked_out.push(format!("{}: {error}", repo.dir));
+            }
+        }
+    }
+    finish_step(
+        clone_step,
+        format!("Cloned {what}"),
+        Some(format!("in {}", format_wait(clone_started.elapsed()))),
+        true,
+    );
+    if not_checked_out.is_empty() {
+        record_setup("branch", format!("Checked out {branch}"));
+    } else {
+        let index = begin_step("branch", format!("Checking out {branch}"), None);
+        finish_step(
+            index,
+            format!("Couldn't check out {branch}"),
+            Some(not_checked_out.join("\n")),
+            false,
+        );
+    }
+    tracing::info!(path = %root.display(), branch, repositories = repos.len(),
+        cloned = checked_out.len(), "runner: session checkouts ready");
+    Ok(())
+}
+
 /// `origin/{branch}`, when the session pushed that branch before this clone.
 async fn pushed_session_branch(path: &Path, branch: &str) -> Option<String> {
+    remote_branch(path, branch).await
+}
+
+/// `origin/{branch}`, when the clone at `path` has it.
+async fn remote_branch(path: &Path, branch: &str) -> Option<String> {
     let remote = format!("origin/{branch}");
     let found = tokio::process::Command::new("git")
         .arg("-C")
@@ -334,6 +546,66 @@ async fn pushed_session_branch(path: &Path, branch: &str) -> Option<String> {
     found
         .is_ok_and(|out| out.status.success())
         .then_some(remote)
+}
+
+/// `git checkout -B {branch} [{base}]` in the clone at `path`; `Err` is git's
+/// own words.
+async fn checkout_branch(path: &Path, branch: &str, base: Option<&str>) -> Result<(), String> {
+    let checkout = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["checkout", "-B", branch])
+        .args(base)
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match checkout {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Clone `url` at `path` (blobless, `branch` checked out, else the remote's
+/// default), its step (`index`) showing progress under `label`; four tries
+/// with backoff from `retry_base`. A failed try leaves nothing behind.
+/// `Err` is git's own words from the last try.
+async fn clone_with_retries(
+    url: &str,
+    path: &Path,
+    branch: Option<&str>,
+    index: usize,
+    label: &str,
+    retry_base: Duration,
+) -> Result<(), String> {
+    let mut delay = retry_base;
+    let mut last = String::new();
+    for attempt in 1..=4 {
+        let mut clone = tokio::process::Command::new("git");
+        // Blobless: every commit and tree, but only the files the checkout
+        // needs (older ones come when something asks for them). A Cloud
+        // machine reaches GitHub far slower than anything else, and a whole
+        // history (a few hundred MB) took half an hour.
+        clone.args(["clone", "--filter=blob:none", "--progress"]);
+        if let Some(branch) = branch {
+            clone.args(["--branch", branch]);
+        }
+        clone.arg("--").arg(url).arg(path);
+        clone.env("GIT_TERMINAL_PROMPT", "0").kill_on_drop(true);
+        match run_clone(clone, index, label).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last = error,
+        }
+        // A half-written clone would make the next attempt fail on the
+        // existing directory; it never held anything of the user's.
+        let _ = std::fs::remove_dir_all(path);
+        tracing::warn!(attempt, url, error = %last, "runner: cloning a session repository failed");
+        if attempt < 4 {
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+    }
+    Err(last)
 }
 
 /// Run `clone` (`git clone --progress`), its step (`index`) saying how far
@@ -1709,6 +1981,7 @@ mod tests {
             repo: Some(origin.to_string_lossy().into_owned()),
             path: Some(path.to_string_lossy().into_owned()),
             branch: Some("main".into()),
+            repos: Vec::new(),
         };
         prepare_checkout(&session, None).await.unwrap();
         let head = std::process::Command::new("git")
@@ -1786,6 +2059,223 @@ mod tests {
                     true
                 ),
             ]
+        );
+
+        // A project of several repositories: each cloned at its folder in
+        // one, on the session branch — from the branch the session started
+        // from where a repository has it, else from its default branch.
+        let commit = |repo: &Path, message: &str| {
+            git(
+                repo,
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+            )
+        };
+        let rev = |repo: &Path, what: &str| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["rev-parse", what])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let api = dir.path().join("origins").join("api");
+        let ui = dir.path().join("origins").join("ui");
+        for (origin, default) in [(&api, "main"), (&ui, "trunk")] {
+            std::fs::create_dir_all(origin).unwrap();
+            git(origin, &["init", "-q", "-b", default]);
+            commit(origin, "init");
+        }
+        git(&api, &["checkout", "-q", "-b", "feature/x"]);
+        commit(&api, "on feature/x");
+        git(&api, &["checkout", "-q", "main"]);
+        let root = dir.path().join("work").join("shop");
+        let repo = |origin: &Path, dir: &str, branch: &str| CloudRepo {
+            dir: dir.into(),
+            url: origin.to_string_lossy().into_owned(),
+            branch: branch.into(),
+        };
+        let several = CloudSession {
+            account: "cloud-acct".into(),
+            chat_id: "fedcba9876".into(),
+            repo: Some(api.to_string_lossy().into_owned()),
+            path: Some(root.to_string_lossy().into_owned()),
+            branch: Some("feature/x".into()),
+            repos: vec![repo(&api, "api", "main"), repo(&ui, "packages/ui", "trunk")],
+        };
+        let before = setup_snapshot("m", None).0.len();
+        prepare_checkout(&several, None).await.unwrap();
+        for clone in [root.join("api"), root.join("packages").join("ui")] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "zeron/cloud-fedcba9876",
+                "{}",
+                clone.display()
+            );
+        }
+        assert_eq!(rev(&root.join("api"), "HEAD"), rev(&api, "feature/x"));
+        assert_eq!(
+            rev(&root.join("packages").join("ui"), "HEAD"),
+            rev(&ui, "trunk")
+        );
+        // A boot cut short: what was cloned stays as it is, what wasn't is
+        // cloned.
+        std::fs::write(root.join("api").join("notes.txt"), "work in progress").unwrap();
+        std::fs::remove_dir_all(root.join("packages").join("ui")).unwrap();
+        prepare_checkout(&several, None).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("api").join("notes.txt")).unwrap(),
+            "work in progress"
+        );
+        assert!(root.join("packages").join("ui").join(".git").exists());
+        // Every repository there: a wake.
+        prepare_checkout(&several, None).await.unwrap();
+        // One that can't be cloned fails the checkout, naming it; the others
+        // stay for the next boot.
+        let missing = dir.path().join("origins").join("gone");
+        let mut broken = several.clone();
+        broken.repos.push(repo(&missing, "gone", "main"));
+        let err = prepare_checkout_with(&broken, None, Duration::from_millis(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(&format!(
+                "couldn't clone {} at gone: ",
+                missing.to_string_lossy()
+            )),
+            "{err}"
+        );
+        assert!(!root.join("gone").exists());
+        assert!(root.join("api").join("notes.txt").exists());
+        let (parts, _) = setup_snapshot("m", None);
+        let steps: Vec<(String, bool)> = parts[before..]
+            .iter()
+            .map(|part| match part {
+                zeron_doc::MessagePart::Tool {
+                    call: zeron_proto::ToolCall::Unknown { name, .. },
+                    is_error,
+                    ..
+                } => (name.clone(), *is_error),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let step = |name: &str, error| (name.to_string(), error);
+        assert_eq!(
+            steps,
+            [
+                step("Started a machine", false),
+                step("Cloned 2 repositories", false),
+                step("Checked out zeron/cloud-fedcba9876", false),
+                step("Started a machine", false),
+                step(&format!("Cloned {}", ui.to_string_lossy()), false),
+                step("Checked out zeron/cloud-fedcba9876", false),
+                step("Woke the machine", false),
+                step("Started a machine", false),
+                step(
+                    &format!("Couldn't clone {}", missing.to_string_lossy()),
+                    true
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_of_several_repositories_reads_them_from_its_env() {
+        let vars = |name: &str| match name {
+            "ZERON_CLOUD_PATH" => Some("/home/user/shop".into()),
+            "ZERON_CLOUD_REPOS" => Some(
+                "api=https://github.com/acme/api.git@main,\
+                 packages/ui=https://github.com/acme/ui.git@trunk,\
+                 again=https://github.com/ACME/API.git@main"
+                    .into(),
+            ),
+            other => session_vars(other),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let session = CloudSession::resolve_with(dir.path(), vars).unwrap();
+        assert_eq!(
+            session.repos,
+            [
+                CloudRepo {
+                    dir: "api".into(),
+                    url: "https://github.com/acme/api.git".into(),
+                    branch: "main".into(),
+                },
+                CloudRepo {
+                    dir: "packages/ui".into(),
+                    url: "https://github.com/acme/ui.git".into(),
+                    branch: "trunk".into(),
+                },
+                CloudRepo {
+                    dir: "again".into(),
+                    url: "https://github.com/ACME/API.git".into(),
+                    branch: "main".into(),
+                },
+            ]
+        );
+        // Its other repositories each get a grant (`acme/app` is the first;
+        // a repository named twice is asked for once).
+        assert_eq!(session.other_github_repos(), ["acme/api", "acme/ui"]);
+        // ... and the next boot reads them from the file.
+        assert_eq!(
+            CloudSession::resolve_with(dir.path(), |_| None).unwrap(),
+            session
+        );
+        // A single repository's session: none of that.
+        let single = CloudSession::resolve_with(dir.path(), session_vars).unwrap();
+        assert!(single.repos.is_empty());
+        assert!(single.other_github_repos().is_empty());
+        let raw = serde_json::to_string(&single).unwrap();
+        assert!(!raw.contains("repos"), "{raw}");
+
+        for bad in [
+            "api",
+            "api=https://github.com/acme/api.git",
+            "../x=https://github.com/acme/api.git@main",
+            "a/b/c=https://github.com/acme/api.git@main",
+            "./x=https://github.com/acme/api.git@main",
+            "api=git@github.com:acme/api.git@main",
+            "api=https://github.com/acme/api.git@ma in",
+            "api=https://github.com/acme/api.git@a..b",
+            "api=http://github.com/acme/api.git@main",
+            "x=https://github.com/a/b.git@main,x=https://github.com/a/c.git@main",
+            "x=https://github.com/a/b.git@main,x/y=https://github.com/a/c.git@main",
+        ] {
+            assert!(parse_cloud_repos(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse_cloud_repos("").unwrap(), []);
+        assert!(
+            parse_cloud_repos("x=https://github.com/a/b.git@main,xy=https://github.com/a/c.git@m")
+                .is_ok()
+        );
+        // An unreadable list: the first repository alone, as before.
+        let unreadable = |name: &str| match name {
+            "ZERON_CLOUD_REPOS" => Some("../x=https://github.com/a/b.git@main".into()),
+            other => session_vars(other),
+        };
+        let fallback = tempfile::tempdir().unwrap();
+        assert!(
+            CloudSession::resolve_with(fallback.path(), unreadable)
+                .unwrap()
+                .repos
+                .is_empty()
         );
     }
 

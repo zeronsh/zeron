@@ -16,7 +16,9 @@ import {
   REPAIR_ENGINE_SCRIPT,
   START_ENGINE_COMMAND,
   STOP_ENGINE_COMMAND,
+  encodeCloudRepos,
   installCommand,
+  isCloudRepos,
   type SessionEnv
 } from "../../src/cloud/install-script";
 
@@ -73,11 +75,11 @@ esac`);
   stub(bin, "uname", `[ "$1" = "-m" ] && echo x86_64 || /usr/bin/uname "$@"`);
   const script = join(root, "install.sh");
   writeFileSync(script, CLOUD_INSTALL_SCRIPT);
-  const run = (enroll: string) =>
+  const run = (enroll: string, overrides: Partial<SessionEnv> = {}) =>
     execFileSync("sh", [script], {
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
-        ...session(enroll),
+        ...session(enroll, "https://edge.test", overrides),
         ZERON_CLOUD_HOME: home,
         ZERON_CLOUD_UNIT_DIR: units
       },
@@ -333,6 +335,71 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     expect(() => installCommand(session("org.user.dev.code", "https://edge.test", { ZERON_CLOUD_REPO: "https://github.com/a/b'; id" }))).toThrow();
     expect(() => installCommand(session("org.user.dev.code", "https://edge.test", { ZERON_CLOUD_PATH: "/home/user/../../etc" }))).toThrow();
     expect(() => installCommand(session("org.user.dev.code", "https://edge.test", { ZERON_CLOUD_BRANCH: "main; reboot" }))).toThrow();
+  });
+
+  describe("a project of several repositories", () => {
+    const REPOS = [
+      { dir: "api", cloneUrl: "https://github.com/acme/api.git", defaultBranch: "main" },
+      { dir: "packages/ui", cloneUrl: "https://github.com/acme/ui.git", defaultBranch: "trunk" }
+    ];
+
+    it("encodes each repository as dir=cloneUrl@branch, and refuses what isn't one", () => {
+      const value = encodeCloudRepos(REPOS);
+      expect(value).toBe("api=https://github.com/acme/api.git@main,packages/ui=https://github.com/acme/ui.git@trunk");
+      expect(isCloudRepos(value)).toBe(true);
+      const at = (dir: string, cloneUrl = "https://github.com/acme/x.git", defaultBranch = "main") => ({ dir, cloneUrl, defaultBranch });
+      for (const bad of [
+        [REPOS[0]!], // one repository is ZERON_CLOUD_REPO's
+        [...REPOS, at("../etc")],
+        [...REPOS, at("a/b/c")],
+        [...REPOS, at("./x")],
+        [...REPOS, at("x/..")],
+        [...REPOS, at("api")],
+        [...REPOS, at("packages")],
+        [...REPOS, at("api/inner")],
+        [...REPOS, at("with space")],
+        [...REPOS, at("x", "https://github.com/a/b'; id")],
+        [...REPOS, at("x", "https://token@github.com/a/b.git")],
+        [...REPOS, at("x", "git@github.com:a/b.git")],
+        [...REPOS, at("x", "https://github.com/a/b.git", "main; reboot")],
+        [...REPOS, at("x", "https://github.com/a/b.git", "a..b")],
+        [...REPOS, at("x", "https://github.com/a/b.git,y=https://github.com/a/c.git")],
+        Array.from({ length: 17 }, (_, i) => at(`r${i}`))
+      ]) {
+        expect(() => encodeCloudRepos(bad), JSON.stringify(bad)).toThrow();
+      }
+      expect(isCloudRepos("")).toBe(false);
+      expect(isCloudRepos("api=https://github.com/acme/api.git")).toBe(false);
+      expect(isCloudRepos("api=https://github.com/acme/api.git@main,=https://github.com/acme/ui.git@main")).toBe(false);
+      expect(isCloudRepos(`${encodeCloudRepos(REPOS)},`)).toBe(false);
+      expect(encodeCloudRepos(Array.from({ length: 16 }, (_, i) => at(`r${i}`))).split(",")).toHaveLength(16);
+    });
+
+    it("passes the repositories to the machine, and only for a project of several", () => {
+      const command = installCommand(session("org.user.cloud-1.codeA", "https://edge.test", { ZERON_CLOUD_REPOS: encodeCloudRepos(REPOS) }));
+      expect(command).toContain(
+        "ZERON_CLOUD_REPOS='api=https://github.com/acme/api.git@main,packages/ui=https://github.com/acme/ui.git@trunk'"
+      );
+      expect(installCommand(session("org.user.cloud-1.codeA"))).not.toContain("ZERON_CLOUD_REPOS");
+      expect(() =>
+        installCommand(session("org.user.dev.code", "https://edge.test", { ZERON_CLOUD_REPOS: "x=https://github.com/a/b.git@main'; id" }))
+      ).toThrow();
+      expect(() =>
+        installCommand(
+          session("org.user.dev.code", "https://edge.test", {
+            ZERON_CLOUD_REPOS: "../x=https://github.com/a/b.git@main,y=https://github.com/a/c.git@main"
+          })
+        )
+      ).toThrow();
+
+      const { home, run } = setup();
+      run("org.user.cloud-1.codeA", { ZERON_CLOUD_PATH: "/home/user/shop", ZERON_CLOUD_REPOS: encodeCloudRepos(REPOS) });
+      const envFile = readFileSync(join(home, ".zeron", "env"), "utf8");
+      expect(envFile).toContain("ZERON_CLOUD_PATH=/home/user/shop\nZERON_CLOUD_BRANCH=main\n");
+      expect(envFile).toContain(
+        "\nZERON_CLOUD_REPOS=api=https://github.com/acme/api.git@main,packages/ui=https://github.com/acme/ui.git@trunk\n"
+      );
+    });
   });
 
   it("runs end to end through the command wrapper", () => {

@@ -192,6 +192,7 @@ env_new="$(mktemp "$data/.env.XXXXXX")"
   put ZERON_CLOUD_REPO "\${ZERON_CLOUD_REPO:-}"
   put ZERON_CLOUD_PATH "\${ZERON_CLOUD_PATH:-}"
   put ZERON_CLOUD_BRANCH "\${ZERON_CLOUD_BRANCH:-}"
+  put ZERON_CLOUD_REPOS "\${ZERON_CLOUD_REPOS:-}"
   put ZERON_AUTO_UPDATE 1
   put HOME "$home"
 } >"$env_new"
@@ -270,6 +271,53 @@ export const isRepoUrl = (value: string): boolean => REPO_RE.test(value) && !val
 export const isCheckoutPath = (value: string): boolean => PATH_RE.test(value) && !value.split("/").includes("..");
 export const isBranch = (value: string): boolean => BRANCH_RE.test(value) && !value.includes("..");
 
+/** A repository's folder in a project of several: one or two plain names. */
+const DIR_RE = /^[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._-]{1,100})?$/;
+const isRepoDir = (value: string): boolean => DIR_RE.test(value) && !value.split("/").some((part) => part === "." || part === "..");
+/** The most repositories `ZERON_CLOUD_REPOS` names. */
+const MAX_CLOUD_REPOS = 16;
+
+/** One repository of a project of several, as its machine clones it. */
+export interface CloudRepoEntry {
+  readonly dir: string;
+  readonly cloneUrl: string;
+  readonly defaultBranch: string;
+}
+
+/**
+ * `ZERON_CLOUD_REPOS`: a session of a project of several repositories,
+ * `dir=cloneUrl@defaultBranch` per repository, comma separated (none of the
+ * three may hold a comma, a quote or a space, and a clone URL holds no `@`).
+ * The machine clones each at `dir` under `ZERON_CLOUD_PATH`. Throws on a value
+ * that isn't one.
+ */
+export const encodeCloudRepos = (repos: readonly CloudRepoEntry[]): string => {
+  const value = repos.map((r) => `${r.dir}=${r.cloneUrl}@${r.defaultBranch}`).join(",");
+  if (!isCloudRepos(value)) throw new Error("bad ZERON_CLOUD_REPOS");
+  return value;
+};
+
+/** Whether `value` is a `ZERON_CLOUD_REPOS` (see {@link encodeCloudRepos}):
+ * 2..=16 entries, each part checked like the single repository's, folders
+ * unique and none inside another. */
+export const isCloudRepos = (value: string): boolean => {
+  const entries = value.split(",");
+  if (entries.length < 2 || entries.length > MAX_CLOUD_REPOS) return false;
+  const dirs: string[] = [];
+  for (const entry of entries) {
+    const eq = entry.indexOf("=");
+    const at = entry.lastIndexOf("@");
+    if (eq < 0 || at < eq) return false;
+    const dir = entry.slice(0, eq);
+    const url = entry.slice(eq + 1, at);
+    const branch = entry.slice(at + 1);
+    if (!isRepoDir(dir) || !isRepoUrl(url) || !isBranch(branch)) return false;
+    if (dirs.some((other) => other === dir || dir.startsWith(`${other}/`) || other.startsWith(`${dir}/`))) return false;
+    dirs.push(dir);
+  }
+  return true;
+};
+
 /** Everything a session sandbox is provisioned with (also its create env). */
 export interface SessionEnv {
   readonly ZERON_RUNNER_ENROLL: string;
@@ -281,6 +329,9 @@ export interface SessionEnv {
   readonly ZERON_CLOUD_REPO: string;
   readonly ZERON_CLOUD_PATH: string;
   readonly ZERON_CLOUD_BRANCH: string;
+  /** A project of several repositories ({@link encodeCloudRepos}); absent:
+   * `ZERON_CLOUD_REPO` alone, at `ZERON_CLOUD_PATH`. */
+  readonly ZERON_CLOUD_REPOS?: string;
 }
 
 const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
@@ -292,8 +343,12 @@ const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
   ZERON_CLOUD_CHAT: (v) => ID_RE.test(v),
   ZERON_CLOUD_REPO: isRepoUrl,
   ZERON_CLOUD_PATH: isCheckoutPath,
-  ZERON_CLOUD_BRANCH: isBranch
+  ZERON_CLOUD_BRANCH: isBranch,
+  ZERON_CLOUD_REPOS: isCloudRepos
 };
+
+/** Optional values: left out of the command when absent. */
+const OPTIONAL: ReadonlySet<keyof SessionEnv> = new Set(["ZERON_CLOUD_REPOS"]);
 
 /**
  * The shell command sent through `SandboxProvider.exec`. The script travels
@@ -304,10 +359,11 @@ const CHECKS: Record<keyof SessionEnv, (v: string) => boolean> = {
  * charset first.
  */
 export const installCommand = (env: SessionEnv): string => {
-  const assignments = (Object.keys(CHECKS) as (keyof SessionEnv)[]).map((name) => {
+  const assignments = (Object.keys(CHECKS) as (keyof SessionEnv)[]).flatMap((name) => {
     const value = env[name];
-    if (!CHECKS[name](value)) throw new Error(`bad ${name}`);
-    return `${name}='${value}'`;
+    if (value === undefined && OPTIONAL.has(name)) return [];
+    if (value === undefined || !CHECKS[name](value)) throw new Error(`bad ${name}`);
+    return [`${name}='${value}'`];
   });
   const script = btoa(CLOUD_INSTALL_SCRIPT);
   return (

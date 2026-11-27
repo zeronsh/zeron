@@ -202,6 +202,8 @@ struct Edge {
     stale_once: bool,
     /// Every `github` grant request's `repo`.
     github_repos: Vec<String>,
+    /// A `github` grant's answer for one repository, over `grants`.
+    github_by_repo: HashMap<String, (u16, Value)>,
     /// Grant requests seen, per provider.
     grant_requests: HashMap<String, usize>,
     /// An edge from before `POST /vault/{org}/grants` (it answers 404).
@@ -305,6 +307,9 @@ fn edge_handler(state: Arc<Mutex<Edge>>) -> impl FnMut(&Req) -> (u16, Value) + S
                         );
                     };
                     edge.github_repos.push(repo.into());
+                    if let Some(answer) = edge.github_by_repo.get(repo) {
+                        return answer.clone();
+                    }
                 }
                 edge.grants.get(provider).cloned().unwrap_or((
                     403,
@@ -397,6 +402,7 @@ impl Rig {
             claude_env_login: false,
             codex_env_login: false,
             github_repo: Some("acme/app".into()),
+            other_github_repos: Vec::new(),
             agents: AgentPaths::under(&self.home),
             env_logins: Default::default(),
             install_missing: false,
@@ -1173,6 +1179,114 @@ async fn github_grant_sets_env_git_store_helper_and_gh_hosts() {
     let hosts = std::fs::read_to_string(rig.home.join(".config/gh/hosts.yml")).unwrap();
     assert!(hosts.contains("oauth_token: ghu_token"));
     assert!(hosts.contains("user: octo"));
+}
+
+/// A session of several repositories: a grant per repository, each one's
+/// token for that repository alone (git asks the store by path), and one
+/// it can't reach named.
+#[tokio::test]
+async fn a_session_of_several_repositories_gets_each_its_own_token() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "github",
+        200,
+        json!({"provider": "github", "accessToken": "ghs_app", "expiresAt": in_ms(3600),
+               "account": "octo", "generation": 1}),
+    );
+    {
+        let mut edge = rig.state.lock().unwrap();
+        edge.github_by_repo.insert(
+            "acme/ui".into(),
+            (
+                200,
+                json!({"provider": "github", "accessToken": "ghs_ui", "expiresAt": in_ms(3600),
+                       "account": "octo", "generation": 1}),
+            ),
+        );
+        edge.github_by_repo.insert(
+            "acme/docs".into(),
+            (
+                404,
+                json!({"error": "not_found",
+                       "message": "No GitHub account you connected can reach acme/docs through the Zeron app."}),
+            ),
+        );
+    }
+    let broker = |identity: Arc<RunnerIdentity>| {
+        let auth = rig.auth(identity.clone());
+        let config = BrokerConfig {
+            other_github_repos: vec!["acme/ui".into(), "acme/docs".into()],
+            ..rig.broker_config("http://127.0.0.1:9")
+        };
+        CredentialBroker::new(config, identity, Arc::new(auth))
+    };
+    let refused = broker(identity.clone()).ensure_each_git_credentials().await;
+    assert_eq!(refused.keys().collect::<Vec<_>>(), ["acme/docs"]);
+    assert!(refused["acme/docs"].contains("acme/docs"), "{refused:?}");
+    let mut asked = rig.state.lock().unwrap().github_repos.clone();
+    asked.sort();
+    assert_eq!(asked, ["acme/app", "acme/docs", "acme/ui"]);
+
+    let store = rig.data_dir.join("cloud/git-credentials");
+    assert_eq!(
+        std::fs::read_to_string(&store).unwrap(),
+        "https://x-access-token:ghs_app@github.com/acme/app.git\n\
+         https://x-access-token:ghs_app@github.com/acme/app\n\
+         https://x-access-token:ghs_ui@github.com/acme/ui.git\n\
+         https://x-access-token:ghs_ui@github.com/acme/ui\n"
+    );
+    assert_eq!(mode(&store), 0o600);
+    // git itself picks each repository's token, and none for another.
+    let fill = |path: &str| {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .args(["credential", "fill"])
+            .env("HOME", &rig.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/bin/false")
+            .env("SSH_ASKPASS", "/bin/false")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("protocol=https\nhost=github.com\npath={path}\n\n").as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("password=").map(str::to_owned))
+    };
+    assert_eq!(fill("acme/app.git").as_deref(), Some("ghs_app"));
+    assert_eq!(fill("acme/ui.git").as_deref(), Some("ghs_ui"));
+    assert_eq!(fill("acme/ui").as_deref(), Some("ghs_ui"));
+    assert_eq!(fill("acme/docs.git"), None);
+    // gh keeps one token for github.com: the first repository's.
+    let hosts = std::fs::read_to_string(rig.home.join(".config/gh/hosts.yml")).unwrap();
+    assert!(hosts.contains("oauth_token: ghs_app"));
+
+    // Without the first repository's grant, git keeps the others'.
+    rig.grant(
+        "github",
+        403,
+        json!({"error": "not_authorized", "message": "not connected"}),
+    );
+    let refused = broker(identity).ensure_each_git_credentials().await;
+    let mut refused: Vec<&String> = refused.keys().collect();
+    refused.sort();
+    assert_eq!(refused, ["acme/app", "acme/docs"]);
+    assert_eq!(
+        std::fs::read_to_string(&store).unwrap(),
+        "https://x-access-token:ghs_ui@github.com/acme/ui.git\n\
+         https://x-access-token:ghs_ui@github.com/acme/ui\n"
+    );
+    assert!(!rig.home.join(".config/gh/hosts.yml").exists());
 }
 
 /// Agents on Cloud commit as the signed-in GitHub user (author and

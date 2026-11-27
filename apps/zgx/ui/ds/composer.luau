@@ -124,6 +124,7 @@ export type Repositories = {
 	chosen: () -> { string },
 	toggle: (path: string) -> (),
 	all: (on: boolean) -> (),
+	hint: (() -> string?)?,
 }
 export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
@@ -2558,6 +2559,7 @@ return ui.component(function(props: Props): Node
 						loading = repositories.loading,
 						on_toggle = repositories.toggle,
 						on_all = repositories.all,
+						hint = repositories.hint,
 					}
 					else nil,
 				extra_when = if repositories then of_repositories else nil,

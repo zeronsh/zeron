@@ -56,6 +56,27 @@ fn http() -> reqwest::Client {
         .clone()
 }
 
+/// One repository of a Cloud session of several, and its folder in the
+/// project (`api`, `packages/ui`).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionRepo<'a> {
+    pub repo: &'a GithubRepo,
+    pub dir: &'a str,
+}
+
+/// `POST /cloud/{orgId}/sessions`'s body for one repository.
+fn session_body(chat_id: &str, space_id: &str, repo: &GithubRepo) -> serde_json::Value {
+    serde_json::json!({
+        "chatId": chat_id,
+        "spaceId": space_id,
+        "repo": {
+            "fullName": repo.full_name,
+            "cloneUrl": repo.clone_url,
+            "defaultBranch": repo.default_branch,
+        },
+    })
+}
+
 /// Lifecycle actions on one session's sandbox
 /// (`POST /cloud/{orgId}/sessions/{chatId}/{action}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,8 +271,10 @@ impl CloudClient {
     }
 
     /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?,
-    /// reach?}` — idempotent per chat; mints the session device and starts
-    /// provisioning. No `reach`: the account's default.
+    /// reach?}` (and, for a project of several repositories, `repos` and
+    /// `folder`: [`Self::create_session_of`]) — idempotent per chat; mints the
+    /// session device and starts provisioning. No `reach`: the account's
+    /// default.
     pub async fn create_session(
         &self,
         chat_id: &str,
@@ -260,15 +283,48 @@ impl CloudClient {
         branch: Option<&str>,
         reach: Option<CloudReach>,
     ) -> Result<CloudSession, EngineError> {
-        let mut body = serde_json::json!({
-            "chatId": chat_id,
-            "spaceId": space_id,
-            "repo": {
-                "fullName": repo.full_name,
-                "cloneUrl": repo.clone_url,
-                "defaultBranch": repo.default_branch,
-            },
-        });
+        self.post_session(session_body(chat_id, space_id, repo), branch, reach)
+            .await
+    }
+
+    /// [`Self::create_session`] for a project of several repositories:
+    /// `repos` (2..=16) each cloned at its `dir` in `/home/user/{folder}`.
+    /// `repo` is the first of them, so an edge from before sessions of
+    /// several still starts a working session (of that one).
+    pub async fn create_session_of(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        repos: &[SessionRepo<'_>],
+        folder: &str,
+        branch: Option<&str>,
+        reach: Option<CloudReach>,
+    ) -> Result<CloudSession, EngineError> {
+        let first = repos
+            .first()
+            .ok_or_else(|| EngineError::Other("No repository to clone.".into()))?;
+        let mut body = session_body(chat_id, space_id, first.repo);
+        body["repos"] = repos
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "fullName": r.repo.full_name,
+                    "cloneUrl": r.repo.clone_url,
+                    "defaultBranch": r.repo.default_branch,
+                    "dir": r.dir,
+                })
+            })
+            .collect();
+        body["folder"] = folder.into();
+        self.post_session(body, branch, reach).await
+    }
+
+    async fn post_session(
+        &self,
+        mut body: serde_json::Value,
+        branch: Option<&str>,
+        reach: Option<CloudReach>,
+    ) -> Result<CloudSession, EngineError> {
         if let Some(branch) = branch {
             body["branch"] = serde_json::Value::String(branch.to_owned());
         }
@@ -1819,6 +1875,31 @@ mod tests {
                         "spaceId": body["spaceId"], "state": "provisioning", "createdAt": 4}),
                 )
             }
+            // A session of several repositories.
+            ("POST", "/cloud/org_9/sessions") => {
+                assert_eq!(body["chatId"], "chat-3");
+                // An older edge reads the first repository as the session's.
+                assert_eq!(body["repo"]["fullName"], "acme/api");
+                assert_eq!(body["repo"]["cloneUrl"], "https://github.com/acme/api.git");
+                assert_eq!(
+                    body["repos"],
+                    serde_json::json!([
+                        {"fullName": "acme/api", "cloneUrl": "https://github.com/acme/api.git",
+                            "defaultBranch": "main", "dir": "api"},
+                        {"fullName": "acme/ui", "cloneUrl": "https://github.com/acme/ui.git",
+                            "defaultBranch": "trunk", "dir": "packages/ui"},
+                    ])
+                );
+                assert_eq!(body["folder"], "shop");
+                assert_eq!(body.get("branch"), None);
+                assert_eq!(body.get("reach"), None);
+                (
+                    200,
+                    serde_json::json!({"chatId": "chat-3", "deviceId": "cloud-s3",
+                        "spaceId": body["spaceId"], "state": "provisioning", "createdAt": 5,
+                        "path": "/home/user/shop"}),
+                )
+            }
             ("POST", "/cloud/org_1/sessions/chat-1/wake") => (
                 409,
                 serde_json::json!({"error": "too_many_awake", "message": "All 5 of your Cloud sessions that may run at once are busy."}),
@@ -1936,6 +2017,51 @@ mod tests {
         assert_eq!(ids, ["opus", "sonnet"]);
         // A level this build doesn't know goes; the model stays.
         assert_eq!(models[0].reasoning_levels.len(), 2);
+    }
+
+    /// A project of several repositories: every one rides `repos` with its
+    /// folder, and `repo` stays the first (an older edge's single session).
+    #[tokio::test]
+    async fn a_session_of_several_repositories_names_each_and_its_folder() {
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_9");
+        let repo = |name: &str, branch: &str| GithubRepo {
+            full_name: format!("acme/{name}"),
+            clone_url: format!("https://github.com/acme/{name}.git"),
+            default_branch: branch.into(),
+            private: true,
+            ..Default::default()
+        };
+        let (api, ui) = (repo("api", "main"), repo("ui", "trunk"));
+        let created = client
+            .create_session_of(
+                "chat-3",
+                "sp-1",
+                &[
+                    SessionRepo {
+                        repo: &api,
+                        dir: "api",
+                    },
+                    SessionRepo {
+                        repo: &ui,
+                        dir: "packages/ui",
+                    },
+                ],
+                "shop",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.device_id, "cloud-s3");
+        assert_eq!(created.path.as_deref(), Some("/home/user/shop"));
+        assert_eq!(edge.requests().len(), 1);
+        assert!(
+            client
+                .create_session_of("chat-3", "sp-1", &[], "shop", None, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

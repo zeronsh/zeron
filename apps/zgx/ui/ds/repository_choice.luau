@@ -37,12 +37,16 @@ export type Row = {
 	disabled: boolean?,
 	-- Can't be chosen: no longer where the project includes it from.
 	missing: boolean?,
+	-- Can't be chosen on Cloud: not a GitHub repository Cloud reaches.
+	uncloned: boolean?,
 }
 export type Props = {
 	list: () -> { Row },
 	loading: (() -> boolean)?,
 	on_toggle: (path: string) -> (),
 	on_all: (on: boolean) -> (),
+	-- The line under the list, when it isn't the worktree's (Cloud's).
+	hint: (() -> string?)?,
 }
 
 -- Rows shown before the list scrolls.
@@ -196,6 +200,8 @@ local function RepositoryChoice(props: Props): Node
 						local it = now()
 						if it.missing then
 							return locale.s("ds.composer.repositories.missing")
+						elseif it.uncloned then
+							return locale.s("ds.composer.repositories.not_on_github")
 						elseif it.disabled then
 							return locale.s("ds.composer.repositories.no_commits")
 						end
@@ -250,7 +256,10 @@ local function RepositoryChoice(props: Props): Node
 		}),
 		list,
 		ui.text {
-			locale.t("ds.composer.repositories.hint"),
+			function(): string
+				local own = if props.hint then props.hint() else nil
+				return own or locale.s("ds.composer.repositories.hint")
+			end,
 			px = "$space.2",
 			pt = "$space.1",
 			pb = "$space.1",

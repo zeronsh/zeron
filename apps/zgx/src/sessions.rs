@@ -1583,6 +1583,20 @@ impl Sessions {
         if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
             params["cloudReach"] = Json::from(reach);
         }
+        // A project of several repositories: those chosen, each where it goes
+        // in the project and the GitHub repository Cloud clones there.
+        if let Some(chosen) = args
+            .field("repositories")
+            .and_then(|v| serde_json::from_str::<Json>(&v.to_json()).ok())
+            .and_then(|v| v.as_array().cloned())
+            .filter(|list| !list.is_empty())
+        {
+            let list: Vec<Json> = chosen
+                .iter()
+                .filter_map(|r| Some(json!({ "path": r["path"].as_str()?, "github": r["github"].as_str()? })))
+                .collect();
+            params["cloudRepositories"] = Json::Array(list);
+        }
         if let Some(config) = args
             .field("config")
             .filter(|c| !matches!(c, Value::Nil))

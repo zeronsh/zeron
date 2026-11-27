@@ -55,6 +55,16 @@ A chat whose folder holds several repositories (a project worktree, or a local c
 
 Plugins can find the same repositories with `zeron.repositories(folder)` in their service (`sessions.read`, and only within this device's chats' and projects' folders).
 
+## Cloud
+
+A chat in such a project can run on Cloud too, on a machine of its own that clones the chosen repositories (each needs a GitHub repository Cloud reaches) into one folder laid out like the project.
+
+- **Asked for** with `CreateChat {cloud: true, cloudRepositories: [{path, github}]}`: each repository's path in the project (`api`, `packages/ui`, one or two plain names, none inside another) and its GitHub `owner/name`, 2 to 16 of them. The creating engine looks each one up in the repositories Cloud reaches; one it can't reach fails the create, naming it. One repository named is a session of that repository alone, as before; none, the project's own `githubRepo`.
+- **The session** (`POST /cloud/{org}/sessions`) carries them as `repos: [{fullName, cloneUrl, defaultBranch, dir}]` with `folder`, the project's folder name (other characters than letters, digits, `.`, `_` and `-` become `-`). `repo` is the first of them, so an edge from before such sessions starts a session of that one. The machine's folder is `/home/user/<folder>`; the session lists the first repository as its `repo` and that folder as its `path`. Delegates of the chat clone the same repositories the same way.
+- **The machine** gets them as `ZERON_CLOUD_REPOS`: `dir=cloneUrl@defaultBranch` per repository, comma separated. It clones each at its path in the folder (blobless, as a single repository is), then puts it on the session's `zeron/cloud-<id>` branch: from what the session pushed of it (a fresh machine for a chat that already ran), else the branch the chat started from where that repository has it, else its default branch. Every repository must clone for the checkout to be ready: the first that can't fails it, naming it, and the next boot clones only what is still missing (those cloned are kept). The folder itself is not a repository, and the project's own other files are not copied.
+- **GitHub access:** the machine asks for a grant (an App installation token for one repository) per repository, and the edge grants a machine only the repositories of its own session. Git uses each one's token for that repository alone: `credential.https://github.com.useHttpPath` is set and the credential store holds one line per repository path (with and without `.git`). `gh` keeps one token for github.com, the first repository's, so `gh` reaches the others only where that token does.
+- **Older parts:** a single-repository session is sent, provisioned and credentialed exactly as before. A machine whose engine predates `ZERON_CLOUD_REPOS` clones the first repository alone, into the folder.
+
 ## Compatibility
 
 - **Older hosts** (a device on a version before project worktrees) refuse `ListProjectRepositories`. The composer then offers no worktree for such a folder and runs in it, as before. A worktree spec naming repositories is only ever sent after the host has listed them (`capabilities::PROJECT_WORKTREES_V1`).

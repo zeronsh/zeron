@@ -1293,10 +1293,11 @@ local REPOSITORIES: { [string]: any } = {
 	["/tmp/acme"] = {
 		repo = false,
 		list = {
-			{ path = "api", branch = "main" },
+			-- (Two of them on GitHub where Cloud reaches them.)
+			{ path = "api", branch = "main", github = "acme/site" },
 			{ path = "packages/ui", branch = "main" },
 			{ path = "scratch", empty = true },
-			{ path = "web", branch = "develop" },
+			{ path = "web", branch = "develop", github = "octo/tools" },
 		},
 	},
 }
@@ -1405,6 +1406,13 @@ sessions_stub.create = function(req: any)
 	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
 	note(`made:{req.project or "-"}|{req.device or "-"}|{req.branch or "-"}|{req.cwd or "-"}{if req.cloud then "|cloud" else ""}`)
+	if req.repositories then
+		local clones = {}
+		for _, r in req.repositories do
+			table.insert(clones, `{r.path}={r.github}`)
+		end
+		note(`clones:{table.concat(clones, ",")}`)
+	end
 	META[id] = { title = "New chat", project = req.project, model = req.config and req.config.model }
 	-- (On Cloud, its machine's device, as the engine's list will say.)
 	if req.cloud then

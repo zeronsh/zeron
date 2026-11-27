@@ -279,10 +279,11 @@ export const handleVaultRoute = async (
     if (auth.kind === "runner" && deviceId !== auth.deviceId) {
       return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
     }
-    // A Cloud machine's GitHub access is its own chat's repository, nothing
-    // else the user's GitHub reaches. A delegate's first grant takes the
-    // GitHub login of the session that started it; only this Worker says so,
-    // never a request's body.
+    // A Cloud machine's GitHub access is its own chat's repositories (its
+    // one, or each of a project of several), nothing else the user's GitHub
+    // reaches. A delegate's first grant takes the GitHub login of the
+    // session that started it; only this Worker says so, never a request's
+    // body.
     let inheritFrom: string | undefined;
     if (auth.kind === "runner" && provider === "github") {
       const cloud =
@@ -290,9 +291,9 @@ export const handleVaultRoute = async (
           ? env.CLOUD_ACCOUNTS.get(env.CLOUD_ACCOUNTS.idFromName(cloudAccountName(auth.orgId, auth.userId)))
           : undefined;
       const owner = { orgId: auth.orgId ?? "", userId: auth.userId };
-      const own = cloud ? await cloud.repoOfDevice(owner, deviceId) : undefined;
-      if (!own || typeof repo !== "string" || repo.toLowerCase() !== own.toLowerCase()) {
-        return json({ error: "forbidden", message: "A Cloud machine may only get GitHub access to its own chat's repository." }, 403);
+      const own = cloud ? await cloud.reposOfDevice(owner, deviceId) : [];
+      if (typeof repo !== "string" || !own.some((name) => name.toLowerCase() === repo.toLowerCase())) {
+        return json({ error: "forbidden", message: "A Cloud machine may only get GitHub access to its own chat's repositories." }, 403);
       }
       inheritFrom = await cloud?.parentDeviceOf(owner, deviceId);
     }
@@ -309,7 +310,7 @@ export const handleVaultRoute = async (
 
   // POST /vault/{orgId}/grants — several providers' grants at once (user or
   // runner). Never `github`: a Cloud machine's GitHub grant is checked
-  // against its own chat's repository above, one at a time.
+  // against its own chat's repositories above, one at a time.
   if (rest[0] === "grants" && rest.length === 1 && method === "POST") {
     const b = await body();
     if (b instanceof Response) return b;

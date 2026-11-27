@@ -809,6 +809,97 @@ struct CloudHost {
     row_written: bool,
 }
 
+/// One repository of a Cloud session of a project of several
+/// (`CreateChat`'s `cloudRepositories`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudRepositoryChoice {
+    /// Its folder in the project (`ProjectRepository::path`: `api`,
+    /// `packages/ui`) — where the machine clones it.
+    path: String,
+    /// Its GitHub repository, `owner/name`.
+    github: String,
+}
+
+/// The most repositories one Cloud session clones (the edge's limit too).
+const MAX_CLOUD_REPOSITORIES: usize = 16;
+
+/// The repositories picked for a Cloud session of several, as the edge
+/// accepts them: at most [`MAX_CLOUD_REPOSITORIES`], each `owner/name` at a
+/// folder of its own, none inside another's.
+fn check_cloud_repositories(repositories: &[CloudRepositoryChoice]) -> Result<(), RpcError> {
+    let bad = |message: String| Err(RpcError::BadParams(message));
+    if repositories.len() > MAX_CLOUD_REPOSITORIES {
+        return bad(format!(
+            "A Cloud session clones at most {MAX_CLOUD_REPOSITORIES} repositories."
+        ));
+    }
+    for (ix, choice) in repositories.iter().enumerate() {
+        let github = choice.github.trim();
+        if crate::runner::github_full_name(&format!("https://github.com/{github}")).as_deref()
+            != Some(github)
+            || github.split('/').any(|part| part == "." || part == "..")
+        {
+            return bad(format!(
+                "{github:?} isn't a GitHub repository (owner/name)."
+            ));
+        }
+        if !crate::runner::is_repository_dir(&choice.path) {
+            return bad(format!(
+                "Cloud can't check {github} out at {:?}: a folder of the project is one or two plain names.",
+                choice.path
+            ));
+        }
+        for other in &repositories[..ix] {
+            let (a, b) = (choice.path.as_str(), other.path.as_str());
+            let inside = |outer: &str, inner: &str| {
+                inner
+                    .strip_prefix(outer)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            };
+            if inside(a, b) || inside(b, a) {
+                return bad(format!(
+                    "Cloud can't check out both {a} and {b}: one is inside the other."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The folder a Cloud session of several repositories checks them out in:
+/// the project's folder name, kept to what the edge accepts (other
+/// characters become `-`), else `project`.
+fn cloud_project_folder(path: &str, name: Option<&str>) -> String {
+    let base = path
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|base| !base.is_empty())
+        .or(name)
+        .unwrap_or_default();
+    let mut folder = String::new();
+    for c in base.chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            c
+        } else {
+            '-'
+        };
+        if !(c == '-' && folder.ends_with('-')) {
+            folder.push(c);
+        }
+        if folder.len() >= 100 {
+            break;
+        }
+    }
+    let folder = folder.trim_matches('-');
+    if folder.is_empty() || folder.chars().all(|c| c == '.') {
+        "project".into()
+    } else {
+        folder.to_string()
+    }
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -851,6 +942,11 @@ enum MutateParams {
         /// another device, it is ignored.
         #[serde(default)]
         cloud_reach: Option<zeron_proto::CloudReach>,
+        /// The repositories a Cloud session of a project of several clones,
+        /// each at its place in the project (the composer's pick under
+        /// Cloud). Empty: the project's one GitHub repository, as before.
+        #[serde(default)]
+        cloud_repositories: Vec<CloudRepositoryChoice>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1467,6 +1563,8 @@ impl EngineRpc {
     /// person's computer). `None` = not Cloud; create normally. `reach`: what
     /// a new session reaches (`None`: the account's default); a delegate
     /// always reaches what its parent does (the edge decides).
+    /// `repositories`: of a project of several, the ones the session clones,
+    /// each at its place in the project's folder (empty: the project's own).
     async fn cloud_chat_host(
         &self,
         chat_id: &str,
@@ -1477,6 +1575,7 @@ impl EngineRpc {
         branch: Option<&str>,
         cloud: bool,
         reach: Option<zeron_proto::CloudReach>,
+        repositories: &[CloudRepositoryChoice],
         config: Option<&ChatConfig>,
     ) -> Result<Option<CloudHost>, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
@@ -1547,24 +1646,64 @@ impl EngineRpc {
             .space(space_id)
             .map_err(failed)?
             .ok_or_else(|| RpcError::Failed("That project no longer exists.".into()))?;
-        let full_name = space.github_repo.ok_or_else(|| {
-            RpcError::Failed("This project has no GitHub repository for Cloud to clone.".into())
-        })?;
         let cloud_client = self.cloud();
-        let repo = cloud_client
-            .github_repos(Some(&full_name))
-            .await
-            .map_err(failed)?
-            .into_iter()
-            .find(|repo| repo.full_name.eq_ignore_ascii_case(&full_name))
-            .ok_or_else(|| {
-                RpcError::Failed(format!(
-                    "Cloud can't reach {full_name} — install the Zeron GitHub App on it in Settings → Cloud."
-                ))
-            })?;
-        let session = cloud_client
-            .create_session(chat_id, space_id, &repo, branch, reach)
-            .await
+        let resolve = |full_name: String| {
+            let cloud_client = cloud_client.clone();
+            async move {
+                cloud_client
+                    .github_repos(Some(&full_name))
+                    .await
+                    .map_err(failed)?
+                    .into_iter()
+                    .find(|repo| repo.full_name.eq_ignore_ascii_case(&full_name))
+                    .ok_or_else(|| {
+                        RpcError::Failed(format!(
+                            "Cloud can't reach {full_name} — install the Zeron GitHub App on it in Settings → Cloud."
+                        ))
+                    })
+            }
+        };
+        let started = match repositories {
+            // A project of several repositories: each one cloned at its
+            // place in the project's folder.
+            [_, _, ..] => {
+                check_cloud_repositories(repositories)?;
+                let repos = futures::future::try_join_all(
+                    repositories
+                        .iter()
+                        .map(|choice| resolve(choice.github.trim().to_string())),
+                )
+                .await?;
+                let repos: Vec<crate::cloud_client::SessionRepo<'_>> = repositories
+                    .iter()
+                    .zip(&repos)
+                    .map(|(choice, repo)| crate::cloud_client::SessionRepo {
+                        repo,
+                        dir: &choice.path,
+                    })
+                    .collect();
+                let folder = cloud_project_folder(&space.path, space.name.as_deref());
+                cloud_client
+                    .create_session_of(chat_id, space_id, &repos, &folder, branch, reach)
+                    .await
+            }
+            // One repository: the one picked, else the project's own.
+            _ => {
+                let full_name = match repositories.first() {
+                    Some(choice) => choice.github.trim().to_string(),
+                    None => space.github_repo.ok_or_else(|| {
+                        RpcError::Failed(
+                            "This project has no GitHub repository for Cloud to clone.".into(),
+                        )
+                    })?,
+                };
+                let repo = resolve(full_name).await?;
+                cloud_client
+                    .create_session(chat_id, space_id, &repo, branch, reach)
+                    .await
+            }
+        };
+        let session = started
             .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
         Ok(Some(CloudHost {
             device_id: session.device_id,
@@ -2320,6 +2459,7 @@ impl EngineRpc {
                 child_kind,
                 cloud: _,
                 cloud_reach: _,
+                cloud_repositories: _,
             } => {
                 tracing::debug!(target: "first_word", chat = %chat_id, "create chat");
                 // A voice orchestrator is hidden, so the chats it creates are
@@ -4957,6 +5097,7 @@ impl RpcService for EngineRpc {
                     child_kind,
                     cloud,
                     cloud_reach,
+                    cloud_repositories,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
@@ -4967,6 +5108,7 @@ impl RpcService for EngineRpc {
                         branch.as_deref().filter(|b| !b.is_empty()),
                         *cloud,
                         cloud_reach.filter(|_| zeron_rpc::caller().is_local()),
+                        cloud_repositories,
                         config.as_ref(),
                     ))
                     .await?
@@ -6718,6 +6860,76 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CreateChat`'s `cloudRepositories`: read when sent, empty when not;
+    /// checked as the edge would before any call to it.
+    #[test]
+    fn cloud_repositories_are_read_and_checked() {
+        let p: MutateParams = serde_json::from_value(serde_json::json!({
+            "op": "createChat", "chatId": "c1", "spaceId": "s1", "cloud": true,
+            "cloudRepositories": [
+                {"path": "api", "github": "acme/api"},
+                {"path": "packages/ui", "github": "acme/ui"},
+            ],
+        }))
+        .unwrap();
+        let MutateParams::CreateChat {
+            cloud_repositories, ..
+        } = p
+        else {
+            panic!("{p:?}")
+        };
+        assert_eq!(cloud_repositories.len(), 2);
+        assert_eq!(cloud_repositories[1].path, "packages/ui");
+        assert!(check_cloud_repositories(&cloud_repositories).is_ok());
+        let p: MutateParams = serde_json::from_value(serde_json::json!({
+            "op": "createChat", "chatId": "c1", "cloud": true,
+        }))
+        .unwrap();
+        assert!(matches!(
+            p,
+            MutateParams::CreateChat { ref cloud_repositories, .. } if cloud_repositories.is_empty()
+        ));
+
+        let choice = |path: &str, github: &str| CloudRepositoryChoice {
+            path: path.into(),
+            github: github.into(),
+        };
+        for bad in [
+            vec![choice("api", "acme/api"), choice("../x", "acme/ui")],
+            vec![choice("api", "acme/api"), choice("a/b/c", "acme/ui")],
+            vec![choice("api", "acme/api"), choice("api", "acme/ui")],
+            vec![
+                choice("packages", "acme/api"),
+                choice("packages/ui", "acme/ui"),
+            ],
+            vec![choice("api", "acme/api"), choice("ui", "acme")],
+            vec![choice("api", "acme/api"), choice("ui", "acme/..")],
+            vec![
+                choice("api", "acme/api"),
+                choice("ui", "https://github.com/acme/ui"),
+            ],
+            (0..17)
+                .map(|i| choice(&format!("r{i}"), "acme/api"))
+                .collect(),
+        ] {
+            assert!(check_cloud_repositories(&bad).is_err(), "{bad:?}");
+        }
+        assert!(
+            check_cloud_repositories(&[
+                choice("packages/ui", "a/b"),
+                choice("packages/uikit", "a/c")
+            ])
+            .is_ok()
+        );
+
+        assert_eq!(cloud_project_folder("/Users/me/shop", None), "shop");
+        assert_eq!(cloud_project_folder("/Users/me/My Shop!/", None), "My-Shop");
+        assert_eq!(cloud_project_folder("C:\\code\\shop", None), "shop");
+        assert_eq!(cloud_project_folder("/", Some("Big Thing")), "Big-Thing");
+        assert_eq!(cloud_project_folder("/x/..", None), "project");
+        assert_eq!(cloud_project_folder("/x/日本", None), "project");
+    }
 
     /// No warm start for an agent known to be signed out; one whose logins
     /// aren't known yet, or that signs in from the environment, still gets it.
