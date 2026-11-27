@@ -90,11 +90,26 @@ test("usage sheet tokens tab totals tokens by time agent and model", function()
 			costEvents = 1,
 		},
 		buckets = {
-			{ start = os.time() - 86400, inputTokens = 500000, outputTokens = 200000, totalTokens = 700000 },
-			{ start = os.time(), inputTokens = 400000, outputTokens = 130000, totalTokens = 530000 },
+			{
+				start = (os.time() // 86400 - 1) * 86400,
+				inputTokens = 500000,
+				outputTokens = 200000,
+				totalTokens = 700000,
+				byHarness = { { harness = "claude-code", totalTokens = 600000 }, { harness = "codex", totalTokens = 100000 } },
+			},
+			{
+				start = (os.time() // 86400) * 86400,
+				inputTokens = 400000,
+				outputTokens = 130000,
+				totalTokens = 530000,
+				byHarness = { { harness = "claude-code", totalTokens = 530000 } },
+			},
 		},
-		byHarness = { { harness = "claude-code", totalTokens = 1230000, costUsd = 0.0042 } },
-		byModel = { { model = "claude-sonnet-4.5", totalTokens = 1230000 } },
+		byHarness = {
+			{ harness = "codex", totalTokens = 100000 },
+			{ harness = "claude-code", totalTokens = 1130000, costUsd = 0.0042 },
+		},
+		byModel = { { model = "gpt-5", totalTokens = 100000 }, { model = "claude-sonnet-4.5", totalTokens = 1130000, costUsd = 0.0042 } },
 		byAccount = {},
 		coverage = { startedCollectingAt = os.time() - 86400 },
 	})
@@ -103,12 +118,22 @@ test("usage sheet tokens tab totals tokens by time agent and model", function()
 	app:click('role:dialog "Usage" >> role:tab "Tokens"')
 	app:frames(40)
 	local tree = app:tree('role:dialog "Usage"')
-	expect(tree).to_contain("Total tokens")
+	expect(tree).to_contain("Processed tokens")
 	expect(tree).to_contain("1.2M")
+	expect(tree).to_contain("3 turns")
+	expect(tree).to_contain("Per day, by agent")
+	-- Tokens by type, so cache and output explain the total.
+	expect(tree).to_contain("Tokens by type")
+	expect(tree).to_contain("Uncached input")
 	expect(tree).to_contain("900.0k")
 	expect(tree).to_contain("$0.0042")
-	expect(tree).to_contain("claude-code")
-	expect(tree).to_contain("claude-sonnet-4.5")
+	-- Agents ranked by tokens, each with its share.
+	expect(tree).to_contain("92% of tokens")
+	-- Models ranked by tokens: the largest first.
+	local sonnet = string.find(tree, "claude-sonnet-4.5", 1, true)
+	local gpt = string.find(tree, "gpt-5", 1, true)
+	expect(sonnet ~= nil and gpt ~= nil and sonnet < gpt).to_be(true)
+	expect(tree).to_contain("2 models")
 	expect(tree).to_contain("Measured on this machine")
 	expect(app:state("settings_stub_calls")).to_contain("agents.usage_summary:")
 end)

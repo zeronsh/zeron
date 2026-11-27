@@ -1723,12 +1723,7 @@
         "limits_tab": "Limits",
         "tokens_tab": "Tokens",
         "range": "Range",
-        "total_tokens": "Total tokens",
-        "input_tokens": "Input",
-        "output_tokens": "Output",
-        "reported_cost": "Reported cost",
-        "provider_reported": "reported by the provider",
-        "per_day": "Activity",
+        "per_day": "Per day, by agent",
         "by_agent": "By agent",
         "by_model": "By model",
         "tokens_loading": "Reading token usage…",
@@ -1738,7 +1733,31 @@
         "tokens_cloud_title": "Cloud tokens are per machine",
         "tokens_cloud_body": "Cloud in the device picker is the vault of accounts, not one machine. Pick a computer or a Cloud machine to read its token usage.",
         "coverage_note": "Measured on this machine since {when}. Providers that do not report token usage are absent rather than zero; cost appears only when the provider itself reports it.",
-        "just_now": "just now"
+        "just_now": "just now",
+        "processed": "Processed tokens",
+        "per_hour": "Per hour, by agent",
+        "turns": "{n} turns",
+        "cost_reported": "{cost} reported",
+        "cache_hit": "{share} cache hit",
+        "chart_label": "Tokens over time, stacked by agent",
+        "share_of": "{share} of tokens",
+        "by_type": "Tokens by type",
+        "type": {
+          "input": "Uncached input",
+          "cache_read": "Cache read",
+          "cache_write": "Cache write",
+          "output": "Output"
+        },
+        "reasoning_note": "Output includes {n} reasoning tokens.",
+        "model_count": "{n} models",
+        "col": {
+          "model": "Model",
+          "cost": "Cost",
+          "share": "Share",
+          "tokens": "Tokens"
+        },
+        "backfill_note": "Turns recovered from older chat journals are dated by the journal's last write, so they can bunch into one hour.",
+        "pace_marker": "The line is where even spending would be by now."
       },
       "zeron_mcp_only": {
         "label": "Only Zeron's MCP servers",

@@ -14,6 +14,8 @@ local usage_pools = require("@account/usage_pools")
 local cloud = require("@account/cloud")
 local sessions = require("@account/sessions")
 local usage_open = require("@app/screens/settings/usage_open")
+local Chart = require("@ds/chart")
+local ink = require("@ds/visual_ink")
 
 local M = {}
 
@@ -54,6 +56,15 @@ local function window_meta(w: usage_pools.Window): string
 	return table.concat(parts, " · ")
 end
 
+-- How far through its window a limit is (0 to 1), where its length and
+-- reset are known.
+local function elapsed(w: usage_pools.Window): number?
+	if not w.resets_at or not w.window_seconds or w.window_seconds <= 0 then
+		return nil
+	end
+	return math.clamp(1 - (w.resets_at - os.time()) / w.window_seconds, 0, 1)
+end
+
 local function window_row(_w: usage_pools.Window, _i: number, row: State<usage_pools.Window>): Node
 	local function w(): usage_pools.Window
 		return row:get()
@@ -76,6 +87,7 @@ local function window_row(_w: usage_pools.Window, _i: number, row: State<usage_p
 		ui.div {
 			grow = 1,
 			min_w = 40,
+			relative = true,
 			ds.ProgressBar {
 				value = function()
 					return w().used
@@ -83,12 +95,28 @@ local function window_row(_w: usage_pools.Window, _i: number, row: State<usage_p
 				tone = function()
 					return tone(w().used) :: any
 				end,
-				size = "thin",
+				size = "regular",
 				w_full = true,
 				label = function()
 					return ui.t("settings.providers.usage.meter", { label = w().label }):get()
 				end,
 			},
+			-- Where even spending would be by now: the bar past it is ahead
+			-- of pace.
+			ui.show(function()
+				return elapsed(w()) ~= nil
+			end, ui.div {
+				absolute = true,
+				top = -3,
+				left = function(): string
+					return `{math.floor((elapsed(w()) or 0) * 1000) / 10}%`
+				end,
+				w = 2,
+				h = 10,
+				rounded = "$radius.full",
+				bg = "$text.primary",
+				tooltip = ui.t("settings.providers.usage.pace_marker"):get(),
+			}),
 		},
 		ui.text {
 			function()
@@ -393,89 +421,418 @@ local function money_words(n: number?): string
 	if not n then
 		return "—"
 	end
-	return string.format("$%.4f", n):gsub("0+$", ""):gsub("%.$", "")
+	if n >= 100 then
+		return string.format("$%.2f", n)
+	end
+	return (string.format("$%.4f", n):gsub("0+$", ""):gsub("%.$", ""))
 end
 
-local function metric_card(label: Message, value: () -> string, note: (() -> string?)?): Node
-	return ui.column {
-		grow = 1,
-		min_w = 0,
-		p = "$space.3",
-		gap = ui.raw(1, "the metric's number on its label"),
-		rounded = "$radius.lg",
+local function share_words(part: number, whole: number): string
+	if whole <= 0 then
+		return "0%"
+	end
+	local p = part / whole * 100
+	if p > 0 and p < 1 then
+		return "<1%"
+	end
+	return `{math.floor(p + 0.5)}%`
+end
+
+local function num(v: any): number
+	return tonumber(v) or 0
+end
+
+local function card(props: { [any]: any }): Node
+	local out = {
+		w_full = true,
+		p = "$space.4",
+		gap = "$space.3",
+		rounded = "$radius.xl",
 		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 		border = 1,
 		border_color = "$zeron.settings.edge",
-		ui.text { label, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary", truncate = true },
-		ui.text {
-			value,
-			text_size = "$font.size.lg",
-			line_height = "$font.line.lg",
-			weight = "$font.weight.semibold",
-			color = "$text.primary",
-			tabular = true,
-			truncate = true,
-		},
-		if note then ui.text {
-			function()
-				return note() or ""
-			end,
-			text_size = "$font.size.xs",
-			line_height = "$font.line.xs",
-			color = "$text.tertiary",
-			truncate = true,
-		} else nil,
 	}
+	for k, v in props do
+		if type(k) == "number" then
+			table.insert(out, v)
+		else
+			out[k] = v
+		end
+	end
+	return ui.column(out)
 end
 
-local function analytics_row(label: string, value: number, share: number, detail: string?): Node
+local function card_title(label: Message, right: (string | Message)?): Node
 	return ui.row {
 		w_full = true,
-		gap = "$space.2",
 		items = "center",
-		py = ui.raw(3, "an analytics row's breath"),
-		ui.text { label, w = 128, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.secondary", truncate = true },
-		ui.div {
-			grow = 1,
-			min_w = 36,
-			ds.ProgressBar {
-				value = function()
-					return share
-				end,
-				tone = "accent",
-				size = "thin",
-				w_full = true,
-				label = label,
-			},
+		justify = "between",
+		gap = "$space.2",
+		ui.text { label, text_size = "$font.size.sm", line_height = "$font.line.sm", weight = "$font.weight.semibold", color = "$text.primary" },
+		if right
+			then ui.text { right, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary", tabular = true }
+			else nil,
+	}
+end
+
+-- A round axis for `hi` in four or five steps of 1, 2 or 5 × 10ⁿ.
+local function nice_axis(hi: number, unit: string, scale: number): any
+	if hi <= 0 then
+		hi = 1
+	end
+	local raw = hi / 4
+	local mag = 10 ^ math.floor(math.log10(raw))
+	local step = mag
+	for _, m in { 1, 2, 2.5, 5, 10 } do
+		if m * mag >= raw then
+			step = m * mag
+			break
+		end
+	end
+	local top = math.ceil(hi / step) * step
+	local ticks, labels = {}, {}
+	local v = 0
+	while v <= top + step / 2 do
+		table.insert(ticks, v)
+		local shown = v / scale
+		local text = if shown % 1 == 0 then string.format("%d", shown) else string.format("%.1f", shown)
+		table.insert(labels, if v == 0 then "0" else `{text}{unit}`)
+		v += step
+	end
+	return { lo = 0, hi = top, ticks = ticks, labels = labels }
+end
+
+-- The summary laid on the whole range: every step from `from` to `to`
+-- (empty ones zero), each split by agent in rank order.
+local function series_of(view: any, agents_ranked: { any }): any
+	local data = view.data
+	local step = view.step
+	local first = math.floor(view.from / step) * step
+	local by_start: { [number]: any } = {}
+	for _, b in data.buckets or {} do
+		by_start[num(b.start)] = b
+	end
+	local x, totals = {}, {}
+	local series = {}
+	for i, h in agents_ranked do
+		series[i] = { name = h.name, color = `chart{((i - 1) % 6) + 1}`, values = {} }
+	end
+	local t = first
+	local peak = 0
+	while t < view.to do
+		local b = by_start[t]
+		-- (Hours in local time; days are the engine's UTC days.)
+		table.insert(x, os.date(if view.hourly then "%H:00" else "!%b %d", t) :: string)
+		local split: { [string]: number } = {}
+		for _, part in (b and b.byHarness) or {} do
+			split[tostring(part.harness)] = num(part.totalTokens)
+		end
+		local sum = 0
+		for i, h in agents_ranked do
+			local v = split[h.id] or 0
+			table.insert(series[i].values, v)
+			sum += v
+		end
+		-- An old engine's bucket has no split: its whole as the top agent's.
+		if b and not b.byHarness and series[1] then
+			series[1].values[#series[1].values] = num(b.totalTokens)
+			sum = num(b.totalTokens)
+		end
+		table.insert(totals, sum)
+		peak = math.max(peak, sum)
+		t += step
+	end
+	local scale, unit = 1, ""
+	if peak >= 1_000_000 then
+		scale, unit = 1_000_000, "M"
+	elseif peak >= 1_000 then
+		scale, unit = 1_000, "k"
+	end
+	for _, s in series do
+		for i, v in s.values do
+			s.values[i] = v / scale
+		end
+	end
+	local axis = nice_axis(peak, unit, scale)
+	axis.hi /= scale
+	for i, v in axis.ticks do
+		axis.ticks[i] = v / scale
+	end
+	return {
+		type = "bar",
+		stacked = true,
+		x = x,
+		series = series,
+		yaxis = axis,
+		fmt = { unit = unit, decimals = if unit == "" then 0 else 1 },
+	}
+end
+
+local function dot(color: any, size: number?): Node
+	return ui.div {
+		w = size or 8,
+		h = size or 8,
+		shrink = 0,
+		rounded = "$radius.full",
+		bg = ink.paint(color),
+	}
+end
+
+-- One bar split by share: Input, cache read, cache write, output.
+local function share_bar(parts: { { label: string, value: number, color: any } }, whole: number): Node
+	local segs = {}
+	for _, p in parts do
+		if p.value > 0 then
+			table.insert(segs, ui.div {
+				grow = p.value,
+				basis = 0,
+				min_w = 4,
+				h = 8,
+				rounded = "$radius.full",
+				bg = ink.paint(p.color),
+				tooltip = `{p.label} · {token_words(p.value)} · {share_words(p.value, whole)}`,
+			})
+		end
+	end
+	return ui.row { w_full = true, gap = "$zeron.space.hair", table.unpack(segs) }
+end
+
+local function legend_cell(color: any, label: string, value: string, share: string): Node
+	return ui.column {
+		grow = 1,
+		basis = 0,
+		min_w = 0,
+		gap = ui.raw(2, "a legend value under its name"),
+		ui.row {
+			items = "center",
+			gap = "$space.2",
+			dot(color),
+			ui.text { label, literal = true, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary", truncate = true },
 		},
-		ui.text {
-			token_words(value),
-			w = 54,
-			shrink = 0,
-			align = "right",
-			tabular = true,
-			text_size = "$font.size.xs",
-			line_height = "$font.line.xs",
-			color = "$text.primary",
-		},
-		ui.text {
-			detail or "",
-			w = 74,
-			shrink = 0,
-			align = "right",
-			text_size = "$font.size.xs",
-			line_height = "$font.line.xs",
-			color = "$text.tertiary",
-			truncate = true,
+		ui.row {
+			items = "baseline",
+			gap = "$space.1",
+			ui.text { value, literal = true, text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.semibold", color = "$text.primary", tabular = true },
+			ui.text { share, literal = true, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary", tabular = true },
 		},
 	}
 end
 
-local function day_label(start: number, hourly: boolean): string
-	return os.date(if hourly then "!%b %d %H:00" else "!%b %d", math.floor(start)) :: string
+local function agent_row(h: any, whole: number): Node
+	local bits = { ui.t("settings.providers.usage.share_of", { share = share_words(h.total, whole) }):get() }
+	if h.cost then
+		table.insert(bits, money_words(h.cost))
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		gap = "$space.3",
+		py = ui.raw(6, "an agent row's breath"),
+		border_sides = { 1, 0, 0, 0 },
+		border_color = "$border.subtle",
+		dot(h.color, 10),
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(1, "the agent's name on its share"),
+			ui.text { h.name, literal = true, text_size = "$font.size.sm", line_height = "$font.line.sm", weight = "$font.weight.medium", color = "$text.primary", truncate = true },
+			ui.text { table.concat(bits, " · "), literal = true, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary", truncate = true },
+		},
+		ui.text { token_words(h.total), literal = true, text_size = "$font.size.sm", line_height = "$font.line.sm", weight = "$font.weight.semibold", color = "$text.primary", tabular = true },
+	}
 end
 
-local function tokens_view(resource: any, range: State<string>, target: any): Node
+local function model_row(rank: number, m: any, peak: number, whole: number): Node
+	local small = { text_size = "$font.size.xs", line_height = "$font.line.xs", tabular = true, align = "right", shrink = 0 }
+	local function cell(text: string, w: number, color: string): Node
+		local props = table.clone(small) :: any
+		props[1] = text
+		props.literal = true
+		props.w = w
+		props.color = color
+		return ui.text(props)
+	end
+	return ui.row {
+		w_full = true,
+		items = "center",
+		gap = "$space.3",
+		py = ui.raw(7, "a model row's breath"),
+		border_sides = { 1, 0, 0, 0 },
+		border_color = "$border.subtle",
+		cell(tostring(rank), 16, "$text.tertiary"),
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(4, "a model's name on its bar"),
+			ui.text { tostring(m.model or "unknown"), literal = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.primary", truncate = true },
+			ui.row {
+				w_full = true,
+				max_w = 220,
+				h = 3,
+				ui.div {
+					grow = math.max(num(m.totalTokens), peak * 0.01),
+					basis = 0,
+					h = 3,
+					rounded = "$radius.full",
+					bg = ink.paint("chart1"),
+				},
+				ui.div { grow = math.max(0, peak - num(m.totalTokens)), basis = 0 },
+			},
+		},
+		cell(if m.costUsd then money_words(num(m.costUsd)) else "—", 72, if m.costUsd then "$text.secondary" else "$text.tertiary"),
+		cell(share_words(num(m.totalTokens), whole), 44, "$text.tertiary"),
+		cell(token_words(num(m.totalTokens)), 56, "$text.primary"),
+	}
+end
+
+local function header_cell(label: Message, w: number?, grow: boolean?): Node
+	return ui.text {
+		label,
+		literal = if type(label) == "string" then true else nil,
+		w = w,
+		grow = if grow then 1 else nil,
+		shrink = 0,
+		align = if grow then nil else "right",
+		text_size = "$font.size.xs",
+		line_height = "$font.line.xs",
+		weight = "$font.weight.medium",
+		color = "$text.tertiary",
+	}
+end
+
+local function tokens_body(view: any, names: { [string]: string }): Node
+	local data = view.data
+	local totals = data.totals or {}
+	local whole = num(totals.totalTokens)
+	-- Agents by tokens, largest first, each with the colour its bars wear.
+	local ranked = {}
+	for _, h in data.byHarness or {} do
+		local id = tostring(h.harness or "unknown")
+		table.insert(ranked, { id = id, name = names[id] or id, total = num(h.totalTokens), cost = tonumber(h.costUsd) })
+	end
+	table.sort(ranked, function(a, b)
+		return a.total > b.total
+	end)
+	for i, h in ranked do
+		h.color = `chart{((i - 1) % 6) + 1}`
+	end
+	local chart_data = series_of(view, ranked)
+	local models = table.clone(data.byModel or {})
+	table.sort(models, function(a, b)
+		return num(a.totalTokens) > num(b.totalTokens)
+	end)
+	local model_peak = if models[1] then num(models[1].totalTokens) else 0
+
+	local cache_read = num(totals.cacheReadInputTokens)
+	local cache_write = num(totals.cacheCreationInputTokens)
+	local input = num(totals.inputTokens)
+	local output = num(totals.outputTokens)
+	local reasoning = num(totals.reasoningTokens)
+	local prompt = input + cache_read + cache_write
+	local L = function(key: string, args: any?): string
+		return ui.t(`settings.providers.usage.{key}`, args):get()
+	end
+	local types = {
+		{ label = L("type.input"), value = input, color = { token = "chart1", alpha = 0.55 } },
+		{ label = L("type.cache_read"), value = cache_read, color = { token = "chart1", alpha = 0.25 } },
+		{ label = L("type.cache_write"), value = cache_write, color = { token = "chart3", alpha = 0.6 } },
+		{ label = L("type.output"), value = output, color = "chart1" },
+	}
+
+	local sub = { L("turns", { n = num(totals.events) }) }
+	if totals.costUsd then
+		table.insert(sub, L("cost_reported", { cost = money_words(num(totals.costUsd)) }))
+	end
+	if prompt > 0 then
+		table.insert(sub, L("cache_hit", { share = share_words(cache_read, prompt) }))
+	end
+
+	local agent_rows = {}
+	for _, h in ranked do
+		table.insert(agent_rows, agent_row(h, whole))
+	end
+	local model_rows = {}
+	for i, m in models do
+		table.insert(model_rows, model_row(i, m, model_peak, whole))
+	end
+	local type_cells = {}
+	for _, p in types do
+		table.insert(type_cells, legend_cell(p.color, p.label, token_words(p.value), share_words(p.value, whole)))
+	end
+
+	return ui.column {
+		w_full = true,
+		gap = "$space.3",
+		card {
+			ui.row {
+				w_full = true,
+				items = "end",
+				justify = "between",
+				gap = "$space.3",
+				ui.column {
+					min_w = 0,
+					gap = ui.raw(2, "the headline under its label"),
+					ui.text { ui.t("settings.providers.usage.processed"), text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
+					ui.text {
+						token_words(whole),
+						literal = true,
+						text_size = "$font.size.xxl",
+						line_height = "$font.line.xxl",
+						weight = "$font.weight.semibold",
+						color = "$text.primary",
+						tabular = true,
+					},
+					ui.text { table.concat(sub, " · "), literal = true, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.secondary", truncate = true },
+				},
+				ui.text {
+					if view.hourly then ui.t("settings.providers.usage.per_hour") else ui.t("settings.providers.usage.per_day"),
+					text_size = "$font.size.xs",
+					line_height = "$font.line.xs",
+					color = "$text.tertiary",
+					shrink = 0,
+				},
+			},
+			Chart {
+				data = function()
+					return chart_data
+				end,
+				height = 180,
+				label = L("chart_label"),
+			},
+			ui.column { w_full = true, table.unpack(agent_rows) },
+		},
+		card {
+			card_title(ui.t("settings.providers.usage.by_type")),
+			share_bar(types, whole),
+			ui.row { w_full = true, gap = "$space.3", table.unpack(type_cells) },
+			if reasoning > 0
+				then ui.text {
+					L("reasoning_note", { n = token_words(reasoning) }),
+					literal = true,
+					text_size = "$font.size.xs",
+					line_height = "$font.line.xs",
+					color = "$text.tertiary",
+				}
+				else nil,
+		},
+		card {
+			gap = "$space.2",
+			card_title(ui.t("settings.providers.usage.by_model"), L("model_count", { n = #models })),
+			ui.row {
+				w_full = true,
+				gap = "$space.3",
+				header_cell("#", 16),
+				header_cell(ui.t("settings.providers.usage.col.model"), nil, true),
+				header_cell(ui.t("settings.providers.usage.col.cost"), 72),
+				header_cell(ui.t("settings.providers.usage.col.share"), 44),
+				header_cell(ui.t("settings.providers.usage.col.tokens"), 56),
+			},
+			ui.column { w_full = true, table.unpack(model_rows) },
+		},
+	}
+end
+
+local function tokens_view(resource: any, target: any): Node
 	return ui.column {
 		w_full = true,
 		gap = "$space.3",
@@ -507,156 +864,36 @@ local function tokens_view(resource: any, range: State<string>, target: any): No
 			wrap = true,
 		}),
 		ui.presence(function()
-			return if target:get() ~= "cloud" then resource.data:get() else nil
-		end, function(data: any): Node
+			local view = if target:get() ~= "cloud" then resource.data:get() else nil
+			return if view and view.data then view else nil
+		end, function(view: any): Node
+			local data = view.data
 			local totals = data.totals or {}
 			local coverage = data.coverage or {}
-			local buckets = data.buckets or {}
-			local by_harness = data.byHarness or {}
-			local by_model = data.byModel or {}
-			local max_bucket = 0
-			for _, b in buckets do
-				max_bucket = math.max(max_bucket, tonumber(b.totalTokens) or 0)
-			end
-			local max_harness = 0
-			for _, h in by_harness do
-				max_harness = math.max(max_harness, tonumber(h.totalTokens) or 0)
+			local names = {}
+			for _, agent in agents.now:peek().list do
+				names[agent.id] = agent.name
 			end
 			return ui.column {
 				w_full = true,
 				gap = "$space.3",
-				ui.row {
-					w_full = true,
-					gap = "$space.2",
-					metric_card(ui.t("settings.providers.usage.total_tokens"), function()
-						return token_words(tonumber(totals.totalTokens) or 0)
-					end),
-					metric_card(ui.t("settings.providers.usage.input_tokens"), function()
-						return token_words(tonumber(totals.inputTokens) or 0)
-					end),
-					metric_card(ui.t("settings.providers.usage.output_tokens"), function()
-						return token_words(tonumber(totals.outputTokens) or 0)
-					end),
-					metric_card(ui.t("settings.providers.usage.reported_cost"), function()
-						return money_words(tonumber(totals.costUsd))
-					end, function()
-						return if totals.costEvents then ui.t("settings.providers.usage.provider_reported"):get() else nil
-					end),
-				},
-				ui.show(function()
-					return (tonumber(totals.events) or 0) == 0
-				end, ds.EmptyState {
-					icon = "inbox",
-					title = ui.t("settings.providers.usage.tokens_empty"),
-					body = ui.t("settings.providers.usage.tokens_empty_body"),
-					size = "sm",
-				}),
-				ui.show(function()
-					return (tonumber(totals.events) or 0) > 0
-				end, ui.column {
-					w_full = true,
-					gap = "$space.2",
-					ui.column {
-						w_full = true,
-						p = "$space.4",
-						gap = "$space.2",
-						rounded = "$radius.xl",
-						bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-						border = 1,
-						border_color = "$zeron.settings.edge",
-						ui.text { ui.t("settings.providers.usage.per_day"), text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.semibold", color = "$text.primary" },
-						ui.each(buckets, function(_b: any, _i: number, row: State<any>): Node
-							local function b(): any
-								return row:get()
-							end
-							return analytics_row(
-								day_label(tonumber(b().start) or 0, range:peek() == "24h"),
-								tonumber(b().totalTokens) or 0,
-								if max_bucket > 0 then (tonumber(b().totalTokens) or 0) / max_bucket else 0,
-								`{token_words(tonumber(b().inputTokens) or 0)} in · {token_words(tonumber(b().outputTokens) or 0)} out`
-							)
-						end, {
-							key = function(b: any): string
-								return tostring(b.start)
-							end,
-						}),
-					},
-					ui.column {
-						w_full = true,
-						p = "$space.4",
-						gap = "$space.2",
-						rounded = "$radius.xl",
-						bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-						border = 1,
-						border_color = "$zeron.settings.edge",
-						ui.text { ui.t("settings.providers.usage.by_agent"), text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.semibold", color = "$text.primary" },
-						ui.each(by_harness, function(_h: any, _i: number, row: State<any>): Node
-							local function h(): any
-								return row:get()
-							end
-							return analytics_row(
-								tostring(h().harness or "unknown"),
-								tonumber(h().totalTokens) or 0,
-								if max_harness > 0 then (tonumber(h().totalTokens) or 0) / max_harness else 0,
-								if h().costUsd then money_words(tonumber(h().costUsd)) else nil
-							)
-						end, {
-							key = function(h: any): string
-								return tostring(h.harness)
-							end,
-						}),
-					},
-					ui.column {
-						w_full = true,
-						p = "$space.4",
-						gap = "$space.2",
-						rounded = "$radius.xl",
-						bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-						border = 1,
-						border_color = "$zeron.settings.edge",
-						ui.text { ui.t("settings.providers.usage.by_model"), text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.semibold", color = "$text.primary" },
-						ui.each(by_model, function(_m: any, _i: number, row: State<any>): Node
-							local function m(): any
-								return row:get()
-							end
-							return ui.row {
-								w_full = true,
-								items = "center",
-								gap = "$space.2",
-								py = ui.raw(3, "a model row's breath"),
-								ui.text {
-									function()
-										return tostring(m().model or "unknown")
-									end,
-									grow = 1,
-									min_w = 0,
-									text_size = "$font.size.xs",
-									line_height = "$font.line.xs",
-									color = "$text.secondary",
-									truncate = true,
-								},
-								ui.text {
-									function()
-										return token_words(tonumber(m().totalTokens) or 0)
-									end,
-									tabular = true,
-									text_size = "$font.size.xs",
-									line_height = "$font.line.xs",
-									color = "$text.primary",
-								},
-							}
-						end, {
-							key = function(m: any): string
-								return tostring(m.model)
-							end,
-						}),
-					},
-				}),
+				if num(totals.events) == 0
+					then ds.EmptyState {
+						icon = "inbox",
+						title = ui.t("settings.providers.usage.tokens_empty"),
+						body = ui.t("settings.providers.usage.tokens_empty_body"),
+						size = "sm",
+					}
+					else tokens_body(view, names),
 				ui.text {
 					function()
 						local started = tonumber(coverage.startedCollectingAt)
 						local when = started and provider_card.when_words(started) or ui.t("settings.providers.usage.just_now"):get()
-						return ui.t("settings.providers.usage.coverage_note", { when = when }):get()
+						local note = ui.t("settings.providers.usage.coverage_note", { when = when }):get()
+						if coverage.backfillTimestampsEstimated then
+							note ..= " " .. ui.t("settings.providers.usage.backfill_note"):get()
+						end
+						return note
 					end,
 					text_size = "$font.size.xs",
 					line_height = "$font.line.xs",
@@ -667,6 +904,7 @@ local function tokens_view(resource: any, range: State<string>, target: any): No
 		end),
 	}
 end
+
 
 
 -- The device a global opening reads: the Providers target when one was
@@ -733,8 +971,16 @@ function M.sheet(open: State<boolean>, device_name: () -> string): Node
 			then { seconds = 86400, bucket = "hour" }
 			elseif range:get() == "30d" then { seconds = 30 * 86400, bucket = "day" }
 			else { seconds = 7 * 86400, bucket = "day" }
-		local to = os.time()
-		return agents.usage_summary(target, to - spec.seconds, to, spec.bucket):await()
+		local step = if spec.bucket == "hour" then 3600 else 86400
+		-- The range ends at the end of the current step, so the newest bar
+		-- is the one still filling.
+		local to = (math.floor(os.time() / step) + 1) * step
+		local from = to - spec.seconds
+		local data = agents.usage_summary(target, from, to, spec.bucket):await()
+		if data == nil then
+			return nil
+		end
+		return { data = data, from = from, to = to, step = step, hourly = spec.bucket == "hour" }
 	end)
 	return ds.Sheet {
 		open = open,
@@ -834,7 +1080,7 @@ function M.sheet(open: State<boolean>, device_name: () -> string): Node
 						ui.div { y = -0.5, ds.Icon { name = "refresh", size = 13 } },
 					},
 				},
-				tokens_view(summary, range, target),
+				tokens_view(summary, target),
 			}
 		end),
 	}

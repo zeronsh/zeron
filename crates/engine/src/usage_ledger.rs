@@ -214,6 +214,8 @@ impl UsageLedger {
         let bucket_seconds = bucket_seconds.max(60);
         let mut totals = Totals::default();
         let mut buckets: BTreeMap<i64, Totals> = BTreeMap::new();
+        // Each bucket split by agent, so the sheet can draw time per agent.
+        let mut bucket_harness: BTreeMap<i64, BTreeMap<String, Totals>> = BTreeMap::new();
         let mut by_harness: BTreeMap<String, Totals> = BTreeMap::new();
         let mut by_model: BTreeMap<String, Totals> = BTreeMap::new();
         let mut by_account: BTreeMap<String, Totals> = BTreeMap::new();
@@ -228,6 +230,12 @@ impl UsageLedger {
             totals.add(&row);
             let start = row.at.div_euclid(bucket_seconds) * bucket_seconds;
             buckets.entry(start).or_default().add(&row);
+            bucket_harness
+                .entry(start)
+                .or_default()
+                .entry(row.harness.clone())
+                .or_default()
+                .add(&row);
             by_harness.entry(row.harness.clone()).or_default().add(&row);
             let model = row.model.clone().unwrap_or_else(|| "unknown".into());
             by_model.entry(model).or_default().add(&row);
@@ -246,9 +254,11 @@ impl UsageLedger {
         };
         json!({
             "totals": totals.value(),
+            "bucketSeconds": bucket_seconds,
             "buckets": buckets.into_iter().map(|(start, totals)| {
                 let mut row = totals.value();
                 row["start"] = json!(start);
+                row["byHarness"] = json!(named(bucket_harness.remove(&start).unwrap_or_default(), "harness"));
                 row
             }).collect::<Vec<_>>(),
             "byHarness": named(by_harness, "harness"),
@@ -314,6 +324,13 @@ mod tests {
         assert_eq!(summary["totals"]["costUsd"], 0.25);
         assert_eq!(summary["buckets"].as_array().unwrap().len(), 1);
         assert_eq!(summary["buckets"][0]["start"], 86_400);
+        assert_eq!(summary["bucketSeconds"], 86_400);
+        let split = summary["buckets"][0]["byHarness"].as_array().unwrap();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0]["harness"], "claude-code");
+        assert_eq!(split[0]["totalTokens"], 57);
+        assert_eq!(split[1]["harness"], "codex");
+        assert_eq!(split[1]["totalTokens"], 5);
         assert_eq!(summary["byHarness"].as_array().unwrap().len(), 2);
         assert_eq!(summary["coverage"]["missingCost"], true);
     }
