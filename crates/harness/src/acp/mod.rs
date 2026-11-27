@@ -146,6 +146,14 @@ struct AcpAgentSpec {
     /// non-response on some machines). The prompt response stays as the
     /// fallback; whichever lands first settles the turn, exactly once.
     prompt_complete_extension: bool,
+    /// The agent emits `_cognition.ai/agent_stopped` at a turn's genuine end
+    /// (Devin: in healthy turns the notification immediately precedes the
+    /// `session/prompt` RPC response — verified live, CLI 3000.15). Treat it
+    /// as the AUTHORITATIVE turn end, grok's completion extension's shape:
+    /// when the RPC response is the frame that never arrives, the turn still
+    /// settles. It carries no prompt id, but prompts are serialized per
+    /// session, so a session match with a prompt outstanding is enough.
+    agent_stopped_extension: bool,
     /// Bound on prompt-send → FIRST sign of life on the wire. `None`
     /// disables. Grok's healthy runs acknowledge a prompt within
     /// milliseconds (queue bookkeeping precedes any model work), so total
@@ -298,6 +306,7 @@ fn grok_spec() -> AcpAgentSpec {
         // Verified live (1.0.4): the notification fires with the echoed
         // `_meta.promptId`, just ahead of the RPC response.
         prompt_complete_extension: true,
+        agent_stopped_extension: false,
         prompt_stall: Some(Duration::from_secs(30)),
         stall_hint: "The agent process is likely wedged — a stale shared leader \
              process or a hung startup check; zeron launches it with --no-leader \
@@ -391,6 +400,7 @@ fn devin_spec() -> AcpAgentSpec {
         effort_values: devin_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
+        agent_stopped_extension: true,
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: false,
@@ -430,6 +440,7 @@ fn registry_spec(agent: zeron_proto::RegistryAgent, name: &str) -> AcpAgentSpec 
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
+        agent_stopped_extension: false,
         prompt_stall: None,
         stall_hint: "The agent may be waiting on its own sign-in or setup.",
         effort_in_model_id: false,
@@ -461,6 +472,7 @@ fn fx_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
+        agent_stopped_extension: false,
         prompt_stall: None,
         stall_hint: "Check fx's provider configuration.",
         effort_in_model_id: false,
@@ -543,6 +555,7 @@ fn hermes_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
+        agent_stopped_extension: false,
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: false,
@@ -1755,6 +1768,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
+        agent_stopped_extension: false,
         // Generous bound (30s past CCPA's own 300s HTTP timeout) so silent
         // xhigh thinking never false-positives while wedged turns still settle.
         prompt_stall: Some(Duration::from_secs(330)),
@@ -4579,6 +4593,7 @@ impl AcpHarness {
             prompt_transform: self.spec.prompt_transform,
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
+            agent_stopped_extension: self.spec.agent_stopped_extension,
             preempt_steers: self.spec.steering_mode == SteeringMode::StepBoundary,
             devin_selection,
             devin_catalog,
@@ -4629,6 +4644,8 @@ struct Session {
     harness: HarnessId,
     agent_name: &'static str,
     prompt_complete_extension: bool,
+    /// See `AcpAgentSpec::agent_stopped_extension`.
+    agent_stopped_extension: bool,
     /// Steers preempt the generation (descriptor: mid-turn steering).
     preempt_steers: bool,
     /// Devin: the requested model's catalog group (see `devin_models`).
@@ -6599,6 +6616,7 @@ async fn run_session(session: Session) {
         harness,
         agent_name,
         prompt_complete_extension,
+        agent_stopped_extension,
         preempt_steers,
         devin_selection,
         devin_catalog,
@@ -7330,6 +7348,40 @@ async fn run_session(session: Session) {
                                 Ok(json!({ "stopReason": stop }))
                             }));
                         }
+                    }
+                    // `_cognition.ai/agent_stopped` — Devin's authoritative
+                    // turn end (see the spec field). `cause` maps onto a
+                    // stopReason: the synthesized response settles the turn
+                    // through the same response arm as grok's extension, and
+                    // the real RPC — healthy or hung — drains in the
+                    // background, its late result discarded.
+                    if agent_stopped_extension
+                        && method == "_cognition.ai/agent_stopped"
+                        && !interrupted
+                        && turn.is_some()
+                        && params.get("sessionId").and_then(Value::as_str)
+                            == Some(session_id.as_str())
+                    {
+                        let cause = params
+                            .get("cause")
+                            .and_then(Value::as_str)
+                            .unwrap_or("end_turn");
+                        let stop = if cause == "cancelled" {
+                            "cancelled"
+                        } else if cause.contains("error") {
+                            "error"
+                        } else {
+                            "end_turn"
+                        }
+                        .to_owned();
+                        if let Some(old) = turn.take() {
+                            tokio::spawn(async move {
+                                let _ = old.await;
+                            });
+                        }
+                        turn = Some(Box::pin(async move {
+                            Ok(json!({ "stopReason": stop }))
+                        }));
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
