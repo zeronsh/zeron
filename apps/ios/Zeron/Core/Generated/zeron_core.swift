@@ -1061,7 +1061,20 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func cloudModels(harness: String) async  -> [ModelInfo]
     
+    /**
+     * A new project named `name` on `device_id` of the repositories at
+     * `repository_paths` (anywhere there), each staying where it is. Its id.
+     */
+    func composeProject(deviceId: String, name: String, repositoryPaths: [String]) async throws  -> String
+    
     func connectivity()  -> Connectivity
+    
+    /**
+     * A new repository named `name` on `device_id`, in `parent` (where most
+     * of its repositories are when None), with a README as its first commit
+     * unless `empty`, and on GitHub too when `publish` (Some(private)).
+     */
+    func createLocalRepository(deviceId: String, name: String, parent: String?, empty: Bool, publish: Bool?) async throws  -> CreatedRepository
     
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
@@ -1115,6 +1128,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * unreachable).
      */
     func listHarnesses(deviceId: String) async  -> [HarnessInfo]
+    
+    /**
+     * The repositories on `device_id`: those its host found and those kept
+     * there, newest worked-in first. A host too old to list them fails.
+     */
+    func listLocalRepositories(deviceId: String, refresh: Bool) async throws  -> LocalRepositories
     
     /**
      * Model catalog for `harness` on `device_id` (normalized; static fallback).
@@ -1237,6 +1256,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * OS network path: `false` only for a definitive "unsatisfied".
      */
     func setNetworkOnline(online: Bool) 
+    
+    /**
+     * The project at `path` includes exactly `members` from elsewhere on
+     * its device. What it holds then.
+     */
+    func setProjectRepositories(deviceId: String, path: String, members: [ProjectMember]) async throws  -> ProjectRepositories
     
     func setSectionCollapsed(sectionId: String, collapsed: Bool) throws 
     
@@ -1613,6 +1638,26 @@ open func cloudModels(harness: String)async  -> [ModelInfo]  {
         )
 }
     
+    /**
+     * A new project named `name` on `device_id` of the repositories at
+     * `repository_paths` (anywhere there), each staying where it is. Its id.
+     */
+open func composeProject(deviceId: String, name: String, repositoryPaths: [String])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_compose_project(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(name),FfiConverterSequenceString.lower(repositoryPaths)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func connectivity() -> Connectivity  {
     return try!  FfiConverterTypeConnectivity_lift(try! rustCall() {
         uniffiCallStatus in
@@ -1620,6 +1665,27 @@ open func connectivity() -> Connectivity  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * A new repository named `name` on `device_id`, in `parent` (where most
+     * of its repositories are when None), with a README as its first commit
+     * unless `empty`, and on GitHub too when `publish` (Some(private)).
+     */
+open func createLocalRepository(deviceId: String, name: String, parent: String?, empty: Bool, publish: Bool?)async throws  -> CreatedRepository  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_local_repository(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(name),FfiConverterOptionString.lower(parent),FfiConverterBool.lower(empty),FfiConverterOptionBool.lower(publish)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCreatedRepository_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -1801,6 +1867,26 @@ open func listHarnesses(deviceId: String)async  -> [HarnessInfo]  {
             liftFunc: FfiConverterSequenceTypeHarnessInfo.lift,
             errorHandler: nil
             
+        )
+}
+    
+    /**
+     * The repositories on `device_id`: those its host found and those kept
+     * there, newest worked-in first. A host too old to list them fails.
+     */
+open func listLocalRepositories(deviceId: String, refresh: Bool)async throws  -> LocalRepositories  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_local_repositories(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterBool.lower(refresh)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLocalRepositories_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
         )
 }
     
@@ -2189,6 +2275,26 @@ open func setNetworkOnline(online: Bool)  {try! rustCall() {
         FfiConverterBool.lower(online),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * The project at `path` includes exactly `members` from elsewhere on
+     * its device. What it holds then.
+     */
+open func setProjectRepositories(deviceId: String, path: String, members: [ProjectMember])async throws  -> ProjectRepositories  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_set_project_repositories(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(path),FfiConverterSequenceTypeProjectMember.lower(members)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeProjectRepositories_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func setSectionCollapsed(sectionId: String, collapsed: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
@@ -8593,6 +8699,64 @@ public func FfiConverterTypeCoreConfig_lower(_ value: CoreConfig) -> RustBuffer 
 
 
 /**
+ * A repository just made, and what didn't go as asked (no first commit,
+ * no GitHub copy), though it's there.
+ */
+public struct CreatedRepository: Equatable, Hashable {
+    public var repository: LocalRepository
+    public var warning: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(repository: LocalRepository, warning: String?) {
+        self.repository = repository
+        self.warning = warning
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreatedRepository: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreatedRepository: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreatedRepository {
+        return
+            try CreatedRepository(
+                repository: FfiConverterTypeLocalRepository.read(from: &buf), 
+                warning: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CreatedRepository, into buf: inout [UInt8]) {
+        FfiConverterTypeLocalRepository.write(value.repository, into: &buf)
+        FfiConverterOptionString.write(value.warning, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreatedRepository_lift(_ buf: RustBuffer) throws -> CreatedRepository {
+    return try FfiConverterTypeCreatedRepository.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreatedRepository_lower(_ value: CreatedRepository) -> RustBuffer {
+    return FfiConverterTypeCreatedRepository.lower(value)
+}
+
+
+/**
  * A debug/demo transcript entry (markdown text), for fixtures and benches.
  */
 public struct DebugEntry: Equatable, Hashable {
@@ -10382,6 +10546,176 @@ public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer 
 }
 
 
+/**
+ * A device's repositories, and where a new one goes.
+ */
+public struct LocalRepositories: Equatable, Hashable {
+    public var repositories: [LocalRepository]
+    public var defaultParent: String
+    /**
+     * Its home (a path under it reads `~/…`).
+     */
+    public var home: String
+    /**
+     * Its GitHub CLI is signed in: a new one can be made on GitHub too.
+     */
+    public var canPublish: Bool
+    public var truncated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(repositories: [LocalRepository], defaultParent: String, 
+        /**
+         * Its home (a path under it reads `~/…`).
+         */home: String, 
+        /**
+         * Its GitHub CLI is signed in: a new one can be made on GitHub too.
+         */canPublish: Bool, truncated: Bool) {
+        self.repositories = repositories
+        self.defaultParent = defaultParent
+        self.home = home
+        self.canPublish = canPublish
+        self.truncated = truncated
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalRepositories: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalRepositories: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalRepositories {
+        return
+            try LocalRepositories(
+                repositories: FfiConverterSequenceTypeLocalRepository.read(from: &buf), 
+                defaultParent: FfiConverterString.read(from: &buf), 
+                home: FfiConverterString.read(from: &buf), 
+                canPublish: FfiConverterBool.read(from: &buf), 
+                truncated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalRepositories, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeLocalRepository.write(value.repositories, into: &buf)
+        FfiConverterString.write(value.defaultParent, into: &buf)
+        FfiConverterString.write(value.home, into: &buf)
+        FfiConverterBool.write(value.canPublish, into: &buf)
+        FfiConverterBool.write(value.truncated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalRepositories_lift(_ buf: RustBuffer) throws -> LocalRepositories {
+    return try FfiConverterTypeLocalRepositories.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalRepositories_lower(_ value: LocalRepositories) -> RustBuffer {
+    return FfiConverterTypeLocalRepositories.lower(value)
+}
+
+
+/**
+ * A git repository on a device (`list_local_repositories`).
+ */
+public struct LocalRepository: Equatable, Hashable {
+    public var path: String
+    public var name: String
+    public var branch: String?
+    public var hasCommits: Bool
+    public var github: String?
+    /**
+     * Last worked in, ms since the epoch (the list's order, newest first).
+     */
+    public var touchedAt: Int64?
+    /**
+     * Added, cloned or made through Zeron, not only found.
+     */
+    public var kept: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, name: String, branch: String?, hasCommits: Bool, github: String?, 
+        /**
+         * Last worked in, ms since the epoch (the list's order, newest first).
+         */touchedAt: Int64?, 
+        /**
+         * Added, cloned or made through Zeron, not only found.
+         */kept: Bool) {
+        self.path = path
+        self.name = name
+        self.branch = branch
+        self.hasCommits = hasCommits
+        self.github = github
+        self.touchedAt = touchedAt
+        self.kept = kept
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LocalRepository: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalRepository: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalRepository {
+        return
+            try LocalRepository(
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                hasCommits: FfiConverterBool.read(from: &buf), 
+                github: FfiConverterOptionString.read(from: &buf), 
+                touchedAt: FfiConverterOptionInt64.read(from: &buf), 
+                kept: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LocalRepository, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterBool.write(value.hasCommits, into: &buf)
+        FfiConverterOptionString.write(value.github, into: &buf)
+        FfiConverterOptionInt64.write(value.touchedAt, into: &buf)
+        FfiConverterBool.write(value.kept, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalRepository_lift(_ buf: RustBuffer) throws -> LocalRepository {
+    return try FfiConverterTypeLocalRepository.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalRepository_lower(_ value: LocalRepository) -> RustBuffer {
+    return FfiConverterTypeLocalRepository.lower(value)
+}
+
+
 public struct LoginOptionInfo: Equatable, Hashable {
     /**
      * The engine's `provider` (`None`: the agent's only login).
@@ -11012,6 +11346,65 @@ public func FfiConverterTypePendingSend_lower(_ value: PendingSend) -> RustBuffe
 }
 
 
+/**
+ * A repository asked for in a project (`set_project_repositories`): where
+ * it is on the device, and the name it goes by there (its folder's when
+ * None).
+ */
+public struct ProjectMember: Equatable, Hashable {
+    public var path: String
+    public var name: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, name: String?) {
+        self.path = path
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectMember: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectMember: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectMember {
+        return
+            try ProjectMember(
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectMember, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectMember_lift(_ buf: RustBuffer) throws -> ProjectMember {
+    return try FfiConverterTypeProjectMember.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectMember_lower(_ value: ProjectMember) -> RustBuffer {
+    return FfiConverterTypeProjectMember.lower(value)
+}
+
+
 public struct ProjectRef: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -11168,6 +11561,19 @@ public struct ProjectRepository: Equatable, Hashable {
      * False with no commit yet: nothing to branch from, can't be chosen.
      */
     public var hasCommits: Bool
+    /**
+     * Where it really is, for one the project includes from elsewhere on
+     * its device (absolute); None for one in the project's folder.
+     */
+    public var location: String?
+    /**
+     * Included, but no longer at `location`: listed, never chosen.
+     */
+    public var missing: Bool
+    /**
+     * Its origin's GitHub repository (`owner/name`).
+     */
+    public var github: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11180,10 +11586,23 @@ public struct ProjectRepository: Equatable, Hashable {
          */branch: String?, 
         /**
          * False with no commit yet: nothing to branch from, can't be chosen.
-         */hasCommits: Bool) {
+         */hasCommits: Bool, 
+        /**
+         * Where it really is, for one the project includes from elsewhere on
+         * its device (absolute); None for one in the project's folder.
+         */location: String?, 
+        /**
+         * Included, but no longer at `location`: listed, never chosen.
+         */missing: Bool, 
+        /**
+         * Its origin's GitHub repository (`owner/name`).
+         */github: String?) {
         self.path = path
         self.branch = branch
         self.hasCommits = hasCommits
+        self.location = location
+        self.missing = missing
+        self.github = github
     }
 
     
@@ -11204,7 +11623,10 @@ public struct FfiConverterTypeProjectRepository: FfiConverterRustBuffer {
             try ProjectRepository(
                 path: FfiConverterString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
-                hasCommits: FfiConverterBool.read(from: &buf)
+                hasCommits: FfiConverterBool.read(from: &buf), 
+                location: FfiConverterOptionString.read(from: &buf), 
+                missing: FfiConverterBool.read(from: &buf), 
+                github: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -11212,6 +11634,9 @@ public struct FfiConverterTypeProjectRepository: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterBool.write(value.hasCommits, into: &buf)
+        FfiConverterOptionString.write(value.location, into: &buf)
+        FfiConverterBool.write(value.missing, into: &buf)
+        FfiConverterOptionString.write(value.github, into: &buf)
     }
 }
 
@@ -21256,6 +21681,31 @@ fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeLocalRepository: FfiConverterRustBuffer {
+    typealias SwiftType = [LocalRepository]
+
+    public static func write(_ value: [LocalRepository], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLocalRepository.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LocalRepository] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LocalRepository]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLocalRepository.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeLoginOptionInfo: FfiConverterRustBuffer {
     typealias SwiftType = [LoginOptionInfo]
 
@@ -21398,6 +21848,31 @@ fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePendingSend.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeProjectMember: FfiConverterRustBuffer {
+    typealias SwiftType = [ProjectMember]
+
+    public static func write(_ value: [ProjectMember], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProjectMember.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProjectMember] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProjectMember]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProjectMember.read(from: &buf))
         }
         return seq
     }
@@ -22554,7 +23029,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_cloud_models() != 32016) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_compose_project() != 39111) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_connectivity() != 51284) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_local_repository() != 22437) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_project() != 59427) {
@@ -22597,6 +23078,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses() != 2345) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_local_repositories() != 896) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_models() != 23103) {
@@ -22687,6 +23171,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_network_online() != 33835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_project_repositories() != 64903) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_section_collapsed() != 55017) {
