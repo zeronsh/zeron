@@ -2,7 +2,7 @@
 
 Control your coding agents (Claude Code, Codex, Cursor, OpenCode, Devin, Grok, Hermes, Pi, Antigravity, Muse Code, fx) locally by default, with optional multi-device sync.
 
-*English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
+*English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Français](README.fr.md)*
 
 ![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
 

@@ -1,0 +1,312 @@
+{
+  "loading": "Chargement",
+  "try_again": "Réessayer",
+  "device": {
+    "unknown": "l’appareil de cette conversation"
+  },
+  "tab": {
+    "changes": "Modifications",
+    "history": "Historique",
+    "asking": "Interrogation de git…",
+    "no_session_title": "Aucune conversation ici",
+    "no_session_body": "Git affiche la copie de travail d’une conversation. Ouvrez-le depuis le panneau d’une conversation."
+  },
+  "empty_page": {
+    "changes": "Modifications",
+    "history": "Historique"
+  },
+  "scope": {
+    "label": "Ce qui a changé",
+    "working": "Copie de travail",
+    "working_about": "Tout depuis le dernier commit, staged ou non",
+    "branch": "Branche",
+    "branch_about": "Tout depuis que la branche a divergé de sa base",
+    "turn": "Dernier tour",
+    "turn_about": "Ce qu’a changé le dernier tour de cette conversation",
+    "against": "par rapport à",
+    "base_label": "Comparer avec",
+    "base_choose": "Choisir une branche"
+  },
+  "head": {
+    "ahead_of": "{n, plural, =0 {# commit} one {# commit} other {# commits}} d’avance sur {base}"
+  },
+  "state": {
+    "merge": "Merge en cours",
+    "rebase": "Rebase en cours",
+    "cherry_pick": "Cherry-pick en cours",
+    "revert": "Revert en cours",
+    "commit_to_finish": "Quand tous les fichiers sont prêts, créez un commit pour terminer."
+  },
+  "conflicts": {
+    "title": "{n, plural, =0 {# fichier en conflit} one {# fichier en conflit} other {# fichiers en conflit}}",
+    "body": "Résolvez chaque conflit dans votre éditeur, cliquez sur Stage, puis créez un commit."
+  },
+  "stage_all": "Stage all",
+  "file": {
+    "stage": "Stage",
+    "unstage": "Unstage",
+    "discard": "Abandonner les modifications"
+  },
+  "diff": {
+    "loading": "Chargement du diff…",
+    "binary": "Fichier binaire : aucune ligne à afficher.",
+    "cut": "Diff trop long : la suite n’est pas affichée.",
+    "pick_title": "Aucun fichier sélectionné",
+    "pick_body": "Sélectionnez un fichier pour voir ses modifications."
+  },
+  "empty": {
+    "working_title": "Aucune modification en attente",
+    "working_body": "Sur {branch}, tout est déjà dans un commit.",
+    "working_ahead": "Sur {branch}, tout est déjà dans un commit. {n, plural, =0 {# commit est en attente de push} one {# commit est en attente de push} other {# commits sont en attente de push}}.",
+    "branch_title": "Aucune modification sur cette branche",
+    "branch_body": "Elle ne contient rien de plus que {base}.",
+    "turn_title": "Rien n’a changé pendant ce tour",
+    "turn_body": "Le dernier tour n’a modifié aucun fichier."
+  },
+  "pull": {
+    "button": "Pull {n}"
+  },
+  "push": {
+    "button": "Push {n}",
+    "publish": "Publier la branche",
+    "pushing_label": "Push en cours",
+    "pushing": "Push de {n, plural, =0 {# commit} one {# commit} other {# commits}} vers {where}",
+    "pull_then_push": "Pull, puis push"
+  },
+  "more": {
+    "label": "Plus",
+    "fetch": "Fetch",
+    "pull": "Pull",
+    "discard_all": "Abandonner toutes les modifications"
+  },
+  "commit": {
+    "button": "Commit",
+    "files": "Commit de {n, plural, =0 {# fichier} one {# fichier} other {# fichiers}}",
+    "and_push": "Commit et push",
+    "amend": "Modifier le dernier commit",
+    "you": "Vous",
+    "placeholder": "Ce qui a changé et pourquoi",
+    "message": "Message de commit"
+  },
+  "discard": {
+    "title_one": "Abandonner les modifications de {name} ?",
+    "title_many": "Abandonner les modifications de {n, plural, =0 {# fichier} one {# fichier} other {# fichiers}} ?",
+    "body": "Les fichiers reviennent à leur état du dernier commit ; les fichiers ajoutés depuis sont supprimés. Cette action est irréversible.",
+    "confirm": "Abandonner"
+  },
+  "branches": {
+    "label": "Branche",
+    "none": "Aucune branche",
+    "search": "Rechercher une branche…",
+    "new": "Nouvelle branche",
+    "new_title": "Nouvelle branche",
+    "new_body": "À partir de {from}, en conservant vos modifications.",
+    "create": "Créer et basculer",
+    "name": "Nom de la branche",
+    "name_placeholder": "feature/name",
+    "on_remote": "Sur {remote}, pas encore en local",
+    "ahead_behind": "{ahead} en avance, {behind} en retard",
+    "no_match": "Aucune branche ne correspond à « {query} »",
+    "current": "actuelle"
+  },
+  "history": {
+    "head": "{n, plural, =0 {# commit} one {# commit} other {# commits}} sur {branch}",
+    "head_more": "Les {n} derniers commits sur {branch}",
+    "older": "Afficher les commits plus anciens",
+    "fetch": "Fetch",
+    "back": "Retour à l’historique",
+    "empty_title": "Aucun commit pour l’instant",
+    "empty_body": "Le premier commit de cette branche apparaîtra ici.",
+    "pick_title": "Aucun commit sélectionné",
+    "pick_body": "Sélectionnez un commit pour voir ses modifications.",
+    "no_files_title": "Aucun fichier modifié",
+    "no_files_body": "Ce commit ne change rien à son parent.",
+    "ref_head": "{name} : votre branche actuelle",
+    "ref_branch": "Branche {name}",
+    "ref_remote": "{name}, sur le dépôt distant",
+    "ref_tag": "Tag {name}",
+    "no_subject": "(sans titre)",
+    "copy_sha": "Copier l’identifiant du commit",
+    "copied": "Copié",
+    "open_parent": "Ouvrir le parent {sha}",
+    "body_more": "Afficher tout le message",
+    "body_less": "Afficher moins",
+    "committed_by": "commit créé par {name}",
+    "parents": "{n, plural, =0 {Parent} one {Parent} other {Parents}}",
+    "files": "{n, plural, =0 {# fichier} one {# fichier} other {# fichiers}}",
+    "menu": {
+      "copy_sha": "Copier l’identifiant du commit",
+      "copy_subject": "Copier le titre",
+      "branch_here": "Nouvelle branche à partir d’ici"
+    },
+    "found": "{n, plural, =0 {# commit trouvé} one {# commit trouvé} other {# commits trouvés}}",
+    "head_all": "{n, plural, =0 {# commit} one {# commit} other {# commits}} sur toutes les branches",
+    "head_all_more": "Les {n} derniers commits sur toutes les branches",
+    "base_tip": "{ahead} en avance sur {base}, {behind} en retard",
+    "all_branches": "Toutes les branches",
+    "fetching": "Fetch en cours",
+    "search": "Rechercher des commits",
+    "fetch_failed": "Échec du fetch",
+    "none_found_title": "Aucun commit trouvé",
+    "none_found_body": "Aucun message de commit ne contient « {query} ».",
+    "branch_from": "À partir du commit {sha}. Vous basculez dessus en gardant vos modifications.",
+    "parents_n": "{n, plural, =0 {# parent} one {# parent} other {# parents}}",
+    "ref_line": {
+      "branch": "Branche : {name}",
+      "remote": "Branche distante : {name}",
+      "tag": "Tag : {name}"
+    },
+    "ref_more": "{n, plural, =0 {# autre référence} one {# autre référence} other {# autres références}}"
+  },
+  "reason": {
+    "offline": {
+      "title": "Impossible de joindre {device}",
+      "body": "Il est hors ligne ou en veille. Ses modifications s’afficheront ici à son retour."
+    },
+    "timeout": {
+      "title": "Pas de réponse de {device}",
+      "body": "Il a mis trop de temps à répondre. Il est peut-être occupé ou sa connexion est lente."
+    },
+    "not_installed": {
+      "title": "Git n’est pas installé sur {device}",
+      "body": "Mettez Zeron à jour sur cet appareil : Git est inclus."
+    },
+    "off": {
+      "title": "Git est désactivé sur {device}",
+      "body": "Activez-le sur cet appareil, dans Réglages → Plugins."
+    },
+    "not_approved": {
+      "title": "Git n’est pas encore autorisé sur {device}",
+      "body": "Autorisez-le sur cet appareil, dans Réglages → Plugins."
+    },
+    "version_mismatch": {
+      "title": "Version de Git différente sur {device}",
+      "body": "Mettez Zeron à jour sur les deux appareils pour qu’ils correspondent."
+    },
+    "other_author": {
+      "title": "Un autre plugin Git est installé sur {device}",
+      "body": "Un plugin d’un autre auteur porte le même nom sur cet appareil. Retirez-le pour utiliser celui de Zeron."
+    },
+    "no_service": {
+      "title": "Git ne peut pas fonctionner sur {device}",
+      "body": "Cette version n’a pas de service. Mettez Zeron à jour sur cet appareil."
+    },
+    "not_loaded": {
+      "title": "Git n’a pas démarré sur {device}",
+      "body": "Son service n’a pas pu se charger. Consultez Réglages → Plugins sur cet appareil pour en savoir plus."
+    },
+    "old_engine": {
+      "title": "Zeron doit être mis à jour sur {device}",
+      "body": "Mettez Zeron à jour sur cet appareil pour utiliser Git avec cette conversation."
+    },
+    "interrupted": {
+      "title": "Git s’est arrêté sur {device}",
+      "body": "Il s’est arrêté en cours d’opération. Réessayez."
+    },
+    "other": {
+      "title": "Une erreur est survenue"
+    }
+  },
+  "code": {
+    "not_a_repo": {
+      "title": "Aucun dépôt git",
+      "body": "Le dossier de cette conversation n’est pas dans un dépôt git : il n’y a rien à comparer."
+    },
+    "no_checkout": {
+      "title": "Aucun dossier",
+      "body": "Cette conversation n’est liée à aucun dossier."
+    },
+    "rejected": {
+      "title": "La branche a avancé sur {remote}",
+      "body": "Elle a des commits que vous n’avez pas. Faites d’abord un pull, puis un push."
+    },
+    "auth": {
+      "title": "{remote} a refusé",
+      "body": "git sur {device} n’a pas pu s’y authentifier. Vérifiez ses identifiants sur cet appareil."
+    },
+    "network": {
+      "title": "Impossible de joindre {remote}",
+      "body": "{device} n’a pas pu s’y connecter. Vérifiez son réseau."
+    },
+    "nothing_staged": {
+      "title": "Aucun fichier staged",
+      "body": "Cochez d’abord les fichiers à inclure dans le commit."
+    },
+    "no_identity": {
+      "title": "git ne sait pas qui vous êtes",
+      "body": "Définissez votre nom et votre e-mail pour git sur {device} (git config user.name, user.email)."
+    },
+    "dirty": {
+      "title": "Des modifications seraient écrasées",
+      "body": "Changer de branche les écraserait. Mettez-les d’abord dans un commit, ou abandonnez-les."
+    },
+    "pull_conflicts": {
+      "title": "Le pull créerait des conflits",
+      "body": "Vos commits et les leurs modifient les mêmes lignes. Rien n’a été modifié : faites le merge dans votre éditeur ou un terminal."
+    },
+    "no_base": {
+      "title": "Aucune branche de base",
+      "body": "Ce dépôt n’a ni main ni master : impossible de comparer cette branche."
+    },
+    "no_turn": {
+      "title": "Aucun tour pour l’instant",
+      "body": "Les modifications par tour s’afficheront dès le prochain tour de cette conversation."
+    },
+    "detached": {
+      "title": "Aucune branche pour le push",
+      "body": "La copie de travail est sur un commit, pas sur une branche. Créez d’abord une branche."
+    },
+    "no_remote": {
+      "title": "Aucune destination pour le push",
+      "body": "Ce dépôt n’a pas de dépôt distant."
+    },
+    "no_upstream": {
+      "title": "Pas encore sur le dépôt distant",
+      "body": "Faites d’abord un push de la branche."
+    },
+    "bad_name": {
+      "title": "Nom de branche invalide",
+      "body": "Un nom de branche ne peut pas contenir d’espaces ni « .. », ni finir par « / » ou « .lock »."
+    },
+    "exists": {
+      "title": "Cette branche existe déjà",
+      "body": "Une branche porte déjà ce nom : basculez plutôt dessus."
+    },
+    "timeout": {
+      "title": "git a mis trop de temps",
+      "body": "Il travaille peut-être encore sur {device}. Réessayez dans un instant."
+    },
+    "no_message": {
+      "title": "Aucun message",
+      "body": "Dites ce qui a changé et pourquoi."
+    },
+    "git": {
+      "title": "La commande git a échoué",
+      "body": "Git s’est arrêté dans le dossier de cette conversation sur {device}. Réessayez ; si cela se reproduit, lancez la même commande dans un terminal sur cet appareil pour voir le détail."
+    },
+    "no_ref": {
+      "title": "Aucune branche nommée {words} ici",
+      "body": "Choisissez une autre branche de comparaison, ou faites un fetch pour la récupérer depuis {remote}."
+    },
+    "unsafe_dir": {
+      "title": "Git refuse de travailler dans ce dossier",
+      "body": "Git ne fait pas confiance à un dossier qui appartient à un autre utilisateur. Sur {device}, ajoutez-le avec git config --global --add safe.directory, puis réessayez."
+    },
+    "locked": {
+      "title": "Une autre commande git est en cours ici",
+      "body": "Attendez qu’elle se termine, puis réessayez. Si rien n’est en cours, supprimez .git/index.lock sur {device}."
+    }
+  },
+  "home": {
+    "diff_label": "{adds} lignes ajoutées, {dels} supprimées : ouvrir les modifications de la branche",
+    "branch_changes": "Modifications de la branche"
+  },
+  "changes": {
+    "partial": "{n} affichés sur {total}"
+  },
+  "comment": {
+    "placeholder": "Dites ce qu’il faut changer ici…",
+    "add": "Ajouter à la conversation",
+    "where_old": "{where} (avant)"
+  }
+}
