@@ -69,14 +69,54 @@ impl DocHost {
     }
 
     /// A chat's messages not yet taken by its agent: unresolved runs and steers
-    /// in its doc, then what this device still holds for it.
+    /// in its doc, then what this device still holds for it. A run or steer
+    /// its host refused (its worktree couldn't be made, say) stays, with the
+    /// host's reason as its `failure`, until it is sent again or its time to
+    /// run is up: without it a composer shows the message as on its way
+    /// forever, since it never reaches the transcript.
     pub fn waiting_messages(&self, chat_id: &str) -> Result<Vec<WaitingMessage>, EngineError> {
         let handle = self.open(chat_id)?;
-        let pending: Vec<_> = handle
-            .doc
-            .read_commands()?
+        let now = now_ms();
+        let commands = handle.doc.read_commands()?;
+        let message_of = |c: &SessionCommandEntry| match &c.payload {
+            SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+            SessionCommandPayload::Steer { message_id, .. } => message_id.clone(),
+            _ => None,
+        };
+        // Messages with an attempt still going (or gone through): a refused
+        // earlier attempt of theirs is not their story any more.
+        let live: std::collections::HashSet<String> = commands
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    SessionCommandStatus::Pending | SessionCommandStatus::Applied
+                )
+            })
+            .filter_map(message_of)
+            .collect();
+        // Each such message's newest refused attempt, by command id.
+        let mut refused: std::collections::HashMap<String, (i64, String)> = Default::default();
+        for c in commands
+            .iter()
+            .filter(|c| c.status == SessionCommandStatus::Rejected && now < c.effective_expiry())
+        {
+            if let Some(message) = message_of(c).filter(|m| !live.contains(m)) {
+                let newest = refused
+                    .entry(message)
+                    .or_insert((c.issued_at, c.id.clone()));
+                if c.issued_at > newest.0 {
+                    *newest = (c.issued_at, c.id.clone());
+                }
+            }
+        }
+        let pending: Vec<_> = commands
             .into_iter()
-            .filter(|c| c.status == SessionCommandStatus::Pending)
+            .filter(|c| match c.status {
+                SessionCommandStatus::Pending => true,
+                SessionCommandStatus::Rejected => refused.values().any(|(_, id)| *id == c.id),
+                _ => false,
+            })
             .collect();
         // (Read on every change to the chat while it's open: the
         // transcript's ids only when a command waits, and shared, not
@@ -108,8 +148,14 @@ impl DocHost {
                 if message_id.as_ref().is_some_and(|id| landed.contains(id)) {
                     return None;
                 }
+                let expires_at = Some(c.effective_expiry());
+                let failure = (c.status == SessionCommandStatus::Rejected).then(|| {
+                    c.resolution
+                        .filter(|r| !r.trim().is_empty())
+                        .unwrap_or_else(|| "Its device couldn't run it.".into())
+                });
                 Some(WaitingMessage {
-                    expires_at: Some(c.effective_expiry()),
+                    expires_at,
                     id: c.id,
                     chat_id: chat_id.to_string(),
                     message_id,
@@ -117,7 +163,7 @@ impl DocHost {
                     issued_by: c.issued_by,
                     sent_at: c.issued_at,
                     held: false,
-                    failure: None,
+                    failure,
                 })
             })
             .collect();
