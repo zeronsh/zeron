@@ -86,7 +86,7 @@ describe("POST /auth/orgs/{id}/invitations", () => {
 
   it("answers failed for an address WorkOS fails on, and sends the rest", async () => {
     const { userId, orgId } = await admin();
-    await workosControl("__fail", { path: "/user_management/invitations", times: 1 });
+    await workosControl("__fail", { path: "/user_management/invitations", times: 1, match: { organization_id: orgId } });
     const [a, b] = addresses(2);
     const res = await invite(userId, orgId, { emails: [a, b] });
     expect(res.status).toBe(200);
@@ -157,7 +157,7 @@ describe("POST /auth/orgs/{id}/invitations", () => {
       vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void logged.push(...args))
     );
     try {
-      await workosControl("__fail", { path: "/user_management/invitations", times: 1 });
+      await workosControl("__fail", { path: "/user_management/invitations", times: 1, match: { organization_id: orgId } });
       const emails = [...addresses(2), "secret-invalid", "x@secret..net"];
       const res = await invite(userId, orgId, { emails });
       expect((res.body.failed as unknown[]).length).toBe(3);

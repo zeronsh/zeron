@@ -71,12 +71,12 @@ describe("POST /auth/orgs: one created org per user", () => {
 
   it("gives the claim back when WorkOS fails, so the user can try again", async () => {
     const userId = newUserId();
-    await workosControl("__fail", { path: "/organizations", times: 1 });
-    const failed = await createOrg(userId);
+    await workosControl("__fail", { path: "/organizations", times: 1, match: { name: "Acme Again" } });
+    const failed = await createOrg(userId, "Acme Again");
     expect(failed.status).toBe(401);
     expect(await adminOrgs(userId)).toEqual([]);
 
-    const retried = await createOrg(userId);
+    const retried = await createOrg(userId, "Acme Again");
     expect(retried.status).toBe(200);
     expect(await adminOrgs(userId)).toEqual([retried.body.organizationId]);
   });
