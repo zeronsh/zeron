@@ -363,7 +363,8 @@ final class SessionFlowTests: XCTestCase {
 
         cell.tap()
         XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
-        let menu = app.buttons["session-menu"]
+        // On iPhone Duo's vertical bar the session menu is the system ⋯.
+        let menu = app.buttons.matching(NSPredicate(format: "identifier IN {'session-menu', 'BottomOverflowBarButtonItem'}")).firstMatch
         XCTAssertTrue(menu.waitForExistence(timeout: 5))
         snapshot(app, "session-bar")
         menu.tap()

@@ -138,6 +138,9 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             })
             show.accessibilityLabel = "Show Sidebar"
             show.accessibilityIdentifier = "sidebar-show"
+            show.menuRepresentation = UIAction(title: "Show Sidebar", image: UIImage(systemName: "sidebar.left")) { [weak self] _ in
+                self?.setSidebarShown(true)
+            }
             items.append(show)
             if !(root is NewSessionViewController) {
                 let compose = UIBarButtonItem(image: UIImage(systemName: "square.and.pencil"), primaryAction: UIAction { [weak self] _ in
@@ -145,6 +148,9 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
                 })
                 compose.accessibilityLabel = "New session"
                 compose.accessibilityIdentifier = "detail-new-session"
+                compose.menuRepresentation = UIAction(title: "New Session", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in
+                    self?.presentNewSession(prompt: nil)
+                }
                 items.append(compose)
             }
         }

@@ -176,6 +176,12 @@ final class VoiceBarItem {
         button.tintColor = Palette.text
         button.accessibilityIdentifier = "voice-bar"
         item = UIBarButtonItem(customView: button)
+        // How it reads if a short bar folds it into ⋯ (a custom view has no
+        // title or image of its own to list).
+        item.menuRepresentation = UIAction(title: "Voice", image: UIImage(systemName: "waveform")) { [weak self] _ in
+            guard let self, let host = self.host else { return }
+            host.openVoice(app: app, source: nil)
+        }
         button.addAction(UIAction { [weak self] _ in
             guard let self, let host = self.host else { return }
             host.openVoice(app: app, source: self.button)
