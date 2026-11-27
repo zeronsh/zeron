@@ -1781,7 +1781,12 @@ async fn skills_are_not_advertised_as_commands() {
         .await
         .unwrap()
         .expect("skills supported");
-    assert_eq!(skills.len(), 2, "identical skill paths deduplicate");
+    assert_eq!(skills.len(), 3, "identical skill paths deduplicate");
+    assert_eq!(skills[2].name, "visualize:visualize");
+    assert!(
+        !skills[2].enabled,
+        "Zeron offered the Codex UI's HTML visualization skill"
+    );
     assert_eq!(skills[0].name, "imagegen");
     assert_eq!(skills[0].path, "/skills/imagegen/SKILL.md");
     assert_eq!(skills[0].description, "Generate or edit images");

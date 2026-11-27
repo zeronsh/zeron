@@ -60,7 +60,12 @@ fi
 if has "$line" '"method":"skills/list"'; then
   # Skill discovery probe: answer with two cwd groups sharing one skill
   # (dedupe by identity) and settle; no thread ever starts.
-  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
+  # Like Codex, list an installed skill with its effective enablement.
+  visualize_enabled=true
+  if has " $* " ' -c skills.config=[{name="visualize:visualize",enabled=false}] '; then
+    visualize_enabled=false
+  fi
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]},{\"skills\":[{\"name\":\"visualize:visualize\",\"path\":\"/plugins/visualize/SKILL.md\",\"enabled\":$visualize_enabled}]}]}}"
   exec sleep 30
 fi
 if has "$line" '"method":"model/list"'; then
