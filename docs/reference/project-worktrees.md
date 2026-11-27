@@ -1,6 +1,6 @@
 # Project worktrees
 
-A project's folder doesn't have to be one git repository. A folder that holds several, and isn't one itself, can be checked out whole: a new chat in a **worktree** of such a project gets one folder laid out like the project, with a worktree of each repository chosen in it, all on one branch.
+A project's folder doesn't have to be one git repository. (Nor does it need to hold its repositories: see [projects of repositories](composed-projects.md), made from repositories anywhere on a device.) A folder that holds several, and isn't one itself, can be checked out whole: a new chat in a **worktree** of such a project gets one folder laid out like the project, with a worktree of each repository chosen in it, all on one branch.
 
 ```text
 ~/work/acme/                      ~/.zeron/worktrees/acme/swift-otter/
@@ -30,7 +30,7 @@ The chip under the composer reads *device › project › N repositories* behind
 
 ## Where the repositories are found
 
-The project folder's own subfolders, and one level further inside a plain subfolder (`packages/ui` above). Never dot folders, `node_modules`, linked worktrees or submodules (each belongs to another repository), nor a symbolic link (it may lead out of the project). At most 64 are listed.
+The project folder's own subfolders, and one level further inside a plain subfolder (`packages/ui` above). Never dot folders, `node_modules`, linked worktrees or submodules (each belongs to another repository), nor a symbolic link (it may lead out of the project), except a link the project's `.zeron-project.json` names: a repository it includes from elsewhere on its device ([projects of repositories](composed-projects.md)). Its worktree is made from where it really is. At most 64 are listed.
 
 The host device looks, when asked (`ListProjectRepositories`): nothing is stored in the workspace registry, so a repository cloned into the folder shows up in the next new chat.
 

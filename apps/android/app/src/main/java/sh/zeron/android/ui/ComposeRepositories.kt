@@ -128,6 +128,17 @@ fun ComposeRepositories(client: CoreClient?, device: DeviceView, onCreated: (Str
                 )
             }
             val count = shown.size + if (listing != null) 1 else 0
+            if (listing != null) {
+                item("new") {
+                    SegmentedListItem(
+                        onClick = { newRepository = true },
+                        shapes = segmentedShapes(0, count),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { ZIcon(ZIcons.Plus, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.testTag("compose-new-repository"),
+                    ) { Text("New repository…", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary) }
+                }
+            }
             if (shown.isEmpty()) {
                 item("status") {
                     Text(
@@ -148,7 +159,7 @@ fun ComposeRepositories(client: CoreClient?, device: DeviceView, onCreated: (Str
                 fun flip() = if (on) chosen.remove(r.path) else chosen.add(r.path)
                 SegmentedListItem(
                     onClick = { flip() },
-                    shapes = segmentedShapes(i, count),
+                    shapes = segmentedShapes(i + if (listing != null) 1 else 0, count),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { ZIcon(ZIcons.Branch, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                     trailingContent = { Checkbox(checked = on, onCheckedChange = { flip() }) },
@@ -163,17 +174,6 @@ fun ComposeRepositories(client: CoreClient?, device: DeviceView, onCreated: (Str
                     },
                     modifier = Modifier.padding(bottom = ListItemDefaults.SegmentedGap).testTag("compose-repository-${r.name}"),
                 ) { Text(r.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            }
-            if (listing != null) {
-                item("new") {
-                    SegmentedListItem(
-                        onClick = { newRepository = true },
-                        shapes = segmentedShapes(count - 1, count),
-                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
-                        leadingContent = { ZIcon(ZIcons.Plus, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
-                        modifier = Modifier.testTag("compose-new-repository"),
-                    ) { Text("New repository…", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary) }
-                }
             }
         }
         Column(

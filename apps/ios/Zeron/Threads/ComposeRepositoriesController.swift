@@ -11,9 +11,9 @@ import UIKit
 ///   [ acme                                   ]
 ///   REPOSITORIES ON MACBOOK PRO
 ///   [🔍 Search                                ]
+///   + New Repository…
 ///   api            ~/code/api · main          ✓
 ///   web            ~/acme/web · develop       ✓
-///   + New Repository…
 ///   [ Create Project · 2 Repositories ]
 final class ComposeRepositoriesController: UIViewController, UICollectionViewDelegate {
     private enum Item: Hashable {
@@ -251,14 +251,15 @@ final class ComposeRepositoriesController: UIViewController, UICollectionViewDel
         var s = NSDiffableDataSourceSnapshot<Int, Item>()
         s.appendSections([0, 1])
         s.appendItems([.name], toSection: 0)
+        // (New Repository first: reachable however many there are.)
         var rows: [Item] = [.search]
+        if listing != nil { rows.append(.new) }
         let list = shown
         if list.isEmpty {
             rows.append(.status)
         } else {
             rows += list.map { .repository($0.path) }
         }
-        if listing != nil { rows.append(.new) }
         s.appendItems(rows, toSection: 1)
         s.reconfigureItems(s.itemIdentifiers.filter { if case .repository = $0 { return true }; return $0 == .status })
         dataSource.apply(s, animatingDifferences: false)
