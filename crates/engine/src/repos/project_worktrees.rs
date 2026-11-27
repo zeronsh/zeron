@@ -27,6 +27,11 @@
 //! `node_modules`, linked worktrees or submodules (each belongs to another
 //! repository), nor a link (it may lead out of the project).
 //!
+//! A project can also include repositories from anywhere on its device
+//! ([`super::composed`]): each is a link in the project's folder, named in
+//! its `.zeron-project.json`, and listed and checked out like one of its
+//! own (its worktree made from where it really is).
+//!
 //! Nothing records a project worktree but the folder itself: its linked
 //! worktrees say which repositories it holds (their `.git` files), so a
 //! rename after the chat's title or a removal works from the folder alone,
@@ -58,7 +63,7 @@ pub struct ProjectWorktree {
 
 /// What a folder's `.git` says it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Marker {
+pub(super) enum Marker {
     /// No `.git`: a plain folder.
     None,
     /// A repository of its own (a `.git` folder, or a `gitdir:` file for a
@@ -70,7 +75,7 @@ enum Marker {
     Submodule,
 }
 
-fn marker(dir: &Path) -> Marker {
+pub(super) fn marker(dir: &Path) -> Marker {
     let dot = dir.join(".git");
     let Ok(meta) = std::fs::symlink_metadata(&dot) else {
         return Marker::None;
@@ -102,11 +107,24 @@ fn marker(dir: &Path) -> Marker {
 }
 
 /// A repository (or, in a project worktree, a linked worktree) found in a
-/// folder: its `/`-separated path there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Found {
-    path: String,
-    linked: bool,
+/// folder: its `/`-separated path there. For one the project includes from
+/// elsewhere, where it really is (`location`), and whether it's gone from
+/// there (`missing`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct Found {
+    pub(super) path: String,
+    pub(super) linked: bool,
+    pub(super) location: Option<PathBuf>,
+    pub(super) missing: bool,
+}
+
+impl Found {
+    /// Where its git commands run: where it really is.
+    fn source(&self, root: &Path) -> PathBuf {
+        self.location
+            .clone()
+            .unwrap_or_else(|| root.join(&self.path))
+    }
 }
 
 /// The repositories in `root` (see the module docs for where it looks),
@@ -115,7 +133,8 @@ struct Found {
 /// worktree's own).
 fn discover(root: &Path, linked: bool) -> (Vec<Found>, bool) {
     let mut found = Vec::new();
-    let truncated = walk(root, "", 0, linked, &mut found);
+    let truncated =
+        walk(root, "", 0, linked, &mut found) || super::composed::included(root, &mut found);
     found.sort_by(|a, b| a.path.cmp(&b.path));
     (found, truncated)
 }
@@ -156,6 +175,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, linked: bool, found: &mut Vec<Fo
             found.push(Found {
                 path,
                 linked: is_linked,
+                ..Found::default()
             });
         } else if kind == Marker::None
             && depth == 0
@@ -180,7 +200,7 @@ pub fn repositories_in(folder: &Path) -> Vec<(String, bool)> {
 
 /// Whether `relative` names a place inside a folder: `/`-separated plain
 /// names, none of them `.`, `..` or empty, and no root or drive.
-fn is_inside(relative: &str) -> bool {
+pub(super) fn is_inside(relative: &str) -> bool {
     !relative.is_empty()
         && !relative.contains('\\')
         && !relative.contains(':')
@@ -242,7 +262,8 @@ fn lay_out_level(
         };
         let path = format!("{prefix}{text}");
         // A repository: its worktree's place, or (not chosen) left out.
-        if all.contains(&path) || chosen.contains(&path) {
+        // (The list of those included from elsewhere is the project's.)
+        if all.contains(&path) || chosen.contains(&path) || path == super::composed::MANIFEST {
             continue;
         }
         let inner = format!("{path}/");
@@ -266,12 +287,12 @@ fn lay_out_level(
 }
 
 #[cfg(unix)]
-fn link(original: &Path, at: &Path, _is_dir: bool) -> std::io::Result<()> {
+pub(super) fn link(original: &Path, at: &Path, _is_dir: bool) -> std::io::Result<()> {
     std::os::unix::fs::symlink(original, at)
 }
 
 #[cfg(windows)]
-fn link(original: &Path, at: &Path, is_dir: bool) -> std::io::Result<()> {
+pub(super) fn link(original: &Path, at: &Path, is_dir: bool) -> std::io::Result<()> {
     if is_dir {
         std::os::windows::fs::symlink_dir(original, at)
     } else {
@@ -280,7 +301,7 @@ fn link(original: &Path, at: &Path, is_dir: bool) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn link(_original: &Path, _at: &Path, _is_dir: bool) -> std::io::Result<()> {
+pub(super) fn link(_original: &Path, _at: &Path, _is_dir: bool) -> std::io::Result<()> {
     Err(std::io::Error::other("links are not supported here"))
 }
 
@@ -310,13 +331,32 @@ impl Repos {
         let (found, truncated) = self.discover(path, true).await?;
         let repositories = stream::iter(found)
             .map(|found| async move {
-                let at = path.join(&found.path);
-                let (branch, head) = tokio::join!(self.current_branch(&at), self.head_sha(&at));
+                let location = found
+                    .location
+                    .as_ref()
+                    .map(|at| at.to_string_lossy().into_owned());
+                if found.missing {
+                    return ProjectRepository {
+                        path: found.path,
+                        location,
+                        missing: true,
+                        ..Default::default()
+                    };
+                }
+                let at = found.source(path);
+                let (branch, head, github) = tokio::join!(
+                    self.current_branch(&at),
+                    self.head_sha(&at),
+                    self.github_repo(&at)
+                );
                 ProjectRepository {
                     path: found.path,
                     branch: branch.ok().filter(|name| name != "HEAD"),
                     has_commits: matches!(head, Ok(Some(_))),
                     linked: found.linked,
+                    location,
+                    missing: false,
+                    github,
                 }
             })
             .buffered(GIT_CONCURRENCY)
@@ -330,7 +370,11 @@ impl Repos {
     }
 
     /// [`discover`] on a disposable thread, under [`LISTING_TIMEOUT`].
-    async fn discover(&self, path: &Path, linked: bool) -> Result<(Vec<Found>, bool), EngineError> {
+    pub(super) async fn discover(
+        &self,
+        path: &Path,
+        linked: bool,
+    ) -> Result<(Vec<Found>, bool), EngineError> {
         let root = path.to_path_buf();
         let walk = disposable_worker("project-repositories", move || discover(&root, linked));
         match tokio::time::timeout(LISTING_TIMEOUT, walk).await {
@@ -384,14 +428,22 @@ impl Repos {
         }
         let (found, _) = self.discover(project, false).await?;
         let all: HashSet<String> = found.iter().map(|found| found.path.clone()).collect();
+        // Where each one's git commands run: an included one's own place.
+        let sources: HashMap<String, PathBuf> = found
+            .iter()
+            .map(|found| (found.path.clone(), found.source(project)))
+            .collect();
         for path in &chosen {
-            if !all.contains(path) {
+            let gone = found
+                .iter()
+                .any(|found| &found.path == path && found.missing);
+            if !all.contains(path) || gone {
                 return Err(EngineError::Other(format!(
                     "{path} is no longer a repository in {}",
                     project.display()
                 )));
             }
-            if self.head_sha(&project.join(path)).await?.is_none() {
+            if self.head_sha(&sources[path]).await?.is_none() {
                 return Err(EngineError::Other(format!(
                     "{path} has no commit yet, so there is nothing to branch from"
                 )));
@@ -424,7 +476,7 @@ impl Repos {
         // making it (two chats starting at once never share one).
         let mut taken: HashSet<String> = HashSet::new();
         for path in &chosen {
-            taken.extend(self.branches(&project.join(path)).await.unwrap_or_default());
+            taken.extend(self.branches(&sources[path]).await.unwrap_or_default());
         }
         let mut claimed = None;
         for attempt in 0..50u64 {
@@ -447,7 +499,7 @@ impl Repos {
         let branch = format!("zeron/{name}");
 
         let made = self
-            .fill_project_worktree(project, &folder, &chosen, &all, &branch, base)
+            .fill_project_worktree(project, &folder, &chosen, &all, &sources, &branch, base)
             .await;
         let repositories = match made {
             Ok(repositories) => repositories,
@@ -483,6 +535,7 @@ impl Repos {
         folder: &Path,
         chosen: &[String],
         all: &HashSet<String>,
+        sources: &HashMap<String, PathBuf>,
         branch: &str,
         base: &str,
     ) -> Result<Vec<Worktree>, (EngineError, Vec<Worktree>)> {
@@ -506,7 +559,10 @@ impl Repos {
         }
         let mut done: Vec<Worktree> = Vec::new();
         for path in chosen {
-            let repository = project.join(path);
+            let repository = sources
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| project.join(path));
             let at = folder.join(path);
             let step = async {
                 #[cfg(windows)]
@@ -595,20 +651,28 @@ impl Repos {
     }
 
     /// Whether `folder` is a project worktree of the project at `project`:
-    /// its linked worktrees all belong to repositories in that folder.
+    /// its linked worktrees all belong to repositories in that folder, or
+    /// to those it includes from elsewhere.
     pub(crate) async fn is_project_worktree_of(&self, folder: &Path, project: &Path) -> bool {
         if !is_project_worktree_folder(folder).await {
             return false;
         }
-        let Ok(project) = std::fs::canonicalize(project) else {
+        let Ok(canonical) = std::fs::canonicalize(project) else {
             return false;
         };
+        let mut homes = vec![canonical];
+        homes.extend(
+            super::composed::included_locations(project)
+                .iter()
+                .filter_map(|at| std::fs::canonicalize(at).ok()),
+        );
         let Ok(checkouts) = self.project_worktree_checkouts(folder).await else {
             return false;
         };
         !checkouts.is_empty()
             && checkouts.iter().all(|(_, common)| {
-                std::fs::canonicalize(common).is_ok_and(|common| common.starts_with(&project))
+                std::fs::canonicalize(common)
+                    .is_ok_and(|common| homes.iter().any(|home| common.starts_with(home)))
             })
     }
 

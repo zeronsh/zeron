@@ -28,6 +28,8 @@ use crate::EngineError;
 use crate::WorkspaceSearch;
 use crate::workspace_search::{NameKinds, normalize_name_query};
 
+mod composed;
+mod library;
 mod project_worktrees;
 pub use project_worktrees::{ProjectWorktree, repositories_in};
 
@@ -178,6 +180,13 @@ struct ReposInner {
     /// changes, so the full first-parent walk runs once per HEAD, not on
     /// every spaces repair pass.
     trunk_roots: std::sync::Mutex<HashMap<String, String>>,
+    /// Where new projects' folders go (`ComposeProject`).
+    projects_root: PathBuf,
+    /// The device's repositories as last looked for, and when
+    /// (`ListLocalRepositories`).
+    found_repositories: tokio::sync::Mutex<Option<(std::time::Instant, library::Scan)>>,
+    /// Whether the GitHub CLI is signed in here, and when that was asked.
+    can_publish: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
 }
 
 #[derive(Clone)]
@@ -212,12 +221,22 @@ impl Repos {
             std::env::var_os("ZERON_WORKTREES_DIR")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            std::env::var_os("ZERON_PROJECTS_DIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_dir().join(".zeron").join("projects")),
         )
     }
 
     /// Explicit default worktree root, without the environment override (tests).
     pub fn with_worktrees_root(data_dir: &Path, device_id: &str, worktrees_root: PathBuf) -> Self {
-        Self::with_worktree_preferences(data_dir, device_id, worktrees_root, None)
+        Self::with_worktree_preferences(
+            data_dir,
+            device_id,
+            worktrees_root,
+            None,
+            data_dir.join("projects"),
+        )
     }
 
     fn with_worktree_preferences(
@@ -225,6 +244,7 @@ impl Repos {
         device_id: &str,
         worktrees_root: PathBuf,
         environment_override: Option<PathBuf>,
+        projects_root: PathBuf,
     ) -> Self {
         Self {
             inner: std::sync::Arc::new(ReposInner {
@@ -242,6 +262,9 @@ impl Repos {
                     .unwrap_or_else(|_| reqwest::Client::new()),
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 trunk_roots: std::sync::Mutex::new(HashMap::new()),
+                projects_root,
+                found_repositories: tokio::sync::Mutex::new(None),
+                can_publish: std::sync::Mutex::new(None),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
                 workspace_search: WorkspaceSearch::new(),
             }),
@@ -667,6 +690,7 @@ impl Repos {
             )));
         }
         self.register(&abs.to_string_lossy())?;
+        self.unhide(&abs.to_string_lossy());
         self.to_repo(&abs).await
     }
 
@@ -725,6 +749,7 @@ impl Repos {
         self.git(&["clone", "--", trimmed, &target.to_string_lossy()], None)
             .await?;
         self.register(&target.to_string_lossy())?;
+        self.unhide(&target.to_string_lossy());
         self.to_repo(&target).await
     }
 

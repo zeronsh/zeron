@@ -2772,6 +2772,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // update, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // A first push to GitHub; a look through a large home.
+        methods::CREATE_LOCAL_REPOSITORY => Duration::from_secs(120),
+        methods::LIST_LOCAL_REPOSITORIES => Duration::from_secs(60),
         // The longest a command may run there, and the reply's way back.
         methods::RUN_COMMAND => crate::commands::MAX_TIMEOUT + Duration::from_secs(30),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
@@ -2904,6 +2907,11 @@ fn forwardable(method: &str) -> bool {
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
             | methods::LIST_PROJECT_REPOSITORIES
+            | methods::COMPOSE_PROJECT
+            | methods::SET_PROJECT_REPOSITORIES
+            | methods::LIST_LOCAL_REPOSITORIES
+            | methods::CREATE_LOCAL_REPOSITORY
+            | methods::FORGET_LOCAL_REPOSITORY
             // Project Actions live in the owning engine's private profile store.
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
@@ -6034,6 +6042,94 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
+            }
+            methods::COMPOSE_PROJECT => {
+                #[derive(Deserialize)]
+                struct P {
+                    name: String,
+                    #[serde(default)]
+                    repositories: Vec<zeron_proto::ProjectMember>,
+                    #[serde(default)]
+                    parent: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let made = self
+                    .repos
+                    .compose_project(&p.name, p.parent.as_deref(), &p.repositories)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&made)
+            }
+            methods::SET_PROJECT_REPOSITORIES => {
+                #[derive(Deserialize)]
+                struct P {
+                    path: String,
+                    #[serde(default)]
+                    repositories: Vec<zeron_proto::ProjectMember>,
+                }
+                let p: P = parse_params(params)?;
+                let listing = self
+                    .repos
+                    .set_project_repositories(std::path::Path::new(&p.path), &p.repositories)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&listing)
+            }
+            methods::LIST_LOCAL_REPOSITORIES => {
+                #[derive(Deserialize, Default)]
+                #[serde(default)]
+                struct P {
+                    refresh: bool,
+                }
+                let p: P = if params.is_null() {
+                    P::default()
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(&self.repos.local_repositories(p.refresh).await)
+            }
+            methods::CREATE_LOCAL_REPOSITORY => {
+                #[derive(Deserialize)]
+                struct Publish {
+                    #[serde(default = "yes")]
+                    private: bool,
+                }
+                fn yes() -> bool {
+                    true
+                }
+                #[derive(Deserialize)]
+                struct P {
+                    name: String,
+                    #[serde(default)]
+                    parent: Option<String>,
+                    #[serde(default)]
+                    empty: bool,
+                    #[serde(default)]
+                    publish: Option<Publish>,
+                }
+                let p: P = parse_params(params)?;
+                let made = self
+                    .repos
+                    .create_local_repository(
+                        &p.name,
+                        p.parent.as_deref(),
+                        p.empty,
+                        p.publish.map(|publish| publish.private),
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&made)
+            }
+            methods::FORGET_LOCAL_REPOSITORY => {
+                #[derive(Deserialize)]
+                struct P {
+                    path: String,
+                }
+                let p: P = parse_params(params)?;
+                self.repos
+                    .forget_local_repository(&p.path)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::DELETE_WORKTREE => {
                 let p: DeleteWorktreeParams = parse_params(params)?;

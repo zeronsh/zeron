@@ -884,7 +884,7 @@ pub struct Worktree {
 /// One git repository inside a project folder that isn't a repository
 /// itself (`ListProjectRepositories`): what a worktree of the project can
 /// check out ([`crate::WorktreeSpec::repositories`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRepository {
     /// Where it is in the folder, `/`-separated (`api`, `packages/web`):
@@ -901,6 +901,103 @@ pub struct ProjectRepository {
     /// repository is one); never offered from a project's own folder.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked: bool,
+    /// Where the repository really is, for one the project includes from
+    /// elsewhere on its device (`SetProjectRepositories`): absolute. `None`
+    /// for one in the project's folder itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// An included repository that's no longer at its `location` (moved or
+    /// deleted): listed so it can be found again or taken out, never
+    /// checked out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+    /// The GitHub repository (`owner/name`) of its `origin`, when it has one:
+    /// what a Cloud session of the project clones in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+}
+
+/// One repository a project includes, as `SetProjectRepositories` and
+/// `ComposeProject` are asked for it: a repository anywhere on the
+/// project's device (`path`, absolute or `~/…`), and the name it goes by in
+/// the project (its folder's own name when absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMember {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `ComposeProject`'s answer: the project's new folder on its device, to add
+/// as a project (`createSpace`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposedProject {
+    pub path: String,
+    pub repositories: ProjectRepositories,
+}
+
+/// A git repository on a device (`ListLocalRepositories`): found under its
+/// home, or added, cloned or created there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepository {
+    /// Absolute.
+    pub path: String,
+    /// Its folder's name.
+    pub name: String,
+    /// The branch checked out; `None` when detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub has_commits: bool,
+    /// `owner/name` of its `origin` on GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    /// When it was last worked in (its git index or HEAD last changed), in
+    /// ms since the epoch: the list's order, newest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_at: Option<i64>,
+    /// Kept in the device's list on purpose (added, cloned or created
+    /// through Zeron), not only found.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
+}
+
+/// `ListLocalRepositories`' answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepositories {
+    /// Newest first.
+    #[serde(default)]
+    pub repositories: Vec<LocalRepository>,
+    /// Where a new repository goes unless another folder is chosen: where
+    /// most of the device's repositories are, else a usual code folder,
+    /// else home.
+    #[serde(default)]
+    pub default_parent: String,
+    /// The device's home folder (paths under it read `~/…`).
+    #[serde(default)]
+    pub home: String,
+    /// The device's GitHub CLI is signed in: a new repository can be made
+    /// on GitHub too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_publish: bool,
+    /// The look through the device stopped short (time or count).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// `CreateLocalRepository`'s answer: the repository made, and what didn't
+/// go as asked (`warning`: no first commit without a git identity, or no
+/// GitHub copy) though the repository is there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedRepository {
+    pub repository: LocalRepository,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `ListProjectRepositories`' answer for a folder.
@@ -930,7 +1027,7 @@ impl ProjectRepositories {
     pub fn choosable(&self) -> Vec<String> {
         self.repositories
             .iter()
-            .filter(|r| r.has_commits && !r.linked)
+            .filter(|r| r.has_commits && !r.linked && !r.missing)
             .map(|r| r.path.clone())
             .collect()
     }
@@ -2388,7 +2485,7 @@ mod tests {
             path: path.into(),
             branch: Some("main".into()),
             has_commits,
-            linked: false,
+            ..Default::default()
         };
         let few = ProjectRepositories {
             is_repo: false,
