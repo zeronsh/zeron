@@ -13,6 +13,9 @@
 --            photo is, cut here and kept by Zeron's edge.
 -- What's chosen is the project's on every device (sessions.set_project_icon).
 --
+-- A Repositories tab beside (screens/shell/project_repositories): what a
+-- project of repositories holds, and changing it; Save saves both.
+--
 --   editor.open(id, start?, also?)  asks about that project (`also`: other
 --                    projects, by id, given what's saved too: Settings →
 --                    Projects' one row for a repository on Cloud's machines)
@@ -23,6 +26,8 @@ local sessions = require("@account/sessions")
 local projects = require("@account/projects")
 local look = require("@app/screens/shell/project_look")
 local locale = require("@ds/locale")
+local repos_tab = require("@app/screens/shell/project_repositories")
+local repositories = require("@app/screens/shell/repositories")
 
 local M = {}
 
@@ -31,6 +36,8 @@ local M = {}
 -- and a picture chosen now, to place and cut: { path, w, h }.
 type Picture = { path: string, w: number, h: number }
 local open = ui.state("project_edit_open", false)
+-- Which tab: "general" (its name and icon) or "repositories".
+local tab = ui.state("project_edit_tab", "general")
 local editing = ui.state("project_edit_id", nil :: string?)
 local also = ui.state("project_edit_also", {} :: { string })
 local name = ui.state("project_edit_name", "")
@@ -44,6 +51,8 @@ local picture = ui.state("project_edit_picture", nil :: Picture?)
 local zoom = ui.state("project_edit_zoom", 1)
 local centre = ui.state("project_edit_centre", { x = 0.5, y = 0.5 })
 local busy = ui.state("project_edit_busy", false)
+-- What the host said when the repositories couldn't be saved.
+local repos_failed = ui.state("project_edit_repos_failed", nil :: string?)
 -- What went wrong, as an error's key (shell.sidebar.project.edit.error.*),
 -- and whether the name is wanted.
 local failed = ui.state("project_edit_failed", nil :: string?)
@@ -123,7 +132,9 @@ function M.open(id: string, start: { [string]: any }?, others: { string }?)
 		failed:set(nil)
 		unnamed:set(false)
 		dropping:set(false)
+		tab:set("general")
 		if start then
+			tab:set(start.tab or "general")
 			kind:set(start.kind or kind:peek())
 			emoji:set(start.emoji or emoji:peek())
 			hue:set(start.hue or hue:peek())
@@ -133,6 +144,20 @@ function M.open(id: string, start: { [string]: any }?, others: { string }?)
 		end
 		open:set(true)
 	end)
+	repos_tab.reset(p)
+	-- Opened on Repositories: chosen again once the dialog has placed its
+	-- focus (on its first control, the General tab, which chooses it).
+	if start and start.tab and start.tab ~= "general" then
+		local wanted = start.tab
+		ui.after(0, function()
+			tab:set(wanted)
+		end)
+	end
+end
+-- Combining a project of one repository with others leaves this dialog
+-- for New project from repositories.
+repos_tab.on_combine = function()
+	open:set(false)
 end
 
 -- A picture to place: its size read, then the square starting in its
@@ -328,6 +353,9 @@ local function head(): Node
 					return if unnamed:get() then ui.t("shell.sidebar.project.edit.name_empty"):get() else nil
 				end,
 				select_on_focus = true,
+				-- (Focus starts here, not on the tabs over it: a tab focused is
+				-- a tab chosen.)
+				autofocus = true,
 				w_full = true,
 			},
 			ui.text { where, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, literal = true, w_full = true },
@@ -622,9 +650,18 @@ local function save()
 	busy:set(true)
 	local before = p.icon
 	local function done()
-		busy:set(false)
-		uploaded:set(nil)
-		open:set(false)
+		-- Then its repositories, when they changed.
+		repos_tab.save(p :: any, function(err: any?)
+			busy:set(false)
+			if err then
+				tab:set("repositories")
+				failed:set("repositories")
+				repos_failed:set(err)
+				return
+			end
+			uploaded:set(nil)
+			open:set(false)
+		end)
 		-- (An image of ours the project wore before, let go of.)
 		if before and before.image and before.image ~= image:peek() then
 			projects.forget_icon(before.image)
@@ -699,17 +736,78 @@ function M.Dialog(): Node
 		open = open,
 		title = ui.t("shell.sidebar.project.edit.title") :: any,
 		size = "md",
+		hold = function(): boolean
+			return busy:get() or repositories.busy:get()
+		end,
 		confirm = {
+			-- (A step of adding repositories has its own: Add, Create, Clone.)
 			label = function(): string
+				if tab:get() == "repositories" and repos_tab.view() ~= "list" then
+					return repos_tab.confirm_label()
+				end
 				return if busy:get()
 					then ui.t("shell.sidebar.project.edit.saving"):get()
 					else ui.t("shell.sidebar.project.edit.save"):get()
 			end,
 			keep_open = true,
-			on_click = save,
+			busy = function(): boolean
+				return busy:get() or repositories.busy:get()
+			end,
+			disabled = function(): boolean
+				return tab:get() == "repositories" and repos_tab.confirm_disabled()
+			end,
+			on_click = function()
+				if tab:peek() == "repositories" and repos_tab.view() ~= "list" then
+					local p = project()
+					if p then
+						repos_tab.confirm(p)
+					end
+					return
+				end
+				save()
+			end,
 		},
 		ui.column {
 			id = "project-edit",
+			w_full = true,
+			gap = "$space.4",
+			ds.Tabs {
+				value = tab,
+				id = "project-edit-tabs",
+				label = ui.t("shell.sidebar.project.edit.tabs"),
+				options = {
+					{ value = "general", label = ui.t("shell.sidebar.project.edit.tab.general") :: any },
+					{ value = "repositories", label = ui.t("shell.sidebar.project.edit.tab.repositories") :: any, count = repos_tab.badge :: any },
+				},
+			},
+			ui.switch(function(): string
+				return tab:get()
+			end, {
+				repositories = ui.column {
+					w_full = true,
+					gap = "$space.4",
+					repos_tab.Panel(project),
+					ui.show(function(): boolean
+						return failed:get() == "repositories"
+					end, ui.row {
+						id = "project-edit-repositories-error",
+						role = "alert",
+						w_full = true,
+						gap = "$space.2",
+						items = "center",
+						color = "$danger",
+						ds.Icon { name = "danger-triangle", size = 14 },
+						ui.text {
+							function(): string
+								return locale.s("shell.project_repositories.couldnt_save", { why = repos_failed:get() or "" })
+							end,
+							text_size = "$font.size.sm",
+							wrap = true,
+							grow = 1,
+						},
+					}),
+				},
+				general = ui.column {
 			w_full = true,
 			gap = "$space.4",
 			-- A picture carried over any of it is taken (its head lit).
@@ -737,7 +835,7 @@ function M.Dialog(): Node
 				image = image_panel(),
 			}),
 			ui.show(function(): boolean
-				return failed:get() ~= nil
+				return failed:get() ~= nil and failed:get() ~= "repositories"
 			end, ui.row {
 				id = "project-edit-error",
 				role = "alert",
@@ -749,11 +847,16 @@ function M.Dialog(): Node
 				ui.text {
 					function(): string
 						local f = failed:get()
+						if f == "repositories" then
+							return locale.s("shell.project_repositories.couldnt_save", { why = repos_failed:get() or "" })
+						end
 						return if f then ui.t(`shell.sidebar.project.edit.error.{f}`):get() else ""
 					end,
 					text_size = "$font.size.sm",
 					wrap = true,
 					grow = 1,
+				},
+			}),
 				},
 			}),
 		},

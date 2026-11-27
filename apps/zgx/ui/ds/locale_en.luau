@@ -533,6 +533,7 @@ return {
 	["ds.composer.repositories.all"] = "All",
 	["ds.composer.repositories.none"] = "None",
 	["ds.composer.repositories.no_commits"] = "No commits yet",
+	["ds.composer.repositories.missing"] = "Not found",
 	["ds.composer.repositories.loading"] = "Looking for repositories…",
 	["ds.composer.repositories.hint"] = "Each gets a worktree on one new branch, in a folder laid out like the project.",
 	["ds.composer.repositories.label"] = "Repositories in the worktree",

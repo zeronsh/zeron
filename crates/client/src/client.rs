@@ -1727,6 +1727,129 @@ impl Client {
         }
     }
 
+    /// The repositories on `device_id`, found and kept (host
+    /// `ListLocalRepositories`): what a project of repositories is made
+    /// from. A host too old to answer refuses it
+    /// (`capabilities::COMPOSED_PROJECTS_V1`).
+    pub async fn list_local_repositories(
+        &self,
+        device_id: &str,
+        refresh: bool,
+    ) -> Result<zeron_proto::LocalRepositories> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_local_repositories(device_id).await,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_LOCAL_REPOSITORIES,
+                        serde_json::json!({ "refresh": refresh }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// The project at `path` includes exactly `members` from elsewhere on
+    /// its device (host `SetProjectRepositories`): links made and removed,
+    /// never the repositories. Answers what it holds then.
+    pub async fn set_project_repositories(
+        &self,
+        device_id: &str,
+        path: &str,
+        members: &[zeron_proto::ProjectMember],
+    ) -> Result<zeron_proto::ProjectRepositories> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => {
+                demo.set_project_repositories(device_id, path, members)
+                    .await
+            }
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::SET_PROJECT_REPOSITORIES,
+                        serde_json::json!({ "path": path, "repositories": members }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// A new project named `name` on `device_id` of `members` (repositories
+    /// anywhere there): its folder made by the host (`ComposeProject`), then
+    /// the project added and named. Answers the project's id.
+    pub async fn compose_project(
+        &self,
+        device_id: &str,
+        name: &str,
+        members: &[zeron_proto::ProjectMember],
+    ) -> Result<String> {
+        let made = match self.inner.backend() {
+            Backend::Demo(demo) => demo.compose_project(device_id, name, members).await?,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::COMPOSE_PROJECT,
+                        serde_json::json!({ "name": name, "repositories": members }),
+                    )
+                    .await?;
+                serde_json::from_value::<zeron_proto::ComposedProject>(value)
+                    .map_err(|e| ClientError::HostError(e.to_string()))?
+            }
+        };
+        let id = self.create_project(device_id, &made.path, false).await?;
+        let name = name.trim();
+        if !name.is_empty() {
+            self.rename_project(&id, Some(name))?;
+        }
+        Ok(id)
+    }
+
+    /// A new repository on `device_id` (host `CreateLocalRepository`): in
+    /// `parent` (where most of its repositories are by default), a README as
+    /// its first commit unless `empty`, and on GitHub too (`publish`:
+    /// private or not) where its GitHub CLI is signed in.
+    pub async fn create_local_repository(
+        &self,
+        device_id: &str,
+        name: &str,
+        parent: Option<&str>,
+        empty: bool,
+        publish: Option<bool>,
+    ) -> Result<zeron_proto::CreatedRepository> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => {
+                demo.create_local_repository(device_id, name, parent, empty, publish)
+                    .await
+            }
+            Backend::Live(live) => {
+                let mut params = serde_json::json!({ "name": name, "empty": empty });
+                if let Some(parent) = parent {
+                    params["parent"] = parent.into();
+                }
+                if let Some(private) = publish {
+                    params["publish"] = serde_json::json!({ "private": private });
+                }
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::CREATE_LOCAL_REPOSITORY,
+                        params,
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
     /// Workspace file search for composer `@` mentions (host `SearchFiles`,
     /// gitignore-aware; an empty query returns the chat's featured files).
     pub async fn search_files(

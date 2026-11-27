@@ -753,6 +753,8 @@ function M.bind(c: Choices)
 					branch = repo.branch,
 					chosen = picked[repo.path] == true,
 					disabled = repo.empty or nil,
+					-- (Gone from where the project includes it from.)
+					missing = repo.missing or nil,
 				})
 			end
 			return out

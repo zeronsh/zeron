@@ -1051,6 +1051,100 @@ pub struct ProjectRepository {
     pub branch: Option<String>,
     /// False with no commit yet: nothing to branch from, can't be chosen.
     pub has_commits: bool,
+    /// Where it really is, for one the project includes from elsewhere on
+    /// its device (absolute); None for one in the project's folder.
+    pub location: Option<String>,
+    /// Included, but no longer at `location`: listed, never chosen.
+    pub missing: bool,
+    /// Its origin's GitHub repository (`owner/name`).
+    pub github: Option<String>,
+}
+
+/// A repository asked for in a project (`set_project_repositories`): where
+/// it is on the device, and the name it goes by there (its folder's when
+/// None).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProjectMember {
+    pub path: String,
+    pub name: Option<String>,
+}
+
+/// A git repository on a device (`list_local_repositories`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LocalRepository {
+    pub path: String,
+    pub name: String,
+    pub branch: Option<String>,
+    pub has_commits: bool,
+    pub github: Option<String>,
+    /// Last worked in, ms since the epoch (the list's order, newest first).
+    pub touched_at: Option<i64>,
+    /// Added, cloned or made through Zeron, not only found.
+    pub kept: bool,
+}
+
+/// A device's repositories, and where a new one goes.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LocalRepositories {
+    pub repositories: Vec<LocalRepository>,
+    pub default_parent: String,
+    /// Its home (a path under it reads `~/…`).
+    pub home: String,
+    /// Its GitHub CLI is signed in: a new one can be made on GitHub too.
+    pub can_publish: bool,
+    pub truncated: bool,
+}
+
+/// A repository just made, and what didn't go as asked (no first commit,
+/// no GitHub copy), though it's there.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CreatedRepository {
+    pub repository: LocalRepository,
+    pub warning: Option<String>,
+}
+
+impl From<zeron_proto::LocalRepository> for LocalRepository {
+    fn from(r: zeron_proto::LocalRepository) -> Self {
+        Self {
+            path: r.path,
+            name: r.name,
+            branch: r.branch,
+            has_commits: r.has_commits,
+            github: r.github,
+            touched_at: r.touched_at,
+            kept: r.kept,
+        }
+    }
+}
+
+impl From<zeron_proto::LocalRepositories> for LocalRepositories {
+    fn from(r: zeron_proto::LocalRepositories) -> Self {
+        Self {
+            repositories: r.repositories.into_iter().map(Into::into).collect(),
+            default_parent: r.default_parent,
+            home: r.home,
+            can_publish: r.can_publish,
+            truncated: r.truncated,
+        }
+    }
+}
+
+impl From<zeron_proto::CreatedRepository> for CreatedRepository {
+    fn from(r: zeron_proto::CreatedRepository) -> Self {
+        Self {
+            repository: r.repository.into(),
+            warning: r.warning,
+        }
+    }
+}
+
+impl From<ProjectMember> for zeron_proto::ProjectMember {
+    fn from(m: ProjectMember) -> Self {
+        Self {
+            path: m.path,
+            name: m.name,
+        }
+    }
 }
 
 /// A project folder's repositories (`list_project_repositories`).
@@ -1077,6 +1171,9 @@ impl From<zeron_proto::ProjectRepositories> for ProjectRepositories {
                     path: r.path,
                     branch: r.branch,
                     has_commits: r.has_commits,
+                    location: r.location,
+                    missing: r.missing,
+                    github: r.github,
                 })
                 .collect(),
             truncated: r.truncated,
@@ -1095,7 +1192,10 @@ impl From<&ProjectRepositories> for zeron_proto::ProjectRepositories {
                     path: r.path.clone(),
                     branch: r.branch.clone(),
                     has_commits: r.has_commits,
-                    linked: false,
+                    location: r.location.clone(),
+                    missing: r.missing,
+                    github: r.github.clone(),
+                    ..Default::default()
                 })
                 .collect(),
             truncated: r.truncated,

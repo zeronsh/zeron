@@ -62,9 +62,9 @@ final class NewSessionWorktreeTests: XCTestCase {
     /// one with no commit; the last choice where it still stands.
     func testAFolderOfRepositoriesStartsFromItsLastChoice() {
         let listing = ProjectRepositories(isRepo: false, repositories: [
-            ProjectRepository(path: "api", branch: "main", hasCommits: true),
-            ProjectRepository(path: "scratch", branch: nil, hasCommits: false),
-            ProjectRepository(path: "web", branch: "develop", hasCommits: true),
+            ProjectRepository(path: "api", branch: "main", hasCommits: true, location: nil, missing: false, github: nil),
+            ProjectRepository(path: "scratch", branch: nil, hasCommits: false, location: nil, missing: false, github: nil),
+            ProjectRepository(path: "web", branch: "develop", hasCommits: true, location: nil, missing: false, github: nil),
         ], truncated: false)
         XCTAssertEqual(projectWorktreeFirstChoice(listing: listing, remembered: nil), ["api", "web"])
         XCTAssertEqual(projectWorktreeFirstChoice(listing: listing, remembered: ["web"]), ["web"])

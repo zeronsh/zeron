@@ -733,6 +733,14 @@ return function(): Node
 			boundary.screen(boundary.named("shell.boundary.screen.new_project"), "@app/screens/shell/add_project", function(AddProject): Node
 				return AddProject()
 			end),
+			-- New project from repositories, and New / Clone repository on
+			-- their own.
+			boundary.screen(boundary.named("shell.boundary.screen.compose_project"), "@app/screens/shell/compose_project", function(compose): Node
+				return compose.Dialog()
+			end),
+			boundary.screen(boundary.named("shell.boundary.screen.repositories"), "@app/screens/shell/repositories", function(repositories): Node
+				return repositories.Dialog()
+			end),
 		},
 	}
 end

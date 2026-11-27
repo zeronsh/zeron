@@ -1542,28 +1542,7 @@ async fn repositories(args: Value) -> Result<Value, Outcome> {
 }
 
 fn repositories_value(found: &Json) -> Value {
-    let list: Vec<Value> = found["repositories"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| r["linked"].as_bool() != Some(true))
-        .filter_map(|r| {
-            let path = r["path"].as_str().filter(|p| !p.is_empty())?;
-            let mut fields = vec![("path", Value::from(path))];
-            if let Some(branch) = r["branch"].as_str() {
-                fields.push(("branch", Value::from(branch)));
-            }
-            if r["hasCommits"].as_bool() != Some(true) {
-                fields.push(("empty", Value::Bool(true)));
-            }
-            Some(Value::record(fields))
-        })
-        .collect();
-    Value::record(vec![
-        ("repo", Value::Bool(found["isRepo"].as_bool() == Some(true))),
-        ("truncated", Value::Bool(found["truncated"].as_bool() == Some(true))),
-        ("list", Value::List(list.into())),
-    ])
+    Value::from_json(&crate::projects::project_repositories(found).to_string()).unwrap_or(Value::Nil)
 }
 
 /// A new chat's worktree, as its first run asks the host for it: off

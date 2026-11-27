@@ -84,6 +84,10 @@ pub(crate) struct DemoHost {
     terminals: terminal::DemoTerminals,
     /// Forked side chats → the chat they copy.
     forks: Mutex<HashMap<String, String>>,
+    /// Each device's repositories, as its host would list them.
+    library: Mutex<HashMap<String, Vec<zeron_proto::LocalRepository>>>,
+    /// What each project of repositories includes, by its folder.
+    included: Mutex<HashMap<String, Vec<zeron_proto::ProjectRepository>>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -106,6 +110,8 @@ impl DemoHost {
             cancel: Mutex::new(None),
             terminals: terminal::DemoTerminals::default(),
             forks: Mutex::new(HashMap::new()),
+            library: Mutex::new(HashMap::new()),
+            included: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1153,7 +1159,7 @@ impl DemoHost {
                 path: path.into(),
                 branch: branch.map(str::to_owned),
                 has_commits,
-                linked: false,
+                ..Default::default()
             }
         };
         if path.ends_with("/acme") {
@@ -1179,7 +1185,201 @@ impl DemoHost {
         path: &str,
     ) -> Result<zeron_proto::ProjectRepositories> {
         tokio::time::sleep(Duration::from_millis(120)).await;
+        if let Some(included) = lock(&self.included).get(path) {
+            return Ok(zeron_proto::ProjectRepositories {
+                is_repo: false,
+                repositories: included.clone(),
+                truncated: false,
+            });
+        }
         Ok(Self::seeded_repositories(path))
+    }
+
+    /// A demo device's repositories: the Mac's several, newest worked-in
+    /// first (one with no commit yet); the server's two.
+    fn seeded_library(device_id: &str) -> Vec<zeron_proto::LocalRepository> {
+        let now = now_ms();
+        let r = |path: &str, branch: &str, github: Option<&str>, hours: i64| {
+            zeron_proto::LocalRepository {
+                path: path.into(),
+                name: path.rsplit('/').next().unwrap_or(path).into(),
+                branch: Some(branch.into()),
+                has_commits: true,
+                github: github.map(str::to_owned),
+                touched_at: Some(now - hours * 3_600_000),
+                kept: false,
+            }
+        };
+        if device_id == fixtures::VPS {
+            return vec![
+                r("/srv/deploys/edge", "main", Some("zeronsh/edge"), 2),
+                r("/srv/deploys/landing", "main", Some("zeronsh/landing"), 40),
+            ];
+        }
+        let mut playground = r("/Users/dev/Projects/playground", "main", None, 90);
+        playground.has_commits = false;
+        vec![
+            r("/Users/dev/acme/api", "main", Some("acme/api"), 0),
+            r(
+                "/Users/dev/Projects/zeron",
+                "main",
+                Some("zeronsh/zeron"),
+                1,
+            ),
+            r("/Users/dev/acme/web", "develop", Some("acme/web"), 3),
+            r("/Users/dev/zeron-ios", "main", Some("zeronsh/zeron-ios"), 6),
+            r("/Users/dev/Projects/blog", "main", Some("dev/blog"), 30),
+            r(
+                "/Users/dev/Projects/dotfiles",
+                "master",
+                Some("dev/dotfiles"),
+                70,
+            ),
+            playground,
+        ]
+    }
+
+    pub(crate) async fn list_local_repositories(
+        &self,
+        device_id: &str,
+    ) -> Result<zeron_proto::LocalRepositories> {
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let repositories = lock(&self.library)
+            .entry(device_id.to_owned())
+            .or_insert_with(|| Self::seeded_library(device_id))
+            .clone();
+        let vps = device_id == fixtures::VPS;
+        Ok(zeron_proto::LocalRepositories {
+            repositories,
+            default_parent: if vps {
+                "/srv/deploys"
+            } else {
+                "/Users/dev/Projects"
+            }
+            .into(),
+            home: if vps { "/srv" } else { "/Users/dev" }.into(),
+            can_publish: !vps,
+            truncated: false,
+        })
+    }
+
+    /// The project's folder includes exactly `members`, each listed by its
+    /// folder's name (or the one asked), unique.
+    pub(crate) async fn set_project_repositories(
+        &self,
+        device_id: &str,
+        path: &str,
+        members: &[zeron_proto::ProjectMember],
+    ) -> Result<zeron_proto::ProjectRepositories> {
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let library = lock(&self.library)
+            .entry(device_id.to_owned())
+            .or_insert_with(|| Self::seeded_library(device_id))
+            .clone();
+        let mut included: Vec<zeron_proto::ProjectRepository> = Vec::new();
+        for member in members {
+            let known = library
+                .iter()
+                .find(|r| r.path == member.path)
+                .ok_or_else(|| {
+                    ClientError::HostError(format!("{} isn't a git repository", member.path))
+                })?;
+            let base = member.name.clone().unwrap_or_else(|| known.name.clone());
+            let mut name = base.clone();
+            let mut n = 2;
+            while included.iter().any(|r| r.path == name) {
+                name = format!("{base}-{n}");
+                n += 1;
+            }
+            included.push(zeron_proto::ProjectRepository {
+                path: name,
+                branch: known.branch.clone(),
+                has_commits: known.has_commits,
+                location: Some(known.path.clone()),
+                github: known.github.clone(),
+                ..Default::default()
+            });
+        }
+        included.sort_by(|a, b| a.path.cmp(&b.path));
+        lock(&self.included).insert(path.to_owned(), included.clone());
+        Ok(zeron_proto::ProjectRepositories {
+            is_repo: false,
+            repositories: included,
+            truncated: false,
+        })
+    }
+
+    pub(crate) async fn compose_project(
+        &self,
+        device_id: &str,
+        name: &str,
+        members: &[zeron_proto::ProjectMember],
+    ) -> Result<zeron_proto::ComposedProject> {
+        let home = if device_id == fixtures::VPS {
+            "/srv"
+        } else {
+            "/Users/dev"
+        };
+        let path = format!("{home}/.zeron/projects/{}", name.trim());
+        let repositories = self
+            .set_project_repositories(device_id, &path, members)
+            .await?;
+        Ok(zeron_proto::ComposedProject { path, repositories })
+    }
+
+    pub(crate) async fn create_local_repository(
+        &self,
+        device_id: &str,
+        name: &str,
+        parent: Option<&str>,
+        empty: bool,
+        publish: Option<bool>,
+    ) -> Result<zeron_proto::CreatedRepository> {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let clean: String = name
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let clean = clean.trim_matches(['-', '.']).to_string();
+        if clean.is_empty() {
+            return Err(ClientError::HostError(
+                "Name the repository with letters, digits, dots, dashes or underscores".into(),
+            ));
+        }
+        let mut library = lock(&self.library);
+        let list = library
+            .entry(device_id.to_owned())
+            .or_insert_with(|| Self::seeded_library(device_id));
+        let home = if device_id == fixtures::VPS {
+            "/srv/deploys"
+        } else {
+            "/Users/dev/Projects"
+        };
+        let path = format!("{}/{clean}", parent.unwrap_or(home).trim_end_matches('/'));
+        if list.iter().any(|r| r.path == path) {
+            return Err(ClientError::HostError(format!("Already exists: {path}")));
+        }
+        let repository = zeron_proto::LocalRepository {
+            path,
+            name: clean.clone(),
+            branch: Some("main".into()),
+            has_commits: !empty,
+            github: publish.map(|_| format!("dev/{clean}")),
+            touched_at: Some(now_ms()),
+            kept: true,
+        };
+        list.insert(0, repository.clone());
+        Ok(zeron_proto::CreatedRepository {
+            repository,
+            warning: None,
+        })
     }
 
     pub(crate) async fn list_refs(&self, path: &str) -> Result<Vec<RepoRef>> {

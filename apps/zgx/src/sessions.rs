@@ -1334,6 +1334,14 @@ impl Sessions {
                 if let Some(version) = d["version"].as_str().filter(|v| !v.is_empty()) {
                     fields.push(("version", Value::from(version)));
                 }
+                // Its host composes projects of repositories from anywhere
+                // on it and manages its repositories.
+                let says = |capability: &str| {
+                    d["capabilities"].as_array().into_iter().flatten().any(|c| c.as_str() == Some(capability))
+                };
+                if says("composed-projects-v1") {
+                    fields.push(("composes", Value::Bool(true)));
+                }
                 Some(Value::record(fields))
             })
             .collect();

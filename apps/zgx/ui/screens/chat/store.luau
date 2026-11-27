@@ -234,7 +234,7 @@ end
 -- A repository in a project folder that isn't one itself: its path there
 -- (`packages/web`), the branch checked out, and `empty` when it has no
 -- commit to branch from.
-export type Repository = { path: string, branch: string?, empty: boolean? }
+export type Repository = { path: string, branch: string?, empty: boolean?, missing: boolean?, location: string?, github: string? }
 -- A project folder's repositories (at `path`, on `device` when that isn't
 -- this one), for a worktree of the whole project: a promise of `{ repo,
 -- list }` (`repo`: the folder is a repository itself, and lists none). An

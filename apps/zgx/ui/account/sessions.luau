@@ -119,7 +119,7 @@ export type Project = { id: string, name: string, device: string, path: string, 
 -- shows nowhere).
 -- `cloud`: one of Cloud's (the account's, or a session's machine): never a
 -- device to pick.
-export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean? }
+export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean?, composes: boolean? }
 export type Section = { id: string, name: string, sessions: { string }, collapsed: boolean? }
 export type Places = { pinned: { string }, sections: { Section } }
 export type Now = {

@@ -35,6 +35,8 @@ export type Row = {
 	chosen: boolean,
 	-- Can't be chosen (no commit to branch from).
 	disabled: boolean?,
+	-- Can't be chosen: no longer where the project includes it from.
+	missing: boolean?,
 }
 export type Props = {
 	list: () -> { Row },
@@ -192,7 +194,9 @@ local function RepositoryChoice(props: Props): Node
 				FadeText {
 					function(): string
 						local it = now()
-						if it.disabled then
+						if it.missing then
+							return locale.s("ds.composer.repositories.missing")
+						elseif it.disabled then
 							return locale.s("ds.composer.repositories.no_commits")
 						end
 						return it.branch or ""

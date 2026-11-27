@@ -473,6 +473,80 @@ impl CoreClient {
         Ok(listing.into())
     }
 
+    /// The repositories on `device_id`: those its host found and those kept
+    /// there, newest worked-in first. A host too old to list them fails.
+    pub async fn list_local_repositories(
+        &self,
+        device_id: String,
+        refresh: bool,
+    ) -> CoreResult<LocalRepositories> {
+        let client = self.client.clone();
+        let listing =
+            on_runtime(async move { client.list_local_repositories(&device_id, refresh).await })
+                .await?;
+        Ok(listing.into())
+    }
+
+    /// A new project named `name` on `device_id` of the repositories at
+    /// `repository_paths` (anywhere there), each staying where it is. Its id.
+    pub async fn compose_project(
+        &self,
+        device_id: String,
+        name: String,
+        repository_paths: Vec<String>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        let members: Vec<zeron_proto::ProjectMember> = repository_paths
+            .into_iter()
+            .map(|path| zeron_proto::ProjectMember { path, name: None })
+            .collect();
+        Ok(
+            on_runtime(async move { client.compose_project(&device_id, &name, &members).await })
+                .await?,
+        )
+    }
+
+    /// The project at `path` includes exactly `members` from elsewhere on
+    /// its device. What it holds then.
+    pub async fn set_project_repositories(
+        &self,
+        device_id: String,
+        path: String,
+        members: Vec<ProjectMember>,
+    ) -> CoreResult<ProjectRepositories> {
+        let client = self.client.clone();
+        let members: Vec<zeron_proto::ProjectMember> =
+            members.into_iter().map(Into::into).collect();
+        let listing = on_runtime(async move {
+            client
+                .set_project_repositories(&device_id, &path, &members)
+                .await
+        })
+        .await?;
+        Ok(listing.into())
+    }
+
+    /// A new repository named `name` on `device_id`, in `parent` (where most
+    /// of its repositories are when None), with a README as its first commit
+    /// unless `empty`, and on GitHub too when `publish` (Some(private)).
+    pub async fn create_local_repository(
+        &self,
+        device_id: String,
+        name: String,
+        parent: Option<String>,
+        empty: bool,
+        publish: Option<bool>,
+    ) -> CoreResult<CreatedRepository> {
+        let client = self.client.clone();
+        let made = on_runtime(async move {
+            client
+                .create_local_repository(&device_id, &name, parent.as_deref(), empty, publish)
+                .await
+        })
+        .await?;
+        Ok(made.into())
+    }
+
     /// Files matching `query` in the chat's (or project's) workspace, for
     /// composer `@` mentions.
     pub async fn search_files(

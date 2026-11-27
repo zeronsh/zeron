@@ -679,7 +679,8 @@
         "no_commits": "尚无提交",
         "loading": "正在查找仓库…",
         "hint": "每个仓库都会在同一个新分支上获得一个工作树，放在与项目结构相同的文件夹中。",
-        "label": "工作树中的仓库"
+        "label": "工作树中的仓库",
+        "missing": "找不到"
       }
     },
     "markdown": {
@@ -2611,6 +2612,35 @@
         "notice_enable": "一个智能体请求开启 {name}",
         "notice_disable": "一个智能体请求关闭 {name}"
       }
+    },
+    "repositories": {
+      "title": "仓库",
+      "terms": "仓库 git 克隆 新建仓库 github 本地 文件夹",
+      "description": "你的电脑上的 git 仓库。",
+      "new": "新建仓库",
+      "new_terms": "创建 初始化 仓库 github",
+      "clone": "克隆仓库",
+      "clone_terms": "克隆 git 地址 下载",
+      "forgotten": "将不再列出 {name}",
+      "forgotten_body": "它仍留在磁盘上的原处。可以从“新建项目”或项目的“仓库”中再次添加。",
+      "couldnt_forget": "无法忘记它",
+      "added_to": "已将 {name} 添加到 {project}",
+      "couldnt_add": "无法将其添加到项目",
+      "in_projects": "在 {names} 中",
+      "chat": "在其中新建聊天",
+      "show": "在文件夹中显示",
+      "couldnt_show": "无法显示",
+      "copy_path": "复制路径",
+      "add_to": "添加到项目",
+      "forget": "忘记",
+      "more_for": "{name} 的更多操作",
+      "offline_body": "它重新上线后，其仓库会显示在这里。",
+      "old_body": "{device} 运行的 Zeron 版本还不能列出其仓库。",
+      "none_body": "在其主文件夹中没有找到仓库。新建一个，或克隆一个。",
+      "footer": "{n, plural, other {# 个仓库。}}在主文件夹中最多向下查找四层（不包括依赖和构建输出），通过这里添加、克隆或创建的也会保留。",
+      "device": "电脑",
+      "find": "查找仓库",
+      "refresh": "重新查找"
     }
   },
   "common": {
@@ -2749,6 +2779,11 @@
             "save_gone": "此项目已在另一台设备上被移除。",
             "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。",
             "unavailable": "你的账户暂时还不能使用图片图标。请先选择表情符号或颜色。"
+          },
+          "tabs": "项目设置",
+          "tab": {
+            "general": "通用",
+            "repositories": "仓库"
           }
         }
       },
@@ -2787,7 +2822,9 @@
         "settings": "设置",
         "update_watch": "更新监视器",
         "search": "搜索",
-        "new_project": "新建项目"
+        "new_project": "新建项目",
+        "compose_project": "从仓库新建项目",
+        "repositories": "新建仓库"
       }
     },
     "title_bar": {
@@ -2929,7 +2966,14 @@
       "on_device": "在 {device} 上",
       "from_github": "来自 GitHub",
       "add_cloud_project": "添加项目",
-      "holds_repositories": "{n, plural, other {包含 # 个仓库}}"
+      "holds_repositories": "{n, plural, other {包含 # 个仓库}}",
+      "start": "从这里开始",
+      "compose": "仓库…",
+      "compose_hint": "把这台设备上任意位置的多个仓库放进一个项目",
+      "new_repository": "新建仓库…",
+      "new_repository_hint": "在这里创建，带首个提交",
+      "clone_repository": "克隆仓库…",
+      "clone_repository_hint": "通过地址克隆"
     },
     "updates": {
       "available": "有可用更新",
@@ -3000,6 +3044,107 @@
       "waiting_on_chat": "另一个对话",
       "stop_delegated": "停止子代理",
       "stop_delegated_failed": "无法停止子代理"
+    },
+    "repositories": {
+      "error": {
+        "unknown": "出了点问题。",
+        "offline": "该设备当前未连接。"
+      },
+      "no_commits": "尚无提交",
+      "detached": "游离",
+      "failed": {
+        "title": "无法列出其仓库",
+        "retry": "重试"
+      },
+      "none": {
+        "title": "未找到仓库",
+        "all_in": "找到的仓库都已在其中",
+        "body": "新建一个、克隆一个，或输入别处某个仓库的路径。"
+      },
+      "new": "新建仓库",
+      "clone": "克隆仓库",
+      "new_short": "新建",
+      "clone_short": "克隆",
+      "unmatched": "没有与“{query}”匹配的结果",
+      "unmatched_body": "输入路径（~/code/api）以使用未列出的仓库。",
+      "path": {
+        "title": "使用 {path} 处的仓库",
+        "add": "使用此仓库"
+      },
+      "label": "仓库",
+      "search": "搜索仓库",
+      "search_placeholder": "搜索，或输入路径",
+      "found": "{n, plural, =0 {未找到} other {# 个仓库}}",
+      "chosen": "{n, plural, other {已选 # 个}}",
+      "looking": "正在查找更多…",
+      "clear": "清除",
+      "new_form": {
+        "name": "名称",
+        "name_placeholder": "my-repository",
+        "where_hint": "可使用字母、数字、点、短横线和下划线。",
+        "at": "创建于 {path}",
+        "unnamed": "请使用字母、数字、点、短横线或下划线命名。",
+        "location": "位置",
+        "readme": "以 README 开始",
+        "readme_hint": "作为 main 上的首个提交：工作树从它分支。",
+        "publish": "同时在 GitHub 上创建",
+        "publish_hint": "使用这台设备上已登录的 GitHub CLI，作为其 origin。",
+        "visibility": "可见性",
+        "private": "私有",
+        "public": "公开",
+        "go": "创建仓库"
+      },
+      "made_but": "已创建 {name}",
+      "clone_form": {
+        "url": "地址",
+        "hint": "HTTPS 或 SSH 地址，与 git clone 所用相同。",
+        "no_url": "请粘贴仓库的地址。",
+        "go": "克隆",
+        "into": "克隆到 {path}"
+      },
+      "new_title": "新建仓库",
+      "clone_title": "克隆仓库",
+      "new_description": "{device} 上的一个 git 仓库。",
+      "clone_description": "在 {device} 上克隆一个仓库。"
+    },
+    "compose": {
+      "title": "新建项目",
+      "description": "{device} 上任意位置的仓库，每个都留在原处。",
+      "name": "名称",
+      "name_placeholder": "项目名称",
+      "folder_hint": "它自己的文件夹，内含指向每个仓库的链接。",
+      "folder": "文件夹：{path}",
+      "repositories": "仓库",
+      "back": "仓库",
+      "create": "创建项目",
+      "create_n": "{n, plural, other {创建含 # 个仓库的项目}}"
+    },
+    "project_repositories": {
+      "add": "添加",
+      "add_n": "{n, plural, other {添加 # 个仓库}}",
+      "in_folder": "在项目文件夹中",
+      "missing": "在 {path} 处找不到",
+      "adding": "保存时添加 · {path}",
+      "remove": "将 {name} 移出项目",
+      "remove_tip": "移出项目（仓库本身保留）",
+      "none": "还没有仓库",
+      "none_body": "添加其设备上任意位置的仓库，一起处理。",
+      "heading": "{n, plural, =0 {仓库} other {# 个仓库}}",
+      "save_hint": "随项目一起保存。移出只会删除链接，绝不删除仓库。",
+      "hint": "项目的新工作树会检出你选择的仓库，都在同一个分支上。",
+      "back": "仓库",
+      "back_to_add": "添加仓库",
+      "failed": "无法读取其仓库",
+      "cloud": "云端项目只有一个仓库",
+      "cloud_body": "其会话会在各自的机器上克隆 {repo}。",
+      "offline": "{device} 离线",
+      "offline_body": "它重新上线后，其仓库会显示在这里。",
+      "old": "请更新 {device} 上的 Zeron",
+      "old_body": "{device} 运行的版本还不能为项目添加仓库。",
+      "one": "此项目是一个仓库",
+      "one_body": "要同时处理多个仓库，请用它和其他仓库新建一个项目。此项目保持不变。",
+      "combine": "与其他仓库组合…",
+      "couldnt_save": "无法更改其仓库：{why}"
     }
   },
   "onboarding": {

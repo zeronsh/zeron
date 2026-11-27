@@ -982,6 +982,42 @@ final class AppModel {
     /// How many repositories a folder on `deviceId` holds (not being one
     /// itself), as its host lists them for a worktree of the whole project:
     /// for New Project's note. 0 for a repository, or a host too old to say.
+    /// The repositories on a computer (found in its home, and those made or
+    /// cloned there), newest worked-in first. Throws for a host too old to
+    /// list them, or one that's offline.
+    func localRepositories(deviceId: String, refresh: Bool = false) async throws -> LocalRepositories {
+        guard let client else { throw CoreError.Closed }
+        return try await client.listLocalRepositories(deviceId: deviceId, refresh: refresh)
+    }
+
+    /// A project of the repositories at `paths` on `deviceId`, each staying
+    /// where it is, named `name`. Its id.
+    func composeProject(deviceId: String, name: String, paths: [String]) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        let id = try await client.composeProject(deviceId: deviceId, name: name, repositoryPaths: paths)
+        refreshWorkspace()
+        return id
+    }
+
+    /// A new repository on `deviceId`, where most of its repositories are.
+    func createRepository(deviceId: String, name: String, empty: Bool, publish: Bool?) async throws -> CreatedRepository {
+        guard let client else { throw CoreError.Closed }
+        return try await client.createLocalRepository(deviceId: deviceId, name: name, parent: nil, empty: empty, publish: publish)
+    }
+
+    /// What a host's refusal says, in a sentence.
+    static func says(_ error: Error) -> String {
+        if let core = error as? CoreError {
+            switch core {
+            case let .HostUnavailable(message): return message.isEmpty ? "The computer isn't connected right now." : message
+            case let .HostError(message), let .NotFound(message), let .InvalidArgument(message), let .Unsupported(message), let .Network(message):
+                return message.isEmpty ? "Something went wrong." : message
+            default: break
+            }
+        }
+        return error.localizedDescription
+    }
+
     func folderRepositories(deviceId: String, path: String) async -> Int {
         guard let client, let listing = try? await client.listProjectRepositories(deviceId: deviceId, path: path), !listing.isRepo else { return 0 }
         return listing.repositories.count

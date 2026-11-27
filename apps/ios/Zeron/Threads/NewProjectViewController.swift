@@ -1,7 +1,9 @@
 import UIKit
 
 /// Create a project (a device + folder pair): pick a host, browse its folders
-/// over the device relay (git repos badged), and use the current folder.
+/// over the device relay (git repos badged), and use the current folder. Or,
+/// in Repositories, a project of repositories from anywhere on the host
+/// (ComposeRepositoriesController).
 final class NewProjectViewController: UIViewController, UICollectionViewDelegate {
     private let app: AppModel
     private var device: HostOption?
@@ -15,6 +17,10 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
     /// them out together (docs/reference/project-worktrees.md).
     private let repositoriesNote = UILabel()
     private let useButton = UIButton(type: .system)
+    private var bottom: UIStackView!
+    /// Folder or Repositories, in the title's place.
+    private let mode = UISegmentedControl(items: ["Folder", "Repositories"])
+    private var compose: ComposeRepositoriesController?
 
     /// Called with the new project's id (the new-session canvas selects it).
     var onCreated: ((String) -> Void)?
@@ -77,7 +83,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         repositoriesNote.textAlignment = .center
         repositoriesNote.isHidden = true
         repositoriesNote.accessibilityIdentifier = "folder-repositories"
-        let bottom = UIStackView(arrangedSubviews: [repositoriesNote, status, useButton])
+        bottom = UIStackView(arrangedSubviews: [repositoriesNote, status, useButton])
         bottom.axis = .vertical
         bottom.spacing = 8
         bottom.translatesAutoresizingMaskIntoConstraints = false
@@ -97,9 +103,41 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
                 self?.device = h
                 self?.navigationItem.rightBarButtonItem?.title = h.name
                 self?.load(nil)
+                self?.showMode()
             }
         }))
+        mode.selectedSegmentIndex = 0
+        mode.accessibilityIdentifier = "new-project-mode"
+        mode.setTitleTextAttributes([.font: Fonts.ui(.sansMedium, 13)], for: .normal)
+        mode.addAction(UIAction { [weak self] _ in
+            UISelectionFeedbackGenerator().selectionChanged()
+            self?.showMode()
+        }, for: .valueChanged)
+        navigationItem.titleView = mode
         load(nil)
+    }
+
+    /// The folder browser, or (Repositories) a project of repositories from
+    /// anywhere on the device, made afresh for each device.
+    private func showMode() {
+        compose?.willMove(toParent: nil)
+        compose?.view.removeFromSuperview()
+        compose?.removeFromParent()
+        compose = nil
+        let repositories = mode.selectedSegmentIndex == 1
+        collectionView.isHidden = repositories
+        bottom.isHidden = repositories
+        guard repositories, let device else { return }
+        let child = ComposeRepositoriesController(app: app, device: device) { [weak self] id in
+            self?.onCreated?(id)
+            self?.dismiss(animated: true)
+        }
+        addChild(child)
+        child.view.frame = view.bounds
+        child.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(child.view)
+        child.didMove(toParent: self)
+        compose = child
     }
 
     private var loadGeneration = 0
@@ -153,7 +191,6 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             let count = await app.folderRepositories(deviceId: device.id, path: listing.path)
             guard generation == loadGeneration else { return }
             showRepositories(count)
-            title = name.isEmpty ? "New Project" : name
         }
     }
 
