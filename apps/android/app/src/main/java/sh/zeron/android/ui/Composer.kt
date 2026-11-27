@@ -74,6 +74,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.Outbox
+import sh.zeron.android.core.restoredDraft
 import uniffi.zeron_core.BusyPolicy
 import uniffi.zeron_core.ChatConfig
 import uniffi.zeron_core.ComposerState
@@ -162,6 +164,52 @@ fun Composer(
         scope.launch { runCatching { handle.finishQueuedEdit(held, if (body == null) QueueEditAction.CANCEL else QueueEditAction.COMMIT, body) } }
     }
 
+    // Messages on their way into the core: the call runs on the chat's lane
+    // (it can wait behind a save of a large chat), and each shows here until
+    // it returns, by which point its real row is in the chat's documents.
+    val outbox = remember(c.chatId) { model.outbox(c.chatId) }
+    val outgoing = remember(c.chatId) { mutableStateListOf<Outbox.Pending<List<StagedImage>>>() }
+
+    // The user's own draft (never a queued message being edited) is kept
+    // across navigation, the question panel, and the app going away.
+    fun saveDraft() = model.drafts.save(c.chatId, stash?.first ?: draft.text)
+
+    /** Sends that didn't go: their text and photos back ahead of what was typed since. */
+    fun takeBack(items: List<Outbox.Pending<List<StagedImage>>>) {
+        val texts = items.map { it.text }
+        val images = items.flatMap { it.attachments }
+        val parked = stash
+        if (parked != null) {
+            stash = restoredDraft(texts, parked.first) to images + parked.second
+        } else {
+            draft.setText(restoredDraft(texts, draft.text))
+            draft.images.addAll(0, images)
+        }
+        saveDraft()
+    }
+
+    DisposableEffect(outbox) {
+        outbox.onChange = {
+            outgoing.clear()
+            outgoing.addAll(outbox.pending)
+        }
+        outbox.onChange()
+        outbox.onFailed = { items, e ->
+            takeBack(items)
+            error = "Couldn't send: ${e.message}"
+        }
+        onDispose {
+            outbox.onChange = {}
+            // The draft outlives this composer while the question panel is up, and is saved for later.
+            outbox.onFailed = { items, e ->
+                draft.setText(restoredDraft(items.map { it.text }, draft.text))
+                draft.images.addAll(0, items.flatMap { it.attachments })
+                model.drafts.save(c.chatId, draft.text)
+                model.toast("Couldn't send: ${e.message}")
+            }
+        }
+    }
+
     fun beginEdit(id: String) {
         if (editPending) return
         editPending = true
@@ -206,34 +254,32 @@ fun Composer(
             return
         }
         if (!beforeSend()) return
+        // Decided now, from what the user saw when they tapped.
         val body = draft.encoded()
-        try {
-            val queued = running && delivery == Delivery.Queue
-            if (delivery == Delivery.Interrupt && running) handle.interrupt()
-            handle.send(
-                SendRequest(
-                    body,
-                    draft.images.map { it.outgoing },
-                    null,
-                    if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
-                ),
-            )
-            model.noteDeliveryActivity()
-            draft.clear()
-            model.drafts.save(c.chatId, "")
-            error = null
-            delivery = Delivery.Queue
-            // An immediate send gets the runway; one queued behind a live turn
-            // takes it over once its bubble lands.
-            if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
-        } catch (e: Exception) {
-            error = "Couldn't send: ${e.message}"
-        }
+        val images = draft.images.toList()
+        val queued = running && delivery == Delivery.Queue
+        val interrupt = delivery == Delivery.Interrupt && running
+        val request = SendRequest(
+            body,
+            images.map { it.outgoing },
+            null,
+            if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
+        )
+        // The outbox saves the text as on its way before the draft is cleared,
+        // so a process that dies mid-send gives it back as the draft.
+        outbox.submit(body, images, call = {
+            if (interrupt) handle.interrupt()
+            handle.send(request)
+        })
+        model.noteDeliveryActivity()
+        draft.clear()
+        saveDraft()
+        error = null
+        delivery = Delivery.Queue
+        // An immediate send gets the runway; one queued behind a live turn
+        // takes it over once its bubble lands.
+        if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
     }
-
-    // The user's own draft (never a queued message being edited) is kept
-    // across navigation, the question panel, and the app going away.
-    fun saveDraft() = model.drafts.save(c.chatId, stash?.first ?: draft.text)
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     DisposableEffect(c.chatId, lifecycle) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -252,7 +298,8 @@ fun Composer(
     }
 
     Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
-        if (c.queue.isNotEmpty()) QueuePanel(c.queue, handle, editingId, onEdit = ::beginEdit)
+        if (c.queue.isNotEmpty()) QueuePanel(c.queue, handle, outbox, editingId, onEdit = ::beginEdit)
+        if (outgoing.isNotEmpty()) OutgoingPanel(outgoing)
         MentionSuggestions(draft, search = { q ->
             client.searchFiles(c.host.deviceId, c.chatId, null, q)
         })
@@ -274,7 +321,7 @@ fun Composer(
                 running -> ComposerAction.Queue
                 else -> ComposerAction.Send
             },
-            onAction = { if (editingId == null && running && !draft.hasContent) runCatching { handle.interrupt() } else send() },
+            onAction = { if (editingId == null && running && !draft.hasContent) outbox.runInOrder { handle.interrupt() } else send() },
             attach = editingId == null,
             focusRequester = focus,
         ) {
@@ -403,7 +450,7 @@ fun StatusBanner(text: String, action: Pair<String, () -> Unit>?) {
 
 /** Messages queued behind the live turn (shared across devices). */
 @Composable
-fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?, onEdit: (String) -> Unit) {
+fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, outbox: Outbox<*>, editingId: String?, onEdit: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         queue.forEachIndexed { i, item ->
@@ -437,10 +484,45 @@ fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?
                             listOfNotNull(
                                 MenuAction("Send now", ZIcons.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
                                 if (!editing && item.gate == null) MenuAction("Edit", ZIcons.Rename) { onEdit(item.id) } else null,
-                                if (i > 0) MenuAction("Move up", ZIcons.ChevronUp) { runCatching { handle.moveQueuedBy(item.id, -1) } } else null,
-                                if (i < queue.size - 1) MenuAction("Move down", ZIcons.ChevronDown) { runCatching { handle.moveQueuedBy(item.id, 1) } } else null,
+                                if (i > 0) MenuAction("Move up", ZIcons.ChevronUp) { outbox.runInOrder { handle.moveQueuedBy(item.id, -1) } } else null,
+                                if (i < queue.size - 1) MenuAction("Move down", ZIcons.ChevronDown) { outbox.runInOrder { handle.moveQueuedBy(item.id, 1) } } else null,
                                 MenuAction("Remove", ZIcons.Delete, destructive = true) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
                             ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Messages the core doesn't have yet: shown the moment they're sent, gone once their real row is in. */
+@Composable
+private fun OutgoingPanel(items: List<Outbox.Pending<List<StagedImage>>>) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        items.forEachIndexed { i, item ->
+            Surface(
+                shape = segmentShape(i, items.size, outer = 20.dp, inner = 6.dp),
+                color = composerContainer(),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        if (item.text.isNotEmpty()) {
+                            Text(item.text, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        Text("Sending…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    item.attachments.take(3).forEach {
+                        Spacer(Modifier.width(6.dp))
+                        androidx.compose.foundation.Image(
+                            it.thumb,
+                            null,
+                            Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         )
                     }
                 }

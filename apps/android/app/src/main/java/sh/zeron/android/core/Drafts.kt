@@ -16,5 +16,8 @@ class Drafts(context: Context) {
 
     companion object {
         const val NEW_SESSION = "new-session"
+
+        /** A chat's messages on their way into the core (cleared once it has them). */
+        fun sending(chatId: String) = "sending:$chatId"
     }
 }

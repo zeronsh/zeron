@@ -143,8 +143,8 @@ fun SessionScreen(
             transcript.close()
             // What arrived while it was open has been seen too.
             model.markSeen(chatId)
-            // A side chat started here and left without a word: gone.
-            val unused = runCatching { handle.transcriptStatus().let { it.entryCount == 0u && it.pendingCount == 0u } && handle.composer().queue.isEmpty() }.getOrDefault(false)
+            // A side chat started here and left without a word: gone (one whose first message is still on its way isn't).
+            val unused = model.outbox(chatId).isIdle && runCatching { handle.transcriptStatus().let { it.entryCount == 0u && it.pendingCount == 0u } && handle.composer().queue.isEmpty() }.getOrDefault(false)
             if (model.isFreshSideChat(chatId) && unused && model.drafts.load(chatId).isEmpty() && model.row(chatId)?.preview == null) {
                 model.forgetFreshSideChat(chatId)
                 model.delete(chatId)
@@ -165,7 +165,8 @@ fun SessionScreen(
     LaunchedEffect(chatId) { model.workspace.collect { runCatching { transcript.engine.workspaceChanged() } } }
     LaunchedEffect(chatId) {
         val text = sendOnOpen ?: return@LaunchedEffect
-        runCatching { handle.send(uniffi.zeron_core.SendRequest(text, emptyList(), null, uniffi.zeron_core.BusyPolicy.QUEUE)) }
+        val request = uniffi.zeron_core.SendRequest(text, emptyList(), null, uniffi.zeron_core.BusyPolicy.QUEUE)
+        model.outbox(chatId).submit(text, emptyList(), call = { handle.send(request) })
         model.noteDeliveryActivity()
     }
     // Upload rings on pending thumbnails follow the escort.
@@ -206,7 +207,7 @@ fun SessionScreen(
         )
     }
     // The composer's draft outlives the panel that replaces it while the agent asks.
-    val draft = remember(chatId) { ComposerModel(model.drafts.load(chatId)) }
+    val draft = remember(chatId) { ComposerModel(model.openingDraft(chatId)) }
     // Text handed to this chat (a terminal's output) lands after what's typed.
     DisposableEffect(chatId) {
         model.composerSinks[chatId] = { text ->
@@ -390,13 +391,13 @@ fun SessionScreen(
                     CloudCreditsNotice(nudges, onAddCredits = onOpenBilling)
                 }
                 Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
+                    Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { model.outbox(chatId).runInOrder { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
                     CompanionStrip(companions, onTap = { section -> onShowCompanions?.invoke(section) ?: run { companionsSheet = section; showCompanions = true } }, modifier = if (companions.isEmpty) Modifier else Modifier.padding(vertical = 6.dp))
                 }
                 val input = composer.openInput
                 // The panel replaces the composer while the agent asks.
                 if (input != null) {
-                    QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
+                    QuestionPanel(input) { answers -> model.outbox(chatId).runInOrder { handle.respondInput(input.requestId, answers) } }
                 } else {
                     Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
                         // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.

@@ -1194,6 +1194,124 @@ async fn immediate_exit_after_first_send_recovers_new_chat_on_each_host_platform
     }
 }
 
+/// Whether the registry snapshot on disk holds `chat`'s row.
+fn registry_row_saved(dir: &std::path::Path, chat: &str) -> bool {
+    let store = zeron_sync::DocsStore::open(dir).unwrap();
+    store
+        .load_snapshot(zeron_doc::REGISTRY_DOC_ID)
+        .unwrap()
+        .is_some_and(|bytes| {
+            RegistryDoc::from_bytes(&bytes, "ios-live")
+                .unwrap()
+                .chat(chat)
+                .unwrap()
+                .is_some()
+        })
+}
+
+/// Make every write of the registry snapshot fail, or stop doing so.
+fn refuse_registry_writes(dir: &std::path::Path, refuse: bool) {
+    let db = rusqlite::Connection::open(dir.join("docs.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let sql = if refuse {
+        format!(
+            "CREATE TRIGGER no_registry_insert BEFORE INSERT ON snapshots WHEN NEW.doc_id = '{id}'
+                 BEGIN SELECT RAISE(FAIL, 'registry write refused'); END;
+             CREATE TRIGGER no_registry_update BEFORE UPDATE ON snapshots WHEN NEW.doc_id = '{id}'
+                 BEGIN SELECT RAISE(FAIL, 'registry write refused'); END;",
+            id = zeron_doc::REGISTRY_DOC_ID
+        )
+    } else {
+        "DROP TRIGGER no_registry_insert; DROP TRIGGER no_registry_update;".to_owned()
+    };
+    db.execute_batch(&sql).unwrap();
+}
+
+/// A send writes the whole registry (megabytes on a busy account, on the sender's
+/// thread) only while its chat's row isn't on disk yet. Once it is, a send never
+/// touches the registry: here every registry write fails, and sends still go.
+/// A chat that arrived by sync and hasn't been saved yet still has its row saved
+/// by its first send, before that send's outbox row, and recovers after a kill.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_writes_the_registry_only_until_its_chat_row_is_saved() {
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    edge.refuse_chat_joins(true);
+    edge.nudge_status(500);
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, CHAT).await;
+    let start = Instant::now();
+    while !registry_row_saved(dir.path(), CHAT) {
+        assert!(start.elapsed() < Duration::from_secs(10), "the debounced save never ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    refuse_registry_writes(dir.path(), true);
+    let session = client.open_session(CHAT).unwrap();
+    for text in ["one", "two", "three"] {
+        session
+            .send(SendRequest::text(text))
+            .expect("a send on a saved chat wrote the registry");
+    }
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    assert!(store.has_pending_chat_updates(CHAT).unwrap(), "the sends' outbox rows");
+
+    // A chat another device just made: its row is in memory, not on disk.
+    let born = "chat-born-elsewhere";
+    let (_, _, mut chat) = host_rows(Utc::now());
+    chat.id = born.into();
+    chat.title = Some("Born on the Mac".into());
+    host.doc.lock().unwrap().upsert_chat(&chat).unwrap();
+    host.client.nudge();
+    await_chat(&client, born).await;
+    assert!(!registry_row_saved(dir.path(), born));
+    let fresh = client.open_session(born).unwrap();
+    assert!(
+        fresh.send(SendRequest::text("first words")).is_err(),
+        "a first send went out with no way to save its chat's row"
+    );
+    assert!(!store.has_pending_chat_updates(born).unwrap(), "an outbox row without its chat row");
+    refuse_registry_writes(dir.path(), false);
+    let SendOutcome::Started { message_id } = fresh.send(SendRequest::text("first words")).unwrap()
+    else {
+        panic!()
+    };
+    // Saved by the send itself: no debounce, no shutdown flush.
+    assert!(registry_row_saved(dir.path(), born), "first send returned before its chat row was saved");
+    assert!(store.has_pending_chat_updates(born).unwrap());
+
+    // Killed: what's on disk is what the next launch has.
+    client.shutdown();
+    drop((session, fresh, client));
+    edge.refuse_chat_joins(false);
+    edge.nudge_status(200);
+    let restarted = phone(&edge, dir.path());
+    assert!(restarted.workspace().session(born).is_some(), "the chat row didn't survive");
+    let start = Instant::now();
+    while edge.rows(born).is_empty()
+        || edge.rows(CHAT).len() < 3
+        || store.has_pending_chat_updates(born).unwrap()
+        || store.has_pending_chat_updates(CHAT).unwrap()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the sends were stranded without a UI open"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let doc = SessionDoc::from_doc(LoroDoc::new());
+    for row in edge.rows(born) {
+        doc.doc().import(&row.bytes).unwrap();
+    }
+    let commands = doc.read_commands().unwrap();
+    assert_eq!(commands.len(), 1, "recovery lost or duplicated the command");
+    assert!(
+        matches!(&commands[0].payload, SessionCommandPayload::Run { message_id: id, .. } if id.as_str() == message_id.as_str())
+    );
+    restarted.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_wakes_yield_delivery_capacity_to_later_chats() {
     let edge = MockEdge::start().await;

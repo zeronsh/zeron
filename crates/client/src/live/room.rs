@@ -7,7 +7,7 @@
 //! Shape follows the engine's `EngineChatSink` / `ChatPersistence`, minus
 //! host duties (checkpoint posting, command execution).
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -118,8 +118,38 @@ pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
     }
 }
 
+/// Saved deltas stay on top of a snapshot until they pass this many bytes (a
+/// quarter of the snapshot, at least 1 MiB) or [`DELTA_ROW_LIMIT`] rows; then the
+/// chat is saved whole again. Same budgets as the engine's chat persistence: a
+/// whole save of a 34 MB chat rewrote 34 MB every second while rows streamed in,
+/// and held SQLite's one writer while it did, so a send's outbox row waited on it.
+const DELTA_MIN_BUDGET: usize = 1024 * 1024;
+const DELTA_ROW_LIMIT: usize = 512;
+/// Past the budget, the worker keeps writing deltas and folds them in once the
+/// chat has been quiet this long, not mid-stream...
+const QUIET_FOR_COMPACTION: Duration = Duration::from_secs(2);
+/// ...unless the deltas reach this many times the budget: then the save is whole
+/// even mid-stream, so they can't grow without bound.
+const DELTA_HARD_CAP_FACTOR: usize = 4;
+
+fn delta_budget(snapshot_bytes: usize) -> usize {
+    (snapshot_bytes / 4).max(DELTA_MIN_BUDGET)
+}
+
+/// What this persister last saved whole, and the deltas on top of it.
+struct DeltaState {
+    /// The store's token for that whole save ([`DocsStore::save_base_snapshot`]).
+    base: u64,
+    /// The doc's oplog version when the newest saved state was taken.
+    saved_vv: VersionVector,
+    bytes: usize,
+    rows: usize,
+}
+
 /// Debounced snapshot + cursor writer (cursor sampled BEFORE export, both
-/// committed in one transaction).
+/// committed in one transaction). After the first whole save it writes what
+/// changed since the last save, as a delta on that base; the store reads the
+/// base and its deltas back as one snapshot ([`DocsStore::load_snapshot_with_cursor`]).
 pub(crate) struct Persister {
     doc: Weak<SessionDoc>,
     store: Arc<DocsStore>,
@@ -134,6 +164,19 @@ pub(crate) struct Persister {
     /// journaled after its import, so an export begun once it's noted holds it.
     journaled: AtomicI64,
     retired: AtomicI64,
+    /// Taken under `write`; its own lock keeps that obvious.
+    delta: Mutex<Option<DeltaState>>,
+    snapshot_bytes: AtomicUsize,
+    /// The deltas passed their budget: fold them in at the next quiet moment.
+    compaction_due: AtomicBool,
+    /// Deltas already on disk that this persister didn't adopt (left by a kill):
+    /// a compaction folds them even if the chat never changes.
+    inherited_deltas: AtomicBool,
+    /// A worker ([`Self::start`]) folds deltas in when the chat goes quiet. Without
+    /// one, a save past the budget is whole at once.
+    worker: AtomicBool,
+    #[cfg(test)]
+    stats: test_hooks::Stats,
 }
 
 impl Persister {
@@ -143,6 +186,22 @@ impl Persister {
         chat_id: &str,
         cursor: u64,
     ) -> Arc<Self> {
+        // The state the load just found on disk, while it's still the chat's base
+        // and this doc grew from it: deltas continue from there, so opening a chat
+        // costs no whole save. Only a chat2 row (deltas can't stamp a lineage) whose
+        // cursor is verified: the room client reads that flag from the snapshots
+        // row, which only a whole save sets, so an unverified base must be saved
+        // whole once or its legacy cursor repair would run on every open.
+        let verified = store.snapshot_cursor_verified(chat_id).unwrap_or(false);
+        let adopted = store.adopt_loaded_base(chat_id).filter(|loaded| {
+            verified
+                && loaded.epoch == CHAT2_DOC_EPOCH
+                && doc.doc().oplog_vv().includes_vv(&loaded.version)
+        });
+        let inherited = adopted.is_none()
+            && store
+                .snapshot_delta_stats(chat_id)
+                .is_ok_and(|(rows, _)| rows > 0);
         Arc::new(Self {
             doc: Arc::downgrade(doc),
             store,
@@ -155,6 +214,18 @@ impl Persister {
             wake: Arc::new(Notify::new()),
             journaled: AtomicI64::new(0),
             retired: AtomicI64::new(0),
+            snapshot_bytes: AtomicUsize::new(adopted.as_ref().map_or(0, |loaded| loaded.base_bytes)),
+            delta: Mutex::new(adopted.map(|loaded| DeltaState {
+                base: loaded.token,
+                saved_vv: loaded.version,
+                bytes: loaded.delta_bytes,
+                rows: loaded.delta_rows,
+            })),
+            compaction_due: AtomicBool::new(false),
+            inherited_deltas: AtomicBool::new(inherited),
+            worker: AtomicBool::new(false),
+            #[cfg(test)]
+            stats: Default::default(),
         })
     }
 
@@ -164,28 +235,52 @@ impl Persister {
     }
 
     pub(crate) fn start(self: &Arc<Self>, cancel: CancellationToken) {
+        self.worker.store(true, Ordering::Release);
         let weak = Arc::downgrade(self);
         let wake = self.wake.clone();
         crate::runtime::shared().spawn(async move {
             loop {
                 let notified = wake.notified();
+                let Some(compaction_due) = weak
+                    .upgrade()
+                    .map(|this| this.compaction_due.load(Ordering::Acquire))
+                else {
+                    return;
+                };
+                let quiet = async {
+                    if compaction_due {
+                        tokio::time::sleep(QUIET_FOR_COMPACTION).await
+                    } else {
+                        std::future::pending().await
+                    }
+                };
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         if let Some(this) = weak.upgrade() {
-                            let _ = tokio::task::spawn_blocking(move || this.flush()).await;
+                            let _ = tokio::task::spawn_blocking(move || this.compact()).await;
                         }
                         return;
                     }
                     _ = notified => {}
+                    _ = quiet => {
+                        // Quiet: fold the deltas in now, between bursts.
+                        let Some(this) = weak.upgrade() else { return };
+                        let _ = tokio::task::spawn_blocking(move || this.compact()).await;
+                        continue;
+                    }
                 }
                 let Some(this) = weak.upgrade() else { return };
                 if !this.urgent.swap(false, Ordering::AcqRel) {
                     drop(this);
                     tokio::time::sleep(SAVE_INTERVAL).await;
-                    let Some(again) = weak.upgrade() else { return };
-                    let _ = tokio::task::spawn_blocking(move || again.flush()).await;
-                } else {
-                    let _ = tokio::task::spawn_blocking(move || this.flush()).await;
+                }
+                let Some(this) = weak.upgrade() else { return };
+                let job = this.clone();
+                let _ = tokio::task::spawn_blocking(move || job.flush()).await;
+                if !this.is_clean() && this.doc.strong_count() > 0 {
+                    // A failed write: try again next interval, even if the chat
+                    // has gone quiet.
+                    wake.notify_one();
                 }
             }
         });
@@ -193,6 +288,10 @@ impl Persister {
 
     pub(crate) fn cursor(&self) -> u64 {
         self.cursor.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_clean(&self) -> bool {
+        self.saved.load(Ordering::Acquire) == self.generation.load(Ordering::Acquire)
     }
 
     pub(crate) fn applied(&self, cursor: u64, urgent: bool) {
@@ -213,46 +312,181 @@ impl Persister {
         self.wake.notify_one();
     }
 
-    /// Write now if anything changed since the last save (blocking I/O).
-    pub(crate) fn flush(&self) {
+    /// Save what changed since the last save, as a delta when it can, else the
+    /// whole snapshot (blocking I/O). True once everything changed before this
+    /// call is on disk.
+    pub(crate) fn flush(&self) -> bool {
+        self.save(false)
+    }
+
+    /// Save the whole snapshot, folding any deltas into it (backgrounding,
+    /// eviction, shutdown): a reopen then reads one blob, and a build from
+    /// before deltas (0.2.138 and older) reads the snapshots row alone.
+    pub(crate) fn compact(&self) -> bool {
+        self.save(true)
+    }
+
+    fn save(&self, compact: bool) -> bool {
         let _serial = lock(&self.write);
+        let mut delta = lock(&self.delta);
         let generation = self.generation.load(Ordering::Acquire);
-        if generation == self.saved.load(Ordering::Acquire) {
-            return;
+        let folds_deltas = compact
+            && match delta.as_ref() {
+                Some(state) => state.rows > 0,
+                None => self.inherited_deltas.load(Ordering::Acquire),
+            };
+        if generation == self.saved.load(Ordering::Acquire) && !folds_deltas {
+            return true;
         }
         let Some(doc) = self.doc.upgrade() else {
-            return;
+            return false;
         };
+        // Never read the cursor after exporting: a concurrent import could then
+        // label an older snapshot with a newer cursor.
         let cursor = self.cursor();
         // Before the export: only what's noted by now is certainly in it.
         let journaled = self.journaled.load(Ordering::Acquire);
+        #[cfg(test)]
+        self.stats.run(&self.stats.before_export);
+        // The version before the export too: an op committed in between is then
+        // in this save AND counted unsaved, so the next delta repeats it (imports
+        // are idempotent) rather than skipping it.
+        let version = doc.doc().oplog_vv();
+        #[cfg(test)]
+        self.stats.run(&self.stats.after_version);
+        let budget = delta_budget(self.snapshot_bytes.load(Ordering::Relaxed));
+        let (byte_limit, row_limit) = if self.worker.load(Ordering::Acquire) {
+            (budget * DELTA_HARD_CAP_FACTOR, DELTA_ROW_LIMIT * DELTA_HARD_CAP_FACTOR)
+        } else {
+            (budget, DELTA_ROW_LIMIT)
+        };
+        if !compact
+            && let Some(state) = delta.as_mut()
+            && state.bytes < byte_limit
+            && state.rows < row_limit
+        {
+            let appended = doc
+                .export(loro::ExportMode::updates(&state.saved_vv))
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    #[cfg(test)]
+                    self.stats.run(&self.stats.after_export);
+                    self.store
+                        .append_snapshot_delta(&self.chat_id, state.base, &bytes, cursor)
+                        .map(|written| written.then_some(bytes.len()))
+                        .map_err(|e| e.to_string())
+                });
+            match appended {
+                Ok(Some(len)) => {
+                    #[cfg(test)]
+                    self.stats.wrote(false, len);
+                    state.saved_vv = version;
+                    state.bytes += len;
+                    state.rows += 1;
+                    if state.bytes >= budget || state.rows >= DELTA_ROW_LIMIT {
+                        self.compaction_due.store(true, Ordering::Release);
+                    }
+                    self.saved.store(generation, Ordering::Release);
+                    self.retire_journal(journaled);
+                    return true;
+                }
+                // Another whole write replaced the base: save whole.
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot delta failed");
+                    return false;
+                }
+            }
+        }
         let bytes = match doc.export_snapshot() {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot export failed");
-                return;
+                return false;
             }
         };
-        match self.store.save_verified_snapshot_with_cursor(
-            &self.chat_id,
-            &bytes,
-            cursor,
-            CHAT2_DOC_EPOCH,
-        ) {
-            Ok(()) => {
+        #[cfg(test)]
+        self.stats.run(&self.stats.after_export);
+        match self
+            .store
+            .save_base_snapshot(&self.chat_id, &bytes, cursor, CHAT2_DOC_EPOCH)
+        {
+            Ok(base) => {
+                #[cfg(test)]
+                self.stats.wrote(true, bytes.len());
+                self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+                // A whole save replaces every delta on disk.
+                self.inherited_deltas.store(false, Ordering::Release);
+                self.compaction_due.store(false, Ordering::Release);
+                *delta = Some(DeltaState {
+                    base,
+                    saved_vv: version,
+                    bytes: 0,
+                    rows: 0,
+                });
                 self.saved.store(generation, Ordering::Release);
-                if journaled > self.retired.load(Ordering::Acquire) {
-                    match self.store.retire_chat_inbox(&self.chat_id, journaled) {
-                        Ok(()) => self.retired.store(journaled, Ordering::Release),
-                        Err(err) => {
-                            tracing::warn!(chat = %self.chat_id, error = %err, "relay journal retirement failed")
-                        }
-                    }
-                }
+                self.retire_journal(journaled);
+                true
             }
             Err(err) => {
-                tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot save failed")
+                tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot save failed");
+                false
             }
+        }
+    }
+
+    /// After a save that holds every journal row up to `journaled`.
+    fn retire_journal(&self, journaled: i64) {
+        if journaled > self.retired.load(Ordering::Acquire) {
+            match self.store.retire_chat_inbox(&self.chat_id, journaled) {
+                Ok(()) => self.retired.store(journaled, Ordering::Release),
+                Err(err) => {
+                    tracing::warn!(chat = %self.chat_id, error = %err, "relay journal retirement failed")
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_hooks {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+
+    /// Save counts, and code run at points inside a save.
+    #[derive(Default)]
+    pub(crate) struct Stats {
+        pub(crate) whole: AtomicUsize,
+        pub(crate) deltas: AtomicUsize,
+        pub(crate) bytes: AtomicUsize,
+        pub(crate) before_export: Hook,
+        /// Between a save's version read and its export.
+        pub(crate) after_version: Hook,
+        /// Between a save's export and its store write.
+        pub(crate) after_export: Hook,
+    }
+
+    impl Stats {
+        pub(crate) fn run(&self, hook: &Hook) {
+            let hook = hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
+        pub(crate) fn wrote(&self, whole: bool, bytes: usize) {
+            if whole { &self.whole } else { &self.deltas }.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+
+        pub(crate) fn whole(&self) -> usize {
+            self.whole.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn deltas(&self) -> usize {
+            self.deltas.load(Ordering::Relaxed)
         }
     }
 }
@@ -359,7 +593,11 @@ impl ChatDocSink for ViewerSink {
         let chat_id = self.chat_id.clone();
         let batch_id = batch_id.to_owned();
         crate::runtime::shared().spawn_blocking(move || {
-            persister.flush();
+            // A delta save counts: the store reads it back with its base.
+            if !persister.flush() {
+                tracing::warn!(chat = %chat_id, "chat save failed; the sent row stays until one holds it");
+                return;
+            }
             if let Err(err) = store.acknowledge_chat_update(&chat_id, &batch_id) {
                 tracing::warn!(chat = %chat_id, error = %err, "outbox retirement failed");
             }
@@ -829,6 +1067,10 @@ impl Room {
                 if let Err(err) = store.enqueue_chat_update(&publish_chat, &batch_id, bytes) {
                     tracing::warn!(chat = %publish_chat, error = %err, "outbox enqueue failed");
                 }
+                // Before the push can go out: its ack retires the outbox row once a
+                // save holds the update, and a save that finds nothing marked
+                // changed writes nothing.
+                publish_persister.dirty(false);
                 match &slot.client {
                     Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
                     None => slot.unsent.push((batch_id, bytes.clone())),
@@ -838,7 +1080,6 @@ impl Room {
                 {
                     relay.local_update(bytes.clone(), false);
                 }
-                publish_persister.dirty(false);
                 true
             }));
 
@@ -1028,8 +1269,9 @@ impl Room {
         (at > 0).then_some(at)
     }
 
+    /// Save now, whole (backgrounding): see [`Persister::compact`].
     pub(crate) fn flush(&self) {
-        self.persister.flush();
+        self.persister.compact();
     }
 }
 
@@ -1039,7 +1281,7 @@ impl Drop for Room {
         if let Some(client) = lock(&self.slot).client.take() {
             crate::runtime::shared().spawn(client.shutdown());
         }
-        self.persister.flush();
+        self.persister.compact();
     }
 }
 
@@ -1240,5 +1482,683 @@ mod tests {
         relay.apply_route(&RelayRoute { generation: 2, ..route });
         assert!(!relay.relayed.load(Ordering::Acquire));
         assert!(!relay.defer_checkpoint.load(Ordering::Acquire));
+    }
+
+    // ── snapshot deltas (the engine's chat_persistence tests, on this persister) ──
+
+    fn fixture() -> (tempfile::TempDir, Arc<SessionDoc>, Arc<DocsStore>, Arc<Persister>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let persister = Persister::new(&doc, store.clone(), "whale", 0);
+        (dir, doc, store, persister)
+    }
+
+    /// About `kb` kilobytes of incompressible text (Loro compresses repeats away).
+    fn noise(kb: usize, seed: &mut u64) -> String {
+        (0..kb * 64)
+            .map(|_| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                format!("{seed:016x}")
+            })
+            .collect()
+    }
+
+    /// A doc of about `kb` kilobytes, saved once, whole.
+    fn saved_whale(kb: usize) -> (tempfile::TempDir, Arc<SessionDoc>, Arc<DocsStore>, Arc<Persister>) {
+        let (dir, doc, store, persister) = fixture();
+        let text = doc.doc().get_text("transcript");
+        text.insert(0, &noise(kb, &mut 0x9E37_79B9_7F4A_7C15)).unwrap();
+        doc.doc().commit();
+        persister.applied(1, false);
+        assert!(persister.flush());
+        assert_eq!(persister.stats.whole(), 1, "the first save is whole");
+        (dir, doc, store, persister)
+    }
+
+    /// A row streaming in, saved at once (the worker's job, done inline).
+    fn stream(doc: &SessionDoc, persister: &Persister, cursor: u64, token: &str) {
+        let text = doc.doc().get_text("transcript");
+        text.insert(text.len_unicode(), token).unwrap();
+        doc.doc().commit();
+        persister.applied(cursor, false);
+        assert!(persister.flush());
+    }
+
+    fn reopened(store: &DocsStore, chat: &str) -> (loro::LoroDoc, u64) {
+        let (bytes, cursor, epoch) = store.load_snapshot_with_cursor(chat).unwrap().unwrap();
+        assert_eq!(epoch, CHAT2_DOC_EPOCH);
+        let doc = loro::LoroDoc::new();
+        doc.import(&bytes).unwrap();
+        (doc, cursor)
+    }
+
+    /// The snapshots row as a build that never reads deltas sees it.
+    fn snapshots_row(dir: &std::path::Path, chat: &str) -> (loro::LoroDoc, u64, bool) {
+        let db = rusqlite::Connection::open(dir.join("docs.sqlite3")).unwrap();
+        let (bytes, cursor, verified): (Vec<u8>, i64, bool) = db
+            .query_row(
+                "SELECT bytes, cursor, cursor_verified FROM snapshots WHERE doc_id = ?1",
+                [chat],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let doc = loro::LoroDoc::new();
+        doc.import(&bytes).unwrap();
+        (doc, cursor as u64, verified)
+    }
+
+    #[test]
+    fn a_save_after_the_first_writes_what_changed_not_the_whole_doc() {
+        let (_dir, doc, store, persister) = saved_whale(2048);
+        assert!(persister.snapshot_bytes.load(Ordering::Relaxed) > 1024 * 1024);
+        for cursor in 2..=11 {
+            stream(&doc, &persister, cursor, "streamed tokens ");
+        }
+        assert_eq!(persister.stats.whole(), 1, "no whole-doc rewrite");
+        assert_eq!(persister.stats.deltas(), 10);
+        let (rows, bytes) = store.snapshot_delta_stats("whale").unwrap();
+        assert_eq!(rows, 10);
+        assert!(bytes < 10 * 1024, "{bytes} B of deltas for 10 short edits");
+        let (loaded, cursor) = reopened(&store, "whale");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 11);
+        assert!(store.snapshot_cursor_verified("whale").unwrap());
+        assert!(persister.is_clean());
+    }
+
+    /// Backgrounding and eviction compact: afterwards the snapshots row alone (what
+    /// a build from before deltas reads) is the whole doc, with its newest cursor.
+    #[test]
+    fn compaction_folds_deltas_into_the_snapshots_row_alone() {
+        let (dir, doc, store, persister) = saved_whale(64);
+        for cursor in 2..=4 {
+            stream(&doc, &persister, cursor, "more ");
+        }
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap().0, 3);
+        // Until then, that row is the older honest pair.
+        let (row, row_cursor, _) = snapshots_row(dir.path(), "whale");
+        assert_ne!(row.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(row_cursor, 1);
+        assert!(persister.compact());
+        assert_eq!(persister.stats.whole(), 2);
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap(), (0, 0));
+        let (row, row_cursor, verified) = snapshots_row(dir.path(), "whale");
+        assert_eq!(row.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(row_cursor, 4);
+        assert!(verified);
+        // Clean with no deltas: nothing to fold, nothing written.
+        assert!(persister.compact());
+        assert_eq!(persister.stats.whole(), 2);
+    }
+
+    #[test]
+    fn deltas_past_their_budget_save_the_whole_doc_again() {
+        let (_dir, doc, store, persister) = saved_whale(16);
+        for cursor in 2..(2 + DELTA_ROW_LIMIT as u64) {
+            stream(&doc, &persister, cursor, "t");
+        }
+        assert_eq!(persister.stats.whole(), 1);
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap().0, DELTA_ROW_LIMIT as u64);
+        stream(&doc, &persister, 9_999, "t");
+        assert_eq!(persister.stats.whole(), 2, "row limit reached: whole save");
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap(), (0, 0));
+        // Byte budget: one delta past max(1 MiB, snapshot / 4).
+        stream(&doc, &persister, 10_000, &"y".repeat(DELTA_MIN_BUDGET + 1));
+        assert_eq!(persister.stats.whole(), 2);
+        stream(&doc, &persister, 10_001, "t");
+        assert_eq!(persister.stats.whole(), 3, "byte budget reached: whole save");
+        let (loaded, cursor) = reopened(&store, "whale");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 10_001);
+    }
+
+    #[test]
+    fn another_full_write_makes_the_next_save_whole() {
+        let (_dir, doc, store, persister) = saved_whale(16);
+        stream(&doc, &persister, 2, "a");
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap().0, 1);
+        // Another writer replaces the base.
+        store
+            .save_verified_snapshot_with_cursor("whale", &doc.export_snapshot().unwrap(), 2, CHAT2_DOC_EPOCH)
+            .unwrap();
+        assert_eq!(store.snapshot_delta_stats("whale").unwrap(), (0, 0), "a full write clears deltas");
+        stream(&doc, &persister, 3, "b");
+        assert_eq!(persister.stats.whole(), 2, "no delta onto a base it didn't write");
+        let (loaded, cursor) = reopened(&store, "whale");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 3);
+        // A deleted chat forgets its base too.
+        store.delete_snapshot("whale").unwrap();
+        stream(&doc, &persister, 4, "c");
+        assert_eq!(persister.stats.whole(), 3);
+        assert_eq!(reopened(&store, "whale").1, 4);
+    }
+
+    #[test]
+    fn a_lowered_cursor_is_the_one_read_back() {
+        let (_dir, doc, store, persister) = saved_whale(16);
+        stream(&doc, &persister, 50, "a");
+        persister.reset_cursor(7);
+        assert!(persister.flush());
+        assert_eq!(persister.stats.deltas(), 2);
+        assert_eq!(reopened(&store, "whale").1, 7);
+        assert_eq!(load_local(&store, "whale").cursor, 7);
+    }
+
+    /// A delta cut short never yields a state that claims the delta's cursor: the
+    /// base and its own cursor load instead.
+    #[test]
+    fn a_torn_delta_falls_back_to_the_base_pair() {
+        let (_dir, doc, store, persister) = saved_whale(16);
+        let (base_bytes, base_cursor, _) = store.load_snapshot_with_cursor("whale").unwrap().unwrap();
+        let vv = doc.doc().oplog_vv();
+        stream(&doc, &persister, 2, "a token");
+        let full = doc.doc().export(loro::ExportMode::updates(&vv)).unwrap();
+        let base = store.save_base_snapshot("whale", &base_bytes, base_cursor, CHAT2_DOC_EPOCH).unwrap();
+        assert!(store.append_snapshot_delta("whale", base, &full[..full.len() / 2], 2).unwrap());
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("whale").unwrap().unwrap();
+        assert_eq!(cursor, base_cursor);
+        assert_eq!(bytes, base_bytes);
+        let local = load_local(&store, "whale");
+        assert_eq!(local.cursor, base_cursor);
+    }
+
+    /// An op that lands between a delta save's version read and its export is in
+    /// that delta and still counted unsaved; one after the export is carried by the
+    /// next. Neither is lost nor doubled.
+    #[test]
+    fn an_op_racing_a_delta_save_is_neither_lost_nor_doubled() {
+        let (_dir, doc, store, persister) = saved_whale(16);
+        stream(&doc, &persister, 2, "before ");
+        let racer = doc.clone();
+        *persister.stats.after_version.lock().unwrap() = Some(Box::new(move || {
+            let text = racer.doc().get_text("transcript");
+            text.insert(text.len_unicode(), "RACER ").unwrap();
+            racer.doc().commit();
+        }));
+        stream(&doc, &persister, 3, "during ");
+        stream(&doc, &persister, 4, "after ");
+        let late = doc.clone();
+        *persister.stats.after_export.lock().unwrap() = Some(Box::new(move || {
+            let text = late.doc().get_text("transcript");
+            text.insert(text.len_unicode(), "LATE ").unwrap();
+            late.doc().commit();
+        }));
+        stream(&doc, &persister, 5, "then ");
+        persister.dirty(false);
+        assert!(persister.flush());
+        let (loaded, cursor) = reopened(&store, "whale");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        let text = loaded.get_text("transcript").to_string();
+        assert_eq!(text.matches("RACER").count(), 1);
+        assert_eq!(text.matches("LATE").count(), 1);
+        assert_eq!(cursor, 5);
+        assert_eq!(persister.stats.whole(), 1, "all on the delta path");
+    }
+
+    /// A delta that the store refuses leaves the save unclean and the disk as it
+    /// was; the retry writes it.
+    #[test]
+    fn a_failed_delta_write_stays_unsaved_until_a_retry_lands() {
+        let (dir, doc, store, persister) = saved_whale(16);
+        stream(&doc, &persister, 2, "first ");
+        let before = reopened(&store, "whale");
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER no_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(FAIL, 'disk full'); END;").unwrap();
+        let text = doc.doc().get_text("transcript");
+        text.insert(text.len_unicode(), "refused ").unwrap();
+        doc.doc().commit();
+        persister.applied(3, false);
+        assert!(!persister.flush());
+        assert!(!persister.is_clean(), "a failed write counted as saved");
+        let after = reopened(&store, "whale");
+        assert_eq!(after.0.get_deep_value(), before.0.get_deep_value());
+        assert_eq!(after.1, 2);
+        db.execute_batch("DROP TRIGGER no_delta;").unwrap();
+        assert!(persister.flush());
+        let (loaded, cursor) = reopened(&store, "whale");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 3);
+    }
+
+    /// The relay journal goes only once a save holds it, and a delta save does.
+    #[test]
+    fn a_delta_save_retires_the_relay_journal_rows_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        let (remote, first) = update("first");
+        sink.relay_import(&first, false);
+        assert!(sink.persister.flush());
+        assert_eq!(sink.persister.stats.whole(), 1);
+        let at = remote.oplog_vv();
+        remote.get_text("t").insert(0, "second ").unwrap();
+        remote.commit();
+        sink.relay_import(&remote.export(loro::ExportMode::updates(&at)).unwrap(), false);
+        assert_eq!(store.pending_chat_inbox("chat").unwrap().0.len(), 1);
+        assert!(sink.persister.flush());
+        assert_eq!(sink.persister.stats.deltas(), 1);
+        assert!(store.pending_chat_inbox("chat").unwrap().0.is_empty(), "the delta holds it");
+        let local = load_local(&store, "chat");
+        assert_eq!(local.doc.doc().get_text("t").to_string(), "second first");
+    }
+
+    /// An ack retires its outbox row only after a save that holds the update has
+    /// landed, delta or whole: until then the row is the send's only local copy.
+    #[test]
+    fn an_ack_retires_the_outbox_row_only_after_a_durable_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = sink(store.clone(), &doc, "chat");
+        doc.doc().get_text("t").insert(0, "history ").unwrap();
+        doc.doc().commit();
+        sink.persister.dirty(false);
+        assert!(sink.persister.flush());
+        // A send: committed, its outbox row written, the doc marked changed.
+        let send = |text: &str, batch: &str| {
+            let at = doc.doc().oplog_vv();
+            let t = doc.doc().get_text("t");
+            t.insert(t.len_unicode(), text).unwrap();
+            doc.doc().commit();
+            let bytes = doc.doc().export(loro::ExportMode::updates(&at)).unwrap();
+            store.enqueue_chat_update("chat", batch, &bytes).unwrap();
+            sink.persister.dirty(false);
+        };
+        let pending = |batch: &str| {
+            store.pending_chat_updates("chat").unwrap().iter().any(|(id, _)| id == batch)
+        };
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(FAIL, 'disk full'); END;
+             CREATE TRIGGER no_whole BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(FAIL, 'disk full'); END;",
+        )
+        .unwrap();
+        send("refused", "b1");
+        sink.acknowledge_update("b1").unwrap();
+        settle();
+        assert!(pending("b1"), "retired without a save that holds it");
+        db.execute_batch("DROP TRIGGER no_delta; DROP TRIGGER no_whole;").unwrap();
+
+        send("kept", "b2");
+        sink.acknowledge_update("b2").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending("b2") {
+            assert!(std::time::Instant::now() < deadline, "the outbox row was never retired");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(sink.persister.stats.whole(), 1, "the ack's save was a delta");
+        // With the outbox row gone, the save alone holds the send.
+        store.acknowledge_chat_update("chat", "b1").unwrap();
+        let (loaded, _) = reopened(&store, "chat");
+        assert_eq!(loaded.get_text("t").to_string(), "history refusedkept");
+    }
+
+    /// The app updated over a store the current release wrote (whole snapshots,
+    /// cursor verified, no deltas): it opens unchanged, and saves deltas on it
+    /// without a whole first save.
+    #[test]
+    fn app_updated_over_existing_data_reads_it_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = loro::LoroDoc::new();
+        old.get_text("t").insert(0, &noise(64, &mut 7)).unwrap();
+        old.commit();
+        let bytes = old.export(loro::ExportMode::Snapshot).unwrap();
+        {
+            // What the release's persister wrote, and its relay journal.
+            let store = DocsStore::open(dir.path()).unwrap();
+            store.save_verified_snapshot_with_cursor("chat", &bytes, 42, CHAT2_DOC_EPOCH).unwrap();
+        }
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        assert_eq!(store.load_snapshot_with_cursor("chat").unwrap().unwrap(), (bytes.clone(), 42, 2));
+        let local = load_local(&store, "chat");
+        assert!(local.had_content);
+        assert_eq!(local.cursor, 42);
+        assert_eq!(local.doc.doc().get_deep_value(), old.get_deep_value());
+        let doc = Arc::new(local.doc);
+        let persister = Persister::new(&doc, store.clone(), "chat", local.cursor);
+        for cursor in 43..=45 {
+            let t = doc.doc().get_text("t");
+            t.insert(0, "new ").unwrap();
+            doc.doc().commit();
+            persister.applied(cursor, false);
+            assert!(persister.flush());
+        }
+        assert_eq!(persister.stats.whole(), 0, "a whole save after the update");
+        assert_eq!(store.snapshot_delta_stats("chat").unwrap().0, 3);
+        let again = load_local(&store, "chat");
+        assert_eq!(again.cursor, 45);
+        assert_eq!(again.doc.doc().get_deep_value(), doc.doc().get_deep_value());
+        assert!(store.snapshot_cursor_verified("chat").unwrap());
+    }
+
+    /// A base whose cursor isn't verified (a legacy row) is saved whole once: the
+    /// room client reads that flag from the snapshots row, and a delta can't set it.
+    #[test]
+    fn an_unverified_base_is_saved_whole_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = loro::LoroDoc::new();
+        old.get_text("t").insert(0, "legacy").unwrap();
+        old.commit();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        store
+            .save_snapshot_with_cursor("chat", &old.export(loro::ExportMode::Snapshot).unwrap(), 9, CHAT2_DOC_EPOCH)
+            .unwrap();
+        let local = load_local(&store, "chat");
+        assert_eq!(local.cursor, 0, "an unverified cursor isn't trusted");
+        let doc = Arc::new(local.doc);
+        let persister = Persister::new(&doc, store.clone(), "chat", 0);
+        persister.applied(12, false);
+        assert!(persister.flush());
+        assert_eq!(persister.stats.whole(), 1);
+        assert!(store.snapshot_cursor_verified("chat").unwrap());
+        persister.applied(13, false);
+        assert!(persister.flush());
+        assert_eq!(persister.stats.deltas(), 1);
+        assert_eq!(load_local(&store, "chat").cursor, 13);
+    }
+
+    /// Deltas a kill left behind (not adopted: here the next open's doc didn't grow
+    /// from them) fold in at the next compaction even if the chat never changes.
+    #[test]
+    fn deltas_left_by_a_kill_fold_at_the_next_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+            let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+            let persister = Persister::new(&doc, store.clone(), "left", 0);
+            for cursor in 1..=4u64 {
+                doc.doc().get_text("t").insert(0, "x").unwrap();
+                doc.doc().commit();
+                persister.applied(cursor, false);
+                assert!(persister.flush());
+            }
+            assert_eq!(store.snapshot_delta_stats("left").unwrap().0, 3);
+        }
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        // Adopted on a normal open: the next save is a delta, and a compaction folds.
+        let local = load_local(&store, "left");
+        let doc = Arc::new(local.doc);
+        let persister = Persister::new(&doc, store.clone(), "left", local.cursor);
+        assert!(persister.compact());
+        assert_eq!(persister.stats.whole(), 1);
+        assert_eq!(store.snapshot_delta_stats("left").unwrap(), (0, 0));
+        let (row, cursor, _) = snapshots_row(dir.path(), "left");
+        assert_eq!(row.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 4);
+    }
+
+    /// Child of [`a_kill_mid_save_loses_and_doubles_nothing`]: streams numbered ops,
+    /// saving after each (deltas, and whole saves at each budget), until killed.
+    #[test]
+    fn delta_crash_child() {
+        let Some(dir) = std::env::var_os("ZERON_CLIENT_DELTA_CRASH_DIR") else {
+            return;
+        };
+        let store = Arc::new(DocsStore::open(&dir).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let persister = Persister::new(&doc, store, "crash", 0);
+        let text = doc.doc().get_text("ops");
+        for op in 1u64..=u64::MAX {
+            text.insert(text.len_unicode(), &format!("{op},")).unwrap();
+            doc.doc().commit();
+            persister.applied(op, false);
+            persister.flush();
+            if op.is_multiple_of(97) {
+                persister.compact();
+            }
+            if op == 1 {
+                // The parent times its kill from here, not from a cold start.
+                std::fs::write(std::path::Path::new(&dir).join("started"), b"").unwrap();
+            }
+        }
+    }
+
+    /// Kill the writer (SIGKILL) at arbitrary points, mid-append or mid-compaction.
+    /// What reopens is exactly ops 1..=cursor.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_mid_save_loses_and_doubles_nothing() {
+        for (round, kill_after_ms) in [0u64, 15, 60, 140, 300].into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "live::room::tests::delta_crash_child", "--nocapture"])
+                .env("ZERON_CLIENT_DELTA_CRASH_DIR", dir.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !dir.path().join("started").exists() {
+                assert!(std::time::Instant::now() < deadline, "round {round}: the child never started");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(kill_after_ms));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let store = DocsStore::open(dir.path()).unwrap();
+            let Some((bytes, cursor, _)) = store.load_snapshot_with_cursor("crash").unwrap() else {
+                panic!("round {round}: nothing saved in {kill_after_ms} ms");
+            };
+            let doc = loro::LoroDoc::new();
+            doc.import(&bytes).unwrap();
+            let expected: String = (1..=cursor).map(|op| format!("{op},")).collect();
+            assert_eq!(doc.get_text("ops").to_string(), expected, "round {round}: not ops 1..={cursor}");
+            let local = load_local(&store, "crash");
+            assert_eq!(local.cursor, cursor, "round {round}");
+            let (rows, _) = store.snapshot_delta_stats("crash").unwrap();
+            eprintln!("round {round}: killed at {kill_after_ms} ms, cursor {cursor}, {rows} deltas");
+        }
+    }
+
+    /// Child of [`dying_between_export_and_commit_keeps_the_last_commit`]: streams
+    /// ops 1.. and aborts inside save number ZERON_CLIENT_DELTA_ABORT_AT, after its
+    /// export and before its store write.
+    #[test]
+    fn delta_abort_child() {
+        let (Some(dir), Some(at)) = (
+            std::env::var_os("ZERON_CLIENT_DELTA_CRASH_DIR"),
+            std::env::var("ZERON_CLIENT_DELTA_ABORT_AT").ok().and_then(|v| v.parse::<u64>().ok()),
+        ) else {
+            return;
+        };
+        let store = Arc::new(DocsStore::open(&dir).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let persister = Persister::new(&doc, store, "crash", 0);
+        let text = doc.doc().get_text("ops");
+        for op in 1u64..=u64::MAX {
+            text.insert(text.len_unicode(), &format!("{op},")).unwrap();
+            doc.doc().commit();
+            if op == at {
+                *persister.stats.after_export.lock().unwrap() = Some(Box::new(|| std::process::abort()));
+            }
+            persister.applied(op, false);
+            persister.flush();
+        }
+    }
+
+    /// Dying after the export and before the commit leaves exactly the last
+    /// committed state: in the first whole save, in a delta, and in the whole save
+    /// that folds 512 deltas.
+    #[cfg(unix)]
+    #[test]
+    fn dying_between_export_and_commit_keeps_the_last_commit() {
+        // Op 1 is the first (whole) save; 2..=513 are deltas; 514 is whole.
+        for at in [1u64, 2, 37, 513, 514, 515] {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "live::room::tests::delta_abort_child", "--nocapture"])
+                .env("ZERON_CLIENT_DELTA_CRASH_DIR", dir.path())
+                .env("ZERON_CLIENT_DELTA_ABORT_AT", at.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "op {at}: the child should have died");
+            let store = DocsStore::open(dir.path()).unwrap();
+            let Some((bytes, cursor, _)) = store.load_snapshot_with_cursor("crash").unwrap() else {
+                assert_eq!(at, 1, "op {at}: nothing on disk");
+                continue;
+            };
+            assert_eq!(cursor, at - 1, "op {at}: the cursor isn't the last committed save's");
+            let doc = loro::LoroDoc::new();
+            doc.import(&bytes).unwrap();
+            let expected: String = (1..at).map(|op| format!("{op},")).collect();
+            assert_eq!(doc.get_text("ops").to_string(), expected, "op {at}");
+        }
+    }
+
+    /// Ops stream on one thread, the worker saves, and another thread forces saves
+    /// and compactions (backgrounding, acks) meanwhile. Every state on disk holds
+    /// ops 1..=k with no gap or repeat, and never fewer than its cursor claims.
+    #[test]
+    fn deltas_stay_whole_while_the_cursor_advances_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let persister = Persister::new(&doc, store.clone(), "race", 0);
+        let cancel = CancellationToken::new();
+        persister.start(cancel.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (doc, persister, stop) = (doc.clone(), persister.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let text = doc.doc().get_text("ops");
+                let mut op = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    op += 1;
+                    text.insert(text.len_unicode(), &format!("{op},")).unwrap();
+                    doc.doc().commit();
+                    persister.applied(op, op.is_multiple_of(7));
+                }
+                op
+            })
+        };
+        let forcer = {
+            let (persister, stop) = (persister.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    n += 1;
+                    if n.is_multiple_of(50) {
+                        persister.compact();
+                    } else {
+                        persister.flush();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+            })
+        };
+        let check = |label: &str| {
+            let Some((bytes, cursor, _)) = store.load_snapshot_with_cursor("race").unwrap() else {
+                return;
+            };
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            let text = loaded.get_text("ops").to_string();
+            let ops: Vec<u64> = text.split_terminator(',').map(|op| op.parse().unwrap()).collect();
+            assert!(ops.iter().copied().eq(1..=ops.len() as u64), "{label}: gap or repeat");
+            assert!(ops.len() as u64 >= cursor, "{label}: cursor {cursor} past {} ops", ops.len());
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_500);
+        while std::time::Instant::now() < deadline {
+            check("mid-stream");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let last = writer.join().unwrap();
+        forcer.join().unwrap();
+        assert!(persister.flush());
+        check("after the last save");
+        let (loaded, cursor) = reopened(&store, "race");
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, last);
+        assert!(persister.stats.deltas() > 0, "no deltas exercised");
+        cancel.cancel();
+    }
+
+    /// Past the budget, a streaming chat isn't saved whole while rows keep coming;
+    /// the worker folds the deltas in once it goes quiet.
+    #[test]
+    fn a_streaming_chat_is_saved_whole_once_it_goes_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let persister = Persister::new(&doc, store.clone(), "stream", 0);
+        let cancel = CancellationToken::new();
+        persister.start(cancel.clone());
+        let mut seed = 0x517c_c1b7_2722_0a95_u64;
+        let mut cursor = 0;
+        let mut tick = |kb: usize| {
+            let text = doc.doc().get_text("t");
+            text.insert(text.len_unicode(), &noise(kb, &mut seed)).unwrap();
+            doc.doc().commit();
+            cursor += 1;
+            persister.applied(cursor, true);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        };
+        let wait = |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !f() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        tick(1);
+        wait("the first save", &|| persister.stats.whole() == 1);
+        // ~1.5 MiB past a 1 MiB budget, well under the 4 MiB cap.
+        for _ in 0..48 {
+            tick(32);
+        }
+        wait("the last delta", &|| persister.is_clean());
+        assert!(persister.compaction_due.load(Ordering::Acquire), "never passed the budget");
+        assert_eq!(persister.stats.whole(), 1, "a whole save landed mid-stream");
+        wait("folding once quiet", &|| persister.stats.whole() == 2);
+        assert_eq!(store.snapshot_delta_stats("stream").unwrap(), (0, 0));
+        let (row, row_cursor, _) = snapshots_row(dir.path(), "stream");
+        assert_eq!(row.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(row_cursor, cursor);
+        cancel.cancel();
+    }
+
+    /// The real thing, when supplied: a big chat's snapshot (never written back)
+    /// through deltas and a compaction; after every step a reload equals the doc.
+    #[test]
+    #[ignore = "requires ZERON_PHONE_BENCH_CHAT: a local chat snapshot, read into a temporary store"]
+    fn real_chat_reloads_equal_through_deltas() {
+        let path = std::env::var("ZERON_PHONE_BENCH_CHAT").unwrap();
+        let raw = loro::LoroDoc::new();
+        raw.import(&std::fs::read(path).unwrap()).unwrap();
+        let doc = Arc::new(SessionDoc::from_doc(raw));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let persister = Persister::new(&doc, store.clone(), "real", 0);
+        let check = |label: &str| {
+            let local = load_local(&store, "real");
+            assert_eq!(local.doc.doc().oplog_vv(), doc.doc().oplog_vv(), "{label}: ops differ");
+            assert_eq!(local.doc.doc().get_deep_value(), doc.doc().get_deep_value(), "{label}: state differs");
+        };
+        persister.applied(1, false);
+        assert!(persister.flush());
+        check("after the whole save");
+        let text = doc.doc().get_text("bench-stream");
+        for cursor in 2..=201u64 {
+            text.insert(text.len_unicode(), &format!("streamed token {cursor} ")).unwrap();
+            doc.doc().commit();
+            persister.applied(cursor, false);
+            assert!(persister.flush());
+        }
+        check("after 200 deltas");
+        assert_eq!(persister.stats.whole(), 1);
+        assert!(persister.compact());
+        assert_eq!(store.snapshot_delta_stats("real").unwrap(), (0, 0));
+        check("after compaction");
+        assert_eq!(load_local(&store, "real").cursor, 201);
     }
 }

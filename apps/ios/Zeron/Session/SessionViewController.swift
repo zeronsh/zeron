@@ -161,7 +161,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             return .sent
         }
         composer.onStop = { [weak self] in self?.source.stop() }
-        composer.text = Drafts.load(chatId)
+        // A send that didn't go comes back ahead of whatever was typed since.
+        source.onSendFailed = { [weak self] text, images in
+            guard let self else { return }
+            if self.stashed {
+                self.stashedDraft = Drafts.joined([text, self.stashedDraft])
+                self.stashedImages = images + self.stashedImages
+            } else {
+                self.composer.text = Drafts.joined([text, self.composer.text])
+                self.composer.addImages(images)
+            }
+            self.saveDraft()
+        }
+        composer.text = Drafts.opening(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         questions.onSubmit = { [weak self] answers in
@@ -1199,5 +1211,31 @@ enum Drafts {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         all[chatId] = trimmed.isEmpty ? nil : text
         UserDefaults.standard.set(all, forKey: key)
+    }
+
+    /// Chats with a send on its way in this process (main thread).
+    private static var sending: Set<String> = []
+
+    /// A chat's messages on their way into the core, kept until it has them.
+    static func saveSending(_ chatId: String, _ texts: [String]) {
+        if texts.isEmpty { sending.remove(chatId) } else { sending.insert(chatId) }
+        save("sending:" + chatId, joined(texts))
+    }
+
+    /// The draft a chat's composer opens with. Text still on its way when the
+    /// process ended comes back ahead of it: it may have reached the core just
+    /// before, but a message the user typed is never lost.
+    static func opening(_ chatId: String) -> String {
+        let draft = load(chatId)
+        let leftover = load("sending:" + chatId)
+        guard !leftover.isEmpty, !sending.contains(chatId) else { return draft }
+        let restored = joined([leftover, draft])
+        save(chatId, restored)
+        save("sending:" + chatId, "")
+        return restored
+    }
+
+    static func joined(_ texts: [String]) -> String {
+        texts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n\n")
     }
 }
