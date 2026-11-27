@@ -58,6 +58,7 @@ mod mcp_config;
 pub use mcp_config::configured_mcp_servers;
 mod normalize;
 pub mod refresh_lock;
+mod settings_env;
 mod wire;
 
 use std::path::PathBuf;
@@ -675,6 +676,16 @@ impl ClaudeHarness {
         // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
         // subscription token: those stay inside the CLI's own login.
         crate::apply_run_env(&mut cmd, &request.env);
+        if title_only {
+            // `--setting-sources ""` below drops the user settings' `env`,
+            // where a gateway or proxy is set: carry its provider part over,
+            // under what the host resolved for this run.
+            for (key, value) in settings_env::provider_env(&config_root(&request.env)) {
+                if !request.env.contains_key(&key) {
+                    cmd.env(key, value);
+                }
+            }
+        }
         cmd.args(Self::launch_args(request));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
@@ -2721,6 +2732,71 @@ mod tests {
                 "title_only {title_only}"
             );
         }
+    }
+
+    /// A titling run loads no settings, but a proxy set in the user
+    /// settings' `env` still carries it: without it the run signs in with
+    /// the CLI's own login and fails. What the host set for the run wins.
+    #[test]
+    fn titling_runs_reach_the_proxy_the_user_settings_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("settings.json"),
+            r#"{"env": {
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",
+                "ANTHROPIC_AUTH_TOKEN": "sk-proxy",
+                "ANTHROPIC_API_KEY": "from-settings",
+                "ENABLE_TOOL_SEARCH": "true"
+            }}"#,
+        )
+        .unwrap();
+        let request = RunRequest {
+            mcp: None,
+            prompt: "Name this chat".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::ReadOnly,
+            auto_approve: false,
+            access: Default::default(),
+            plan: false,
+            code_mode: false,
+            zeron_mcp_only: false,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: std::collections::BTreeMap::from([
+                (
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    root.path().to_string_lossy().into_owned(),
+                ),
+                ("ANTHROPIC_API_KEY".to_owned(), "from-host".to_owned()),
+            ]),
+            extra_mcp: Vec::new(),
+        };
+        let env_of = |title_only: bool| {
+            let mut cmd =
+                ClaudeHarness::build_command(std::path::Path::new("claude"), &request, title_only);
+            cmd.as_std_mut()
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    Some((
+                        key.to_string_lossy().into_owned(),
+                        value?.to_string_lossy().into_owned(),
+                    ))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let title = env_of(true);
+        assert_eq!(title["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8317");
+        assert_eq!(title["ANTHROPIC_AUTH_TOKEN"], "sk-proxy");
+        assert_eq!(title["ANTHROPIC_API_KEY"], "from-host");
+        assert!(!title.contains_key("ENABLE_TOOL_SEARCH"));
+        // A chat run loads the settings itself.
+        let chat = env_of(false);
+        assert!(!chat.contains_key("ANTHROPIC_BASE_URL"));
     }
 
     /// "Only Zeron's MCP servers": the CLI is told to load `--mcp-config`'s
