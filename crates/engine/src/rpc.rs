@@ -4260,13 +4260,22 @@ impl RpcService for EngineRpc {
                 if title.is_empty() || p.source.is_empty() {
                     return Err(RpcError::BadParams("A notification needs a title and who asked".into()));
                 }
+                let session = p
+                    .session
+                    .as_deref()
+                    .filter(|s| !s.is_empty() && s.len() <= 200);
+                if let Some(chat_id) = session {
+                    if let Err(error) = self.workspace.wake_chat(chat_id, chrono::Utc::now()) {
+                        tracing::warn!("notification wake failed: {error}");
+                    }
+                }
                 let outcome = crate::desktop_notify::post_for(
                     self.repos.data_dir(),
                     &self.viewport_focus,
                     &p.source,
                     &title,
                     &p.body,
-                    p.session.as_deref(),
+                    session,
                 );
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }

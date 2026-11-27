@@ -80,4 +80,17 @@ describe("session notifications on a real RegistryRoom", () => {
     await push(stub, [session("idle", "t")]);
     expect((await stats(stub)).pushLog).toEqual([]);
   });
+
+  it("keeps a sleeping chat's completion quiet, while its wake event notifies", async () => {
+    const stub = room();
+    await register(stub, "ios-1");
+    await push(stub, [
+      { kind: "chats", id: "c1", op: "upsert", hlc: hlc(), set: { title: "Asleep", sleepUntil: Date.now() + 60_000 } },
+      session("working", null)
+    ]);
+    await push(stub, [session("idle", "turn-1")]);
+    expect((await stats(stub)).pushLog).toEqual([]);
+    await push(stub, [session("awaitingInput", "turn-1")]);
+    expect((await stats(stub)).pushLog.map((e) => e.category)).toEqual(["input"]);
+  });
 });

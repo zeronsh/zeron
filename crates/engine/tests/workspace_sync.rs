@@ -19,7 +19,7 @@ use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
+    SessionStatus, SleepState, SteeringMode,
 };
 use zeron_rpc::methods;
 
@@ -1075,6 +1075,68 @@ async fn a_repositorys_name_and_icon_are_the_same_on_every_device() {
     a.shutdown().await;
     b.shutdown().await;
     c.shutdown().await;
+}
+
+/// A plugin's session-targeted notification is a wake event: the banner is
+/// attention, so the sleeping chat comes back with it.
+#[tokio::test]
+async fn a_targeted_notification_wakes_a_sleeping_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = assemble(dir.path(), "dev-a");
+    let client = zeron_rpc::memory_client(engine.rpc_service());
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": "chat-1", "deviceId": "dev-a" }),
+        )
+        .await
+        .expect("create chat");
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatSleep",
+                "chatId": "chat-1",
+                "until": chrono::Utc::now().timestamp_millis() + 3_600_000,
+            }),
+        )
+        .await
+        .expect("put the chat to sleep");
+    assert!(matches!(
+        engine
+            .workspace
+            .chat("chat-1")
+            .expect("read chat")
+            .expect("chat row")
+            .sleep_state(chrono::Utc::now()),
+        SleepState::Asleep { .. }
+    ));
+
+    client
+        .call(
+            methods::POST_NOTIFICATION,
+            serde_json::json!({
+                "source": "github",
+                "title": "CI is failing",
+                "body": "tests failed",
+                "session": "chat-1",
+            }),
+        )
+        .await
+        .expect("post a targeted notification");
+
+    let chat = engine
+        .workspace
+        .chat("chat-1")
+        .expect("read chat")
+        .expect("chat row");
+    assert!(matches!(
+        chat.sleep_state(chrono::Utc::now()),
+        SleepState::Woke { .. }
+    ));
+    assert!(chat.sleep.and_then(|sleep| sleep.woke_at).is_some());
+
+    engine.shutdown().await;
 }
 
 /// Settings → Devices' Remove: another device, gone from the account on

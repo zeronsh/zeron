@@ -27,7 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use zeron_proto::view::{Indicator, effective_indicator};
-use zeron_proto::{Chat, ConnectivityState, HarnessUpdatePhase, HarnessUpdateStatus, Session};
+use zeron_proto::{
+    Chat, ConnectivityState, HarnessUpdatePhase, HarnessUpdateStatus, Session, SleepState,
+};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -382,12 +384,18 @@ impl Notifier {
         for session in sessions {
             let status = SessionNotificationState::new(session, now);
             let chat = chats.iter().find(|chat| chat.id == session.chat_id);
+            let asleep =
+                chat.is_some_and(|chat| matches!(chat.sleep_state(now), SleepState::Asleep { .. }));
             let prev = self
                 .baselines
                 .insert(session.chat_id.clone(), status.clone());
             // Side chats keep their baselines current but never ring.
             if !chat.is_some_and(Chat::is_top_level) {
                 continue;
+            }
+            // Falling asleep takes a waiting finish with it.
+            if asleep {
+                self.settling.remove(&session.chat_id);
             }
             // A turn going on (or asking, or failing) takes a waiting
             // finish with it.
@@ -401,6 +409,9 @@ impl Notifier {
                     .and_then(|chat| chat.title.clone())
                     .unwrap_or_else(|| "New session".into());
                 match ping {
+                    // Asleep is attention state, not execution state: a
+                    // finished turn stays quiet until the chat wakes.
+                    Ping::Done if asleep => {}
                     // Published with the next turn already running: the
                     // person's message carried it on, nothing finished.
                     Ping::Done if status.indicator == Indicator::Working => {}
@@ -910,6 +921,51 @@ mod tests {
         notifier.sessions(&[session("a", Some("t4"), now)], &chats, now);
         notifier.flush(now + DONE_SETTLE);
         assert_eq!(posted.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sleeping_chats_keep_finished_quiet_but_wake_events_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let now = chrono::Utc::now();
+        let mut asleep = chat("a", "Fix the build", None);
+        asleep.sleep = Some(zeron_proto::ChatSleep {
+            until: now + chrono::Duration::hours(1),
+            at: now,
+            woke_at: None,
+        });
+        let chats = [asleep];
+
+        notifier.sessions(&[working("a", Some("t1"), now)], &chats, now);
+        notifier.sessions(&[session("a", Some("t2"), now)], &chats, now);
+        notifier.flush(now + DONE_SETTLE);
+        assert!(posted.lock().unwrap().is_empty());
+
+        // Asking or failing is the chat's wake event: it still rings.
+        let mut asking = working("a", Some("t2"), now);
+        asking.status = zeron_proto::SessionStatus::AwaitingInput;
+        notifier.sessions(&[asking], &chats, now);
+        assert_eq!(posted.lock().unwrap().len(), 1);
+        assert_eq!(posted.lock().unwrap()[0].1, "Waiting on your input");
+    }
+
+    #[test]
+    fn falling_asleep_takes_a_waiting_finish_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let now = chrono::Utc::now();
+        let mut awake = chat("a", "Fix the build", None);
+        notifier.sessions(&[working("a", Some("t1"), now)], &[awake.clone()], now);
+        notifier.sessions(&[session("a", Some("t2"), now)], &[awake.clone()], now);
+
+        awake.sleep = Some(zeron_proto::ChatSleep {
+            until: now + chrono::Duration::hours(1),
+            at: now,
+            woke_at: None,
+        });
+        notifier.sessions(&[session("a", Some("t2"), now)], &[awake], now);
+        notifier.flush(now + DONE_SETTLE);
+        assert!(posted.lock().unwrap().is_empty());
     }
 
     fn working(chat_id: &str, turn: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Session {

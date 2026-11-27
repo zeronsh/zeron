@@ -112,3 +112,26 @@ test("chimes: Task completed off keeps done quiet, the rest still ring", functio
 	publish(app, { chat("a", "input", "t2") })
 	expect(table.concat(played(app), ",")).to_be("request")
 end)
+
+local function asleep(id: string, status: string?, turn: string?): any
+	local c = chat(id, status, turn)
+	c.sleep_until = 1
+	return c
+end
+
+test("chimes: a sleeping chat's finish never rings, its wake events do", function()
+	local app = open({ asleep("a", "working", "t1") })
+	publish(app, { asleep("a", "done", "t2") })
+	settle(app)
+	expect(#played(app)).to_be(0)
+	publish(app, { asleep("a", "input", "t2") })
+	expect(table.concat(played(app), ",")).to_be("request")
+end)
+
+test("chimes: falling asleep takes a waiting finish with it", function()
+	local app = open({ chat("a", "working", "t1") })
+	publish(app, { chat("a", "done", "t2") })
+	publish(app, { asleep("a", "done", "t2") })
+	settle(app)
+	expect(#played(app)).to_be(0)
+end)
