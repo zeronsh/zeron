@@ -1,6 +1,7 @@
 --!strict
 -- What's waiting for you to allow it, said in the window's corner: a plugin
--- (new, or changed since you allowed it) and someone else's template.
+-- (new, or changed since you allowed it), someone else's template, what an
+-- agent asked of the MCP servers, and an agent outside Zeron asking in.
 --
 -- Each notice follows the host's lists, never an event: it's up while the
 -- plugin waits and goes however that ends, wherever you decided. Loading the
@@ -108,6 +109,26 @@ local KINDS: { Kind } = {
 				return ui.t(if it.enabled then "settings.mcp.requests.notice_enable" else "settings.mcp.requests.notice_disable", { name = it.name })
 			end
 			return ui.t("settings.mcp.requests.notice_add", { name = it.name })
+		end,
+	},
+	{
+		-- (An agent outside Zeron asking in: answered in Settings → MCP's dialog.)
+		group = "mcp-outside",
+		prefix = "outside:",
+		ready = function(): boolean
+			return mcp.outside:get().loaded == true
+		end,
+		waiting = function(): { any }
+			local out = {}
+			for _, a in mcp.outside:get().asks or {} do
+				table.insert(out, { key = `outside:{a.id}`, name = a.client, value = a.id })
+			end
+			return out
+		end,
+		review = "mcp.review",
+		body = ui.t("settings.mcp.outside.notice_body"),
+		title = function(it: any): Message
+			return ui.t("settings.mcp.outside.notice", { name = it.name })
 		end,
 	},
 }

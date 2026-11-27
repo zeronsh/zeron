@@ -68,6 +68,7 @@ pub mod mcp_servers;
 mod hosted_models;
 mod model_catalogs;
 pub mod model_publish;
+pub mod outside_agents;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
@@ -213,6 +214,8 @@ pub struct EngineCore {
     pub plugins: plugins::Plugins,
     /// Managed external MCP servers (Vault + local store + OAuth + loopback gateway).
     pub mcp_servers: Arc<mcp_servers::McpServers>,
+    /// Agents outside Zeron let in to this device's tools through the edge.
+    pub outside_agents: outside_agents::OutsideAgents,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -392,6 +395,14 @@ impl EngineCore {
         sessions.set_plugins(plugins.clone());
         let mcp_servers = mcp_servers::McpServers::new(&profile, data_dir, &device_id, edge.as_ref());
         sessions.set_mcp_servers(mcp_servers.clone());
+        let outside_agents = {
+            let sessions = sessions.clone();
+            outside_agents::OutsideAgents::new(
+                profile.store_root().join("outside-agents.json"),
+                device_id.clone(),
+                Arc::new(move || sessions.mcp_endpoint()),
+            )
+        };
         sessions.set_doc_host(doc_host.clone());
         // Recovering clears the journals' marks of what to resume, which a
         // rollback doesn't restore: it waits with all other new work.
@@ -551,6 +562,7 @@ impl EngineCore {
             local_import,
             plugins,
             mcp_servers,
+            outside_agents,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -679,6 +691,9 @@ impl EngineCore {
             // message is usually waiting on this very dial.
             config.max_jitter = std::time::Duration::from_millis(100);
             config.on_connected = Some(Arc::new(|| wake_trace::mark(wake_trace::Stage::Relay)));
+        } else {
+            // (A Cloud machine has no window to let one in from.)
+            config.on_mcp = Some(Arc::new(self.outside_agents.clone()));
         }
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
@@ -723,7 +738,8 @@ impl EngineCore {
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
         .with_plugins(self.plugins.clone())
-        .with_mcp_servers(self.mcp_servers.clone());
+        .with_mcp_servers(self.mcp_servers.clone())
+        .with_outside_agents(self.outside_agents.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

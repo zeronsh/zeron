@@ -53,6 +53,12 @@ pub struct Origin {
     /// How the host wants this agent to delegate
     /// ([`zeron_proto::McpServer::ASYNC_DELEGATION_ENV`]).
     pub delegation: Delegation,
+    /// An outside agent's grant (docs/mcp.md, "Outside agents"). It speaks
+    /// for no chat: no shell tools, and a chat it starts is read-only and
+    /// supervised. A terminal `zeron mcp` and a chat's injected server
+    /// leave this false — a hand-run server stays uncapped, as the engine's
+    /// agent gate does for a caller with no chat.
+    pub outside: bool,
 }
 
 /// How an agent works with others (Settings → General).
@@ -105,6 +111,7 @@ impl Origin {
             delegation: Delegation::from_env_value(
                 read(zeron_proto::McpServer::ASYNC_DELEGATION_ENV).as_deref(),
             ),
+            outside: false,
         }
     }
 }

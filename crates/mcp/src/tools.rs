@@ -889,7 +889,9 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
-        let in_chat = self.zeron.origin().chat_id.is_some();
+        let origin = self.zeron.origin();
+        let in_chat = origin.chat_id.is_some();
+        let outside = origin.outside;
         let waits = self.waits_on_background();
         let mut tools = catalog();
         delegation::adapt(&mut tools, self.delegation());
@@ -898,6 +900,9 @@ impl Tools {
             .filter(|tool| match tool.name {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
+                // An outside grant's shell calls are refused by the engine
+                // (no chat of its own, so not full access). Don't offer them.
+                name if outside && commands::NAMES.contains(&name) => false,
                 _ => true,
             })
             .collect()
@@ -954,6 +959,12 @@ impl Tools {
                 return self.template_packages(name, args).await;
             }
             command if commands::NAMES.contains(&command) => {
+                if self.zeron.origin().outside {
+                    return Err(
+                        "An outside agent can't run commands. Chats it starts are read-only and supervised; a shell is the person's."
+                            .into(),
+                    );
+                }
                 return self.commands(command, args).await;
             }
             theme if themes::NAMES.contains(&theme) => {
@@ -1259,6 +1270,14 @@ impl Tools {
                 sandbox_ceiling = config.sandbox;
             }
             own = Some(origin);
+        }
+        // An outside agent has no chat to inherit from. The engine's agent
+        // gate holds that caller to read-only and supervised; use the same
+        // ceiling here so the reply describes the chat that is created.
+        // A terminal `zeron mcp` leaves `outside` false and stays uncapped.
+        if self.zeron.origin().outside {
+            ceiling = AccessMode::Supervised;
+            sandbox_ceiling = SandboxLevel::ReadOnly;
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;

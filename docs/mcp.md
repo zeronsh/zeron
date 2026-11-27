@@ -439,6 +439,89 @@ first, then collect replies with `wait_for_turn`. Waiting on each individual
 launch before issuing the next serializes work at the caller, even though
 both the MCP transport and engine support concurrent chat runs.
 
+## Outside agents
+
+An agent outside Zeron (Grok, or any client that speaks remote MCP with
+OAuth) can use one of your devices' Zeron tools. It adds this remote MCP
+server:
+
+```
+https://edge.zeron.sh/mcp
+```
+
+It signs in with OAuth in your browser, you pick one of your devices, and
+Zeron on that device asks you. It gets the agent tool set
+(`zeron_rpc::agent_allowed`, the tools an agent in a Zeron chat has), on that
+device and nowhere else, and nothing more: never the bearer API, never the IPC
+token. It can read the chats on that device and message them, so an agent you
+already run keeps the access you gave it. It speaks for no chat, so the
+engine's agent gate holds it to the least an agent gets: chats it starts are
+read-only and supervised, and `run_command` is not offered (the gate would
+refuse it anyway).
+
+How a sign-in goes (`edge/src/mcp-oauth.ts`, `edge/src/mcp-relay.ts`,
+`crates/engine/src/outside_agents.rs`):
+
+1. `POST /mcp` without a token is `401` with `WWW-Authenticate: Bearer
+   resource_metadata=".../.well-known/oauth-protected-resource/mcp"` (RFC 9728).
+   That names the edge as the authorization server
+   (`/.well-known/oauth-authorization-server`, RFC 8414: `S256` only, `code`
+   only, `authorization_code` only, no client authentication).
+2. The client registers (`POST /oauth/register`, RFC 7591). Public clients
+   only: a `client_secret`, or any `token_endpoint_auth_method` but `none`, is
+   refused, and redirect URIs must be `https` or `http` on `127.0.0.1` /
+   `localhost`, with no wildcards.
+3. It opens `/oauth/authorize` with PKCE (`code_challenge_method=S256`;
+   anything else is `400`) and `resource=https://edge.zeron.sh/mcp`. You sign
+   in to Zeron (WorkOS, your Zeron account). These pages alone read the short
+   session cookie (`Path=/oauth`, HttpOnly, Secure, SameSite=Lax, 30 minutes),
+   and the page lists your devices.
+4. You pick a device. Zeron there asks you, in Settings → MCP (a notice in the
+   window's corner says so), with the client's name and where its sign-in
+   returns to. Allow or Deny. The device makes the grant id and keeps it
+   (`outside-agents.json`, `0600`). The edge records the grant only once the
+   device answers with it. Deny, here or on the device, or no answer within
+   5 minutes, sends the client back with `access_denied` and nothing issued.
+   An offline device is refused at once.
+5. The browser returns to the client with a code. It is single use and lasts
+   2 minutes. A second redemption fails and revokes the token the first gave.
+   `POST /oauth/token` exchanges it with the PKCE verifier for an opaque access
+   token. The token lasts 8 hours and has no refresh: the client signs in
+   again. It is bound to you, that device, that grant and scope `mcp:agent`.
+   The edge keeps only the SHA-256 of codes and tokens, and logs neither.
+6. `POST /mcp` with the token goes to that device's room on the edge. From
+   there it travels as an `mcp` frame over the device's existing relay
+   connection, which only the room sends (a client's `mcp` frames are
+   dropped). The engine checks the grant on every call, then serves it from the
+   agent MCP endpoint harnesses use (`McpHttpServer::relay`), the same JSON-RPC
+   code, with no new socket. A device that's offline gets a JSON-RPC error
+   (`device offline`); nothing is queued. `GET` and `DELETE` are `405`.
+
+Revoking: Settings → MCP → Agents outside Zeron → Revoke. The device drops
+the grant and tells the edge, which deletes its tokens, so the next call is
+`401`. The device also refuses a grant it no longer keeps even if the edge
+missed the revoke, and the edge drops it then. Reconnecting the device
+reconciles the edge's grants with the device's list. Signing in again asks
+you again.
+
+Grok:
+
+1. In Grok's connector settings, add a custom remote MCP server (HTTPS) and
+   paste `https://edge.zeron.sh/mcp`. Leave any API key or header empty:
+   OAuth does the sign-in.
+2. Grok opens your browser. Sign in to Zeron, pick the device, Continue.
+3. On that device, Zeron asks "Let Grok use Zeron on this device?". Allow.
+4. The browser goes back to Grok, which now lists Zeron's tools.
+
+This is not a tunnel to the local agent endpoint on `127.0.0.1` with a
+bearer header. That would hand a long-lived secret to someone else's config,
+skip the device's consent, and route around the loopback Host and Origin
+checks the endpoint relies on. Don't.
+
+Running an edge: its WorkOS client must allow
+`https://<edge>/oauth/callback` as a redirect URI. Cloud devices aren't
+offered, since there is no window there to answer in.
+
 ## Smoke recipe
 
 ```sh

@@ -9,7 +9,8 @@
 //! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
 //! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
 //!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`;
-//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`.
+//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`;
+//! - outside agents' MCP traffic uses kind [`MCP_KIND`] ([`McpRelay`]).
 //!
 //! The RPC path multiplexes NOTHING new: each distinct client `connId` becomes a virtual
 //! string-frame connection feeding the existing [`serve_connection`] seam, so every RPC
@@ -34,6 +35,10 @@ pub const RELAY_KIND: &str = " relay";
 pub const NUDGE_KIND: &str = "nudge";
 /// The RPC stream over the relay: both `s` (stream id) and `k` (kind) are `"rpc"`.
 pub const RPC_KIND: &str = "rpc";
+/// Outside agents' MCP traffic (docs/mcp.md, "Outside agents"): frames the
+/// room itself sends (no `from`; the room drops any a client sends) and the
+/// host answers (no `to`).
+pub const MCP_KIND: &str = "mcp";
 
 /// A client that reassembles [`RPC_CHUNK_KIND`] says so in its RPC frames' stream
 /// id. The relay passes `s` through and older hosts don't read it, so neither
@@ -324,6 +329,37 @@ impl TokenSource for StaticToken {
 /// open it and drain"); the engine warms/opens the chat doc.
 pub type NudgeHandler = Arc<dyn Fn(String) -> bool + Send + Sync>;
 
+/// The host's end of [`MCP_KIND`] frames. `joined` runs each time the relay
+/// joins the room, `frame` with each frame the room sent (`stream` is its
+/// `s`); both answer through `out`. Neither may block the relay: work runs
+/// on tasks of its own.
+pub trait McpRelay: Send + Sync {
+    fn joined(&self, out: McpOut);
+    fn frame(&self, stream: String, payload: Vec<u8>, out: McpOut);
+}
+
+/// Where an [`McpRelay`] answers: [`MCP_KIND`] frames to the room.
+#[derive(Clone)]
+pub struct McpOut(mpsc::Sender<Vec<u8>>);
+
+impl McpOut {
+    /// Frames into `sender` (the relay makes its own; tests read theirs).
+    pub fn new(sender: mpsc::Sender<Vec<u8>>) -> Self {
+        Self(sender)
+    }
+
+    /// Send `payload` on `stream`; false once the relay socket is gone.
+    pub async fn send(&self, stream: &str, payload: &[u8]) -> bool {
+        match encode_device_frame(&DeviceFrameHeader::new(stream, MCP_KIND), payload) {
+            Ok(frame) => self.0.send(frame).await.is_ok(),
+            Err(err) => {
+                tracing::error!(error = %err, "device-room: mcp frame encode failed");
+                false
+            }
+        }
+    }
+}
+
 pub struct HostRelayConfig {
     /// Edge base URL (`http(s)://…`; rewritten to `ws(s)` for the socket).
     pub edge_url: String,
@@ -335,6 +371,8 @@ pub struct HostRelayConfig {
     pub max_jitter: Duration,
     /// Called each time the relay joins the room.
     pub on_connected: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Serves outside agents' [`MCP_KIND`] frames; without it they're dropped.
+    pub on_mcp: Option<Arc<dyn McpRelay>>,
 }
 
 impl HostRelayConfig {
@@ -350,6 +388,7 @@ impl HostRelayConfig {
             retry: Duration::from_secs(5),
             max_jitter: Duration::from_secs(2),
             on_connected: None,
+            on_mcp: None,
         }
     }
 }
@@ -424,8 +463,13 @@ impl HostRelay {
                         let url = format!("{url}&nudgeAck=1");
                         let started = tokio::time::Instant::now();
                         let outcome = {
-                            let session =
-                                host_session(&url, &service, &on_nudge, config.on_connected.as_ref());
+                            let session = host_session(
+                                &url,
+                                &service,
+                                &on_nudge,
+                                config.on_connected.as_ref(),
+                                config.on_mcp.as_ref(),
+                            );
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -605,6 +649,7 @@ async fn host_session(
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
     on_connected: Option<&Arc<dyn Fn() + Send + Sync>>,
+    on_mcp: Option<&Arc<dyn McpRelay>>,
 ) -> Result<(), RpcError> {
     let ws = zeron_sync::dial::connect_ws(url)
         .await
@@ -614,6 +659,9 @@ async fn host_session(
         on_connected();
     }
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
+    if let Some(on_mcp) = on_mcp {
+        on_mcp.joined(McpOut(out_tx.clone()));
+    }
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
     let transport = zeron_sync::socket::pump_with_timing(
         ws,
@@ -627,7 +675,7 @@ async fn host_session(
     let mut conns: HashMap<String, VirtualConn> = HashMap::new();
     let dispatch = async {
         while let Some(bytes) = in_rx.recv().await {
-            handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
+            handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge, on_mcp).await;
         }
     };
     // Poll the transport even when a virtual RPC connection is backpressured.
@@ -652,6 +700,7 @@ async fn handle_host_frame(
     service: &Arc<dyn RpcService>,
     out_tx: &mpsc::Sender<Vec<u8>>,
     on_nudge: &NudgeHandler,
+    on_mcp: Option<&Arc<dyn McpRelay>>,
 ) {
     let (header, payload) = match decode_device_frame(bytes) {
         Ok(frame) => frame,
@@ -707,6 +756,16 @@ async fn handle_host_frame(
                 }
             }
             Err(_) => tracing::warn!("device-room: malformed nudge — ignoring"),
+        }
+        return;
+    }
+    if header.k == MCP_KIND {
+        // Only the room speaks for outside agents: a client's frame carries
+        // `from`, and is never one of theirs.
+        if header.from.is_none()
+            && let Some(on_mcp) = on_mcp
+        {
+            on_mcp.frame(header.s, payload, McpOut(out_tx.clone()));
         }
         return;
     }
@@ -1684,10 +1743,10 @@ mod tests {
             let call = serde_json::json!({"id": id, "method": "ListPlugins", "params": {}}).to_string();
             encode_device_frame(&header, call.as_bytes()).unwrap()
         };
-        handle_host_frame(&frame("c1", Some("device-a"), 1), &mut conns, &service, &out_tx, &on_nudge).await;
-        handle_host_frame(&frame("c2", None, 1), &mut conns, &service, &out_tx, &on_nudge).await;
+        handle_host_frame(&frame("c1", Some("device-a"), 1), &mut conns, &service, &out_tx, &on_nudge, None).await;
+        handle_host_frame(&frame("c2", None, 1), &mut conns, &service, &out_tx, &on_nudge, None).await;
         // Same conn, another device: dropped.
-        handle_host_frame(&frame("c1", Some("device-b"), 2), &mut conns, &service, &out_tx, &on_nudge).await;
+        handle_host_frame(&frame("c1", Some("device-b"), 2), &mut conns, &service, &out_tx, &on_nudge, None).await;
         for _ in 0..50 {
             if seen.lock().unwrap().len() >= 2 {
                 break;
@@ -1699,6 +1758,43 @@ mod tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert!(seen.contains(&crate::Caller::Peer { device: Some("device-a".into()) }), "{seen:?}");
         assert!(seen.contains(&crate::Caller::Peer { device: None }), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_room_s_own_mcp_frames_reach_the_mcp_relay() {
+        use crate::{RpcReply, RpcService};
+        use std::sync::Mutex;
+
+        struct Seen(Mutex<Vec<String>>);
+        impl McpRelay for Seen {
+            fn joined(&self, _out: McpOut) {}
+            fn frame(&self, stream: String, _payload: Vec<u8>, _out: McpOut) {
+                self.0.lock().unwrap().push(stream);
+            }
+        }
+        struct Unreachable;
+        #[async_trait::async_trait]
+        impl RpcService for Unreachable {
+            async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, crate::RpcError> {
+                panic!("an mcp frame reached RPC: {method}");
+            }
+        }
+        let seen = Arc::new(Seen(Mutex::new(Vec::new())));
+        let relay: Arc<dyn McpRelay> = seen.clone();
+        let service: Arc<dyn RpcService> = Arc::new(Unreachable);
+        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(16);
+        let on_nudge: NudgeHandler = Arc::new(|_| true);
+        let mut conns = HashMap::new();
+        let frame = |s: &str, from: Option<&str>| {
+            let mut header = DeviceFrameHeader::new(s, MCP_KIND);
+            header.from = from.map(str::to_owned);
+            encode_device_frame(&header, br#"{"t":"call","grant":"g"}"#).unwrap()
+        };
+        // A client of the room (another device) posing as the room: dropped.
+        handle_host_frame(&frame("forged", Some("c1")), &mut conns, &service, &out_tx, &on_nudge, Some(&relay)).await;
+        handle_host_frame(&frame("call-1", None), &mut conns, &service, &out_tx, &on_nudge, Some(&relay)).await;
+        assert_eq!(*seen.0.lock().unwrap(), ["call-1"]);
+        assert!(conns.is_empty(), "an mcp frame opens no RPC connection");
     }
 
     #[test]

@@ -727,6 +727,12 @@ impl SessionsEngine {
         Ok(())
     }
 
+    /// The agent MCP endpoint, once [`Self::serve_mcp_endpoint`] has served
+    /// it (outside agents' calls are relayed into it).
+    pub fn mcp_endpoint(&self) -> Option<Arc<zeron_mcp::http::McpHttpServer>> {
+        lock(&self.inner.mcp_endpoint).clone()
+    }
+
     /// `chat_id`'s transcript is open (in this device's app or another
     /// device's) until the guard drops: its parked agent gets the longer
     /// idle window ([`AGENT_IDLE_STOP`], not [`UNWATCHED_IDLE_STOP`]).
@@ -3631,6 +3637,7 @@ impl Inner {
                 side_chats_only,
                 waits_on_background: waits,
                 delegation,
+                outside: false,
             };
             match endpoint.grant(origin) {
                 Ok(grant) => {

@@ -618,6 +618,27 @@ export class RegistryRoom implements DurableObject {
       });
     }
 
+    // The person's devices, for the outside-agent consent page (internal:
+    // mcp-oauth.ts asks the signed-in person's own rooms).
+    if (url.pathname === "/devices" && request.method === "GET") {
+      const devices: { id: string; name: string; platform: string | null }[] = [];
+      for (const raw of this.sql.exec<{ id: string; fields: string }>(
+        "SELECT id, fields FROM rows WHERE kind = 'devices' AND deleted = 0"
+      )) {
+        try {
+          const fields = JSON.parse(raw.fields) as Record<string, unknown>;
+          devices.push({
+            id: raw.id,
+            name: typeof fields.name === "string" && fields.name ? fields.name : raw.id,
+            platform: typeof fields.platform === "string" ? fields.platform : null
+          });
+        } catch {
+          /* a malformed row names no device */
+        }
+      }
+      return json({ devices });
+    }
+
     // A Cloud session's reach (registry-runner.ts): set only by the person's
     // CloudAccount, never reachable through the Worker's routes, and refused
     // above to any runner. Answers how many rooms the runner is still to be

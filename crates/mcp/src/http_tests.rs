@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
 
-/// What the fake engine saw: `AwaitBackground`'s chat per call, and whether
-/// a blocked call was dropped (cancelled).
+/// What the fake engine saw: every method called, `AwaitBackground`'s chat
+/// per call, and whether a blocked call was dropped (cancelled).
 #[derive(Default)]
 struct Engine {
+    called: Mutex<Vec<String>>,
     awaited: Mutex<Vec<String>>,
     dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
@@ -25,6 +26,7 @@ impl Drop for DropSignal {
 #[async_trait]
 impl RpcService for Engine {
     async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+        lock(&self.called).push(method.to_owned());
         match method {
             methods::AWAIT_BACKGROUND => {
                 let chat = params["chatId"].as_str().unwrap_or_default().to_owned();
@@ -48,6 +50,7 @@ fn origin(chat: &str) -> Origin {
         side_chats_only: false,
         delegation: Default::default(),
         waits_on_background: true,
+        outside: false,
     }
 }
 
@@ -180,6 +183,96 @@ async fn get_and_delete_are_not_served() {
         assert_eq!(status, 405, "{method}");
         assert!(head.contains("allow: post"));
     }
+}
+
+/// One request relayed as grant `id`: (status, body).
+async fn relayed(server: &McpHttpServer, id: &str, body: &str) -> (StatusCode, String) {
+    let mut headers = HeaderMap::new();
+    headers.insert("accept", HeaderValue::from_static("application/json, text/event-stream"));
+    let response = server.relay(id, headers, Bytes::from(body.to_owned())).await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+#[tokio::test]
+async fn a_relayed_call_for_an_unknown_or_revoked_grant_dispatches_nothing() {
+    let engine = Arc::<Engine>::default();
+    let server = server(engine.clone()).await;
+    let call = legacy_call(1, "list_devices", json!({}));
+
+    // A grant id this device never issued (one the edge made up), and a
+    // run's bearer token, which is no grant id.
+    let run = server.grant(origin("chat-a")).unwrap();
+    for id in ["edge-invented", run.token()] {
+        assert_eq!(relayed(&server, id, &call).await.0, StatusCode::UNAUTHORIZED, "{id}");
+    }
+    assert!(lock(&engine.called).is_empty(), "{:?}", lock(&engine.called));
+
+    // The grant this device issued: its call runs.
+    let grant = server.remote_grant("g-1", Origin::default());
+    let (status, body) = relayed(&server, "g-1", &call).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"id\":1"), "{body}");
+    let dispatched = lock(&engine.called).len();
+    assert!(dispatched > 0);
+
+    // A grant id is no bearer on the loopback listener either.
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string();
+    assert_eq!(exchange(server.port(), "POST", &[accept(), bearer("g-1")], &init).await.0, 401);
+
+    // Revoked: refused again, and nothing more reaches the engine.
+    drop(grant);
+    assert_eq!(relayed(&server, "g-1", &call).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(lock(&engine.called).len(), dispatched);
+}
+
+/// An outside grant lists no shell and a call never reaches `RunCommand`.
+/// The engine's agent gate refuses it too (no chat of its own); the tool
+/// surface should not offer what that gate will reject.
+#[tokio::test]
+async fn an_outside_grant_does_not_offer_or_run_a_command() {
+    let engine = Arc::<Engine>::default();
+    let server = server(engine.clone()).await;
+    let _grant = server.remote_grant(
+        "g-out",
+        Origin {
+            outside: true,
+            ..Default::default()
+        },
+    );
+    let listed = relayed(
+        &server,
+        "g-out",
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }).to_string(),
+    )
+    .await;
+    assert_eq!(listed.0, StatusCode::OK, "{}", listed.1);
+    let listed: Value = serde_json::from_str(&listed.1).unwrap();
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"run_command"), "{names:?}");
+    assert!(names.contains(&"list_chats"), "{names:?}");
+
+    let before = lock(&engine.called).len();
+    let (status, body) = relayed(
+        &server,
+        "g-out",
+        &legacy_call(2, "run_command", json!({ "command": "id" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("unknown tool: run_command"), "{body}");
+    assert!(
+        !lock(&engine.called).iter().any(|method| method.contains("RunCommand") || method.contains("run_command")),
+        "{:?}",
+        lock(&engine.called)
+    );
+    assert_eq!(lock(&engine.called).len(), before, "{:?}", lock(&engine.called));
 }
 
 #[tokio::test]

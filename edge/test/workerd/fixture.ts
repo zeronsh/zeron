@@ -24,6 +24,7 @@ import { handleVaultRoute } from "../../src/vault-routes";
 import { handleUserDirectoryRoute } from "../../src/user-directory";
 import { handleOnboardingRoute } from "../../src/onboarding-routes";
 import { handlePluginKeyRoute } from "../../src/plugin-keys";
+import { handleMcpRoute } from "../../src/mcp-oauth";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -215,6 +216,8 @@ export default {
     if (release) return release;
     const modelList = await modelListRoute(request, env, url);
     if (modelList) return modelList;
+    const mcp = await handleMcpRoute(request, env, url);
+    if (mcp) return mcp;
     const admin = await handleAdminRoute(request, env, url);
     if (admin) return admin;
     const billing = await handleBillingPublicRoute(request, env, url);

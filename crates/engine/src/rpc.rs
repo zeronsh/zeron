@@ -982,6 +982,8 @@ pub struct EngineRpc {
     plugins: Option<crate::plugins::Plugins>,
     /// Managed external MCP servers (absent in bare test assemblies).
     mcp_servers: Option<std::sync::Arc<crate::mcp_servers::McpServers>>,
+    /// Outside agents' grants on this device (absent in bare test assemblies).
+    outside_agents: Option<crate::outside_agents::OutsideAgents>,
     engine_info: EngineInfo,
 }
 
@@ -1045,6 +1047,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             mcp_servers: None,
+            outside_agents: None,
             engine_info,
         }
     }
@@ -1061,6 +1064,11 @@ impl EngineRpc {
         mcp_servers: std::sync::Arc<crate::mcp_servers::McpServers>,
     ) -> Self {
         self.mcp_servers = Some(mcp_servers);
+        self
+    }
+
+    pub fn with_outside_agents(mut self, outside_agents: crate::outside_agents::OutsideAgents) -> Self {
+        self.outside_agents = Some(outside_agents);
         self
     }
 
@@ -3826,6 +3834,12 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::Failed("MCP servers aren't available here".into()));
             };
             return Box::pin(async move { mcp_servers.handle_rpc(method, params).await }).await;
+        }
+        if crate::outside_agents::handles(method) {
+            let Some(outside_agents) = self.outside_agents.clone() else {
+                return Err(RpcError::Failed("Outside agents aren't available here".into()));
+            };
+            return Box::pin(async move { outside_agents.handle_rpc(method, params).await }).await;
         }
         if crate::acp_registry::handles(method) {
             return Box::pin(crate::acp_registry::dispatch(
