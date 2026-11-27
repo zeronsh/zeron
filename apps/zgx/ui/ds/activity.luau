@@ -147,11 +147,8 @@ local FOLD = 200
 -- How a row joining the tree arrives.
 local ENTER: any = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" }
 
--- Each row's height as last laid out, by its group and its tool: a group
--- made again (its row scrolled back) holds each row as it was. A plain
--- table, a key at a time; it starts again as it fills.
+-- Small bounded caches, a key at a time; each starts again as it fills.
 local KEPT_MOST = 8192
-local MEASURED: { [string]: number } = {}
 local kept_count: { [any]: number } = {}
 local function kept_set(t: { [string]: any }, k: string, value: any)
 	if t[k] == nil then
@@ -940,77 +937,34 @@ return ui.component(function(props: Props): Node
 		end
 	end)
 	local Tree = ui.component(function(_: {}): Node
-		-- The rows: a list virtualized by the view around it (the transcript's),
-		-- each call a row of its own, built only as the view shows it, the rows
-		-- about to come into it built ahead in the time frames leave over
-		-- (zgx's `ahead`), so a scroll or the tree opening builds what shows
-		-- alone. A row follows its tool in place (its item as a state), and
-		-- holds its height in `heights`: a call's line is ROW, one opened or a
-		-- thought its own, as it was last laid out.
-		local own_key = key or tostring(own)
-		local heights = ui.use_state({} :: { number })
-		local listed: { string } = {}
-		-- Calls arriving while the rows are made: each plays `ENTER` as it is
-		-- first built, as a row joining a `ui.each` does.
+		-- The rows: keyed, in the tree's own flow. They used to be a second
+		-- virtualized list inside the transcript's, their heights copied by hand
+		-- into a parallel array; a thought remeasured as it streamed, a row
+		-- opened, or the column rewrapped could leave that array a step behind
+		-- the real layout, which read as rows overlapping and the transcript
+		-- jumping. zgx's measured virtual list can't virtualize by an ancestor,
+		-- and closed groups don't mount their rows at all, so the open group's
+		-- rows are laid out naturally instead.
 		local arriving: { [string]: boolean } = {}
+		local seen: { [string]: boolean } = {}
 		local was_mounted = false
-		-- A row's height as it is first laid out: a call's line, ROW, or as it
-		-- was last laid out if opened; a thought, as it was if it's short or
-		-- opened, else its four lines folded before it knows it's long (its
-		-- button's room comes a frame on, as the words are measured).
-		local line = ui.theme.get("zeron.prose.small.line") :: number
-		local first_folded = THOUGHT_LINES * line + (ROW - line)
-		local function height_of(t: Tool): number
-			local h = MEASURED[`{own_key}:{t.id}`]
-			local open = CALLS_OPEN:peek()[t.id] == true
-			if t.kind ~= "thought" then
-				return if open and h then h else ROW
-			end
-			if h and (open or h <= first_folded) then
-				return h
-			end
-			return first_folded
-		end
 		ui.effect(function()
 			local list = tools:get()
 			local m = mounted:get()
-			local n = #list
-			-- (Rows that were there before: the same calls in the same places,
-			-- looked at at the ends; anything else is written whole.)
-			local same = #listed <= n
-				and (#listed == 0 or (list[1].id == listed[1] and list[#listed].id == listed[#listed]))
-			ui.batch(function()
-				if not same then
-					heights:set({})
-					table.clear(listed)
-				end
-				for i = #listed + 1, n do
-					local t = list[i]
-					listed[i] = t.id
+			for _, t in list do
+				if not seen[t.id] then
+					seen[t.id] = true
 					if m and was_mounted then
 						arriving[t.id] = true
 					end
-					heights:push(height_of(t))
 				end
-			end)
+			end
 			was_mounted = m
 		end)
-		local function row_view(t: Tool, index: State<number>, item: State<Tool>): Node
+		local function row_view(t: Tool, index: number, item: State<Tool>): Node
 			local id = t.id
 			local function place(): number
-				return index:get()
-			end
-			-- Its height, as laid out, for the rows after it.
-			local function resized(size: { w: number, h: number })
-				local k = `{own_key}:{id}`
-				if MEASURED[k] ~= size.h then
-					kept_set(MEASURED, k, size.h)
-				end
-				local i = index:peek()
-				local held = heights:peek()[i]
-				if held ~= nil and held ~= size.h then
-					heights:set_key(i, size.h)
-				end
+				return index
 			end
 			local function made(): Node
 				return row(function(): Tool
@@ -1019,7 +973,7 @@ return ui.component(function(props: Props): Node
 					return place() < last_branch:get()
 				end, function(): boolean
 					return live() and place() == count:get()
-				end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
+				end, props.open_subagent, props.thought, props.key, nil, place() < count:peek(), props.pictures)
 			end
 			-- (A call arriving joins as a row joining a `ui.each` does; the rest
 			-- are made as they come into view, as they were.)
@@ -1057,14 +1011,13 @@ return ui.component(function(props: Props): Node
 				end, { w_full = true })
 				else ui.show(
 				mounted,
-				ui.list {
+				ui.each(tools, row_view, {
+					key = function(t: Tool): string
+						return t.id
+					end,
+					direction = "column",
 					w_full = true,
-					virtualize = "ancestor",
-					data = tools,
-					key = "id",
-					heights = heights,
-					row = row_view,
-				}
+				})
 			),
 		}
 	end)
