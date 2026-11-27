@@ -141,6 +141,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         codex_reset_credits: format!("{base}/backend-api/wham/rate-limit-reset-credits"),
         codex_consume_reset: format!("{base}/backend-api/wham/rate-limit-reset-credits/consume"),
         grok_usage: format!("{base}/v1/billing?format=credits"),
+        opencode_go_status: format!("{base}/console/api/go/status"),
         github_api: base.to_string(),
         github_login: base.to_string(),
         copilot_api: Some(base.to_string()),
@@ -3262,7 +3263,14 @@ async fn opencode_keys_use_its_shape_and_opencode_2s_own_database_is_left_alone(
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     rusqlite::Connection::open(&db)
         .unwrap()
-        .execute_batch("CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL);")
+        .execute_batch(
+            "CREATE TABLE credential (\
+               id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL, active integer\
+             );\
+             INSERT INTO credential (id, integration_id, label, value, active) VALUES (\
+               'cred-go', 'opencode-go', 'OpenCode Go', '{\"type\":\"key\",\"key\":\"oc-test\"}', 1\
+             );",
+        )
         .unwrap();
     let err = accounts2
         .add_api_key(HarnessId::Opencode, "openrouter", OR_KEY, None)
@@ -3274,6 +3282,43 @@ async fn opencode_keys_use_its_shape_and_opencode_2s_own_database_is_left_alone(
     assert_eq!(server.hits("GET"), 1, "only the first add was checked");
     let warned = accounts2.list(false).await.unwrap();
     assert!(warned.warnings.iter().any(|w| w.harness == HarnessId::Opencode && w.message.contains("own database")));
+    let go = warned
+        .accounts
+        .iter()
+        .find(|account| account.harness == HarnessId::Opencode)
+        .expect("the active OpenCode Go credential is listed");
+    assert!(go.active);
+    assert!(!go.switchable);
+    assert_eq!(go.provider.as_deref(), Some("opencode-go"));
+    assert_eq!(go.auth_kind, Some(AgentAuthKind::ApiKey));
+    assert_eq!(go.plan_label.as_deref(), Some("OpenCode Go"));
+}
+
+#[tokio::test]
+async fn opencode_go_usage_uses_its_key_live_without_copying_it() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("GET", "/console/api/go/status") => (200, r#"{"product":"go-plus","access":{"meters":{"fiveHour":{"resetsAt":"2026-11-14T15:03:46.000Z","limitMicroCents":"1000000000","usedMicroCents":"30000000"},"week":{"resetsAt":"2026-11-16T00:00:00.000Z","limitMicroCents":"2000000000","usedMicroCents":"380000000"},"month":{"resetsAt":"2026-11-15T04:29:48.000Z","limitMicroCents":"4000000000","usedMicroCents":"2960000000"}}}}"#.into()),
+        _ => (404, String::new()),
+    }).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let db = config.opencode_auth_file.with_file_name("opencode.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    rusqlite::Connection::open(&db).unwrap().execute_batch(r#"CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL, active integer); INSERT INTO credential VALUES ('cred-go','opencode-go','OpenCode Go','{"type":"key","key":"oc-test"}',1);"#).unwrap();
+    let (listed, log) = logged(accounts.list(true)).await;
+    let snapshot = listed.unwrap();
+    assert_eq!(server.hits("GET /console/api/go/status"), 1);
+    let go = rows(&snapshot, HarnessId::Opencode).into_iter().find(|a| a.provider.as_deref() == Some("opencode-go")).unwrap();
+    assert_eq!(go.plan_label.as_deref(), Some("OpenCode Go Plus"));
+    assert_eq!(go.usage_windows.len(), 3);
+    assert!((go.usage_windows[0].used_fraction - 0.03).abs() < 0.001);
+    assert!((go.usage_windows[1].used_fraction - 0.19).abs() < 0.001);
+    assert!((go.usage_windows[2].used_fraction - 0.74).abs() < 0.001);
+    assert!(go.usage_error.is_none() && go.usage_fetched_at.is_some());
+    let wire = serde_json::to_string(&snapshot).unwrap();
+    assert!(!wire.contains("oc-test") && !log.contains("oc-test"));
+    assert!(accounts.read_slots(HarnessId::Opencode).is_empty());
+    assert!(!every_file(&config.data_dir).contains("oc-test"));
 }
 
 #[cfg(unix)]

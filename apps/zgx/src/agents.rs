@@ -1843,8 +1843,14 @@ fn account_value(account: &Json, reset: Option<&Reset>, cloud: bool) -> Value {
         ("switchable", Value::Bool(can_switch(account, cloud))),
         ("provider", account["provider"].as_str().map_or(Value::Nil, Value::from)),
         // An API key: no plan, so no windows to show; named by someone, or
-        // going by its last four.
-        ("key", Value::Bool(account["authKind"].as_str() == Some("api-key"))),
+        // going by its last four. OpenCode Go's key is a subscription login.
+        (
+            "key",
+            Value::Bool(
+                account["authKind"].as_str() == Some("api-key")
+                    && account["provider"].as_str() != Some("opencode-go"),
+            ),
+        ),
         (
             "named",
             Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),

@@ -200,6 +200,8 @@ pub fn account_group_label(harness: HarnessId, provider: &str) -> String {
     let known = match provider {
         "openai-codex" => "ChatGPT",
         "openai" | "openai-api" => "OpenAI",
+        "opencode" => "OpenCode",
+        "opencode-go" => "OpenCode Go",
         "anthropic" => "Anthropic",
         "github-copilot" | "copilot" => "GitHub Copilot",
         "nous" => "Nous Portal",

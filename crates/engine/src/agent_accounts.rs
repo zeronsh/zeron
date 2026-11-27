@@ -800,6 +800,8 @@ struct ProbeEndpoints {
     codex_consume_reset: String,
     /// Grok's billing view (`/v1/billing?format=credits`).
     grok_usage: String,
+    /// OpenCode Go's subscription status and meters.
+    opencode_go_status: String,
     /// GitHub's REST root (`/user`, `/copilot_internal/user`).
     github_api: String,
     /// GitHub's OAuth root (`/login/device/code`, `/login/oauth/access_token`).
@@ -842,6 +844,7 @@ impl Default for ProbeEndpoints {
             codex_reset_credits: CODEX_RESET_CREDITS_URL.into(),
             codex_consume_reset: CODEX_CONSUME_RESET_URL.into(),
             grok_usage: usage::GROK_USAGE_URL.into(),
+            opencode_go_status: usage::OPENCODE_GO_STATUS_URL.into(),
             github_api: "https://api.github.com".into(),
             github_login: "https://github.com".into(),
             copilot_api: None,
@@ -1224,7 +1227,11 @@ impl AgentAccounts {
         active_keys.insert(HarnessId::Hermes, hermes_active);
         providers.push((HarnessId::Hermes, hermes));
         if force_usage {
-            let targets: Vec<(HarnessId, &Slot, bool)> = providers
+            // OpenCode 2.x owns its database, so Go credentials are never
+            // copied into zeron slots. Ephemeral in-memory slots let usage
+            // follow Claude/Codex's stale-while-revalidate cache anyway.
+            let opencode_go = self.opencode_v2_usage_slots();
+            let mut targets: Vec<(HarnessId, &Slot, bool)> = providers
                 .iter()
                 .flat_map(|(harness, slots)| {
                     let active = active_keys.get(harness);
@@ -1237,6 +1244,9 @@ impl AgentAccounts {
                     })
                 })
                 .collect();
+            targets.extend(
+                opencode_go.iter().map(|slot| (HarnessId::Opencode, slot, true)),
+            );
             self.refresh_usage(&targets).await;
             // A probe can teach a slot who it is (Devin's key file names no
             // one): show that in this very list.
@@ -1298,16 +1308,29 @@ impl AgentAccounts {
                 if slots.iter().any(|s| s.account_key == u.account_key) {
                     continue;
                 }
+                let entry = usage.get(&usage_key(harness, &u.account_key));
+                let snapshot = entry.and_then(|entry| entry.usage.as_ref());
                 accounts.push(AgentAccount {
                     id: slot_id_for(harness, &u.account_key),
                     harness,
                     email: Some(u.profile.email.clone()),
-                    plan_label: u.profile.plan.clone(),
+                    plan_label: snapshot
+                        .and_then(|usage| usage.plan_label.clone())
+                        .or_else(|| u.profile.plan.clone()),
                     active: true,
-                    usage_windows: Vec::new(),
+                    usage_windows: snapshot.map(|usage| usage.windows.clone()).unwrap_or_default(),
                     codex_reset_credits: None,
-                    usage_fetched_at: None,
-                    usage_error: None,
+                    usage_fetched_at: entry.and_then(|entry| entry.fetched_at),
+                    usage_error: entry.and_then(|entry| {
+                        usage_error_message(
+                            harness,
+                            u.store_key.as_deref(),
+                            true,
+                            entry.error.as_ref()?,
+                            entry,
+                            now,
+                        )
+                    }),
                     display_name: u.profile.display_name.clone(),
                     organization: u.profile.organization.clone(),
                     auth_kind: Some(u.profile.auth_kind),
