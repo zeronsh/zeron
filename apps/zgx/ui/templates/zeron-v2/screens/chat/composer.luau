@@ -1122,7 +1122,7 @@ local function Composer(): Node
 			slide_to = chat_id
 			route.open_session(chat_id)
 			sessions
-				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek() })
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true, reach = reach:peek(), repositories = plan.clones })
 				:after(function(made: any)
 					local cwd = if type(made) == "table" then made.cwd else nil
 					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
