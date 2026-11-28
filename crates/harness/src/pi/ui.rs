@@ -84,9 +84,7 @@ impl Dialogs {
                 ("confirm", Some(value)) if options.contains(value) => {
                     response["confirmed"] = json!(value == "Yes")
                 }
-                ("select", Some(value)) if options.contains(value) => {
-                    response["value"] = json!(value)
-                }
+                ("select", Some(value)) if !value.is_empty() => response["value"] = json!(value),
                 ("input" | "editor", Some(value)) => response["value"] = json!(value),
                 _ => response["cancelled"] = json!(true),
             }
@@ -115,6 +113,48 @@ impl Dialogs {
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn select_returns_typed_text_verbatim_and_cancels_empty_answers() {
+        let (writer, peer) = tokio::io::duplex(4096);
+        let (_peer_writer, reader) = tokio::io::duplex(4096);
+        let transport = super::super::rpc::Transport::new(writer, reader);
+        let mut lines = BufReader::new(peer).lines();
+        for (label, key, expected) in [
+            (Some("C"), "value", json!("C")),
+            (Some("  other  "), "value", json!("  other  ")),
+            (Some("A"), "value", json!("A")),
+            (Some(""), "cancelled", json!(true)),
+            (None, "cancelled", json!(true)),
+        ] {
+            let mut dialogs = Dialogs {
+                input: Some(Arc::new(move |questions| {
+                    let (tx, rx) = oneshot::channel();
+                    tx.send(vec![UserInputAnswer {
+                        question_id: questions[0].id.clone(),
+                        labels: label.into_iter().map(String::from).collect(),
+                    }])
+                    .unwrap();
+                    rx
+                })),
+                ..Default::default()
+            };
+            dialogs.request(
+                transport.client.clone(),
+                &json!({"id":"pick", "method":"select", "options":["A", "B"]}),
+            );
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap(),
+                json!({"type":"extension_ui_response", "id":"pick", (key):expected}),
+                "label: {label:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn timeout_cancels_instead_of_selecting_and_drops_the_input_receiver() {
