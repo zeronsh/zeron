@@ -388,6 +388,12 @@ async fn extension_dialogs_roundtrip_without_autoaccepting_and_preserve_editor_t
             "value",
             serde_json::json!("second"),
         ),
+        (
+            "select",
+            Some("  custom answer  "),
+            "value",
+            serde_json::json!("  custom answer  "),
+        ),
         ("select", None, "cancelled", serde_json::json!(true)),
         ("confirm", Some("No"), "confirmed", serde_json::json!(false)),
         (
