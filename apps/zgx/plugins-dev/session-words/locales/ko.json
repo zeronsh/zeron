@@ -1,0 +1,10 @@
+{
+  "status": {
+    "working": "작업 중",
+    "input": "입력 대기 중",
+    "approval": "승인 필요",
+    "failed": "중단됨",
+    "done": "완료"
+  },
+  "minutes": "{n, plural, other {#분}}"
+}

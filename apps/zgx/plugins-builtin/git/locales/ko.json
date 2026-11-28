@@ -1,0 +1,312 @@
+{
+  "loading": "불러오는 중",
+  "try_again": "다시 시도",
+  "device": {
+    "unknown": "이 채팅의 기기"
+  },
+  "tab": {
+    "changes": "변경 사항",
+    "history": "기록",
+    "asking": "Git에 묻는 중…",
+    "no_session_title": "여기에 채팅 없음",
+    "no_session_body": "Git은 채팅의 체크아웃을 보여줍니다. 채팅의 패널에서 여세요."
+  },
+  "empty_page": {
+    "changes": "변경 사항",
+    "history": "기록"
+  },
+  "scope": {
+    "label": "변경 범위",
+    "working": "작업 트리",
+    "working_about": "마지막 커밋 이후, 스테이지 여부와 무관",
+    "branch": "브랜치",
+    "branch_about": "이 브랜치가 기준에서 갈라진 이후의 모든 변경",
+    "turn": "마지막 턴",
+    "turn_about": "이 채팅의 마지막 턴에서 바뀐 내용",
+    "against": "비교 대상:",
+    "base_label": "비교 대상",
+    "base_choose": "브랜치 선택"
+  },
+  "head": {
+    "ahead_of": "{base}보다 {n, plural, other {커밋 #개}} 앞섬"
+  },
+  "state": {
+    "merge": "병합 중",
+    "rebase": "리베이스 중",
+    "cherry_pick": "체리픽 중",
+    "revert": "되돌리는 중",
+    "commit_to_finish": "모든 파일이 올바른 상태가 되면 커밋하여 마칩니다."
+  },
+  "conflicts": {
+    "title": "{n, plural, other {파일 #개에 충돌이 있습니다}}",
+    "body": "편집기에서 각각 해결하고, 스테이지한 다음 커밋하세요."
+  },
+  "stage_all": "모두 스테이지",
+  "file": {
+    "stage": "스테이지",
+    "unstage": "스테이지 취소",
+    "discard": "변경 사항 폐기"
+  },
+  "diff": {
+    "loading": "변경 사항을 불러오는 중…",
+    "binary": "바이너리 파일: 표시할 줄이 없습니다.",
+    "cut": "변경 사항이 길어 나머지는 표시하지 않습니다.",
+    "pick_title": "선택한 파일 없음",
+    "pick_body": "파일을 선택하면 바뀐 내용을 볼 수 있습니다."
+  },
+  "empty": {
+    "working_title": "커밋할 내용 없음",
+    "working_body": "{branch}의 모든 변경이 커밋되었습니다.",
+    "working_ahead": "{branch}의 모든 변경이 커밋되었습니다. {n, plural, other {커밋 #개}}가 아직 푸시되지 않았습니다.",
+    "branch_title": "이 브랜치에 변경 사항 없음",
+    "branch_body": "{base}에 없는 내용이 없습니다.",
+    "turn_title": "이번 턴에 바뀐 내용 없음",
+    "turn_body": "채팅의 마지막 턴에서 모든 파일이 그대로입니다."
+  },
+  "pull": {
+    "button": "풀 {n}"
+  },
+  "push": {
+    "button": "푸시 {n}",
+    "publish": "브랜치 게시",
+    "pushing_label": "푸시 중",
+    "pushing": "{n, plural, other {커밋 #개}}를 {where}에 푸시하는 중",
+    "pull_then_push": "풀 후 푸시"
+  },
+  "more": {
+    "label": "더 보기",
+    "fetch": "가져오기",
+    "pull": "풀",
+    "discard_all": "모든 변경 사항 폐기"
+  },
+  "commit": {
+    "button": "커밋",
+    "files": "{n, plural, other {파일 #개}} 커밋",
+    "and_push": "커밋 후 푸시",
+    "amend": "마지막 커밋 수정",
+    "you": "나",
+    "placeholder": "무엇을, 왜 바꿨는지",
+    "message": "커밋 메시지"
+  },
+  "discard": {
+    "title_one": "{name}의 변경 사항을 폐기하시겠습니까?",
+    "title_many": "{n, plural, other {파일 #개}}의 변경 사항을 폐기하시겠습니까?",
+    "body": "마지막 커밋 상태로 돌아가며, 새 파일은 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
+    "confirm": "폐기"
+  },
+  "branches": {
+    "label": "브랜치",
+    "none": "브랜치 없음",
+    "search": "브랜치 찾기…",
+    "new": "새 브랜치",
+    "new_title": "새 브랜치",
+    "new_body": "{from}에서 만들며, 변경 사항을 그대로 가져갑니다.",
+    "create": "만들고 전환",
+    "name": "브랜치 이름",
+    "name_placeholder": "feature/name",
+    "on_remote": "{remote}에 있음, 여기에는 아직 없음",
+    "ahead_behind": "{ahead} 앞섬, {behind} 뒤처짐",
+    "no_match": "“{query}”와 일치하는 브랜치 없음",
+    "current": "현재"
+  },
+  "history": {
+    "head": "{branch}의 {n, plural, other {커밋 #개}}",
+    "head_more": "{branch}의 최신 커밋 {n}개",
+    "older": "이전 커밋 보기",
+    "fetch": "가져오기",
+    "back": "기록으로 돌아가기",
+    "empty_title": "아직 커밋 없음",
+    "empty_body": "이 브랜치의 첫 커밋이 여기에 표시됩니다.",
+    "pick_title": "선택한 커밋 없음",
+    "pick_body": "커밋을 선택하면 바뀐 내용을 볼 수 있습니다.",
+    "no_files_title": "바뀐 파일 없음",
+    "no_files_body": "이 커밋은 부모 커밋과 다른 내용이 없습니다.",
+    "ref_head": "{name}: 현재 브랜치",
+    "ref_branch": "브랜치 {name}",
+    "ref_remote": "{name}, 원격",
+    "ref_tag": "태그 {name}",
+    "no_subject": "(제목 없음)",
+    "copy_sha": "커밋 ID 복사",
+    "copied": "복사됨",
+    "open_parent": "부모 {sha} 열기",
+    "body_more": "전체 메시지 보기",
+    "body_less": "간단히 보기",
+    "committed_by": "{name}이(가) 커밋",
+    "parents": "{n, plural, other {부모}}",
+    "files": "{n, plural, other {파일 #개}}",
+    "menu": {
+      "copy_sha": "커밋 ID 복사",
+      "copy_subject": "제목 복사",
+      "branch_here": "여기서 새 브랜치"
+    },
+    "found": "{n, plural, other {커밋 #개를 찾음}}",
+    "head_all": "모든 브랜치의 {n, plural, other {커밋 #개}}",
+    "head_all_more": "모든 브랜치의 최신 커밋 {n}개",
+    "base_tip": "{base}보다 {ahead} 앞섬, {behind} 뒤처짐",
+    "all_branches": "모든 브랜치",
+    "fetching": "가져오는 중",
+    "search": "커밋 검색",
+    "fetch_failed": "가져오지 못함",
+    "none_found_title": "커밋을 찾지 못함",
+    "none_found_body": "메시지에 “{query}”가 있는 커밋이 없습니다.",
+    "branch_from": "커밋 {sha}에서 만듭니다. 해당 브랜치로 전환하며 변경 사항은 그대로 가져갑니다.",
+    "parents_n": "{n, plural, other {부모 #개}}",
+    "ref_line": {
+      "branch": "브랜치: {name}",
+      "remote": "원격 브랜치: {name}",
+      "tag": "태그: {name}"
+    },
+    "ref_more": "{n, plural, other {참조 #개 더}}"
+  },
+  "reason": {
+    "offline": {
+      "title": "{device}에 연결할 수 없음",
+      "body": "오프라인이거나 잠자기 상태입니다. 다시 켜지면 변경 사항이 여기에 표시됩니다."
+    },
+    "timeout": {
+      "title": "{device}에서 응답 없음",
+      "body": "시간이 너무 오래 걸렸습니다. 바쁘거나 연결이 느릴 수 있습니다."
+    },
+    "not_installed": {
+      "title": "{device}에 Git 없음",
+      "body": "해당 기기에서 Zeron을 업데이트하세요. Git은 Zeron에 포함되어 있습니다."
+    },
+    "off": {
+      "title": "{device}에서 Git이 꺼져 있음",
+      "body": "해당 기기의 설정 → 플러그인에서 켜세요."
+    },
+    "not_approved": {
+      "title": "{device}에서 Git이 아직 허용되지 않음",
+      "body": "해당 기기의 설정 → 플러그인에서 허용하세요."
+    },
+    "version_mismatch": {
+      "title": "{device}에 다른 버전의 Git이 있음",
+      "body": "두 기기의 Zeron을 업데이트하여 버전을 맞추세요."
+    },
+    "other_author": {
+      "title": "{device}에 다른 Git 플러그인이 있음",
+      "body": "다른 사람의 플러그인이 같은 이름을 쓰고 있습니다. Zeron의 플러그인을 쓰려면 해당 기기에서 제거하세요."
+    },
+    "no_service": {
+      "title": "{device}에서 Git을 실행할 수 없음",
+      "body": "해당 버전에는 서비스가 없습니다. 해당 기기에서 Zeron을 업데이트하세요."
+    },
+    "not_loaded": {
+      "title": "{device}에서 Git이 시작되지 않음",
+      "body": "서비스를 불러오지 못했습니다. 해당 기기의 설정 → 플러그인에서 이유를 확인하세요."
+    },
+    "old_engine": {
+      "title": "{device}에 더 새로운 Zeron 필요",
+      "body": "이 채팅에서 Git을 쓰려면 해당 기기에서 Zeron을 업데이트하세요."
+    },
+    "interrupted": {
+      "title": "{device}에서 Git이 중단됨",
+      "body": "호출 중에 중단되었습니다. 다시 시도하세요."
+    },
+    "other": {
+      "title": "문제가 발생했습니다"
+    }
+  },
+  "code": {
+    "not_a_repo": {
+      "title": "Git 저장소가 아님",
+      "body": "이 채팅의 폴더는 Git 저장소 안에 있지 않아 비교할 대상이 없습니다."
+    },
+    "no_checkout": {
+      "title": "폴더 없음",
+      "body": "이 채팅은 폴더에서 작업하고 있지 않습니다."
+    },
+    "rejected": {
+      "title": "{remote}에서 브랜치가 앞으로 나아감",
+      "body": "내게 없는 커밋이 있습니다. 먼저 풀한 다음 푸시하세요."
+    },
+    "auth": {
+      "title": "{remote}이(가) 거부함",
+      "body": "{device}의 git이 로그인하지 못했습니다. 해당 기기의 자격 증명을 확인하세요."
+    },
+    "network": {
+      "title": "{remote}에 연결할 수 없음",
+      "body": "{device}이(가) 연결하지 못했습니다. 네트워크를 확인하세요."
+    },
+    "nothing_staged": {
+      "title": "스테이지된 항목 없음",
+      "body": "먼저 커밋할 파일을 체크하세요."
+    },
+    "no_identity": {
+      "title": "git이 사용자를 알지 못함",
+      "body": "{device}의 git에 이름과 이메일을 설정하세요 (git config user.name, user.email)."
+    },
+    "dirty": {
+      "title": "변경 사항이 방해가 됨",
+      "body": "전환하면 덮어쓰게 됩니다. 먼저 커밋하거나 폐기하세요."
+    },
+    "pull_conflicts": {
+      "title": "풀하면 충돌이 발생함",
+      "body": "내 커밋과 원격 커밋이 같은 줄을 바꿨습니다. 아무것도 바뀌지 않았습니다. 편집기나 터미널에서 병합하세요."
+    },
+    "no_base": {
+      "title": "기준 브랜치 없음",
+      "body": "이 브랜치와 비교할 main이나 master가 없습니다."
+    },
+    "no_turn": {
+      "title": "아직 확인된 턴 없음",
+      "body": "턴 이후의 변경 사항은 이 채팅이 다음 턴을 시작하면 표시됩니다."
+    },
+    "detached": {
+      "title": "푸시할 브랜치 없음",
+      "body": "체크아웃이 브랜치가 아닌 커밋에 있습니다. 먼저 브랜치를 만드세요."
+    },
+    "no_remote": {
+      "title": "푸시할 곳 없음",
+      "body": "이 저장소에는 원격이 없습니다."
+    },
+    "no_upstream": {
+      "title": "아직 원격에 없음",
+      "body": "먼저 브랜치를 푸시하세요."
+    },
+    "bad_name": {
+      "title": "브랜치 이름이 올바르지 않음",
+      "body": "브랜치 이름에는 공백이나 \"..\"를 쓸 수 없고, \"/\" 또는 \".lock\"으로 끝날 수 없습니다."
+    },
+    "exists": {
+      "title": "이미 있는 브랜치",
+      "body": "같은 이름의 브랜치가 이미 있습니다. 대신 그 브랜치로 전환하세요."
+    },
+    "timeout": {
+      "title": "git이 너무 오래 걸림",
+      "body": "{device}에서 아직 작업 중일 수 있습니다. 잠시 후 다시 시도하세요."
+    },
+    "no_message": {
+      "title": "메시지 없음",
+      "body": "무엇을, 왜 바꿨는지 적어 주세요."
+    },
+    "git": {
+      "title": "git이 처리하지 못함",
+      "body": "{device}에서 이 채팅의 폴더에서 Git이 중단되었습니다. 다시 시도하세요. 계속되면 해당 기기의 터미널에서 같은 명령을 실행해 전체 내용을 확인하세요."
+    },
+    "no_ref": {
+      "title": "여기에 {words} 브랜치가 없음",
+      "body": "비교할 다른 브랜치를 선택하거나, 가져오기로 {remote}에서 받아오세요."
+    },
+    "unsafe_dir": {
+      "title": "이 폴더에서는 Git이 작동하지 않음",
+      "body": "Git은 다른 사용자가 소유한 폴더를 신뢰하지 않습니다. {device}에서 git config --global --add safe.directory로 추가한 다음 다시 시도하세요."
+    },
+    "locked": {
+      "title": "다른 git 명령이 실행 중",
+      "body": "끝날 때까지 기다린 다음 다시 시도하세요. 실행 중인 것이 없다면 {device}에서 .git/index.lock을 삭제하세요."
+    }
+  },
+  "home": {
+    "diff_label": "{adds}줄 추가, {dels}줄 삭제: 브랜치의 변경 사항 열기",
+    "branch_changes": "브랜치 변경 사항"
+  },
+  "changes": {
+    "partial": "{total}개 중 {n}개 표시"
+  },
+  "comment": {
+    "placeholder": "여기서 무엇을 바꿀지 적어 주세요…",
+    "add": "채팅에 추가",
+    "where_old": "{where} (이전)"
+  }
+}
