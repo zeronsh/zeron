@@ -2,7 +2,8 @@
 -- .luau, a stand-in for the host's drawing): a fence still being written
 -- is its code and asks for nothing; once it closes it's drawn, a flowchart
 -- and a sequence diagram alike; Show source and Show diagram swap them in
--- the same frame; a click opens the diagram in the lightbox; one that
+-- the same frame; a click (or Expand) opens the diagram in the lightbox,
+-- which offers Save for it; one that
 -- can't be drawn stays code, with why under it.
 
 local function open_reply(): any
@@ -74,6 +75,34 @@ test("a diagram opens in the lightbox, on the fence's fill", function()
 	app:key("Escape")
 	app:frames(120)
 	expect(app:state("ds/lightbox.luau::open")).to_be_nil()
+	expect(app:error()).to_be_nil()
+end)
+
+test("Expand opens the drawn diagram in the lightbox, which offers Save", function()
+	local app = open_reply()
+	app:command("test.all")
+	expect(app:wait('role:button "View diagram"', { timeout_ms = 2000 })).to_be(true)
+	app:frames(20)
+	-- One Expand per drawn diagram (the fence that can't be drawn has none).
+	expect(app:count('role:button "Expand diagram"')).to_be(diagrams(app))
+	app:click('role:button "Expand diagram"[1]')
+	app:frames(90)
+	local open = app:state("ds/lightbox.luau::open")
+	expect(open).never.to_be_nil()
+	expect(open.items[1].name).to_be("Mermaid diagram")
+	-- A diagram (its vectors with it) can be saved; the island says so.
+	expect(open.items[1].svg).never.to_be_nil()
+	-- It shows on a panel of its own fill (rounded as a dialog), not loose.
+	expect(open.items[1].bg).to_be("#202022")
+	expect(app:has('#reply')).to_be(true)
+	expect(app:count('role:button "Save image"')).to_be(1)
+	app:key("Escape")
+	app:frames(120)
+	expect(app:state("ds/lightbox.luau::open")).to_be_nil()
+	-- Its source showing, there's nothing to expand.
+	app:click('role:button "Show source"[1]')
+	app:frames(10)
+	expect(app:count('role:button "Expand diagram"')).to_be(diagrams(app))
 	expect(app:error()).to_be_nil()
 end)
 

@@ -581,7 +581,13 @@
       "viewer": "图像查看器",
       "open_named": "打开 {name}",
       "open": "打开图像",
-      "position": "第 {i} 张，共 {n} 张"
+      "position": "第 {i} 张，共 {n} 张",
+      "save_image": "保存图片",
+      "save_image_menu": "保存图片…",
+      "save_title": "保存图表",
+      "save_name": "图表",
+      "saved": "图表已保存",
+      "save_failed": "无法保存图表"
     },
     "composer": {
       "access": {
@@ -683,7 +689,8 @@
       "show_diagram": "显示图表",
       "failed": "无法绘制此图表：{reason}",
       "view": "查看图表",
-      "name": "Mermaid 图表"
+      "name": "Mermaid 图表",
+      "expand": "展开图表"
     },
     "math": {
       "style": {

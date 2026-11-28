@@ -18,7 +18,6 @@ Zeron also uses the following editor foundations from the pinned `zeronsh/gpui-c
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
 | gpui-base | 0.5.2 (`ed27327`) | Apache-2.0 | https://github.com/zeronsh/gpui-component |
-| mermaid-rs-renderer | 0.3.1 | MIT | https://github.com/1jehuang/mermaid-rs-renderer |
 | Ropey | 2.0.0-beta.1 | MIT | https://github.com/cessen/ropey |
 
 Zeron's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
@@ -121,30 +120,6 @@ The common MIT permission notice for the adaptations above follows:
 
 The pinned Shades of Purple license additionally says that anything built with
 it should also be MIT licensed. Zeron is distributed under MIT terms.
-
-## mermaid-rs-renderer
-
-MIT License
-
-Copyright (c) 2026 mermaid-rs-renderer contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ## transcribe.cpp
 
@@ -533,6 +508,18 @@ licensed under `LICENSE`, like the rest of the repository.
 | --- | --- | --- | --- |
 | Geist and Geist Mono | OFL-1.1 | https://github.com/vercel/geist-font | `Geist-OFL.txt` |
 | Instrument Serif | OFL-1.1 | https://github.com/Instrument/instrument-serif | `InstrumentSerif-OFL.txt` |
+
+**Mermaid diagrams.** `apps/zgx/src/mermaid.rs` draws Mermaid with
+[Merman 0.11.0](https://github.com/Latias94/merman) (Copyright (c) 2026
+merman contributors). Exact versions are pinned in `apps/zgx/Cargo.lock`.
+Merman's crates carry these licences:
+
+| Crate | License | Notes |
+| --- | --- | --- |
+| `merman`, `merman-core`, `merman-model`, `merman-markup`, `merman-render`, `merman-theme-contract`, `merman-layout-elk` | MIT OR Apache-2.0 | |
+| `merman-unicode-linebreak` | Apache-2.0 | A modified copy of [unicode-linebreak 0.1.5](https://github.com/axelf4/unicode-linebreak); its licence and notices ship in the crate (`THIRD_PARTY_LICENSES/`, `THIRD_PARTY_NOTICES.md`) |
+| `roughr-merman` | MIT | A fork of roughr, Copyright (c) 2022 Orhan Balci and (c) 2019 Preet Shihn |
+| `merman-elk-layered` | **EPL-2.0** | A translation of [Eclipse ELK](https://github.com/eclipse-elk/elk)'s layered layout, used to lay out flowcharts. Its source, unmodified, is available from [crates.io](https://crates.io/crates/merman-elk-layered/0.11.0) and [the Merman repository](https://github.com/Latias94/merman/tree/main/crates/merman-elk-layered); the EPL-2.0 text is at https://www.eclipse.org/legal/epl-2.0/ and ships in the crate (`LICENSES/EPL-2.0.txt`). Zeron's own code is not licensed under the EPL. |
 
 **Solar icons.** Most interface glyphs, in `apps/zgx/ui/assets/icons/ui/`
 (also carried as code in `apps/zgx/ui/ds/icon_svgs.luau`) and in

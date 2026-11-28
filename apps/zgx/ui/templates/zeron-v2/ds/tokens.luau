@@ -485,8 +485,9 @@ function M.setup()
 			toast = { width = 340 },
 			-- The lightbox (ds/lightbox): the room a fitted picture keeps from
 			-- the window's edges, and under it for the controls; their island's
-			-- inset from the foot; the scrim's blur (its fill is each theme's).
-			lightbox = { inset = 40, foot = 72, island_inset = 16, blur = 24, scrim = "{backdrop}", shadow = "{zeron.dialog.stage}" },
+			-- inset from the foot; the scrim's blur (its fill is each theme's);
+			-- the margin a fitted diagram keeps inside its panel.
+			lightbox = { inset = 40, foot = 72, island_inset = 16, blur = 24, scrim = "{backdrop}", shadow = "{zeron.dialog.stage}", panel_margin = 24 },
 			-- Settings: the column a page reads in, a row's least height, the
 			-- room a row's control keeps at its end, and a group's card (a
 			-- quiet fill with a hairline, the rows' dividers fainter).

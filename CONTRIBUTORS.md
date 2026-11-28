@@ -74,6 +74,7 @@ Useful knobs for exercising the UI without a real agent or account:
 | `ZERON_HARNESS=mock` | Offers the mock harness on the engine, streaming canned turns |
 | `ZERON_MOCK_SUBAGENT=1` | Mock turns spawn subagents |
 | `ZERON_MOCK_THINKING=1` | Mock turns include markdown-heavy thinking |
+| `ZERON_MOCK_MERMAID=1` | Mock turns include Mermaid diagrams (simple and large flowcharts, sequence, state, class) |
 | `ZERON_MOCK_TODO=1` | Mock turns work through an 8-item checklist (pair with `ZERON_MOCK_DELAY_MS=900` to watch the todo panel) |
 | `ZERON_MOCK_BACKGROUND=1` | Mock turns leave three background processes running (printing output, stoppable from the composer's background tray) |
 

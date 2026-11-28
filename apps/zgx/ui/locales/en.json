@@ -581,7 +581,13 @@
       "viewer": "Image viewer",
       "open_named": "Open {name}",
       "open": "Open image",
-      "position": "{i} of {n}"
+      "position": "{i} of {n}",
+      "save_image": "Save image",
+      "save_image_menu": "Save Image…",
+      "save_title": "Save Diagram",
+      "save_name": "diagram",
+      "saved": "Diagram saved",
+      "save_failed": "Couldn't save the diagram"
     },
     "composer": {
       "access": {
@@ -683,7 +689,8 @@
       "show_diagram": "Show diagram",
       "failed": "Couldn't draw this diagram: {reason}",
       "view": "View diagram",
-      "name": "Mermaid diagram"
+      "name": "Mermaid diagram",
+      "expand": "Expand diagram"
     },
     "math": {
       "style": {
