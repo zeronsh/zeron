@@ -356,7 +356,7 @@ class SchedulerLabelTests(unittest.TestCase):
 
 
 class EmergencyTests(unittest.TestCase):
-    def test_cancels_everything_but_the_locked_pull_request(self):
+    def test_cancels_everything_but_the_selected_pull_request(self):
         import emergency
         runs = [
             {"id": 1, "status": "in_progress", "head_sha": "mine", "event": "pull_request"},
@@ -364,8 +364,8 @@ class EmergencyTests(unittest.TestCase):
             {"id": 3, "status": "in_progress", "head_sha": "main", "event": "push"},
             {"id": 4, "status": "completed", "head_sha": "old", "event": "pull_request"},
         ]
-        self.assertEqual([r["id"] for r in emergency.to_cancel(runs, "mine", False)], [2])
-        self.assertEqual([r["id"] for r in emergency.to_cancel(runs, "mine", True)], [2, 3])
+        self.assertEqual([r["id"] for r in emergency.to_cancel(runs, {1}, False)], [2])
+        self.assertEqual([r["id"] for r in emergency.to_cancel(runs, {1}, True)], [2, 3])
 
     def test_reruns_only_when_nothing_is_running_and_it_did_not_pass(self):
         import emergency
