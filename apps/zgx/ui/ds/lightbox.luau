@@ -1335,9 +1335,11 @@ local StageView = ui.component(function(st: Stage): Node
 		ui.div {
 			ref = stage_ref,
 			absolute = true,
-			bg = function(): string
+			bg = function(): any
 				local it = item()
-				return if it and it.svg and it.bg then it.bg else "#00000000"
+				return if it and it.svg and it.bg
+					then ui.raw(it.bg, "a diagram's own fill, drawn from the theme by the host")
+					else "#00000000"
 			end,
 			left = function(): number
 				return geo().cx
@@ -1529,11 +1531,14 @@ local StageView = ui.component(function(st: Stage): Node
 			-- A vector picture (`svg`): over its pixels, laid out at the
 			-- size it shows once at rest, so zooming in keeps it sharp. Its
 			-- raster is held to SVG_PIXELS (zgx draws no larger an SVG),
-			-- scaled up past that.
+			-- scaled up past that. Drawn only at rest: zgx rasterizes an SVG
+			-- in the frame that first shows it (a large diagram's takes
+			-- 10-20 ms), which mid-motion is a dropped frame; while it
+			-- moves, its pixels (drawn at 2x) are what shows.
 			ui.svg {
 				src = function(): string
 					local it = item()
-					return if it and it.svg then "code:" .. it.svg else ""
+					return if it and it.svg and not st.morphing:get() then "code:" .. it.svg else ""
 				end,
 				aria_hidden = true,
 				pointer_events = "none",
