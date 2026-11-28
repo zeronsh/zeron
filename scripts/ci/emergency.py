@@ -1,37 +1,23 @@
 #!/usr/bin/env python3
-"""CI emergency: give one pull request every runner, now.
-
-Run by .github/workflows/ci-emergency.yml (manual; needs write access). It:
-
-  1. adds the `ci:lock` label to the pull request (removing it first if it was
-     there, which restarts its CI_LOCK_HOURS), so admission keeps a full run's
-     runners for it until it is merged, closed or unlabelled
-     (scripts/ci/admit.py);
-  2. cancels every other pull request's CI run that is queued, waiting for
-     admission or running (main and merge queue runs too, with CANCEL_MAIN);
-  3. re-runs the pull request's latest CI run if none is in progress and the
-     last one did not pass.
-
-Cancelled pull requests need a push or a re-run afterwards.
-"""
-
 from __future__ import annotations
 
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
-from urllib.parse import quote
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
-LOCK_LABEL = "ci:lock"
+PR_WORKFLOW = "pr-ci.yml"
 ACTIVE = ("queued", "in_progress", "waiting", "pending", "requested")
+RETRYABLE = ("failure", "cancelled", "timed_out")
 
 
-def to_cancel(runs: list[dict], head_sha: str, cancel_main: bool) -> list[dict]:
-    """The active CI runs to cancel: every one not testing the pull request's head."""
+def to_cancel(runs: list[dict], protected: set[int], cancel_main: bool) -> list[dict]:
     chosen = []
     for run in runs:
-        if run.get("status") not in ACTIVE or run.get("head_sha") == head_sha:
+        if run.get("status") not in ACTIVE or run["id"] in protected:
             continue
         if run.get("event") == "pull_request" or cancel_main:
             chosen.append(run)
@@ -44,13 +30,21 @@ def to_rerun(runs: list[dict], head_sha: str) -> dict | None:
                  key=lambda r: r["id"], reverse=True)
     if not own or any(r.get("status") in ACTIVE for r in own):
         return None
-    return own[0] if own[0].get("conclusion") != "success" else None
+    return own[0] if own[0].get("conclusion") in RETRYABLE else None
 
 
-def request(method: str, path: str, body: dict | None = None):
+def from_pull_request(run: dict, pr: dict) -> bool:
+    head = pr["head"]
+    run_repo = run.get("head_repository") or {}
+    associated = run.get("pull_requests") or []
+    return (run.get("event") == "pull_request" and run.get("head_branch") == head["ref"]
+            and run_repo.get("id") == head["repo"]["id"]
+            and (not associated or any(item["number"] == pr["number"] for item in associated)))
+
+
+def request(method: str, path: str):
     url = os.environ.get("GITHUB_API_URL", "https://api.github.com") + path
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
+    req = urllib.request.Request(url, method=method, headers={
         "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -62,12 +56,16 @@ def request(method: str, path: str, body: dict | None = None):
 
 def workflow_runs(repo: str, workflow: str) -> list[dict]:
     runs: list[dict] = []
+    seen: set[int] = set()
     for status in ACTIVE:
         page = 1
         while True:
             batch = request("GET", f"/repos/{repo}/actions/workflows/{workflow}/runs"
                                    f"?status={status}&per_page=100&page={page}")["workflow_runs"]
-            runs.extend(batch)
+            for run in batch:
+                if run["id"] not in seen:
+                    seen.add(run["id"])
+                    runs.append(run)
             if len(batch) < 100:
                 break
             page += 1
@@ -82,16 +80,47 @@ def main() -> int:
     if pr["state"] != "open":
         print(f"::error::#{number} is {pr['state']}")
         return 1
-    head = pr["head"]["sha"]
+    head = pr["head"]
+    if not head.get("repo"):
+        print(f"::error::#{number}'s source repository is unavailable.")
+        return 1
+    query = urlencode({"event": "pull_request", "head_sha": head["sha"], "branch": head["ref"], "per_page": 100})
+    candidates = request("GET", f"/repos/{repo}/actions/workflows/{PR_WORKFLOW}/runs?{query}")["workflow_runs"]
+    recent = [run for run in candidates if from_pull_request(run, pr) and run["head_sha"] == head["sha"]]
+    if not recent:
+        print(f"::error::#{number} has no Pull request CI run for its current head. Update the branch to start one.")
+        return 1
+    latest = max(recent, key=lambda run: run["id"])
+    if latest.get("status") == "action_required" or latest.get("conclusion") == "action_required":
+        print(f"::error::Review and approve #{number}'s Pull request CI run before using CI emergency.")
+        return 1
 
-    if any(label["name"] == LOCK_LABEL for label in pr.get("labels", [])):
-        request("DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(LOCK_LABEL)}")
-    request("POST", f"/repos/{repo}/issues/{number}/labels", {"labels": [LOCK_LABEL]})
-    lines = [f"### CI emergency for #{number}", "", f"Locked: `{LOCK_LABEL}` added to #{number}."]
+    lines = [f"### CI emergency for #{number}", ""]
+    rerun = to_rerun(recent, head["sha"])
+    if rerun:
+        created = datetime.fromisoformat(rerun["created_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) - created >= timedelta(days=30):
+            print(f"::error::#{number}'s CI run is too old to re-run. Update the branch to start a new run.")
+            return 1
+        try:
+            request("POST", f"/repos/{repo}/actions/runs/{rerun['id']}/rerun")
+        except urllib.error.HTTPError as error:
+            print(f"::error::Could not re-run #{number}'s CI run {rerun['id']} ({error.code}).")
+            return 1
+        lines.append(f"Re-ran #{number}'s CI run {rerun['id']}.")
+    elif any(run.get("status") in ACTIVE for run in recent):
+        lines.append(f"#{number}'s CI is active.")
+    elif latest.get("conclusion") == "success":
+        print(f"#{number}'s CI already passed.")
+        return 0
+    else:
+        print(f"::error::#{number}'s CI concluded {latest.get('conclusion')}. Update the branch to start a new run.")
+        return 1
 
-    active = workflow_runs(repo, "ci.yml")
+    active = workflow_runs(repo, PR_WORKFLOW) + workflow_runs(repo, "ci.yml")
+    protected = {run["id"] for run in active if from_pull_request(run, pr)}
     cancelled = []
-    for run in to_cancel(active, head, cancel_main):
+    for run in to_cancel(active, protected, cancel_main):
         try:
             request("POST", f"/repos/{repo}/actions/runs/{run['id']}/cancel")
             cancelled.append(run)
@@ -99,15 +128,6 @@ def main() -> int:
             print(f"::warning::could not cancel run {run['id']}: {error}")
     lines.append(f"Cancelled {len(cancelled)} other CI run(s):")
     lines += [f"- [{r.get('display_title', r['id'])}]({r.get('html_url', '')}) ({r.get('event')})" for r in cancelled]
-
-    recent = request("GET", f"/repos/{repo}/actions/workflows/ci.yml/runs?head_sha={head}&per_page=20")["workflow_runs"]
-    rerun = to_rerun(active + recent, head)
-    if rerun:
-        request("POST", f"/repos/{repo}/actions/runs/{rerun['id']}/rerun")
-        lines.append(f"Re-ran #{number}'s CI run {rerun['id']}.")
-    else:
-        lines.append(f"#{number}'s CI is running or passed; nothing to re-run.")
-    lines += ["", f"Remove `{LOCK_LABEL}` (or merge/close #{number}) to release the runners."]
 
     text = "\n".join(lines)
     print(text)
