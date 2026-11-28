@@ -11,15 +11,18 @@ merge queue commits. The `scope` job selects checks from the changed paths.
 - **Desktop app** builds ZGX on Linux and exercises its CLI, chat actions and
   attachments with Rust integration and Luau UI tests.
 - **Desktop compile check** checks the desktop app, engine and CLI on macOS
-  and Windows when native code or its build inputs change.
+  and Windows when native code or its build inputs change. Changes to Windows
+  packaging also run the installer smoke test.
+- **iOS app** checks the generated bindings and builds the simulator app.
+- **Android app** builds the APK and App Bundle with a debug key.
 
-Edits to `pr-ci.yml` select all three checks. **CI result** requires the
+Edits to `pr-ci.yml` select all checks. **CI result** requires the
 scope job and every selected check to pass.
 
 After a successful run, require the GitHub Actions check **CI result** in
-the `main` ruleset. For existing pull requests that still show the previous
-workflow, update the branch from `main` to start the new checks. A maintainer
-may need to approve workflow runs from forks.
+the `main` ruleset and require branches to be up to date before merging.
+Update existing pull requests from `main` to start the new checks. A
+maintainer may need to approve workflow runs from forks.
 
 ### CI emergency
 
