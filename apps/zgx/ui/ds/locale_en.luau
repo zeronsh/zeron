@@ -5,6 +5,7 @@ return {
 	["language.system"] = "System",
 	["language.en"] = "English",
 	["language.zh_hans"] = "简体中文",
+	["language.ko"] = "한국어",
 	["time.now"] = "now",
 	["time.just_now"] = "just now",
 	["time.yesterday"] = "yesterday",

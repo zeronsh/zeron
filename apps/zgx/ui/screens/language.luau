@@ -15,6 +15,7 @@ M.LANGUAGES = {
 	{ value = "system", label = ui.t("language.system") },
 	{ value = "en", label = ui.t("language.en") },
 	{ value = "zh-Hans", label = ui.t("language.zh_hans") },
+	{ value = "ko", label = ui.t("language.ko") },
 } :: { Language }
 
 M.chosen = ui.persist("settings_language", "system")
