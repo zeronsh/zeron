@@ -84,7 +84,7 @@ impl Dialogs {
                 ("confirm", Some(value)) if options.contains(value) => {
                     response["confirmed"] = json!(value == "Yes")
                 }
-                ("select", Some(value)) if options.contains(value) => {
+                ("select", Some(value)) if !value.is_empty() || options.contains(value) => {
                     response["value"] = json!(value)
                 }
                 ("input" | "editor", Some(value)) => response["value"] = json!(value),
@@ -115,6 +115,57 @@ impl Dialogs {
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn select_returns_typed_text_and_distinguishes_empty_options_from_no_answer() {
+        let (writer, peer) = tokio::io::duplex(4096);
+        let (_peer_writer, reader) = tokio::io::duplex(4096);
+        let transport = super::super::rpc::Transport::new(writer, reader);
+        let mut lines = BufReader::new(peer).lines();
+        let choices = &["A", "B"][..];
+        let with_empty = &["A", "B", ""][..];
+        for (options, labels, key, expected) in [
+            (choices, Some(&["C"][..]), "value", json!("C")),
+            (
+                choices,
+                Some(&["  other  "][..]),
+                "value",
+                json!("  other  "),
+            ),
+            (choices, Some(&["A"][..]), "value", json!("A")),
+            (choices, Some(&[""][..]), "cancelled", json!(true)),
+            (with_empty, Some(&[""][..]), "value", json!("")),
+            (with_empty, Some(&[][..]), "cancelled", json!(true)),
+            (with_empty, None, "cancelled", json!(true)),
+        ] {
+            let mut dialogs = Dialogs {
+                input: Some(Arc::new(move |questions| {
+                    let (tx, rx) = oneshot::channel();
+                    let answers = labels.map(|labels| UserInputAnswer {
+                        question_id: questions[0].id.clone(),
+                        labels: labels.iter().map(|&label| label.to_owned()).collect(),
+                    });
+                    tx.send(answers.into_iter().collect()).unwrap();
+                    rx
+                })),
+                ..Default::default()
+            };
+            dialogs.request(
+                transport.client.clone(),
+                &json!({"id":"pick", "method":"select", "options":options}),
+            );
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap(),
+                json!({"type":"extension_ui_response", "id":"pick", (key):expected}),
+                "options: {options:?}, labels: {labels:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn timeout_cancels_instead_of_selecting_and_drops_the_input_receiver() {
