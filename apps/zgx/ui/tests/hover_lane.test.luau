@@ -5,7 +5,9 @@
 -- in the space under a reply: zgx's partial repaint, fixed in zgx c43b4e5;
 -- zgx-asks/stale-paint-mounted-mid-scroll has the pixel repro.)
 
-local TEXT = "Yes. I called Zeron’s `show_image` tool three times to display `components.png`, `workbench.png`, and `zgx-effects.png` from the project.\n\n"
+-- (Its file names, paths written as code, are links to the files; the
+-- pointer rests on its plain closing words, which no link covers.)
+local TEXT = "Yes. I called Zeron’s `show_image` tool three times to display `components.png`, `workbench.png`, and `zgx-effects.png` from the project.\n\nNothing else ran while they showed.\n\n"
 
 local function settle(app: any)
 	app:frames(30)
@@ -135,12 +137,12 @@ test("hover lane: under a reply written into its runway, hovered and scrolled as
 	for k = 1, 8 do
 		app:scroll("#transcript", if k % 2 == 0 then -200 else 220)
 		app:frames(2)
-		app:hover('~"Yes. I called"')
+		app:hover('~"Nothing else ran while they showed."')
 		app:frames(2)
 	end
 	wait(app, 150)
 	settle(app)
-	app:hover('~"Yes. I called"')
+	app:hover('~"Nothing else ran while they showed."')
 	wait(app, 150)
 	settle(app)
 	-- Its lane right under its last line (the 12 the lane's top pad and

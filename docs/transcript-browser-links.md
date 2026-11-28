@@ -14,6 +14,16 @@ Only explicit HTTP(S) web addresses without embedded credentials, control charac
 
 macOS uses its integrated WebKit browser. Linux uses WebKitGTK and requires the [Linux browser runtime packages](reference/linux-browser.md). If that runtime is unavailable, the Browser tab displays an error; its external-browser button and the link's external action remain explicit alternatives. Platforms without an integrated implementation use the system browser for valid web links.
 
+## Files and chats named in replies
+
+In the desktop app (`apps/zgx`), what an agent names opens where it is:
+
+- **A path written as inline code** (`` `src/app.rs:42` ``, `` `./a/b.ts#L12` ``, `` `Cargo.toml` ``) opens the file in the conversation's panel at its line, with a file's context menu (Open, Reveal in Finder, Copy path), as a Markdown link to it does. Only code that reads as a path counts: no spaces, a file name with an extension, and either a folder before it or an extension files have, so `self.state` or `1.2/3.4` stay code. A path outside the conversation's folder offers Copy path only.
+- **A tool row's file** (Read, Edited, Wrote) opens the file it touched; the row's own click still opens its detail.
+- **A conversation's own link** (`zeron://open/chat/<id>?workspace=…`, what Copy link puts on the clipboard), as a Markdown link or written bare, draws as a chat chip and opens that conversation.
+
+Validation: `apps/zgx/ui/tests/navigation_links.test.luau` on `apps/zgx/ui/chat_fixture.luau` (`nav_turn`).
+
 ## Reproducible validation
 
 The fixture uses synthetic chat data, temporary app storage, and a local HTTP server. Its Markdown corpus includes short and long URLs, misleading labels, rejected destinations, Unicode, and tables:

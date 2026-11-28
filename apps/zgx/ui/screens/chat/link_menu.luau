@@ -12,6 +12,7 @@
 local ds = require("@ds")
 local Links = require("@ds/links")
 local FileLinks = require("@app/screens/chat/file_links")
+local ChatLinks = require("@app/screens/chat/chat_links")
 local sessions = require("@account/sessions")
 local files = require("@app/screens/files/api")
 
@@ -21,7 +22,7 @@ end
 
 return function(open: (target: string) -> (), session: () -> any?): (target: string) -> { Links.Entry }?
 	return function(target: string): { Links.Entry }?
-		local chat = string.match(target, "^zeron%-chat:([%w%-_]+)$")
+		local chat = ChatLinks.id_of(target)
 		if chat then
 			return Links.chat {
 				open = function()

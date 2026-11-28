@@ -2076,6 +2076,43 @@ ui.command {
 		}
 	end,
 }
+-- A turn naming files and chats as agents write them, in a chat whose
+-- folder is /work/atlas: a path in code (with a line), code that isn't a
+-- path, another chat's own link written bare and as a link, and a file
+-- read and one edited (their rows' lines open them). The chat the route
+-- is on: `route_session`.
+ui.command {
+	id = "nav_turn",
+	title = "A turn with paths in code and chat links",
+	run = function()
+		local s = table.clone(store.session:peek() or {})
+		s.cwd = "/work/atlas"
+		store.session:set(s)
+		local reply = "See `src/parse.rs:12` and `Cargo.toml`, not `self.state` or `1.2/3.4`. "
+			.. "Earlier: zeron://open/chat/s1?workspace=abc and [the long one](zeron://open/chat/s1?workspace=abc)."
+		store.messages:push {
+			id = "na1",
+			role = "assistant",
+			text = reply,
+			model = "Opus",
+			at = "Sep 8, 1:52 PM",
+			copy = reply,
+			streaming = true,
+			blocks = {
+				{ id = "g:n1", kind = "tools", summary = "Read 1 file · edited 1", live = true, tools = {
+					{ id = "n1", kind = "read", verb = "Read", target = "lexer.rs", path = "/work/atlas/src/lexer.rs" },
+					{ id = "n2", kind = "edit", verb = "Edited", target = "notes.md", path = "docs/notes.md", added = 1, removed = 0 },
+				} },
+				{ id = "t", kind = "text", text = reply },
+			},
+		}
+	end,
+}
+local route_session = ui.state("route_session", "")
+ui.effect(function()
+	local s = route.session:get()
+	route_session:set(if s and s.id then s.id else "")
+end)
 -- A turn whose prompt and reply each start a paragraph with a file, a
 -- chat, a skill and a command (chips), then a web link (a link), in a chat
 -- whose folder is /work/atlas.

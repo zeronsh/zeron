@@ -517,6 +517,47 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
+-- Whether inline code reads as a file's path (`src/app.rs`, `./a/b.ts:12`,
+-- `/Users/me/x.md#L3-L9`, `Cargo.toml`): no spaces, a file name with an
+-- extension, and either a folder before it or an extension files have
+-- (so `self.state` or `os.path` stay code). An optional line (`:12`,
+-- `:12:5`, `:12-20`, `#L12`) may follow, as ds/screens/chat/file_links
+-- resolves.
+local CODE_PATH_EXT = {}
+for ext in string.gmatch(
+	"rs luau lua ts tsx js jsx mjs cjs mts cts json jsonc toml yaml yml md mdx txt py rb go java kt kts swift m mm c cc cpp cxx h hh hpp cs fs php sh bash zsh fish ps1 sql html htm css scss sass less vue svelte astro xml plist gradle proto graphql gql lock env ini cfg conf csv tsv ipynb dart ex exs erl hs ml scala clj zig nim sol tf hcl nix dockerfile makefile cmake bzl wgsl glsl hlsl metal svg png jpg jpeg gif webp pdf",
+	"%S+"
+) do
+	CODE_PATH_EXT[ext] = true
+end
+local function code_path(text: string): boolean
+	if #text < 3 or #text > 400 or string.find(text, "%s") or string.find(text, "://", 1, true) then
+		return false
+	end
+	-- (Its line, if any, set aside.)
+	local path = string.gsub(text, "#L%d+.*$", "")
+	path = string.gsub(path, ":%d+[%-:]?%d*$", "")
+	if not string.match(path, "^[%w%._%-/~@+]+$") or string.find(path, "//", 1, true) then
+		return false
+	end
+	local name = string.match(path, "([^/]+)$")
+	if not name then
+		return false
+	end
+	local ext = string.match(name, "^.+%.([%w]+)$")
+	if not ext or string.match(name, "^%.+$") then
+		return false
+	end
+	ext = string.lower(ext)
+	local folder = string.find(path, "/", 1, true) ~= nil
+	if folder then
+		-- (A module path written with dots, `a.b/c`, is still a path; a
+		-- version or a number, `1.2/3.4`, isn't.)
+		return not string.match(ext, "^%d+$")
+	end
+	return CODE_PATH_EXT[ext] == true
+end
+
 -- A chip's look: its pill hugs its name with corner 5, and its icon well
 -- (13px icon + 2pt pad = 17pt square, concentric corner 3) sits with equal
 -- 2pt spacing on left, top, bottom, and between the well and the label.
@@ -544,7 +585,7 @@ end
 -- name in the body's ink on the composer chip's wash, corner 5, its file's
 -- icon (or a chat's) before it. Its click is the document's `open`.
 local function mention_chip(span: { [any]: any }, target: string, name: string)
-	local chat = string.match(target, "^zeron%-chat:") ~= nil
+	local chat = string.match(target, "^zeron%-chat:") ~= nil or string.match(target, "^zeron://open/chat/") ~= nil
 	local dir = string.sub(target, -1) == "/"
 	-- (Its icon by its file's own name: a reply's link may say it in other
 	-- words, `[the config](src/config.rs:12)`.)
@@ -682,22 +723,34 @@ local function trimmed(url: string): string
 		end
 	end
 end
+-- A chat's own link (its Copy link, `zeron://open/chat/<id>?workspace=…`),
+-- written bare: a link too, which the page opens as that chat.
+local CHAT_URL = "zeron://open/chat/[%w_%-]+[%w%-%._~:/%?#@!%$&'%*%+,;=%%]*"
+-- The first address at or after `at`: a web one or a chat's.
+local function next_url(text: string, at: number): (number?, number?)
+	local s, e = string.find(text, URL, at)
+	local cs, ce = string.find(text, CHAT_URL, at)
+	if cs and (not s or cs < s) then
+		return cs, ce
+	end
+	return s, e
+end
 local function autolinked(list: { MarkdownRun }): { MarkdownRun }
 	local out: { MarkdownRun }? = nil
 	for i, r in list do
 		local pieces: { MarkdownRun }? = nil
-		if not r.a and not r.c and not r.img and type(r.x) == "string" and string.find(r.x, "https?://") then
+		if not r.a and not r.c and not r.img and type(r.x) == "string" and (string.find(r.x, "https?://") or string.find(r.x, "zeron://open/chat/", 1, true)) then
 			pieces = {}
 			-- (`at`: where the search goes on; `copied`: words before it
 			-- already in a piece.)
 			local at, copied = 1, 1
 			while true do
-				local s, e = string.find(r.x, URL, at)
+				local s, e = next_url(r.x, at)
 				if not s then
 					break
 				end
 				local url = trimmed(string.sub(r.x, s, e :: number))
-				if #url > #"https://" then
+				if #url > #"https://" and (string.sub(url, 1, 8) ~= "zeron://" or #url > #"zeron://open/chat/") then
 					if s > copied then
 						local before = table.clone(r)
 						before.x = string.sub(r.x, copied, s - 1)
@@ -834,6 +887,12 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		-- file's name, as Zeron's markdown keeps a picture the host won't
 		-- draw. (One byte to a find: ds/markdown_find `words`.)
 		local r = run
+		-- A chat's link written bare (its address its words): its chip says
+		-- "Chat", not the address.
+		if run.a and run.x == run.a and string.match(run.a, "^zeron://open/chat/") then
+			r = table.clone(run)
+			r.x = locale.s("ds.markdown.chat_link")
+		end
 		if run.img then
 			r = table.clone(run)
 			r.x = if run.x ~= "" then run.x else (string.match(run.img, "([^/]+)$") or run.img)
@@ -863,6 +922,32 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			-- line's piece of a wrapped span rounded on its own.
 			span.radius = ui.raw(4.5, "Zeron's inline code corner")
 			span.text_size = inline
+			-- A file's path written as code (`src/app.rs:42`, as agents most
+			-- often name one): it opens as a link to it would, its menu a
+			-- file's. The page says whether it is one of the chat's (its
+			-- `open` resolves it against the chat's folder).
+			local open = if ctx then ctx.open else nil
+			if open and not r.a and code_path(r.x) then
+				local target = r.x
+				local asked = if ctx then ctx.link_menu else nil
+				span.underline = false
+				span.hover = { underline = true }
+				span.underline_offset = 4
+				span.href = target
+				span.on_click = function(): boolean
+					open(target)
+					return true
+				end
+				span.context_menu = Links.menu_for(target, function(): { Links.Entry }?
+					local own = if asked then asked(target) else nil
+					if own ~= nil and #own > 0 then
+						return own
+					end
+					return Links.other(target, function()
+						open(target)
+					end)
+				end)
+			end
 		end
 		-- (What the page says a link is: one of the chat's files, or one of
 		-- its agent's skills.)
@@ -897,6 +982,7 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 				if
 					string.match(r.a, "^zeron%-file:")
 					or string.match(r.a, "^zeron%-chat:")
+					or string.match(r.a, "^zeron://open/chat/")
 					or (chip and chip.file)
 				then
 					mention_chip(span, r.a, r.x)

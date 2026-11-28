@@ -6606,6 +6606,13 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     if let Some(target) = &target {
         fields.push(("target", Value::from(target.as_str())));
     }
+    // A file it read, wrote or edited: its whole path, for its line's click
+    // (ds/activity `open_path`: the file in the chat's panel).
+    if matches!(kind, "read" | "write" | "edit")
+        && let Some(path) = part["call"]["path"].as_str().map(str::trim).filter(|p| !p.is_empty() && !p.contains('\n'))
+    {
+        fields.push(("path", Value::from(path)));
+    }
     // The whole call, for the row opened, when it says more than the line.
     if let Some(call) = call_text(part).filter(|c| Some(c) != target.as_ref()) {
         fields.push(("call", Value::from(call.as_str())));
