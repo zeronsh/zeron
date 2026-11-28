@@ -672,6 +672,7 @@
       }
     },
     "markdown": {
+      "chat_link": "对话",
       "fit_content": "适合内容",
       "copy_code": "拷贝代码",
       "copied": "已拷贝",

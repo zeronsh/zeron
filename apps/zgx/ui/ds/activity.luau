@@ -29,6 +29,8 @@ local locale = require("@self/locale")
 local ReplyPicture = require("@self/reply_picture")
 local FoldButton = require("@self/fold_button")
 local Tooltip = require("@self/tooltip")
+-- (By the alias the shell mounts its host by, as ds/markdown's.)
+local Links = require("@ds/links")
 
 -- (`cloud`, `git`: a Cloud machine's own setup steps, the machine and its
 -- checkout.)
@@ -42,6 +44,9 @@ export type Tool = {
 	-- A subagent's spawn: the doc it runs in, how it stands, its title.
 	subagent: { ref: string, title: string?, status: string? }?,
 	target: string?,
+	-- A file it read, wrote or edited, by its whole path: its line opens it
+	-- (with the group's `open_path`).
+	path: string?,
 	-- The whole call, when the line says less (a command of many lines, a
 	-- tool's input): the row opens to it.
 	call: string?,
@@ -93,6 +98,12 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- Where a file a tool read, wrote or edited opens (its `path`, as a
+	-- link: ds/transcript's `open_link`, the chat's panel), and its line's
+	-- menu (`link_menu`: Open, Reveal, Copy path). Without it, the line is
+	-- only words.
+	open_path: ((target: string) -> ())?,
+	path_menu: ((target: string) -> { Links.Entry }?)?,
 	-- Where a tool's pictures are read from (ds/transcript's
 	-- `shown_pictures`: files on the chat's host). Without it, none show.
 	pictures: ReplyPicture.Pictures?,
@@ -300,8 +311,17 @@ end)
 -- A row's line, as FadeText makes it (ds/fade_text: a box that clips the
 -- text at its own width, fading its end while it overflows), built here
 -- directly: a long group makes thousands.
-local function target_line(now: () -> Tool): Node
+-- A file's path as a link the row's opener resolves (ds/transcript's
+-- `open_link`: an absolute path as a `file://` one, as a reply's link).
+local function path_link(path: string): string
+	return if string.sub(path, 1, 1) == "/" then "file://" .. path else path
+end
+
+local function target_line(now: () -> Tool, open_path: ((target: string) -> ())?, path_menu: ((target: string) -> { Links.Entry }?)?): Node
 	local clip, text = ui.ref(), ui.ref()
+	-- A file's line opens the file (the innermost click: the row's own,
+	-- which opens its detail, is left to the rest of the row).
+	local opens_file = open_path ~= nil and now().path ~= nil
 	return ui.row {
 		ref = clip,
 		shrink = 1,
@@ -322,6 +342,42 @@ local function target_line(now: () -> Tool): Node
 			font = "$font.mono",
 			text_size = "$font.size.sm",
 			color = "$text.primary",
+			cursor = if opens_file then "pointer" else nil,
+			hover = if opens_file then { underline = true, color = "$accent" } else nil,
+			underline_offset = if opens_file then 3 else nil,
+			-- (Its whole path: the line says only its name.)
+			tooltip = if opens_file then now().path else nil,
+			on_click = if opens_file
+				then function()
+					local path = now().path
+					if path and open_path then
+						open_path(path_link(path))
+					end
+				end
+				else nil,
+			context_menu = if opens_file
+				then function(e: PointerEvent): { Node }?
+					local path = now().path
+					if not path then
+						return nil
+					end
+					local target = path_link(path)
+					return Links.menu_for(target, function(): { Links.Entry }?
+						local own = if path_menu then path_menu(target) else nil
+						if own ~= nil and #own > 0 then
+							return own
+						end
+						return Links.file {
+							open = function()
+								if open_path then
+									open_path(target)
+								end
+							end,
+							path = path,
+						}
+					end)(e)
+				end
+				else nil,
 		},
 	}
 end
@@ -646,7 +702,9 @@ local function row(
 	group: string?,
 	resized: ((size: { w: number, h: number }) -> ())?,
 	settled: boolean?,
-	pictures: ReplyPicture.Pictures?
+	pictures: ReplyPicture.Pictures?,
+	open_path: ((target: string) -> ())?,
+	path_menu: ((target: string) -> { Links.Entry }?)?
 ): Node
 	local t = now()
 	if t.kind == "thought" then
@@ -793,7 +851,7 @@ local function row(
 				-- (Its line as the tool goes on: a command's input may still
 				-- be arriving as it starts.)
 				if t.target
-					then target_line(now)
+					then target_line(now, open_path, path_menu)
 					else ui.show(
 					function(): boolean
 						return now().target ~= nil
@@ -1019,7 +1077,7 @@ return ui.component(function(props: Props): Node
 					return place() < last_branch:get()
 				end, function(): boolean
 					return live() and place() == count:get()
-				end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
+				end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures, props.open_path, props.path_menu)
 			end
 			-- (A call arriving joins as a row joining a `ui.each` does; the rest
 			-- are made as they come into view, as they were.)

@@ -1,0 +1,68 @@
+-- What a reply names opens where it is: a path written as code opens the
+-- file in the chat's panel (code that isn't a path stays code), another
+-- chat's own link (`zeron://open/chat/…`, bare or as a link) opens that
+-- chat, and a tool's file row opens the file it read or edited. On
+-- ui/chat_fixture.luau (`nav_turn`), in a chat whose folder is /work/atlas.
+
+local ChatLinks = require("../screens/chat/chat_links")
+
+test("a chat's link names its chat, a mention too; nothing else does", function()
+	expect(ChatLinks.id_of("zeron-chat:s1")).to_be("s1")
+	expect(ChatLinks.id_of("zeron://open/chat/abc-12_x?workspace=w1")).to_be("abc-12_x")
+	expect(ChatLinks.id_of("zeron://open/chat/abc")).to_be("abc")
+	expect(ChatLinks.id_of("zeron://open/chat/")).to_be(nil)
+	expect(ChatLinks.id_of("zeron://open/chat/a b")).to_be(nil)
+	expect(ChatLinks.id_of("https://example.com/open/chat/x")).to_be(nil)
+	expect(ChatLinks.id_of("src/chat.rs")).to_be(nil)
+end)
+
+local function open(app: any)
+	app:resize(900, 760)
+	app:command("go_s2")
+	app:frames(30)
+	app:command("nav_turn")
+	app:frames(30)
+end
+
+test("a path in code opens the file at its line; other code isn't a link", function()
+	local app = mount("chat_fixture.luau")
+	open(app)
+	app:click('#transcript >> role:link "src/parse.rs:12"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_file:s2:src/parse.rs")
+	app:click('#transcript >> role:link "Cargo.toml"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_file:s2:Cargo.toml")
+	expect(app:has('#transcript >> role:link "self.state"')).to_be(false)
+	expect(app:has('#transcript >> role:link "1.2/3.4"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("another chat's link, bare or as a link, opens that chat", function()
+	local app = mount("chat_fixture.luau")
+	open(app)
+	expect(app:state("route_session")).to_be("s2")
+	app:click('#transcript >> role:link "the long one"')
+	app:frames(10)
+	expect(app:state("route_session")).to_be("s1")
+	app:command("go_s2")
+	app:frames(30)
+	app:command("nav_turn")
+	app:frames(30)
+	app:click('#transcript >> role:link "Chat"')
+	app:frames(10)
+	expect(app:state("route_session")).to_be("s1")
+	expect(app:error()).to_be(nil)
+end)
+
+test("a tool's file row opens the file it read or edited", function()
+	local app = mount("chat_fixture.luau")
+	open(app)
+	app:click('#transcript >> "lexer.rs"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_file:s2:src/lexer.rs")
+	app:click('#transcript >> "notes.md"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_file:s2:docs/notes.md")
+	expect(app:error()).to_be(nil)
+end)

@@ -672,6 +672,7 @@
       }
     },
     "markdown": {
+      "chat_link": "Chat",
       "fit_content": "Fit content",
       "copy_code": "Copy code",
       "copied": "Copied",

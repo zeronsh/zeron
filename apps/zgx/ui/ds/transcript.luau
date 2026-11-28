@@ -928,6 +928,10 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				-- (A file a tool read or edited: its line opens it where a
+				-- reply's link to it opens.)
+				open_path = if view then view.open else nil,
+				path_menu = if view then view.link_menu else nil,
 				pictures = if view then view.shown_pictures else nil,
 				-- (A long group builds only what's near the view, as a long
 				-- reply does.)
@@ -1363,6 +1367,10 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				-- (A file a tool read or edited: its line opens it where a
+				-- reply's link to it opens.)
+				open_path = if view then view.open else nil,
+				path_menu = if view then view.link_menu else nil,
 				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()

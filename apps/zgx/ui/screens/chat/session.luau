@@ -20,6 +20,7 @@ local shared = require("@app/screens/chat/shared")
 local prefs = require("@app/screens/settings/prefs")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local ChatLinks = require("@app/screens/chat/chat_links")
 local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
@@ -101,7 +102,7 @@ local function Session(id: Id?): Node
 	-- panel (a link outside its folder stays as it is); a chat mentioned,
 	-- that chat.
 	local function open_link(target: string)
-		local chat = string.match(target, "^zeron%-chat:([%w%-_]+)$")
+		local chat = ChatLinks.id_of(target)
 		if chat then
 			route.open_session(chat)
 			return

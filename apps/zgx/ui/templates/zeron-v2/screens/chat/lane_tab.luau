@@ -24,6 +24,7 @@ local CloudTray = require("@app/screens/chat/cloud_tray")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local ChatLinks = require("@app/screens/chat/chat_links")
 local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
@@ -898,7 +899,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return if s then s.id else nil
 	end
 	local function open_link(target: string)
-		local other = string.match(target, "^zeron%-chat:([%w%-_]+)$")
+		local other = ChatLinks.id_of(target)
 		if other then
 			route.open_session(other)
 			return

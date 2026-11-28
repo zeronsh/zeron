@@ -528,6 +528,7 @@ return {
 	["ds.composer.context.waiting"] = "Waiting for context usage",
 	["ds.composer.context.unreported"] = "Context usage not reported by this agent yet",
 	["ds.markdown.fit_content"] = "Fit content",
+	["ds.markdown.chat_link"] = "Chat",
 	["ds.markdown.copy_code"] = "Copy code",
 	["ds.markdown.copied"] = "Copied",
 	["ds.markdown.view_named"] = "View {name}",
