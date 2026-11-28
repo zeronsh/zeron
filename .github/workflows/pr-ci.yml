@@ -1,0 +1,291 @@
+name: Pull request CI
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  LUAU_CXXFLAGS: -DNDEBUG
+
+jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      engine: ${{ steps.paths.outputs.engine }}
+      desktop: ${{ steps.paths.outputs.desktop }}
+      native: ${{ steps.paths.outputs.native }}
+      edge: ${{ steps.paths.outputs.edge }}
+      installer: ${{ steps.paths.outputs.installer }}
+      windows-package: ${{ steps.paths.outputs.windows-package }}
+      ios: ${{ steps.paths.outputs.ios }}
+      android: ${{ steps.paths.outputs.android }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select checks for changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        shell: bash
+        run: |
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          scope() {
+            local name="$1" changed=false status
+            shift
+            git diff --quiet --no-ext-diff --no-textconv "$BASE_SHA" "$GITHUB_SHA" -- "$@" .github/workflows/pr-ci.yml || {
+              status=$?
+              test "$status" -eq 1 || return "$status"
+              changed=true
+            }
+            echo "$name=$changed" >> "$GITHUB_OUTPUT"
+          }
+          toolchain_paths=(Cargo.toml Cargo.lock rust-toolchain.toml .cargo)
+          rust_paths=("${toolchain_paths[@]}" crates apps/zeron)
+          scope engine "${rust_paths[@]}" scripts/ci/apt-install.sh
+          scope desktop "${rust_paths[@]}" assets apps/zgx scripts/ci/apt-install.sh
+          windows_package_paths=(dist/windows scripts/package-windows.ps1 scripts/test-windows-installer.ps1)
+          scope native "${toolchain_paths[@]}" assets apps/zeron apps/zgx/src apps/zgx/native apps/zgx/pixels apps/zgx/assets apps/zgx/.cargo \
+            apps/zgx/build.rs apps/zgx/Cargo.toml apps/zgx/Cargo.lock crates/cli crates/engine crates/launch crates/notify crates/term crates/update \
+            dist/macos scripts/package-zgx-macos.sh "${windows_package_paths[@]}"
+          scope edge edge apps/card-web
+          scope installer edge/src/install.sh scripts/package-linux.sh scripts/test-linux-desktop-entry.sh dist/zeron.desktop dist/zeron.png scripts/ci/apt-install.sh
+          scope windows-package "${windows_package_paths[@]}"
+          mobile_paths=("${toolchain_paths[@]}" crates/mobile crates/mobile-bindgen crates/client)
+          scope ios "${mobile_paths[@]}" apps/ios scripts/ios .github/workflows/macos.yml
+          scope android "${mobile_paths[@]}" apps/android scripts/android apps/ios/Zeron/Fonts apps/ios/Zeron/Assets.xcassets .github/workflows/android.yml
+
+  engine:
+    name: Engine, CLI and services
+    needs: scope
+    if: needs.scope.outputs.engine == 'true' || needs.scope.outputs.edge == 'true' || needs.scope.outputs.installer == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain and system packages
+        if: needs.scope.outputs.engine == 'true'
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          bash scripts/ci/apt-install.sh libasound2-dev libfontconfig1-dev libfreetype-dev pkg-config cmake
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        if: needs.scope.outputs.engine == 'true'
+        with:
+          prefix-key: ci-linux-v1
+          shared-key: core
+          add-job-id-key: false
+          save-if: 'false'
+      - name: Check the workspace
+        if: needs.scope.outputs.engine == 'true'
+        run: cargo check --locked --workspace
+      - name: Exercise the engine, CLI, sync and updater
+        if: needs.scope.outputs.engine == 'true'
+        run: >-
+          cargo test --locked --no-fail-fast
+          -p zeron -p zeron-engine -p zeron-sync -p zeron-update -p zeron-rpc -p zeron-preview
+          --test background_engine --test cli --test e2e --test device_routing
+          --test restart_resume --test session_publication --test transport_reliability
+          --test update_transaction --test device_room --test discovery
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: needs.scope.outputs.edge == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            edge/package-lock.json
+            edge/vault/package-lock.json
+      - name: Exercise the coordinator in the Workers runtime
+        if: needs.scope.outputs.edge == 'true'
+        working-directory: edge
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run test:workerd -- device-link.workerd.test.ts chat-room-writes.workerd.test.ts preview.workerd.test.ts vault-routes.workerd.test.ts card-pages.workerd.test.ts --maxWorkers 2
+      - name: Exercise the credential vault in the Workers runtime
+        if: needs.scope.outputs.edge == 'true'
+        working-directory: edge/vault
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test:workerd -- accounts.workerd.test.ts grants.workerd.test.ts rotation.workerd.test.ts --maxWorkers 2
+      - name: Exercise the Linux installers
+        if: needs.scope.outputs.installer == 'true'
+        run: |
+          command -v desktop-file-validate || bash scripts/ci/apt-install.sh desktop-file-utils
+          scripts/test-linux-desktop-entry.sh
+
+  desktop:
+    name: Desktop app
+    needs: scope
+    if: needs.scope.outputs.desktop == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain and system packages
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          bash scripts/ci/apt-install.sh libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev \
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: zgx-tests
+          workspaces: apps/zgx -> target
+          save-if: 'false'
+      - name: Build the desktop app and exercise its CLI and attachments
+        working-directory: apps/zgx
+        run: cargo test --locked --features beta --no-fail-fast --test cli --test chat_paste --test chat_drop
+      - name: Read the desktop app's zgx revision
+        id: zgx
+        run: |
+          rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)
+          test -n "$rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - name: Restore the matching zgx CLI
+        id: zgx-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx.outputs.rev }}
+      - name: Build the matching zgx CLI
+        if: steps.zgx-cache.outputs.cache-hit != 'true'
+        env:
+          ZGX_REV: ${{ steps.zgx.outputs.rev }}
+        run: >-
+          cargo install --locked --git https://github.com/zeronsh/zgx --rev "$ZGX_REV"
+          zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      - name: Exercise chat actions and attachments
+        working-directory: apps/zgx
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/zgx-ui.log"
+          for scenario in \
+            "Stop interrupts the running turn" \
+            "@ lists the session's files" \
+            "a file picked goes as its mention" \
+            "round trip: an attachment picked"; do
+            ~/zgx-cli/bin/zgx test ui "$scenario" 2>&1 | tee "$log"
+            grep -Eq '^[1-9][0-9]* passed, 0 failed$' "$log"
+          done
+
+  native:
+    name: Desktop compile check (${{ matrix.os }})
+    needs: scope
+    if: needs.scope.outputs.native == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+        if: runner.os == 'Windows'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        if: runner.os == 'macOS'
+        with:
+          version: 0.16.0
+      - name: Locate the Windows SDK shader compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: ${{ runner.os == 'macOS' && 'zgx-tests' || 'zgx-beta' }}
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+          save-if: 'false'
+      - name: Check the native CLI and engine
+        shell: bash
+        run: cargo check --locked -p zeron --bins
+      - name: Check the native desktop app
+        working-directory: apps/zgx
+        shell: bash
+        run: cargo check --locked --features beta --bin zeron-zgx
+      - name: Verify Windows packages and installer
+        if: runner.os == 'Windows' && needs.scope.outputs.windows-package == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-windows-installer.ps1
+
+  ios:
+    name: iOS app
+    needs: scope
+    if: needs.scope.outputs.ios == 'true'
+    uses: ./.github/workflows/macos.yml
+    with:
+      native: false
+      build-only: true
+
+  android:
+    name: Android app
+    needs: scope
+    if: needs.scope.outputs.android == 'true'
+    uses: ./.github/workflows/android.yml
+
+  result:
+    name: CI result
+    needs: [scope, engine, desktop, native, ios, android]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected check to pass
+        env:
+          SCOPE: ${{ needs.scope.result }}
+          ENGINE: ${{ needs.engine.result }}
+          ENGINE_NEEDED: ${{ needs.scope.outputs.engine == 'true' || needs.scope.outputs.edge == 'true' || needs.scope.outputs.installer == 'true' }}
+          DESKTOP: ${{ needs.desktop.result }}
+          DESKTOP_NEEDED: ${{ needs.scope.outputs.desktop }}
+          NATIVE: ${{ needs.native.result }}
+          NATIVE_NEEDED: ${{ needs.scope.outputs.native }}
+          IOS: ${{ needs.ios.result }}
+          IOS_NEEDED: ${{ needs.scope.outputs.ios }}
+          ANDROID: ${{ needs.android.result }}
+          ANDROID_NEEDED: ${{ needs.scope.outputs.android }}
+        shell: bash
+        run: |
+          required() {
+            local name="$1" needed="$2" result="$3"
+            echo "$name: $result (required: $needed)"
+            case "$needed:$result" in
+              true:success|false:skipped) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          required scope true "$SCOPE"
+          required engine "$ENGINE_NEEDED" "$ENGINE"
+          required desktop "$DESKTOP_NEEDED" "$DESKTOP"
+          required native "$NATIVE_NEEDED" "$NATIVE"
+          required ios "$IOS_NEEDED" "$IOS"
+          required android "$ANDROID_NEEDED" "$ANDROID"

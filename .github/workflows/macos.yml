@@ -15,6 +15,9 @@ on:
       ios:
         type: boolean
         default: true
+      build-only:
+        type: boolean
+        default: false
       skip:
         description: JSON list of jobs not to run (ci.yml; `ios-tests` when a pull request leaves the app alone).
         type: string
@@ -103,6 +106,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Rust mobile core tests
+        if: ${{ !inputs.build-only }}
         run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
       # Only for the simulator tests, which link these bindings (they run when the app,
       # the FFI crate or the client changes, see scripts/ci/plan.py).
@@ -174,6 +178,7 @@ jobs:
           cp apps/ios/CoreFFI/zeron_coreFFI.h target/ios-core/iphonesimulator/include/zeron_coreFFI.h
           cp apps/ios/CoreFFI/module.modulemap target/ios-core/iphonesimulator/include/module.modulemap
       - name: Run iOS unit tests
+        if: ${{ !inputs.build-only }}
         working-directory: apps/ios
         env:
           # Reuse the core built above instead of rebuilding it in the Xcode build phase.
@@ -184,12 +189,21 @@ jobs:
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
       - name: Upload iOS test results
-        if: always()
+        if: always() && !inputs.build-only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
           if-no-files-found: ignore
+      - name: Build the iOS app
+        if: inputs.build-only
+        working-directory: apps/ios
+        env:
+          ZERON_SKIP_CORE: 1
+        run: >-
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron
+          -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID"
+          CODE_SIGNING_ALLOWED=NO build
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

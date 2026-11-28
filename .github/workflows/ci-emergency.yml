@@ -1,9 +1,5 @@
 name: CI emergency
 
-# Gives one pull request every CI runner now (scripts/ci/emergency.py): adds
-# `ci:lock` to it, cancels the other pull requests' CI runs, and re-runs its own
-# if needed. Dispatching needs write access. Release the runners by removing the
-# label, or by merging or closing the pull request.
 on:
   workflow_dispatch:
     inputs:
@@ -12,15 +8,14 @@ on:
         required: true
         type: number
       cancel-main:
-        description: Also cancel main and merge queue CI runs
+        description: Also cancel main, scheduled, manual and merge queue CI runs
         type: boolean
         default: false
 
 permissions:
   contents: read
   actions: write  # cancel and re-run CI runs
-  issues: write  # the ci:lock label
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: ci-emergency
