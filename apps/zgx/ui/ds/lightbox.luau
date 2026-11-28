@@ -20,7 +20,8 @@
 -- scaled as drawn; once it rests it is laid out at the size it shows, so
 -- it is as sharp as the file is, and from its own size up its pixels show
 -- square (no soft upscale). ← → go between the pictures of one set (a
--- message's, the composer's), ⌘C copies the picture, and its controls (a
+-- message's, the composer's), ⌘C copies the picture, ⌘S saves a diagram
+-- (an item with `svg`), and its controls (a
 -- small glass island at the foot) come up as the pointer moves and go
 -- again when it rests.
 --
@@ -53,6 +54,10 @@ export type Item = {
 	w: number?,
 	h: number?,
 	svg: string?,
+	-- A vector picture's own ground (a diagram's fill): with `svg`, it shows
+	-- on a panel of that colour, rounded as Zeron's dialogs, rather than
+	-- loose over the scrim.
+	bg: string?,
 	-- Which thumbnail it is in its group (a chip's id), where places move;
 	-- else its place in the set.
 	key: string?,
@@ -90,6 +95,19 @@ local SETTLE = 140
 local SVG_PIXELS = 8000000
 -- The controls go this long after the pointer rests.
 local IDLE = 1600
+-- A diagram opening: drawn unseen this long first (its SVG rasterizes in
+-- the first frame that shows it, 10-20 ms for a large one, and its plate
+-- is uploaded), at this opacity (drawn, not skipped), then it grows in
+-- from this scale as a dialog does, and back to it as it goes.
+local PREPARE = 64
+local UNSEEN = 0.001
+local ENTER_SCALE = 0.96
+
+-- A set shown whose picture is a diagram (an item with `svg`).
+local function is_vector(s: Shown): boolean
+	local it = s.items[s.index]
+	return it ~= nil and it.svg ~= nil
+end
 
 -- Motion: in and out, and a zoom's step, ds/motion's snappy (moving from
 -- the press's own frame, fast at first, no give); a picture swapped, or any
@@ -188,6 +206,32 @@ local function copy_image(item: Item)
 			toast.show { title = locale.s("ds.lightbox.copy_failed"), body = tostring(err), tone = "danger" }
 		end)
 	end
+end
+
+-- A diagram (an item with `svg`) saved where the reader picks, through the
+-- host (`mermaid.save`): SVG for a `.svg` name, else its PNG.
+local function save_image(item: Item)
+	if not item.svg then
+		return
+	end
+	ui.task(function()
+		local file = ui.save_file({
+			title = locale.s("ds.lightbox.save_title"),
+			name = locale.s("ds.lightbox.save_name") .. ".png",
+			filters = { { "PNG", { "png" } }, { "SVG", { "svg" } } },
+		}):await()
+		if not file then
+			return
+		end
+		local ok, promise = pcall(ui.call, "mermaid.save", { to = file.path, plate = item.path or item.src, svg = item.svg })
+		if ok and promise then
+			promise:after(function()
+				toast.show { title = locale.s("ds.lightbox.saved"), tone = "success" }
+			end, function(err: any)
+				toast.show { title = locale.s("ds.lightbox.save_failed"), body = tostring(err), tone = "danger" }
+			end)
+		end
+	end)
 end
 
 local function copy_path(item: Item)
@@ -298,12 +342,30 @@ local StageView = ui.component(function(st: Stage): Node
 		local foot = n("zeron.lightbox.foot", 72)
 		return inset, inset, math.max(1, size.width - inset * 2), math.max(1, size.height - inset - foot)
 	end
+	-- A diagram's panel (an item with `svg`): the room, rounded as a
+	-- dialog's, on the diagram's own fill; the diagram zooms and pans inside
+	-- it, a margin kept round it when fitted. Nil for a picture.
+	local function panel(): Rect?
+		local it = item()
+		if not it or not it.svg then
+			return nil
+		end
+		local x, y, w, h = room()
+		return { x = x, y = y, w = w, h = h }
+	end
+	local function panel_margin(): number
+		return n("zeron.lightbox.panel_margin", 24)
+	end
 	local function fit_scale(): number
 		local nat = natural()
 		if not nat then
 			return 1
 		end
 		local _, _, w, h = room()
+		if panel() then
+			local m = panel_margin()
+			w, h = math.max(1, w - m * 2), math.max(1, h - m * 2)
+		end
 		return math.min(1, w / nat.w, h / nat.h)
 	end
 	-- Keeps the picture in view: on an axis it fits, at the room's middle
@@ -321,6 +383,14 @@ local StageView = ui.component(function(st: Stage): Node
 				return math.clamp(home, extent / 2, span - extent / 2)
 			end
 			return math.clamp(c, span - extent / 2, extent / 2)
+		end
+		local p = panel()
+		if p then
+			-- (A diagram keeps to its panel: its edges never inside the
+			-- panel's once it's larger.)
+			view.cx = p.x + axis(view.cx - p.x, nat.w * view.s, p.w, p.w / 2)
+			view.cy = p.y + axis(view.cy - p.y, nat.h * view.s, p.h, p.h / 2)
+			return
 		end
 		view.cx = axis(view.cx, nat.w * view.s, size.width, x + w / 2)
 		view.cy = axis(view.cy, nat.h * view.s, size.height, y + h / 2)
@@ -669,6 +739,35 @@ local StageView = ui.component(function(st: Stage): Node
 		local lw, lh = nat.w * laid:get(), nat.h * laid:get()
 		local rest = rest_rect() or { x = 0, y = 0, w = lw, h = lh }
 		local settle = st.settle:get()
+		local pan = panel()
+		local radius = n("zeron.dialog.radius", 16)
+		if pan and st.morphing:get() and st.from.rect then
+			-- A diagram from its thumbnail: the clip opens from the
+			-- thumbnail's box to the panel, its corner to a dialog's, while
+			-- the diagram grows from the thumbnail's crop to its fitted size.
+			local t = st.t:get()
+			local a = st.from.rect :: Rect
+			local cx, cy = lerp(a.x, pan.x, t), lerp(a.y, pan.y, t)
+			local cw, ch = math.max(1, lerp(a.w, pan.w, t)), math.max(1, lerp(a.h, pan.h, t))
+			local k0 = math.max(a.w / lw, a.h / lh)
+			local k = lerp(k0, rest.w / lw, t)
+			local px, py = lerp(a.x + a.w / 2, rest.x + rest.w / 2, t), lerp(a.y + a.h / 2, rest.y + rest.h / 2, t)
+			local sw, sh = a.w / k0 * k, a.h / k0 * k
+			return {
+				sn = { x = px - cx - sw / 2, y = py - cy - sh / 2, w = sw, h = sh },
+				cx = cx,
+				cy = cy,
+				cw = cw,
+				ch = ch,
+				r = lerp(st.from.radius, radius, t),
+				lw = lw,
+				lh = lh,
+				x = px - cx - lw / 2,
+				y = py - cy - lh / 2,
+				k = k,
+				d = { x = cx, y = cy, w = cw, h = ch },
+			}
+		end
 		if st.morphing:get() and st.from.rect then
 			-- From the thumbnail: the clip between its box and the
 			-- picture's, the picture covering the clip (the thumbnail's
@@ -707,6 +806,27 @@ local StageView = ui.component(function(st: Stage): Node
 			local k0 = math.max(a.w / lw, a.h / lh)
 			local sw, sh = a.w / k0 * k, a.h / k0 * k
 			sn = { x = mx - sw / 2, y = my - sh / 2, w = sw, h = sh }
+		end
+		if pan then
+			-- A diagram at rest: clipped to its panel, placed in it (the
+			-- panel growing in and out with it about the middle, as a dialog
+			-- does: `settle`).
+			local pw, ph = pan.w * settle, pan.h * settle
+			local px, py = pan.x + (pan.w - pw) / 2, pan.y + (pan.h - ph) / 2
+			return {
+				sn = { x = sn.x - px, y = sn.y - py, w = sn.w, h = sn.h },
+				cx = px,
+				cy = py,
+				cw = pw,
+				ch = ph,
+				r = radius,
+				lw = lw,
+				lh = lh,
+				x = mx - px - lw / 2,
+				y = my - py - lh / 2,
+				k = k,
+				d = { x = px, y = py, w = pw, h = ph },
+			}
 		end
 		return {
 			sn = sn,
@@ -789,11 +909,16 @@ local StageView = ui.component(function(st: Stage): Node
 	local press: { x: number, y: number, cx: number, cy: number, dragged: boolean, samples: { { number } } }? = nil
 	local last_move: { number }? = nil
 	local function inside(px: number, py: number): boolean
-		local r = rest_rect()
+		-- (A diagram's whole panel is its: a click on its margin keeps it.)
+		local r = panel() or rest_rect()
 		return r ~= nil and px >= r.x and px <= r.x + r.w and py >= r.y and py <= r.y + r.h
 	end
 	local function pannable(): boolean
 		local r = rest_rect()
+		local p = panel()
+		if r and p then
+			return r.w > p.w + 0.5 or r.h > p.h + 0.5
+		end
 		local size = window_size(false)
 		return r ~= nil and (r.w > size.width + 0.5 or r.h > size.height + 0.5)
 	end
@@ -868,6 +993,8 @@ local StageView = ui.component(function(st: Stage): Node
 			zoom_to(1, nil, nil, true)
 		elseif e.cmd and e.key == "c" and it then
 			copy_image(it)
+		elseif e.cmd and e.key == "s" and it and it.svg then
+			save_image(it)
 		elseif e.key == "Escape" then
 			-- (Here, not the modal's: it would let focus go at once, while the
 			-- thumbnail it goes back to is still lifted out.)
@@ -1014,6 +1141,16 @@ local StageView = ui.component(function(st: Stage): Node
 			copy_image(it)
 		end
 	end))
+	-- (A diagram's: its vectors or its picture, to a file.)
+	table.insert(island_props, ui.show(function(): boolean
+		local it = item()
+		return it ~= nil and it.svg ~= nil
+	end, button("download", "ds.lightbox.save_image", "cmd+s", function()
+		local it = item()
+		if it then
+			save_image(it)
+		end
+	end)))
 	table.insert(island_props, button("close", "common.close", "escape", function()
 		st.close()
 	end))
@@ -1073,6 +1210,15 @@ local StageView = ui.component(function(st: Stage): Node
 					end,
 				},
 			}
+			if it.svg then
+				table.insert(items, ui.menu_item {
+					label = locale.t("ds.lightbox.save_image_menu"),
+					shortcut = "cmd+s",
+					on_click = function()
+						save_image(it)
+					end,
+				})
+			end
 			if it.path then
 				table.insert(items, ui.menu_item {
 					label = locale.t("ds.lightbox.show_in_finder"),
@@ -1202,10 +1348,16 @@ local StageView = ui.component(function(st: Stage): Node
 				return math.clamp(st.alpha:get(), 0, 1)
 			end,
 		},
-		-- The picture, in its clip.
+		-- The picture, in its clip (a diagram's panel, on its own fill).
 		ui.div {
 			ref = stage_ref,
 			absolute = true,
+			bg = function(): any
+				local it = item()
+				return if it and it.svg and it.bg
+					then ui.raw(it.bg, "a diagram's own fill, drawn from the theme by the host")
+					else "#00000000"
+			end,
 			left = function(): number
 				return geo().cx
 			end,
@@ -1506,6 +1658,8 @@ local HostBody = ui.component(function(): Node
 	local from: { rect: Rect?, radius: number } = { rect = nil, radius = 0 }
 	local api: { rect: () -> Rect?, ready: () -> boolean, gone: () -> boolean }? = nil
 	local moving: { any } = {}
+	-- (A diagram's preparing, superseded by a later opening or a close.)
+	local prepare_gen = 0
 	local function stop()
 		for _, a in moving do
 			a:cancel()
@@ -1549,6 +1703,39 @@ local HostBody = ui.component(function(): Node
 		local key = if s then key_of(s.group, s.index, s.items) else nil
 		local rect, radius = thumb(s)
 		local snappy = Motion.SNAPPY
+		if s and is_vector(s) and not reduced() then
+			-- A diagram comes up as a dialog does, not out of its thumbnail:
+			-- zgx rasterizes an SVG in the first frame that shows it, and a
+			-- morph has the thumbnail's pixels, the plate's and the SVG's
+			-- taking over from each other mid-motion (a flicker). So it is
+			-- drawn first, unseen (`PREPARE`, the frames its raster takes),
+			-- then fades and grows in, drawn whole all the way. Its
+			-- thumbnail stays where it is, under the scrim.
+			prepare_gen += 1
+			local gen = prepare_gen
+			local function enter()
+				animate(alpha, { value = 1, duration = ms(snappy.open), ease = snappy.ease })
+				animate(settle, { value = 1, duration = ms(snappy.open), ease = snappy.ease })
+				animate(lift, { value = 1, duration = ms(snappy.open * 0.8), ease = snappy.ease })
+			end
+			if resume then
+				enter()
+				return
+			end
+			ui.batch(function()
+				morphing:set(false)
+				snap:set("")
+				settle:set(ENTER_SCALE)
+				alpha:set(UNSEEN)
+				lift:set(0)
+			end)
+			ui.after(PREPARE, function()
+				if gen == prepare_gen and not leaving:peek() and shown:peek() == s then
+					enter()
+				end
+			end)
+			return
+		end
 		if resume and was_morphing then
 			-- (Back the way it came, at the pace of what is left.)
 			animate(t, {
@@ -1624,7 +1811,10 @@ local HostBody = ui.component(function(): Node
 				snap:set("")
 			end)
 		end
-		if rect and api and api.ready() and not api.gone() and not reduced() then
+		-- (A diagram's preparing, if it hadn't come up yet, comes to nothing.)
+		prepare_gen += 1
+		local vector = s ~= nil and is_vector(s)
+		if rect and not vector and api and api.ready() and not api.gone() and not reduced() then
 			from.rect, from.radius = rect, radius
 			ui.batch(function()
 				if not was_morphing then
@@ -1643,7 +1833,7 @@ local HostBody = ui.component(function(): Node
 			morphing:set(false)
 			animate(alpha, { value = 0, duration = ms(fade_ms()), ease = "out(2)" })
 			if not reduced() then
-				animate(settle, { value = 0.96, duration = ms(fade_ms()), ease = "out(2)" })
+				animate(settle, { value = ENTER_SCALE, duration = ms(fade_ms()), ease = "out(2)" })
 			end
 			animate(lift, { value = 0, duration = ms(fade_ms()), ease = "out(2)", onComplete = done })
 		end

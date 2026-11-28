@@ -27,7 +27,7 @@ local M = {}
 -- pixel scale they show at, so sharp at any zoom; the fill's as a PNG file
 -- (the lightbox's size, Copy and Reveal); and the diagram's own size in
 -- points.
-export type Drawn = { svg: string, plate_svg: string, plate: string, w: number, h: number }
+export type Drawn = { svg: string, plate_svg: string, plate: string, plate_color: string?, w: number, h: number }
 type Result = Drawn | { error: string }
 
 -- The host's drawing, a promise of a `Drawn` (a test's host has none and
@@ -231,7 +231,7 @@ M.Diagram = ui.component(function(props: Props): Node
 	local function open()
 		local d = drawn()
 		if d then
-			Lightbox.open({ { src = d.plate, path = d.plate, svg = d.plate_svg, name = locale.s("ds.mermaid.name") } }, 1, group)
+			Lightbox.open({ { src = d.plate, path = d.plate, svg = d.plate_svg, bg = d.plate_color, name = locale.s("ds.mermaid.name") } }, 1, group)
 		end
 	end
 	-- The diagram as the thumbnail the lightbox grows from and goes back to.
@@ -243,7 +243,7 @@ M.Diagram = ui.component(function(props: Props): Node
 	end
 
 	-- The frame, as ds/markdown's code block's: its strip (the fence's tag,
-	-- the toggle, Copy) over the diagram or its source.
+	-- Expand, the toggle, Copy) over the diagram or its source.
 	local function frame(showing_source: boolean): Node
 		return ui.column {
 			class = `md-code lang-mermaid md-mermaid`,
@@ -270,6 +270,18 @@ M.Diagram = ui.component(function(props: Props): Node
 					grow = 1,
 					min_w = 0,
 				},
+				-- Expand: the drawn diagram whole, over the window (the lightbox
+				-- a click on it opens too), with its zoom and Save.
+				if showing_source
+					then nil
+					else ui.show(function(): boolean
+						return drawn() ~= nil
+					end, strip_button {
+						class = "mermaid-expand",
+						label = locale.t("ds.mermaid.expand"),
+						icon = "expand-arrows",
+						on_click = open,
+					}),
 				strip_button {
 					class = "mermaid-toggle",
 					label = locale.t(if showing_source then "ds.mermaid.show_diagram" else "ds.mermaid.show_source"),

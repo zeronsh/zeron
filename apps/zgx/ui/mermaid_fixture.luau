@@ -31,7 +31,7 @@ Mermaid.render = function(arg: { [string]: any }): any
 	local source = arg.source :: string
 	local ok = string.match(source, "^%s*flowchart") or string.match(source, "^%s*sequenceDiagram")
 	local box = `<svg xmlns="http://www.w3.org/2000/svg" width="434" height="308"><rect x="8" y="8" width="418" height="292" rx="8" fill="#808080"/></svg>`
-	local value = { svg = box, plate_svg = box, plate = "assets/composer/transcript.png", w = 434, h = 308 }
+	local value = { svg = box, plate_svg = box, plate = "assets/composer/transcript.png", plate_color = "#202022", w = 434, h = 308 }
 	return {
 		after = function(_, done: (any) -> (), fail: ((any) -> ())?)
 			ui.after(16, function()

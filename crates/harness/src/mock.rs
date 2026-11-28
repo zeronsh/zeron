@@ -15,6 +15,201 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+/// `ZERON_MOCK_MERMAID`'s passage: one diagram of each common kind.
+const MOCK_MERMAID: &str = r#"
+### Diagram check
+
+A simple flowchart:
+
+```mermaid
+flowchart TD
+  A[Start] --> B{Ready?}
+  B -->|Yes| C[Ship it]
+  B -->|No| D[Fix]
+  D --> B
+```
+
+A large flowchart, with subgraphs and styled nodes:
+
+```mermaid
+flowchart LR
+  subgraph Desktop["Desktop (zgx)"]
+    direction TB
+    UI[Luau UI] -->|ui.call| Host[Rust host]
+    Host --> Mermaid[mermaid.rs]
+    Host --> Chat[chat.rs]
+    subgraph Panel["Companion panel"]
+      Files[Files] --- Git[Git changes]
+      Git --- Term[Terminals]
+    end
+    UI --> Panel
+  end
+  subgraph Engine["zeron-engine"]
+    direction TB
+    IPC{{WS IPC :27654}} --> Sessions[(Sessions store)]
+    IPC --> Harness[[Harness drivers]]
+    Harness --> CC[Claude Code]
+    Harness --> CX[Codex]
+    Harness --> CU[Cursor]
+    Sessions --> Loro[(Loro docs)]
+  end
+  subgraph Edge["Cloudflare edge"]
+    ChatRoom[/ChatRoom DO/]
+    DeviceRoom[/DeviceRoom DO/]
+    Registry[/RegistryRoom DO/]
+    R2[(R2 attachments)]
+  end
+  Host <==>|localhost| IPC
+  Loro -. chat2 rows .-> ChatRoom
+  Engine -. relay .-> DeviceRoom
+  Sessions -. registry1 .-> Registry
+  ChatRoom --> R2
+  Phone([iOS / Android]) --> DeviceRoom
+  classDef hot fill:#fde68a,stroke:#b45309,color:#78350f
+  classDef cloud fill:#dbeafe,stroke:#1d4ed8
+  class Harness,IPC hot
+  class ChatRoom,DeviceRoom,Registry cloud
+```
+
+A sequence diagram:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant UI as zgx UI
+  participant E as Engine
+  participant H as Harness
+  participant A as Claude Code
+  participant D as ChatRoom DO
+  U->>UI: Type prompt + attach file
+  UI->>E: QueueCommand(send)
+  E->>E: mark processed (ledger rule 2)
+  par Run the turn
+    E->>H: start(run)
+    H->>A: spawn CLI
+    loop every delta
+      A-->>H: stream json
+      H-->>E: part update
+      E->>E: commit Loro (120ms)
+    end
+  and Sync
+    loop every 5s
+      E->>D: append rows
+      D-->>E: ack checkpoint
+    end
+  end
+  critical Tool needs approval
+    A->>H: permission request
+    H->>E: respondInput needed
+    E-->>UI: ask
+    U->>UI: Approve
+    UI->>E: respondInput
+  option Timed out
+    E-->>A: deny
+  end
+  alt turn finished
+    A-->>H: result
+    H-->>E: done
+    E-->>UI: status idle
+  else interrupted
+    U->>UI: Stop
+    UI->>E: interrupt
+    E->>A: SIGINT
+  end
+  Note over U,D: Offline sends stay queued in the doc
+```
+
+A state diagram:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  state Running {
+    [*] --> Thinking
+    Thinking --> ToolCall: tool_use
+    ToolCall --> AwaitApproval: needs permission
+    AwaitApproval --> ToolCall: approved
+    AwaitApproval --> Thinking: denied
+    ToolCall --> Thinking: result
+    Thinking --> Streaming: text
+    Streaming --> Thinking
+    state Streaming {
+      [*] --> Buffering
+      Buffering --> Flushing: 120ms
+      Flushing --> Buffering
+    }
+  }
+  Idle --> Running: send
+  Running --> Idle: done
+  Running --> Interrupted: stop
+  Interrupted --> Idle
+  Running --> Failed: crash
+  Failed --> Idle: retry
+  state fork_state <<fork>>
+  Idle --> fork_state: update
+  fork_state --> Downloading
+  fork_state --> Waiting
+  state join_state <<join>>
+  Downloading --> join_state
+  Waiting --> join_state
+  join_state --> Restarting
+  Restarting --> [*]
+  note right of Failed: Journal kept for 30 days
+```
+
+A class diagram:
+
+```mermaid
+classDiagram
+  direction LR
+  class Harness {
+    <<interface>>
+    +name() String
+    +start(RunConfig cfg) Result~Run~
+    +steer(Message msg)
+    +interrupt()
+  }
+  class AcpDriver {
+    -child: Child
+    -session_id: String
+    +start(RunConfig cfg) Result~Run~
+  }
+  class NativeDriver {
+    <<abstract>>
+    #parse_line(str line) Option~Event~
+  }
+  class ClaudeCode
+  class Codex
+  class Engine {
+    +sessions: HashMap~Id, Session~
+    +spawn(Command cmd)
+    -journal: RunJournal
+  }
+  class Session {
+    +id: Id
+    +doc: LoroDoc
+    +queue: Vec~Command~
+    +host_device() DeviceId
+  }
+  class Command {
+    <<enumeration>>
+    Send
+    Steer
+    Interrupt
+    RespondInput
+  }
+  Harness <|.. AcpDriver
+  Harness <|.. NativeDriver
+  NativeDriver <|-- ClaudeCode
+  NativeDriver <|-- Codex
+  Engine "1" *-- "many" Session : owns
+  Session o-- Command : queues
+  Engine ..> Harness : drives
+```
+
+"#;
+
 /// The subagent count a `/fanout [N]` prompt asks for (40 when bare).
 fn fanout_count(prompt: &str) -> Option<usize> {
     let rest = prompt.trim().strip_prefix("/fanout")?;
@@ -654,6 +849,16 @@ impl Harness for MockHarness {
             )
             .into(),
         });
+        // Dev/testing knob: `ZERON_MOCK_MERMAID=1` appends Mermaid fences — a
+        // simple flowchart, a large one (subgraphs, shapes, classDef), a
+        // sequence, a state and a class diagram — for checking how diagrams
+        // draw in a reply.
+        let mock_mermaid = std::env::var("ZERON_MOCK_MERMAID")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0");
+        let mermaid_event = mock_mermaid.then(|| AgentEvent::TextDelta {
+            text: MOCK_MERMAID.into(),
+        });
         let table_event = mock_table.then(|| AgentEvent::TextDelta {
             text: "\n### Table check\n\n\
                 | Column A | Column B | Column C |\n\
@@ -1015,6 +1220,7 @@ impl Harness for MockHarness {
             .chain(todo_events)
             .chain(code_event)
             .chain(table_event)
+            .chain(mermaid_event)
             .chain(mend_event)
             .chain(error_event)
             .chain(tail.iter().cloned())

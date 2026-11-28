@@ -78,10 +78,13 @@ png = "0.18"
 # versions zgx's text system reads them with.
 fontdb = "0.23"
 ttf-parser = "0.25"
-# Mermaid diagrams (src/mermaid.rs): the shipping app's renderer, at the root
-# workspace's version, its SVG drawn with text by the usvg and resvg zgx
-# draws SVG with (`text`: glyphs from this machine's fonts).
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+# Mermaid diagrams (src/mermaid.rs): Merman, a headless port of Mermaid's own
+# parser, layout and SVG (Zed's backend), its text measured here with
+# rustybuzz over the same fonts usvg and resvg then draw it with (`text`:
+# glyphs from the app's Geist and this machine's fonts). ELK lays out
+# flowcharts with orthogonal, rounded edges.
+merman = { version = "=0.11.0", default-features = false, features = ["svg", "all-diagrams", "layout-cytoscape", "layout-elk"] }
+rustybuzz = "0.20"
 usvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 resvg = { version = "0.46", default-features = false, features = ["text"] }
 serde_json = "1"
