@@ -84,7 +84,9 @@ impl Dialogs {
                 ("confirm", Some(value)) if options.contains(value) => {
                     response["confirmed"] = json!(value == "Yes")
                 }
-                ("select", Some(value)) if !value.is_empty() => response["value"] = json!(value),
+                ("select", Some(value)) if !value.is_empty() || options.contains(value) => {
+                    response["value"] = json!(value)
+                }
                 ("input" | "editor", Some(value)) => response["value"] = json!(value),
                 _ => response["cancelled"] = json!(true),
             }
@@ -115,33 +117,42 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[tokio::test]
-    async fn select_returns_typed_text_verbatim_and_cancels_empty_answers() {
+    async fn select_returns_typed_text_and_distinguishes_empty_options_from_no_answer() {
         let (writer, peer) = tokio::io::duplex(4096);
         let (_peer_writer, reader) = tokio::io::duplex(4096);
         let transport = super::super::rpc::Transport::new(writer, reader);
         let mut lines = BufReader::new(peer).lines();
-        for (label, key, expected) in [
-            (Some("C"), "value", json!("C")),
-            (Some("  other  "), "value", json!("  other  ")),
-            (Some("A"), "value", json!("A")),
-            (Some(""), "cancelled", json!(true)),
-            (None, "cancelled", json!(true)),
+        let choices = &["A", "B"][..];
+        let with_empty = &["A", "B", ""][..];
+        for (options, labels, key, expected) in [
+            (choices, Some(&["C"][..]), "value", json!("C")),
+            (
+                choices,
+                Some(&["  other  "][..]),
+                "value",
+                json!("  other  "),
+            ),
+            (choices, Some(&["A"][..]), "value", json!("A")),
+            (choices, Some(&[""][..]), "cancelled", json!(true)),
+            (with_empty, Some(&[""][..]), "value", json!("")),
+            (with_empty, Some(&[][..]), "cancelled", json!(true)),
+            (with_empty, None, "cancelled", json!(true)),
         ] {
             let mut dialogs = Dialogs {
                 input: Some(Arc::new(move |questions| {
                     let (tx, rx) = oneshot::channel();
-                    tx.send(vec![UserInputAnswer {
+                    let answers = labels.map(|labels| UserInputAnswer {
                         question_id: questions[0].id.clone(),
-                        labels: label.into_iter().map(String::from).collect(),
-                    }])
-                    .unwrap();
+                        labels: labels.iter().map(|&label| label.to_owned()).collect(),
+                    });
+                    tx.send(answers.into_iter().collect()).unwrap();
                     rx
                 })),
                 ..Default::default()
             };
             dialogs.request(
                 transport.client.clone(),
-                &json!({"id":"pick", "method":"select", "options":["A", "B"]}),
+                &json!({"id":"pick", "method":"select", "options":options}),
             );
             let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
                 .await
@@ -151,7 +162,7 @@ mod tests {
             assert_eq!(
                 serde_json::from_str::<Value>(&reply).unwrap(),
                 json!({"type":"extension_ui_response", "id":"pick", (key):expected}),
-                "label: {label:?}"
+                "options: {options:?}, labels: {labels:?}"
             );
         }
     }
