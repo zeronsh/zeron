@@ -56,12 +56,16 @@ def request(method: str, path: str):
 
 def workflow_runs(repo: str, workflow: str) -> list[dict]:
     runs: list[dict] = []
+    seen: set[int] = set()
     for status in ACTIVE:
         page = 1
         while True:
             batch = request("GET", f"/repos/{repo}/actions/workflows/{workflow}/runs"
                                    f"?status={status}&per_page=100&page={page}")["workflow_runs"]
-            runs.extend(batch)
+            for run in batch:
+                if run["id"] not in seen:
+                    seen.add(run["id"])
+                    runs.append(run)
             if len(batch) < 100:
                 break
             page += 1
@@ -87,7 +91,7 @@ def main() -> int:
         print(f"::error::#{number} has no Pull request CI run for its current head. Update the branch to start one.")
         return 1
     latest = max(recent, key=lambda run: run["id"])
-    if latest.get("conclusion") == "action_required":
+    if latest.get("status") == "action_required" or latest.get("conclusion") == "action_required":
         print(f"::error::Review and approve #{number}'s Pull request CI run before using CI emergency.")
         return 1
 

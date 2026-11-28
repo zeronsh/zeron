@@ -14,12 +14,11 @@ concurrency:
 
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
-  LUAU_CXXFLAGS: -DNDEBUG
 
 jobs:
   scope:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       engine: ${{ steps.paths.outputs.engine }}
       desktop: ${{ steps.paths.outputs.desktop }}
@@ -53,18 +52,24 @@ jobs:
           }
           toolchain_paths=(Cargo.toml Cargo.lock rust-toolchain.toml .cargo)
           rust_paths=("${toolchain_paths[@]}" crates apps/zeron)
-          scope engine "${rust_paths[@]}" scripts/ci/apt-install.sh
-          scope desktop "${rust_paths[@]}" assets apps/zgx scripts/ci/apt-install.sh
+          desktop_crates=(crates ':!crates/mobile' ':!crates/mobile-bindgen')
+          scope ci-scripts scripts/ci scripts/tests .github/workflows
+          scope engine "${rust_paths[@]}" scripts/ci/apt-install.sh scripts/ci/test-core.sh scripts/ci/nextest.toml scripts/ci/install-nextest.sh .github/actions/linux-ci
+          scope desktop "${toolchain_paths[@]}" "${desktop_crates[@]}" assets apps/zgx scripts/ci/apt-install.sh
           windows_package_paths=(dist/windows scripts/package-windows.ps1 scripts/test-windows-installer.ps1)
-          scope native "${toolchain_paths[@]}" assets apps/zeron apps/zgx/src apps/zgx/native apps/zgx/pixels apps/zgx/assets apps/zgx/.cargo \
-            apps/zgx/build.rs apps/zgx/Cargo.toml apps/zgx/Cargo.lock crates/cli crates/engine crates/launch crates/notify crates/term crates/update \
+          scope native "${toolchain_paths[@]}" "${desktop_crates[@]}" assets apps/zeron \
+            apps/zgx/src apps/zgx/native apps/zgx/pixels apps/zgx/assets apps/zgx/.cargo \
+            apps/zgx/build.rs apps/zgx/Cargo.toml apps/zgx/Cargo.lock \
             dist/macos scripts/package-zgx-macos.sh "${windows_package_paths[@]}"
           scope edge edge apps/card-web
           scope installer edge/src/install.sh scripts/package-linux.sh scripts/test-linux-desktop-entry.sh dist/zeron.desktop dist/zeron.png scripts/ci/apt-install.sh
           scope windows-package "${windows_package_paths[@]}"
-          mobile_paths=("${toolchain_paths[@]}" crates/mobile crates/mobile-bindgen crates/client)
-          scope ios "${mobile_paths[@]}" apps/ios scripts/ios .github/workflows/macos.yml
+          mobile_paths=("${toolchain_paths[@]}" crates/mobile crates/mobile-bindgen crates/client assets/fonts)
+          scope ios "${mobile_paths[@]}" crates/text apps/ios scripts/ios .github/workflows/macos.yml
           scope android "${mobile_paths[@]}" apps/android scripts/android apps/ios/Zeron/Fonts apps/ios/Zeron/Assets.xcassets .github/workflows/android.yml
+      - name: Run CI script tests
+        if: steps.paths.outputs.ci-scripts == 'true'
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
 
   engine:
     name: Engine, CLI and services
@@ -72,33 +77,31 @@ jobs:
     if: needs.scope.outputs.engine == 'true' || needs.scope.outputs.edge == 'true' || needs.scope.outputs.installer == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 50
+    env:
+      NEXTEST_PROFILE: ci
+      ZERON_STRESS_ROUNDS: '14'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Rust toolchain and system packages
-        if: needs.scope.outputs.engine == 'true'
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          bash scripts/ci/apt-install.sh libasound2-dev libfontconfig1-dev libfreetype-dev pkg-config cmake
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: ./.github/actions/linux-ci
         if: needs.scope.outputs.engine == 'true'
         with:
-          prefix-key: ci-linux-v1
-          shared-key: core
-          add-job-id-key: false
-          save-if: 'false'
-      - name: Check the workspace
+          rust-cache: core
+          save-rust-cache: 'false'
+          apt-cache: core
+          apt-packages: libasound2-dev libfontconfig1-dev libfreetype-dev pkg-config cmake
+      - name: Harness, engine, sync, update, doc, preview, MCP and voice tests
         if: needs.scope.outputs.engine == 'true'
-        run: cargo check --locked --workspace
-      - name: Exercise the engine, CLI, sync and updater
+        run: scripts/ci/test-core.sh
+      - name: Check the workspace and exercise CLI and end-to-end flows
         if: needs.scope.outputs.engine == 'true'
-        run: >-
-          cargo test --locked --no-fail-fast
-          -p zeron -p zeron-engine -p zeron-sync -p zeron-update -p zeron-rpc -p zeron-preview
-          --test background_engine --test cli --test e2e --test device_routing
-          --test restart_resume --test session_publication --test transport_reliability
-          --test update_transaction --test device_room --test discovery
+        run: |
+          cargo check --locked --workspace
+          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
+            -p zeron -p zeron-engine -p zeron-sync -p zeron-update \
+            --test background_engine --test cli --test e2e \
+            --test transport_reliability --test update_transaction
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         if: needs.scope.outputs.edge == 'true'
         with:
@@ -107,21 +110,21 @@ jobs:
           cache-dependency-path: |
             edge/package-lock.json
             edge/vault/package-lock.json
-      - name: Exercise the coordinator in the Workers runtime
+      - name: Exercise the coordinator and card pages
         if: needs.scope.outputs.edge == 'true'
         working-directory: edge
         run: |
           npm ci
           npm run typecheck
           npm run build
-          npm run test:workerd -- device-link.workerd.test.ts chat-room-writes.workerd.test.ts preview.workerd.test.ts vault-routes.workerd.test.ts card-pages.workerd.test.ts --maxWorkers 2
-      - name: Exercise the credential vault in the Workers runtime
+          npm test
+      - name: Exercise the credential vault
         if: needs.scope.outputs.edge == 'true'
         working-directory: edge/vault
         run: |
           npm ci
           npm run typecheck
-          npm run test:workerd -- accounts.workerd.test.ts grants.workerd.test.ts rotation.workerd.test.ts --maxWorkers 2
+          npm test
       - name: Exercise the Linux installers
         if: needs.scope.outputs.installer == 'true'
         run: |
@@ -134,6 +137,8 @@ jobs:
     if: needs.scope.outputs.desktop == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    env:
+      LUAU_CXXFLAGS: -DNDEBUG
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -143,15 +148,19 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           bash scripts/ci/apt-install.sh libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev \
+            mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          key: zgx-tests
+          key: zgx-tests-zgx-linux
+          add-job-id-key: false
           workspaces: apps/zgx -> target
           save-if: 'false'
-      - name: Build the desktop app and exercise its CLI and attachments
+      - name: Build the desktop app and exercise its plugins, CLI and attachments
         working-directory: apps/zgx
-        run: cargo test --locked --features beta --no-fail-fast --test cli --test chat_paste --test chat_drop
+        run: |
+          cargo test --locked --features beta --no-fail-fast --test cli --test chat_paste --test chat_drop
+          cargo test --locked --features beta --no-fail-fast --bin zeron-zgx plugins::
       - name: Read the desktop app's zgx revision
         id: zgx
         run: |
@@ -169,6 +178,7 @@ jobs:
         env:
           ZGX_REV: ${{ steps.zgx.outputs.rev }}
         run: >-
+          CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target"
           cargo install --locked --git https://github.com/zeronsh/zgx --rev "$ZGX_REV"
           zgx-script --bin zgx --features inspect --root ~/zgx-cli
       - name: Exercise chat actions and attachments
@@ -195,6 +205,8 @@ jobs:
         os: [macos-latest, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      LUAU_CXXFLAGS: -DNDEBUG
     steps:
       - run: git config --global core.autocrlf false
         if: runner.os == 'Windows'
@@ -203,11 +215,21 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain
         shell: bash
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            rustup update stable --no-self-update
+          fi
+          rustup show active-toolchain || rustup toolchain install
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         if: runner.os == 'macOS'
         with:
           version: 0.16.0
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: runner.os == 'macOS'
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
       - name: Locate the Windows SDK shader compiler
         if: runner.os == 'Windows'
         shell: pwsh
@@ -218,7 +240,8 @@ jobs:
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          key: ${{ runner.os == 'macOS' && 'zgx-tests' || 'zgx-beta' }}
+          key: ${{ runner.os == 'macOS' && 'zgx-tests-zgx-macos' || 'zgx-beta-windows' }}
+          add-job-id-key: false
           workspaces: |
             . -> target
             apps/zgx -> target
@@ -234,6 +257,15 @@ jobs:
         if: runner.os == 'Windows' && needs.scope.outputs.windows-package == 'true'
         shell: pwsh
         run: |
+          $members = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages.name
+          $config = @('[profile.release]', 'lto = false')
+          foreach ($name in $members) {
+            $config += "[profile.release.package.`"$name`"]"
+            $config += 'opt-level = 0'
+          }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          Add-Content -LiteralPath (Join-Path $cargoHome 'config.toml') -Value $config
           ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-windows-installer.ps1

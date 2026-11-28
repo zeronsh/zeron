@@ -372,10 +372,29 @@ class EmergencyTests(unittest.TestCase):
         failed = {"id": 5, "status": "completed", "conclusion": "cancelled", "head_sha": "h", "event": "pull_request"}
         passed = dict(failed, id=6, conclusion="success")
         running = dict(failed, id=7, status="in_progress")
+        action_required = dict(failed, id=8, conclusion="action_required")
         self.assertEqual(emergency.to_rerun([failed], "h")["id"], 5)
         self.assertIsNone(emergency.to_rerun([failed, passed], "h"))  # the latest passed
         self.assertIsNone(emergency.to_rerun([failed, running], "h"))
+        self.assertIsNone(emergency.to_rerun([action_required], "h"))
         self.assertIsNone(emergency.to_rerun([], "h"))
+
+    def test_from_pull_request_matches_fork_and_pr_association(self):
+        import emergency
+        pr = {"number": 42, "head": {"ref": "feat", "repo": {"id": 100}}}
+        base_run = {
+            "event": "pull_request",
+            "head_branch": "feat",
+            "head_repository": {"id": 100},
+            "pull_requests": [],
+        }
+        self.assertTrue(emergency.from_pull_request(base_run, pr))
+        self.assertTrue(emergency.from_pull_request(dict(base_run, pull_requests=[{"number": 42}]), pr))
+        self.assertFalse(emergency.from_pull_request(dict(base_run, pull_requests=[{"number": 99}]), pr))
+        self.assertFalse(emergency.from_pull_request(dict(base_run, head_repository={"id": 200}), pr))
+        self.assertFalse(emergency.from_pull_request(dict(base_run, head_repository=None), pr))
+        self.assertFalse(emergency.from_pull_request(dict(base_run, head_branch="other"), pr))
+        self.assertFalse(emergency.from_pull_request(dict(base_run, event="push"), pr))
 
 
 class SchedulerTests(unittest.TestCase):

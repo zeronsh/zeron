@@ -5,19 +5,23 @@
 [`pr-ci.yml`](../../.github/workflows/pr-ci.yml) runs on pull requests and
 merge queue commits. The `scope` job selects checks from the changed paths.
 
-- **Engine, CLI and services** checks the Rust workspace and exercises the
-  engine, CLI, sync and updater. Changes to the edge services run checks in
-  the Workers runtime. Changes to the installer run its Linux smoke test.
-- **Desktop app** builds ZGX on Linux and exercises its CLI, chat actions and
-  attachments with Rust integration and Luau UI tests.
+- **Engine, CLI and services** runs the Linux core Rust test suite
+  (`scripts/ci/test-core.sh`), checks the workspace, and exercises the CLI,
+  engine, sync and updater end-to-end tests. Changes to the edge services run
+  the full coordinator and credential vault unit and Workers runtime suites.
+  Changes to the installer run its Linux smoke test.
+- **Desktop app** builds ZGX on Linux and exercises its plugin unit tests,
+  CLI and attachment integration tests, and pinned Luau UI flows.
 - **Desktop compile check** checks the desktop app, engine and CLI on macOS
-  and Windows when native code or its build inputs change. Changes to Windows
-  packaging also run the installer smoke test.
+  and Windows when non-mobile crates, the desktop app, or build inputs change.
+  Changes to Windows packaging also run the installer smoke test.
 - **iOS app** checks the generated bindings and builds the simulator app.
 - **Android app** builds the APK and App Bundle with a debug key.
 
-Edits to `pr-ci.yml` select all checks. **CI result** requires the
-scope job and every selected check to pass.
+Changes to `scripts/ci`, `scripts/tests`, or `.github/workflows` also run the
+CI planner, admission and emergency unit tests inside `scope`. Edits to
+`pr-ci.yml` select all checks. **CI result** requires the scope job and every
+selected check to pass.
 
 After a successful run, require the GitHub Actions check **CI result** in
 the `main` ruleset and require branches to be up to date before merging.
