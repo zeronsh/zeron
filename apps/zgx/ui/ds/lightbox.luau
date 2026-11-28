@@ -95,6 +95,19 @@ local SETTLE = 140
 local SVG_PIXELS = 8000000
 -- The controls go this long after the pointer rests.
 local IDLE = 1600
+-- A diagram opening: drawn unseen this long first (its SVG rasterizes in
+-- the first frame that shows it, 10-20 ms for a large one, and its plate
+-- is uploaded), at this opacity (drawn, not skipped), then it grows in
+-- from this scale as a dialog does, and back to it as it goes.
+local PREPARE = 64
+local UNSEEN = 0.001
+local ENTER_SCALE = 0.96
+
+-- A set shown whose picture is a diagram (an item with `svg`).
+local function is_vector(s: Shown): boolean
+	local it = s.items[s.index]
+	return it ~= nil and it.svg ~= nil
+end
 
 -- Motion: in and out, and a zoom's step, ds/motion's snappy (moving from
 -- the press's own frame, fast at first, no give); a picture swapped, or any
@@ -795,20 +808,24 @@ local StageView = ui.component(function(st: Stage): Node
 			sn = { x = mx - sw / 2, y = my - sh / 2, w = sw, h = sh }
 		end
 		if pan then
-			-- A diagram at rest: clipped to its panel, placed in it.
+			-- A diagram at rest: clipped to its panel, placed in it (the
+			-- panel growing in and out with it about the middle, as a dialog
+			-- does: `settle`).
+			local pw, ph = pan.w * settle, pan.h * settle
+			local px, py = pan.x + (pan.w - pw) / 2, pan.y + (pan.h - ph) / 2
 			return {
-				sn = { x = sn.x - pan.x, y = sn.y - pan.y, w = sn.w, h = sn.h },
-				cx = pan.x,
-				cy = pan.y,
-				cw = pan.w,
-				ch = pan.h,
+				sn = { x = sn.x - px, y = sn.y - py, w = sn.w, h = sn.h },
+				cx = px,
+				cy = py,
+				cw = pw,
+				ch = ph,
 				r = radius,
 				lw = lw,
 				lh = lh,
-				x = mx - pan.x - lw / 2,
-				y = my - pan.y - lh / 2,
+				x = mx - px - lw / 2,
+				y = my - py - lh / 2,
 				k = k,
-				d = pan,
+				d = { x = px, y = py, w = pw, h = ph },
 			}
 		end
 		return {
@@ -1531,14 +1548,11 @@ local StageView = ui.component(function(st: Stage): Node
 			-- A vector picture (`svg`): over its pixels, laid out at the
 			-- size it shows once at rest, so zooming in keeps it sharp. Its
 			-- raster is held to SVG_PIXELS (zgx draws no larger an SVG),
-			-- scaled up past that. Drawn only at rest: zgx rasterizes an SVG
-			-- in the frame that first shows it (a large diagram's takes
-			-- 10-20 ms), which mid-motion is a dropped frame; while it
-			-- moves, its pixels (drawn at 2x) are what shows.
+			-- scaled up past that.
 			ui.svg {
 				src = function(): string
 					local it = item()
-					return if it and it.svg and not st.morphing:get() then "code:" .. it.svg else ""
+					return if it and it.svg then "code:" .. it.svg else ""
 				end,
 				aria_hidden = true,
 				pointer_events = "none",
@@ -1644,6 +1658,8 @@ local HostBody = ui.component(function(): Node
 	local from: { rect: Rect?, radius: number } = { rect = nil, radius = 0 }
 	local api: { rect: () -> Rect?, ready: () -> boolean, gone: () -> boolean }? = nil
 	local moving: { any } = {}
+	-- (A diagram's preparing, superseded by a later opening or a close.)
+	local prepare_gen = 0
 	local function stop()
 		for _, a in moving do
 			a:cancel()
@@ -1687,6 +1703,39 @@ local HostBody = ui.component(function(): Node
 		local key = if s then key_of(s.group, s.index, s.items) else nil
 		local rect, radius = thumb(s)
 		local snappy = Motion.SNAPPY
+		if s and is_vector(s) and not reduced() then
+			-- A diagram comes up as a dialog does, not out of its thumbnail:
+			-- zgx rasterizes an SVG in the first frame that shows it, and a
+			-- morph has the thumbnail's pixels, the plate's and the SVG's
+			-- taking over from each other mid-motion (a flicker). So it is
+			-- drawn first, unseen (`PREPARE`, the frames its raster takes),
+			-- then fades and grows in, drawn whole all the way. Its
+			-- thumbnail stays where it is, under the scrim.
+			prepare_gen += 1
+			local gen = prepare_gen
+			local function enter()
+				animate(alpha, { value = 1, duration = ms(snappy.open), ease = snappy.ease })
+				animate(settle, { value = 1, duration = ms(snappy.open), ease = snappy.ease })
+				animate(lift, { value = 1, duration = ms(snappy.open * 0.8), ease = snappy.ease })
+			end
+			if resume then
+				enter()
+				return
+			end
+			ui.batch(function()
+				morphing:set(false)
+				snap:set("")
+				settle:set(ENTER_SCALE)
+				alpha:set(UNSEEN)
+				lift:set(0)
+			end)
+			ui.after(PREPARE, function()
+				if gen == prepare_gen and not leaving:peek() and shown:peek() == s then
+					enter()
+				end
+			end)
+			return
+		end
 		if resume and was_morphing then
 			-- (Back the way it came, at the pace of what is left.)
 			animate(t, {
@@ -1762,7 +1811,10 @@ local HostBody = ui.component(function(): Node
 				snap:set("")
 			end)
 		end
-		if rect and api and api.ready() and not api.gone() and not reduced() then
+		-- (A diagram's preparing, if it hadn't come up yet, comes to nothing.)
+		prepare_gen += 1
+		local vector = s ~= nil and is_vector(s)
+		if rect and not vector and api and api.ready() and not api.gone() and not reduced() then
 			from.rect, from.radius = rect, radius
 			ui.batch(function()
 				if not was_morphing then
@@ -1781,7 +1833,7 @@ local HostBody = ui.component(function(): Node
 			morphing:set(false)
 			animate(alpha, { value = 0, duration = ms(fade_ms()), ease = "out(2)" })
 			if not reduced() then
-				animate(settle, { value = 0.96, duration = ms(fade_ms()), ease = "out(2)" })
+				animate(settle, { value = ENTER_SCALE, duration = ms(fade_ms()), ease = "out(2)" })
 			end
 			animate(lift, { value = 0, duration = ms(fade_ms()), ease = "out(2)", onComplete = done })
 		end
