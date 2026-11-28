@@ -1,0 +1,278 @@
+{
+  "page": {
+    "pulls": "풀 리퀘스트"
+  },
+  "command": {
+    "refresh": "풀 리퀘스트 새로 고침"
+  },
+  "badge": {
+    "open": "풀 리퀘스트 {number} 열기: {title}",
+    "plain": "풀 리퀘스트"
+  },
+  "notices": {
+    "title": "풀 리퀘스트 #{number} {said}",
+    "merged": "병합됨",
+    "closed": "병합 없이 닫힘",
+    "review_wanted": "검토를 기다리고 있습니다",
+    "changes": "변경이 요청되었습니다",
+    "failing": "검사에 실패했습니다"
+  },
+  "time": {
+    "just_now": "방금",
+    "minutes": "{n, plural, other {#분}} 전",
+    "hours": "{n, plural, other {#시간}} 전",
+    "days": "{n, plural, other {#일}} 전"
+  },
+  "people": {
+    "someone": "누군가",
+    "you": "나"
+  },
+  "board": {
+    "title": "풀 리퀘스트",
+    "refresh": "새로 고침",
+    "project": "프로젝트",
+    "choose_project": "프로젝트 선택",
+    "search_projects": "프로젝트 검색…",
+    "hint": "프로젝트의 GitHub 저장소에 열려 있는 풀 리퀘스트입니다.",
+    "filter": "필터",
+    "filters": {
+      "authored": "내가 작성",
+      "reviewing": "검토 중",
+      "all": "전체"
+    },
+    "search": "풀 리퀘스트 검색",
+    "status": {
+      "draft": "초안",
+      "changes": "변경 요청됨",
+      "conflicts": "병합 충돌",
+      "approved": "승인됨",
+      "ci_failing": "CI 실패",
+      "ci_pending": "CI 대기 중",
+      "ci_passed": "CI 통과"
+    },
+    "empty": {
+      "authored_title": "내가 작성한 풀 리퀘스트 없음",
+      "authored_body": "이 저장소에서 내가 연 풀 리퀘스트가 여기에 표시됩니다.",
+      "reviewing_title": "요청된 검토 없음",
+      "reviewing_body": "내 검토를 기다리는 풀 리퀘스트가 여기에 표시됩니다.",
+      "all_title": "열린 풀 리퀘스트 없음",
+      "all_body": "이 저장소에는 열린 풀 리퀘스트가 없습니다. 새로 생기면 여기에 표시됩니다.",
+      "nomatch_title": "“{q}”와 일치하는 항목 없음",
+      "nomatch_body": "다른 단어나 다른 필터를 시도하세요.",
+      "choose_title": "프로젝트 선택",
+      "choose_body": "프로젝트를 선택하면 풀 리퀘스트를 볼 수 있습니다.",
+      "norepo_title": "GitHub 저장소 없음",
+      "norepo_body": "이 Mac에서 이 프로젝트 폴더의 GitHub 저장소를 찾지 못했습니다."
+    },
+    "failed_title": "풀 리퀘스트를 불러오지 못함",
+    "try_again": "다시 시도",
+    "load_more": "더 불러오기",
+    "count": "{total}개 중 {shown}개"
+  },
+  "checks": {
+    "not_reported": "보고되지 않음",
+    "passed": "통과",
+    "check": "검사",
+    "see_failed": "실패 내용 보기",
+    "details": "세부 정보",
+    "none": "보고된 검사 없음",
+    "unavailable": "CI 사용 불가",
+    "none_body": "이 풀 리퀘스트에는 검사가 없습니다.",
+    "unavailable_body": "검사 세부 정보를 볼 수 없습니다. GitHub에서 이 풀 리퀘스트를 여세요."
+  },
+  "viewer": {
+    "tabs": {
+      "summary": "요약",
+      "code": "코드",
+      "activity": "활동"
+    },
+    "refresh": "새로 고침",
+    "open_github": "GitHub에서 열기",
+    "more": "더 보기",
+    "menu": {
+      "reopen": "풀 리퀘스트 다시 열기",
+      "ready": "검토 준비 완료",
+      "draft": "초안으로 전환",
+      "close": "풀 리퀘스트 닫기"
+    },
+    "loading": "불러오는 중",
+    "loading_pr": "풀 리퀘스트를 불러오는 중…",
+    "failed_title": "풀 리퀘스트를 불러오지 못함",
+    "try_again": "다시 시도",
+    "no_pr": "이 탭에는 풀 리퀘스트가 없습니다.",
+    "description": "설명",
+    "no_description": "설명이 없습니다.",
+    "review": "검토",
+    "comment": "댓글",
+    "approve": "승인",
+    "approving": "승인 중…",
+    "request_changes": "변경 요청",
+    "requesting_changes": "변경 요청 중…",
+    "leave_review": "검토 남기기",
+    "leave_comment": "댓글 남기기",
+    "couldnt_send": "보내지 못함: {why}",
+    "busy": "다른 작업이 GitHub로 전송되는 중입니다.",
+    "edit_comment": "댓글 편집",
+    "cancel": "취소",
+    "save": "저장",
+    "delete": "삭제",
+    "delete_comment": "댓글 삭제",
+    "delete_ask": "이 댓글을 삭제하시겠습니까?",
+    "edit": "편집",
+    "comment_line": "이 줄에 댓글 달기",
+    "outdated": "오래됨",
+    "verdict": {
+      "approved": "승인함",
+      "changes": "변경 요청함",
+      "dismissed": "기각됨",
+      "commented": "댓글 남김",
+      "when": "{verdict}, {when}"
+    },
+    "pictures": {
+      "show": "{name} 표시",
+      "hide": "{name} 숨기기",
+      "view": "{name} 보기",
+      "image": "이미지"
+    },
+    "code": {
+      "loading": "변경 사항을 불러오는 중…",
+      "failed": "변경 사항을 불러오지 못했습니다.",
+      "empty": "표시할 변경 사항이 없습니다.",
+      "cut": "처음 {n}줄입니다.",
+      "open_file": "GitHub에서 {path} 열기",
+      "send_failed": "GitHub로 보내지 못함",
+      "no_files_title": "바뀐 파일 없음",
+      "no_files_body": "이 풀 리퀘스트는 파일을 바꾸지 않습니다."
+    },
+    "merge": {
+      "title": "병합",
+      "how": "병합 방식",
+      "draft_title": "초안",
+      "draft_body": "병합하려면 먼저 검토 준비 완료로 표시하세요.",
+      "ready": "검토 준비 완료",
+      "marking_ready": "준비 완료로 표시하는 중…",
+      "conflicts_title": "{base}와 충돌",
+      "conflicts_body": "바꾼 파일이 {base}에서도 바뀌었습니다. 브랜치에서 해결한 다음 병합하세요.",
+      "behind_title": "{base}보다 뒤처짐",
+      "behind_body": "{base}이(가) 앞으로 나아갔고, 이 저장소는 브랜치를 먼저 최신으로 만들도록 요구합니다.",
+      "update": "브랜치 업데이트",
+      "updating": "업데이트 중…",
+      "not_yet_title": "아직 불가",
+      "not_yet_body": "아직 병합할 수 없습니다: {said}.",
+      "why": {
+        "changes": "변경이 요청됨",
+        "review": "승인 검토가 필요함",
+        "check_failed": "검사에 실패함",
+        "checks_running": "검사가 아직 실행 중임",
+        "rules": "저장소의 규칙을 아직 충족하지 못함",
+        "join": ", "
+      },
+      "checking_title": "확인 중",
+      "checking_body": "GitHub가 병합 가능 여부를 확인하고 있습니다.",
+      "ready_title": "병합 준비 완료",
+      "unstable_body": "일부 검사에 실패했지만, 이 저장소에서 필수인 검사는 아닙니다.",
+      "approved_by": "{names}이(가) 승인함",
+      "names_join": ", ",
+      "names_last": " 및 ",
+      "every_check": "모든 검사 통과",
+      "no_conflicts": "{base}와 충돌 없음",
+      "parts_join": ", ",
+      "couldnt": {
+        "merge": "병합하지 못함",
+        "close": "닫지 못함",
+        "reopen": "다시 열지 못함",
+        "draft": "초안으로 만들지 못함",
+        "ready": "준비 완료로 표시하지 못함",
+        "update": "브랜치를 업데이트하지 못함",
+        "other": "GitHub가 거부함"
+      },
+      "merged_title": "#{number}을(를) {base}에 병합함",
+      "merged_by_when": "{by}, {when}.",
+      "merged_by": "{by}.",
+      "merged_when": "병합됨, {when}.",
+      "merged_plain": "병합됨.",
+      "closed_title": "닫힘",
+      "closed_when": "병합 없이 닫힘, {when}.",
+      "closed_plain": "병합 없이 닫힘.",
+      "reopen": "풀 리퀘스트 다시 열기",
+      "squash": "스쿼시 후 병합",
+      "squash_body": "{n, plural, =0 {커밋이} other {커밋 #개가}} 하나로 합쳐져 {base}에 들어가며, 제목이 메시지가 됩니다.",
+      "merge_commit": "병합 커밋",
+      "merge_commit_body": "커밋을 그대로 두고 병합 커밋으로 잇습니다.",
+      "rebase": "리베이스 후 병합",
+      "rebase_body": "커밋을 하나씩 {base} 위에 다시 적용합니다.",
+      "delete_branch": "병합 후 브랜치 삭제",
+      "delete_branch_body": "{branch}이(가) GitHub에서 삭제됩니다. 채팅의 기록은 그대로 남습니다.",
+      "merging": "병합 중…",
+      "merge_pr": "풀 리퀘스트 병합",
+      "branch_kept": "{branch}을(를) 삭제하지 못함: {why}.",
+      "working": "작업 중",
+      "ready_end": "."
+    },
+    "activity": {
+      "resolved": "해결됨",
+      "unresolved": "해결 안 됨",
+      "outdated": "오래됨",
+      "reply": "답글",
+      "where_join": " · ",
+      "open_where": "GitHub에서 {at} 열기",
+      "verbs": {
+        "approved": "승인함",
+        "changes": "변경 요청함",
+        "reviewed": "검토함",
+        "dismissed": "검토가 기각됨",
+        "commented": "댓글 남김"
+      },
+      "empty_title": "아직 활동 없음",
+      "empty_body": "댓글과 검토가 여기에 표시됩니다. 아래에서 대화를 시작하세요."
+    },
+    "details": "세부 정보"
+  },
+  "gh": {
+    "no_cli": "GitHub CLI가 이 Mac에 없습니다. gh를 설치한 다음 `gh auth login`으로 로그인하세요.",
+    "sign_in": "`gh auth login`으로 이 Mac에서 GitHub에 로그인하세요.",
+    "not_found": "GitHub에서 찾을 수 없거나, 내 계정으로는 볼 수 없습니다.",
+    "rate_limit": "GitHub 요청 한도에 도달했습니다. 몇 분 후 다시 시도하세요.",
+    "rate_limit_until": "GitHub 요청 한도에 도달했습니다. Zeron이 {at}에 다시 요청합니다.",
+    "no_answer": "GitHub가 응답하지 않았습니다.",
+    "unreadable": "GitHub의 응답을 읽을 수 없습니다.",
+    "said_no": "GitHub가 거부했습니다."
+  },
+  "pulls": {
+    "not_pr": "GitHub의 풀 리퀘스트가 아닙니다.",
+    "not_found": "GitHub에서 이 풀 리퀘스트를 찾을 수 없거나, 내 계정으로는 볼 수 없습니다.",
+    "not_merged": "GitHub가 병합하지 않았습니다.",
+    "no_folder": "이 프로젝트의 폴더가 이 Mac에 없습니다.",
+    "no_repo": "이 폴더의 GitHub 저장소를 찾지 못했습니다."
+  },
+  "git_slot": {
+    "create": "풀 리퀘스트 만들기"
+  },
+  "git_history": {
+    "open_pr": "풀 리퀘스트 #{number} 열기: {title}",
+    "view": "GitHub에서 보기",
+    "copy_link": "GitHub 링크 복사",
+    "copied": "링크 복사됨",
+    "not_github": "이 저장소는 GitHub에 없습니다",
+    "picture": "GitHub의 {login}"
+  },
+  "panel_row": {
+    "label": "풀 리퀘스트 #{number}, {state}: {title}",
+    "state": {
+      "open": "열림",
+      "draft": "초안",
+      "merged": "병합됨",
+      "closed": "닫힘"
+    },
+    "checks": {
+      "passing": "통과",
+      "failing": "실패",
+      "running": "실행 중"
+    },
+    "checks_said": {
+      "passing": "검사 통과",
+      "failing": "검사 실패",
+      "running": "검사 실행 중"
+    }
+  }
+}

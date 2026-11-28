@@ -48,7 +48,7 @@ PSEUDO = "en-XA"
 # source spells in another language already.
 SAME_OK = re.compile(
     r"^(Zeron|Appshots|GitHub|Cloud|Claude|Codex|Claude Code|Gemini|Grok|Cursor|OpenCode|Amp|"
-    r"Git|Slack|Linear|macOS|Mac|iOS|Android|Linux|Windows|Geist|English|简体中文|"
+    r"Git|Slack|Linear|macOS|Mac|iOS|Android|Linux|Windows|Geist|English|简体中文|한국어|"
     r"OK|URL|API|PR|SSH|MCP|JSON|PNG|PDF)$"
 )
 
